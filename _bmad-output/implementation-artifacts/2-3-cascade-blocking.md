@@ -59,6 +59,7 @@ So that the daemon doesn't waste time attempting stories that cannot succeed.
   - [ ] 6.3 Test `find_cascade_blocks` returns correct root cause across chain
   - [ ] 6.4 Test `find_cascade_blocks` detects `needs-clarification` as blocking status
   - [ ] 6.5 Test `find_cascade_blocks` does NOT cascade on `in-progress` or `backlog` (these are transient, not failures)
+  - [ ] 6.5b Test `find_cascade_blocks` does NOT cascade on `review` status (transient — code review in progress)
   - [ ] 6.6 Test `find_cascade_blocks` returns empty when no blocking statuses exist
   - [ ] 6.7 Test `find_cascade_blocks` handles story with unknown/missing dependency gracefully
   - [ ] 6.8 Test `filter_eligible` excludes cascade-blocked stories from result
@@ -109,6 +110,9 @@ So that the daemon doesn't waste time attempting stories that cannot succeed.
 
 ### Cascade Blocking Design
 
+**⚠️ FR4 vs Architecture Decision 2 — Design Reconciliation:**
+FR4 in the PRD says the daemon can "mark dependent stories as `blocked`", which implies writing to `sprint-status.yaml`. However, **Architecture Decision 2** explicitly overrides this: the daemon is a **pure reader** — all mutations are performed by the BMAD agent. The epics ACs confirm: "the daemon never writes to `sprint-status.yaml` — all blocking logic is computed in-memory per cycle." Therefore, this story implements **in-memory cascade identification** (log + skip), NOT disk writes. Do NOT attempt to write `blocked` status to sprint-status.yaml.
+
 **What cascade blocking adds beyond Story 2.2:**
 
 Story 2.2's `filter_eligible` already skips stories whose dependencies are not `done`. Story 2.3 adds:
@@ -150,6 +154,11 @@ use std::fmt;
 /// `needs-clarification`), all direct and transitive dependents
 /// are cascade-blocked. This struct records the full chain from
 /// root cause to affected story for diagnostic logging.
+///
+/// **Forward-compatibility:** This struct is intentionally `pub` because
+/// Epic 6 Story 6.1 (Telegram Notifications — FR25/FR26) will use it to
+/// include cascade-block details in human notifications. Do not restrict
+/// visibility or tightly couple to watcher internals.
 #[derive(Debug, Clone)]
 pub struct CascadeBlockInfo {
     /// The story that is being blocked.
@@ -214,7 +223,11 @@ fn find_root_blocker(
             return Some((dep_key, dep_status.to_string()));
         }
 
-        // If dep is not done and not blocking, check its own dependencies
+        // If dep is "done", stop traversal: a completed story succeeded regardless
+        // of its ancestors' current status — its dependents are not affected.
+        // Only traverse deeper for non-done, non-blocking statuses (transient states
+        // like "in-progress", "backlog", "ready-for-dev", "review") to find a
+        // potential blocking ancestor further up the chain.
         if dep_status != "done" {
             if let Some(transitive_deps) = all_deps.get(&dep_key) {
                 for td in transitive_deps {
@@ -330,6 +343,8 @@ pub fn find_cascade_blocks(
 
 The `find_cascade_blocks` function needs deps for ALL stories (not just eligible ones) to do transitive traversal. The `reconstruct_chain` helper also needs a `VecDeque` import. Add a helper:
 
+> **DRY note:** This function duplicates the intra-epic sequential dependency logic from `derive_dependencies()` (Story 2.2). Both iterate `all_statuses`, parse keys with `from_key_and_status()`, and compute N.(M-1) predecessors. Ideally `build_full_dependency_map` would be the single source of truth and `derive_dependencies` would call it. However, `derive_dependencies` mutates a `&mut [StoryInfo]` slice in-place (Story 2.2 API contract), while this function returns a standalone `HashMap`. Refactoring would break Story 2.2's interface. The duplication is intentional and acceptable — both functions are small, pure, and tested independently. Do NOT attempt to merge them.
+
 ```rust
 /// Build a dependency map for ALL story entries in sprint-status.yaml.
 ///
@@ -371,6 +386,12 @@ pub fn build_full_dependency_map(
 ```
 
 ### Updated `filter_eligible` — `src/watcher/deps.rs`
+
+**⚠️ Breaking signature change:**
+- **Before (Story 2.2):** `pub fn filter_eligible(...) -> Result<Vec<StoryInfo>, WatcherError>`
+- **After (Story 2.3):** `pub fn filter_eligible(...) -> Result<(Vec<StoryInfo>, usize), WatcherError>`
+
+The second tuple element is the cascade-blocked count. All callers must be updated to destructure the tuple (see "Impact on Story 2.2 Tests" section below).
 
 ```rust
 /// Pre-gate filter: resolve dependencies, detect cascade blocks, return eligible stories.
@@ -597,6 +618,22 @@ All tests go inline at the bottom of `src/watcher/deps.rs` in `#[cfg(test)] mod 
 mod tests {
     // ... (existing Story 2.2 tests — updated for tuple return) ...
 
+    // --- Test helpers for cascade blocking tests ---
+
+    /// Helper: build a HashMap<String, String> from a slice of (&str, &str) pairs.
+    /// Reduces boilerplate in cascade blocking tests that construct status maps.
+    fn make_statuses_map(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// Helper: build a HashMap<String, Vec<String>> dependency map from (key, deps) pairs.
+    fn make_deps_map(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(k, deps)| (k.to_string(), deps.iter().map(|d| d.to_string()).collect()))
+            .collect()
+    }
+
     // --- Cascade blocking tests ---
 
     #[test]
@@ -604,13 +641,14 @@ mod tests {
         let mut story = make_story("1-2-cli", "ready-for-dev");
         story.dependencies = vec!["1-1-scaffolding".to_string()];
 
-        let mut all_statuses = HashMap::new();
-        all_statuses.insert("1-1-scaffolding".to_string(), "blocked".to_string());
-        all_statuses.insert("1-2-cli".to_string(), "ready-for-dev".to_string());
-
-        let mut all_deps = HashMap::new();
-        all_deps.insert("1-1-scaffolding".to_string(), vec![]);
-        all_deps.insert("1-2-cli".to_string(), vec!["1-1-scaffolding".to_string()]);
+        let all_statuses = make_statuses_map(&[
+            ("1-1-scaffolding", "blocked"),
+            ("1-2-cli", "ready-for-dev"),
+        ]);
+        let all_deps = make_deps_map(&[
+            ("1-1-scaffolding", &[]),
+            ("1-2-cli", &["1-1-scaffolding"]),
+        ]);
 
         let blocks = find_cascade_blocks(&[story], &all_statuses, &all_deps);
         assert_eq!(blocks.len(), 1);
@@ -628,15 +666,16 @@ mod tests {
         let mut story_3 = make_story("1-3-init", "ready-for-dev");
         story_3.dependencies = vec!["1-2-cli".to_string()];
 
-        let mut all_statuses = HashMap::new();
-        all_statuses.insert("1-1-scaffolding".to_string(), "blocked".to_string());
-        all_statuses.insert("1-2-cli".to_string(), "ready-for-dev".to_string());
-        all_statuses.insert("1-3-init".to_string(), "ready-for-dev".to_string());
-
-        let mut all_deps = HashMap::new();
-        all_deps.insert("1-1-scaffolding".to_string(), vec![]);
-        all_deps.insert("1-2-cli".to_string(), vec!["1-1-scaffolding".to_string()]);
-        all_deps.insert("1-3-init".to_string(), vec!["1-2-cli".to_string()]);
+        let all_statuses = make_statuses_map(&[
+            ("1-1-scaffolding", "blocked"),
+            ("1-2-cli", "ready-for-dev"),
+            ("1-3-init", "ready-for-dev"),
+        ]);
+        let all_deps = make_deps_map(&[
+            ("1-1-scaffolding", &[]),
+            ("1-2-cli", &["1-1-scaffolding"]),
+            ("1-3-init", &["1-2-cli"]),
+        ]);
 
         let blocks = find_cascade_blocks(&[story_3], &all_statuses, &all_deps);
         assert_eq!(blocks.len(), 1);
@@ -651,13 +690,14 @@ mod tests {
         let mut story = make_story("1-2-cli", "ready-for-dev");
         story.dependencies = vec!["1-1-scaffolding".to_string()];
 
-        let mut all_statuses = HashMap::new();
-        all_statuses.insert("1-1-scaffolding".to_string(), "needs-clarification".to_string());
-        all_statuses.insert("1-2-cli".to_string(), "ready-for-dev".to_string());
-
-        let mut all_deps = HashMap::new();
-        all_deps.insert("1-1-scaffolding".to_string(), vec![]);
-        all_deps.insert("1-2-cli".to_string(), vec!["1-1-scaffolding".to_string()]);
+        let all_statuses = make_statuses_map(&[
+            ("1-1-scaffolding", "needs-clarification"),
+            ("1-2-cli", "ready-for-dev"),
+        ]);
+        let all_deps = make_deps_map(&[
+            ("1-1-scaffolding", &[]),
+            ("1-2-cli", &["1-1-scaffolding"]),
+        ]);
 
         let blocks = find_cascade_blocks(&[story], &all_statuses, &all_deps);
         assert_eq!(blocks.len(), 1);
@@ -669,16 +709,36 @@ mod tests {
         let mut story = make_story("1-2-cli", "ready-for-dev");
         story.dependencies = vec!["1-1-scaffolding".to_string()];
 
-        let mut all_statuses = HashMap::new();
-        all_statuses.insert("1-1-scaffolding".to_string(), "in-progress".to_string());
-        all_statuses.insert("1-2-cli".to_string(), "ready-for-dev".to_string());
-
-        let mut all_deps = HashMap::new();
-        all_deps.insert("1-1-scaffolding".to_string(), vec![]);
-        all_deps.insert("1-2-cli".to_string(), vec!["1-1-scaffolding".to_string()]);
+        let all_statuses = make_statuses_map(&[
+            ("1-1-scaffolding", "in-progress"),
+            ("1-2-cli", "ready-for-dev"),
+        ]);
+        let all_deps = make_deps_map(&[
+            ("1-1-scaffolding", &[]),
+            ("1-2-cli", &["1-1-scaffolding"]),
+        ]);
 
         let blocks = find_cascade_blocks(&[story], &all_statuses, &all_deps);
         assert!(blocks.is_empty(), "in-progress is transient, not a cascade blocker");
+    }
+
+    #[test]
+    fn test_find_cascade_no_cascade_on_review() {
+        // "review" is a transient status (code review in progress) — NOT a blocker
+        let mut story = make_story("1-2-cli", "ready-for-dev");
+        story.dependencies = vec!["1-1-scaffolding".to_string()];
+
+        let all_statuses = make_statuses_map(&[
+            ("1-1-scaffolding", "review"),
+            ("1-2-cli", "ready-for-dev"),
+        ]);
+        let all_deps = make_deps_map(&[
+            ("1-1-scaffolding", &[]),
+            ("1-2-cli", &["1-1-scaffolding"]),
+        ]);
+
+        let blocks = find_cascade_blocks(&[story], &all_statuses, &all_deps);
+        assert!(blocks.is_empty(), "review is transient, not a cascade blocker");
     }
 
     #[test]
@@ -686,9 +746,10 @@ mod tests {
         let mut story = make_story("1-2-cli", "ready-for-dev");
         story.dependencies = vec!["1-1-scaffolding".to_string()];
 
-        let mut all_statuses = HashMap::new();
-        all_statuses.insert("1-1-scaffolding".to_string(), "done".to_string());
-        all_statuses.insert("1-2-cli".to_string(), "ready-for-dev".to_string());
+        let all_statuses = make_statuses_map(&[
+            ("1-1-scaffolding", "done"),
+            ("1-2-cli", "ready-for-dev"),
+        ]);
 
         let all_deps = HashMap::new();
         let blocks = find_cascade_blocks(&[story], &all_statuses, &all_deps);
@@ -701,8 +762,8 @@ mod tests {
         story.dependencies = vec!["1-1-scaffolding".to_string()];
 
         // 1-1-scaffolding not in all_statuses at all
-        let all_statuses = HashMap::new();
-        let all_deps = HashMap::new();
+        let all_statuses: HashMap<String, String> = HashMap::new();
+        let all_deps: HashMap<String, Vec<String>> = HashMap::new();
 
         let blocks = find_cascade_blocks(&[story], &all_statuses, &all_deps);
         assert!(blocks.is_empty(), "Unknown dep is unmet but not cascade-blocked");
@@ -881,10 +942,11 @@ development_status:
 
     #[test]
     fn test_find_root_blocker_returns_none_when_no_blocker() {
-        let mut all_statuses = HashMap::new();
-        all_statuses.insert("1-1-scaffolding".to_string(), "in-progress".to_string());
+        let all_statuses = make_statuses_map(&[
+            ("1-1-scaffolding", "in-progress"),
+        ]);
 
-        let all_deps = HashMap::new();
+        let all_deps: HashMap<String, Vec<String>> = HashMap::new();
 
         let result = find_root_blocker(
             &["1-1-scaffolding".to_string()],
@@ -896,12 +958,13 @@ development_status:
 
     #[test]
     fn test_find_root_blocker_finds_transitive_blocker() {
-        let mut all_statuses = HashMap::new();
-        all_statuses.insert("1-1-scaffolding".to_string(), "needs-clarification".to_string());
-        all_statuses.insert("1-2-cli".to_string(), "ready-for-dev".to_string());
-
-        let mut all_deps = HashMap::new();
-        all_deps.insert("1-2-cli".to_string(), vec!["1-1-scaffolding".to_string()]);
+        let all_statuses = make_statuses_map(&[
+            ("1-1-scaffolding", "needs-clarification"),
+            ("1-2-cli", "ready-for-dev"),
+        ]);
+        let all_deps = make_deps_map(&[
+            ("1-2-cli", &["1-1-scaffolding"]),
+        ]);
 
         let result = find_root_blocker(
             &["1-2-cli".to_string()],
