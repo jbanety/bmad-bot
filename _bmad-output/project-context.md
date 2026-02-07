@@ -4,7 +4,7 @@ user_name: 'JB'
 date: '2026-02-07'
 sections_completed: ['technology_stack', 'language_rules', 'framework_rules', 'testing_rules', 'code_quality', 'workflow_rules', 'critical_rules']
 status: 'complete'
-rule_count: 34
+rule_count: 45
 optimized_for_llm: true
 ---
 
@@ -38,9 +38,10 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 ### Framework-Specific Rules (rig + Daemon Architecture)
 
-#### Daemon Role — Minimal Orchestrator
-- The daemon is a **launcher**, not an executor. It watches, launches, and notifies. Nothing more.
+#### Daemon Role — Minimal Orchestrator with Pre-Gate
+- The daemon is a **launcher**, not an executor. It watches, pre-filters, launches, and notifies.
 - It does NOT manage story statuses, create branches, or modify BMAD files — the BMAD agent handles all of that via the `dev-story` workflow
+- **Pre-gate responsibility:** The daemon performs a lightweight, deterministic dependency check on `sprint-status.yaml` BEFORE launching any LLM session. This avoids burning tokens on stories that can't proceed. The BMAD agent also verifies dependencies within its own workflow as a second layer.
 - Think of it as a headless Claude Code specialized for BMAD workflows running autonomously
 
 #### rig Agent + Tool Calling
@@ -51,10 +52,11 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 #### Daemon Lifecycle
 1. **Watcher** — Polls `sprint-status.yaml` every 5 minutes for `ready-for-dev` stories
-2. **Session** — Spins up a rig agent with persona + tools + context, sends `DS` to start the `dev-story` workflow
-3. **Supervisor** — Intercepts agent questions: rule engine (deterministic patterns) → LLM fallback (project docs context) → escalate `needs-clarification` + notify human
-4. **Code Review** — After agent session completes, launches a separate LLM for adversarial code review
-5. **Notification** — Sends result to human (Telegram, extensible)
+2. **Pre-gate** — Deterministic dependency check: skip stories with unmet dependencies, cascade `blocked` status to dependents. No LLM involved — pure graph resolution on sprint data. If no eligible story, wait for next poll cycle.
+3. **Session** — Spins up a rig agent with persona + tools + context, sends `DS` to start the `dev-story` workflow
+4. **Supervisor** — Intercepts agent questions: rule engine (deterministic patterns) → LLM fallback (project docs context) → escalate `needs-clarification` + notify human. Every decision logged with question, answer, reasoning, and alternatives.
+5. **Code Review** — Optional (configurable: enabled/disabled). After agent session completes, launches a separate LLM for adversarial code review. Fixes committed in separate commits for visibility. Review posted as PR comment.
+6. **Notification** — Sends result to human (Telegram, extensible)
 
 #### Session Language Override
 - BMAD project config may set `communication_language` to a non-English language
@@ -66,11 +68,22 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Rule engine first** (fast, free, deterministic): match known patterns — confirmations ("Should I proceed?" → "Yes"), step-by-step detection → "Yolo", story selection → provide story content
 - **LLM fallback** (context-aware): loads full project docs (`_bmad/_memory/`, PRD, architecture, conventions) to answer substantive questions
 - **Escalade humaine**: if neither rules nor LLM can answer → mark story `needs-clarification`, notify human, move to next story
+- **Decision logging:** Every supervisor decision (rule engine or LLM) is logged to a decisions file at `_bmad-output/implementation-artifacts/{epic}-{story}-{label}-DECISIONS.md`. Each entry includes: question, chosen answer, reasoning, alternatives considered. A summary "🤖 Supervisor Decisions" section is included in the PR description.
 
 #### Sequential Execution
 - One story at a time, in sprint order. No parallelism.
 - If story B depends on story A, the agent is aware (via BMAD context) and handles branching from the correct parent
-- Dependencies and ordering are managed by BMAD sprint planning, not by the daemon
+- **Two-layer dependency model:** The daemon pre-gate performs cheap deterministic dependency checks (skip/block). The BMAD agent performs full story selection and verification within its workflow. Both layers must agree before work proceeds.
+
+#### Pre-Development Spec Update
+- Before starting development, the agent reviews previously completed stories and their actual implementation
+- The agent updates the current story's specs and acceptance criteria based on what was actually built in prior stories
+- This ensures specs stay current and reflect reality, not just the original plan
+
+#### PR Management
+- After code review passes (or directly after dev session if review is disabled), the daemon creates a Pull Request
+- **PR for blocked/failed stories:** Even when a story fails or is escalated, the daemon creates a PR with partial code and a description of the failure point — nothing is lost silently
+- PR description is agent-written and includes a dedicated "🤖 Supervisor Decisions" section
 
 #### Multi-Provider LLM Config
 - Three independent LLM roles: **dev** (Amelia session), **review** (code review), **supervisor** (question answering)
@@ -94,16 +107,20 @@ _This file contains critical rules and patterns that AI agents must follow when 
   ```
   src/
   ├── main.rs
+  ├── cli/
+  │   └── mod.rs          # init, start, status, logs commands
   ├── config/
-  │   └── mod.rs
+  │   └── mod.rs           # YAML config + .env secrets loading + validation
   ├── watcher/
-  │   └── mod.rs
+  │   ├── mod.rs
+  │   └── deps.rs          # Dependency graph resolution + cascade blocking
   ├── session/
   │   ├── mod.rs
   │   └── parser.rs
   ├── supervisor/
   │   ├── mod.rs
-  │   └── rules.rs
+  │   ├── rules.rs
+  │   └── decisions.rs     # Decision logging to file + PR section
   ├── review/
   │   └── mod.rs
   ├── tools/
@@ -117,11 +134,24 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Documentation:** `///` doc comments mandatory on all public structs, traits, enums, and functions. This serves double duty: Rust docs + LLM context when reading the codebase
 - **No dead code:** `#![deny(dead_code)]` — remove unused code, don't comment it out
 
+### CLI Rules
+
+- **Commands:** `bmad-bot init` (interactive setup → generates `bmad-bot.yaml` + `.env`), `bmad-bot start` (launches daemon), `bmad-bot status` (current state summary), `bmad-bot logs` (structured tracing logs)
+- **Config validation:** Both `init` and `start` validate configuration before proceeding — missing keys, unreachable repos, invalid YAML all reported clearly
+- **BMAD auto-discovery:** On startup, detect BMAD version and installed modules from the project repo
+- **Graceful shutdown:** SIGTERM/SIGINT handled — finish current step if possible, commit partial work, create PR with progress description, notify human, then exit cleanly. No corrupted branches, no half-committed files.
+
+### Resilience Rules
+
+- **Retry with backoff:** Transient LLM errors (timeouts, 429, 500s, 503s) retried with exponential backoff, max 3 retries per call
+- **Notification failures are non-blocking:** Telegram API failures are logged but do not stop story processing
+- **Crash recovery:** On restart, daemon re-reads `sprint-status.yaml` and resumes from clean state. No corrupted branches or half-committed files.
+
 ### Development Workflow Rules
 
 - **Branch naming:** Follow sprint-status.yaml key convention → `story/{epic}-{story}` (e.g., `story/1-2-account-management`). The BMAD dev agent creates and manages branches via exposed git tools
 - **Commit messages:** Conventional Commits enforced — `feat:`, `fix:`, `refactor:`, `test:`, `chore:`, `docs:`. Scope optional but encouraged (e.g., `feat(supervisor): add rule engine pattern matching`)
-- **PR creation:** After code review passes, the daemon opens a Pull Request / Merge Request automatically. Must support **GitHub** (API) and **GitLab** (API) at minimum. Provider configured in `bmad-bot.yaml`
+- **PR creation:** After code review passes (or directly after dev session if review disabled), the daemon opens a Pull Request automatically. GitHub supported in MVP. Provider configured in `bmad-bot.yaml`
 - **No auto-merge:** PRs are created for human review. Never merge automatically into `main`
 - **No CI for now:** No GitHub Actions or CI pipeline. May be added later
 
@@ -153,4 +183,4 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Review quarterly for outdated rules
 - Remove rules that become obvious over time
 
-Last Updated: 2026-02-07
+Last Updated: 2026-02-07 — Synchronized with PRD: added pre-gate dependency model, CLI rules, decisions file pattern, resilience rules, graceful shutdown, updated module structure
