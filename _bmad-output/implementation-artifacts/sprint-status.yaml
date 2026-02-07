@@ -53,8 +53,8 @@ development_status:
   2-3-cascade-blocking: ready-for-dev
   epic-2-retrospective: optional
 
-  epic-3: backlog
-  3-1-supervisor-tool-skeleton-rule-engine: backlog
+  epic-3: in-progress
+  3-1-supervisor-tool-skeleton-rule-engine: ready-for-dev
   3-2-llm-fallback-with-project-context: backlog
   3-3-human-escalation: backlog
   3-4-decision-logging-traceability: backlog
