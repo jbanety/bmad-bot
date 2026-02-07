@@ -1,0 +1,156 @@
+---
+project_name: 'bmad-bot'
+user_name: 'JB'
+date: '2026-02-07'
+sections_completed: ['technology_stack', 'language_rules', 'framework_rules', 'testing_rules', 'code_quality', 'workflow_rules', 'critical_rules']
+status: 'complete'
+rule_count: 34
+optimized_for_llm: true
+---
+
+# Project Context for AI Agents
+
+_This file contains critical rules and patterns that AI agents must follow when implementing code in this project. Focus on unobvious details that agents might otherwise miss._
+
+---
+
+## Technology Stack & Versions
+
+- **Language:** Rust (edition 2024, rustc 1.86.0+)
+- **Async Runtime:** tokio (latest stable)
+- **AI Agent Framework:** rig-core (latest stable)
+- **Serialization:** serde + serde_yaml
+- **Git Operations:** git2 (embedded libgit2, no CLI dependency)
+- **HTTP Client:** reqwest (Telegram API, GitHub Models adapter)
+- **Logging:** tracing (structured logging for daemon)
+- **All crates:** latest stable versions, no pinned versions
+
+## Critical Implementation Rules
+
+### Language-Specific Rules (Rust)
+
+- **Edition 2024** — All crates use `edition = "2024"` in Cargo.toml
+- **Error Handling:** `thiserror` for custom error types, `anyhow` for propagation in binary. No `unwrap()` or `expect()` in production code — only allowed in tests
+- **Async:** Full async tokio runtime. No `block_on()` inside async context, no `std::thread::spawn` unless explicitly justified
+- **Logging:** Use `tracing` exclusively — no `println!` or `eprintln!` in production. Use structured fields: `tracing::info!(story_id = %id, "Processing story")`
+- **Linting:** `#![deny(clippy::all)]` at crate root. Zero warnings policy
+- **No `unsafe`** unless explicitly justified and documented
+
+### Framework-Specific Rules (rig + Daemon Architecture)
+
+#### Daemon Role — Minimal Orchestrator
+- The daemon is a **launcher**, not an executor. It watches, launches, and notifies. Nothing more.
+- It does NOT manage story statuses, create branches, or modify BMAD files — the BMAD agent handles all of that via the `dev-story` workflow
+- Think of it as a headless Claude Code specialized for BMAD workflows running autonomously
+
+#### rig Agent + Tool Calling
+- The LLM agent is instantiated via `rig-core` with the BMAD dev agent persona (Amelia)
+- **Tools exposed to the agent via rig:** git (branch, checkout, commit, push via `git2`), filesystem (read, write), terminal (run commands)
+- The agent uses tools autonomously — the daemon does not perform operations on behalf of the agent
+- All tools must be implemented as rig-compatible tool traits
+
+#### Daemon Lifecycle
+1. **Watcher** — Polls `sprint-status.yaml` every 5 minutes for `ready-for-dev` stories
+2. **Session** — Spins up a rig agent with persona + tools + context, sends `DS` to start the `dev-story` workflow
+3. **Supervisor** — Intercepts agent questions: rule engine (deterministic patterns) → LLM fallback (project docs context) → escalate `needs-clarification` + notify human
+4. **Code Review** — After agent session completes, launches a separate LLM for adversarial code review
+5. **Notification** — Sends result to human (Telegram, extensible)
+
+#### Session Language Override
+- BMAD project config may set `communication_language` to a non-English language
+- The daemon injects an English override in the system prompt: `"OVERRIDE: communication_language = English"`
+- **Never modify BMAD config files on disk** — the daemon is a read-only consumer of the repo
+- Notifications to the human remain in the user's configured language
+
+#### Supervisor Hybrid Pattern
+- **Rule engine first** (fast, free, deterministic): match known patterns — confirmations ("Should I proceed?" → "Yes"), step-by-step detection → "Yolo", story selection → provide story content
+- **LLM fallback** (context-aware): loads full project docs (`_bmad/_memory/`, PRD, architecture, conventions) to answer substantive questions
+- **Escalade humaine**: if neither rules nor LLM can answer → mark story `needs-clarification`, notify human, move to next story
+
+#### Sequential Execution
+- One story at a time, in sprint order. No parallelism.
+- If story B depends on story A, the agent is aware (via BMAD context) and handles branching from the correct parent
+- Dependencies and ordering are managed by BMAD sprint planning, not by the daemon
+
+#### Multi-Provider LLM Config
+- Three independent LLM roles: **dev** (Amelia session), **review** (code review), **supervisor** (question answering)
+- Supported providers: Anthropic, OpenAI, GitHub Models
+- GitHub Models uses OpenAI-compatible API — likely a thin adapter or base URL swap in rig
+- API keys stored in environment variables, never in config files
+
+### Testing Rules
+
+- **Framework:** Rust native only — `#[cfg(test)]` + `cargo test`. No external test runner
+- **Structure:** Tests inline in the same file, inside `#[cfg(test)] mod tests { ... }` at the bottom of each module
+- **Unit tests with mocked LLM responses:** All supervisor rule engine logic, response parser, config parsing, git operations — tested with deterministic mocked data. Mock the LLM provider responses, never call real APIs in unit tests
+- **E2E tests:** Separate `tests/` directory for integration/E2E tests that run actual LLM sessions. These are expensive (token cost) — **manual launch only**, never in CI or automated runs. Gate behind a feature flag or env var (e.g., `BMAD_E2E=1`)
+- **Test naming:** Descriptive snake_case — `test_supervisor_handles_confirmation_pattern`, `test_parser_detects_step_by_step`
+- **Every new module must include at least basic unit tests** before being considered complete
+
+### Code Quality & Style Rules
+
+- **Formatting:** `rustfmt` with default configuration. No custom `rustfmt.toml`. Run `cargo fmt` before every commit
+- **Modular directory structure:** Organize by domain with subdirectories, not flat files. Example:
+  ```
+  src/
+  ├── main.rs
+  ├── config/
+  │   └── mod.rs
+  ├── watcher/
+  │   └── mod.rs
+  ├── session/
+  │   ├── mod.rs
+  │   └── parser.rs
+  ├── supervisor/
+  │   ├── mod.rs
+  │   └── rules.rs
+  ├── review/
+  │   └── mod.rs
+  ├── tools/
+  │   ├── mod.rs
+  │   ├── git.rs
+  │   ├── fs.rs
+  │   └── terminal.rs
+  └── notifier/
+      └── mod.rs
+  ```
+- **Documentation:** `///` doc comments mandatory on all public structs, traits, enums, and functions. This serves double duty: Rust docs + LLM context when reading the codebase
+- **No dead code:** `#![deny(dead_code)]` — remove unused code, don't comment it out
+
+### Development Workflow Rules
+
+- **Branch naming:** Follow sprint-status.yaml key convention → `story/{epic}-{story}` (e.g., `story/1-2-account-management`). The BMAD dev agent creates and manages branches via exposed git tools
+- **Commit messages:** Conventional Commits enforced — `feat:`, `fix:`, `refactor:`, `test:`, `chore:`, `docs:`. Scope optional but encouraged (e.g., `feat(supervisor): add rule engine pattern matching`)
+- **PR creation:** After code review passes, the daemon opens a Pull Request / Merge Request automatically. Must support **GitHub** (API) and **GitLab** (API) at minimum. Provider configured in `bmad-bot.yaml`
+- **No auto-merge:** PRs are created for human review. Never merge automatically into `main`
+- **No CI for now:** No GitHub Actions or CI pipeline. May be added later
+
+### Critical Don't-Miss Rules
+
+- **BMAD files are sacred:** Never modify anything under `_bmad/` — the daemon is a read-only consumer of BMAD config, agents, and workflows
+- **Never merge on `main`:** Even if code review passes, only a human merges. No exceptions
+- **Never call real LLM APIs in unit tests:** Mock responses only. E2E tests with real APIs are manual-launch-only
+- **Secrets in env vars only:** API keys, bot tokens — always referenced via `_env` suffix in config (e.g., `api_key_env: ANTHROPIC_API_KEY`). Never hardcoded, never committed
+- **Supervisor must never invent answers:** If the rule engine doesn't match AND the LLM supervisor can't answer confidently from project docs → mark story `needs-clarification`, notify human, move to next story. Hallucinated answers lead to hallucinated code
+- **No silent failures:** Every error must be logged via `tracing::error!()`. Blocking errors (session crash, git failure, LLM provider down) must also trigger a notification to the human
+- **One session at a time:** Never run multiple story sessions in parallel. Sequential execution only — avoids git conflicts, codebase race conditions, and context confusion
+
+---
+
+## Usage Guidelines
+
+**For AI Agents:**
+
+- Read this file before implementing any code
+- Follow ALL rules exactly as documented
+- When in doubt, prefer the more restrictive option
+- Update this file if new patterns emerge during implementation
+
+**For Humans:**
+
+- Keep this file lean and focused on agent needs
+- Update when technology stack or architecture changes
+- Review quarterly for outdated rules
+- Remove rules that become obvious over time
+
+Last Updated: 2026-02-07
