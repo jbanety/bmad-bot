@@ -186,7 +186,7 @@ The daemon automatically detects stories with ready-for-dev status by polling sp
 **FRs covered:** FR1, FR2, FR3, FR4
 
 ### Epic 3: Intelligent Supervision
-The supervisor can intercept agent questions and answer them via a deterministic rule engine or LLM fallback with full project documentation context, escalate to human when unsure, and log every decision with reasoning and alternatives to a committed decisions file. After this epic, the ask_supervisor rig tool is built, tested, and ready to be registered with the agent.
+The supervisor can intercept agent questions and answer them via a deterministic rule engine or a dedicated BMAD Architect agent session (multi-turn chat with full project context loaded autonomously), escalate to human when unsure, and log every decision with reasoning and alternatives to a committed decisions file. After this epic, the ask_supervisor rig tool is built, tested, and ready to be registered with the agent.
 **FRs covered:** FR12, FR13, FR14, FR15, FR16, FR17
 
 ### Epic 4: Autonomous Development Session
@@ -390,7 +390,7 @@ So that the daemon doesn't waste time attempting stories that cannot succeed.
 
 ## Epic 3: Intelligent Supervision
 
-The supervisor can intercept agent questions and answer them via a deterministic rule engine or LLM fallback with full project documentation context, escalate to human when unsure, and log every decision with reasoning and alternatives to a committed decisions file. After this epic, the ask_supervisor rig tool is built, tested, and ready to be registered with the agent.
+The supervisor can intercept agent questions and answer them via a deterministic rule engine or a dedicated BMAD Architect agent session (multi-turn chat with full project context loaded autonomously), escalate to human when unsure, and log every decision with reasoning and alternatives to a committed decisions file. After this epic, the ask_supervisor rig tool is built, tested, and ready to be registered with the agent.
 
 ### Story 3.1: Supervisor Tool Skeleton & Rule Engine
 
@@ -423,24 +423,27 @@ So that predictable questions are resolved instantly without LLM cost.
 ### Story 3.2: LLM Fallback with Project Context
 
 As a daemon operator,
-I want substantive agent questions to be answered by an LLM with full project documentation context,
-So that the agent gets accurate, context-aware answers when the rule engine cannot help.
+I want substantive agent questions to be answered by a dedicated BMAD Architect agent session with full project context,
+So that the developer agent gets expert, context-aware architectural answers when the rule engine cannot help.
 
 **Acceptance Criteria:**
 
 **Given** the rule engine returns `NoMatch` for a question
 **When** the supervisor LLM fallback is triggered
-**Then** a separate LLM call is made using the supervisor provider/model configured in `bmad-bot.yaml`
-**And** the LLM prompt includes the full content of project documentation: architecture.md, prd.md, project-context.md (paths resolved from `BotConfig` planning_artifacts and project_knowledge)
+**Then** a fresh BMAD Architect agent session is created using the supervisor provider/model configured in `bmad-bot.yaml`
+**And** the Architect agent file (`_bmad/bmm/agents/architect.md`) is loaded as the full preamble (activation steps, persona, menu, rules — the complete file)
+**And** a minimal read-only `ReadFile` rig tool is registered so the Architect can load project files autonomously
 
-**Given** the LLM fallback receives a question with project docs as context
-**When** the LLM returns a response
-**Then** the response is returned to the agent as the tool output
+**Given** a fresh Architect session is created
+**When** the supervisor drives the multi-turn conversation
+**Then** the following messages are sent in sequence via rig's `chat()` API: (1) `"CH"` to enter free chat mode, (2) `"Load the project context"` so the Architect loads relevant project docs via the ReadFile tool, (3) `"A developer agent working on this project has the following question: {question}"` with optional context
+**And** the Architect's final response is returned to the dev agent as the tool output
+**And** the session is discarded after each question (no persistence between supervisor calls)
 **And** the fallback is logged via `tracing::warn!()` with `action = "supervisor_fallback"` and the question
 
-**Given** the LLM provider is unavailable or returns an error
+**Given** the LLM provider is unavailable or the Architect session fails
 **When** the supervisor attempts the fallback
-**Then** the error is handled by the reqwest-middleware retry layer (exponential backoff, max 3 retries)
+**Then** the entire session is retried with exponential backoff (max 2 retries, 3 total attempts)
 **And** if all retries fail, the supervisor proceeds to human escalation
 
 ### Story 3.3: Human Escalation
@@ -451,8 +454,8 @@ So that no incorrect decision is made autonomously.
 
 **Acceptance Criteria:**
 
-**Given** the rule engine returns `NoMatch` and the LLM fallback either fails or returns a low-confidence answer
-**When** the supervisor determines it cannot answer confidently
+**Given** the rule engine returns `NoMatch` and the Architect session either fails or cannot answer confidently
+**When** the supervisor determines it cannot answer
 **Then** the `ask_supervisor` tool returns a `SupervisorError::EscalationRequired` error
 **And** this error stops the rig agent loop, returning control to the daemon session module
 
