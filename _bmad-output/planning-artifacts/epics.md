@@ -1,0 +1,789 @@
+---
+stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step-03-create-stories', 'step-04-final-validation']
+inputDocuments: ['_bmad-output/planning-artifacts/prd.md', '_bmad-output/planning-artifacts/architecture.md']
+---
+
+# BMAD Bot - Epic Breakdown
+
+## Overview
+
+This document provides the complete epic and story breakdown for BMAD Bot, decomposing the requirements from the PRD and Architecture requirements into implementable stories.
+
+## Requirements Inventory
+
+### Functional Requirements
+
+**Story Management**
+- FR1: The daemon can detect stories with `ready-for-dev` status by polling `sprint-status.yaml` at a configurable interval
+- FR2: The daemon can resolve story dependencies and determine correct execution order
+- FR3: The daemon can skip stories whose dependencies are not yet completed
+- FR4: The daemon can mark dependent stories as `blocked` when a prerequisite story fails
+
+**Pre-Development Preparation**
+- FR5: The agent can review previously completed stories and their implementation before starting a new story
+- FR6: The agent can update the current story's specs and acceptance criteria based on actual implementation of prior stories
+- FR7: The agent can create and checkout a git branch following the `story/{epic}-{story}` naming convention
+
+**Development Session**
+- FR8: The daemon can instantiate a rig agent session with the BMAD dev agent persona
+- FR9: The daemon can expose git, filesystem, and terminal tools to the agent via rig tool calling
+- FR10: The agent can execute the full BMAD `dev-story` workflow autonomously
+- FR11: The daemon can inject a session language override (English) via the system prompt without modifying repo files
+
+**Supervision**
+- FR12: The supervisor can intercept agent questions during a development session
+- FR13: The supervisor can answer predictable questions via a deterministic rule engine (confirmations, step-by-step detection, story selection)
+- FR14: The supervisor can answer substantive questions via LLM fallback using full project documentation as context
+- FR15: The supervisor can escalate to human when neither rules nor LLM can answer confidently
+- FR16: The supervisor can log every decision with the question, chosen answer, reasoning, and alternatives considered
+- FR17: The supervisor can commit a decisions file at `_bmad-output/implementation-artifacts/{epic}-{story}-{label}-DECISIONS.md`
+
+**Code Review**
+- FR18: The daemon can optionally launch a code review using a separate LLM after the development session (configurable: enabled/disabled)
+- FR19: When enabled, the review agent can commit fixes in a separate commit (distinct from dev commits)
+- FR20: When enabled, the review agent can post its review as a comment on the PR
+
+**Pull Request Management**
+- FR21: The daemon can create a Pull Request on GitHub with an agent-written description
+- FR22: The PR description includes a dedicated "Supervisor Decisions" section listing all decisions made during the session
+- FR23: The daemon can create a PR for blocked/failed stories with partial code and a description of the failure
+- FR24: When code review is disabled, the daemon proceeds directly to PR creation after the development session
+
+**Notifications**
+- FR25: The daemon can send Telegram notifications with run summaries (stories completed, blocked, errored)
+- FR26: Notifications include story ID, status, and a link to the PR
+
+**CLI & Configuration**
+- FR27: The user can run `bmad-bot init` to interactively generate a project configuration file
+- FR28: The user can run `bmad-bot start` to launch the daemon
+- FR29: The user can run `bmad-bot status` to view current daemon state
+- FR30: The user can run `bmad-bot logs` to view structured daemon logs
+- FR31: The daemon can load configuration from a YAML file with secrets separated in a gitignored file
+- FR32: The daemon can auto-discover BMAD version and installed modules from the project repo
+
+**Error Handling & Resilience**
+- FR33: The daemon can handle LLM provider rate limits with retry and exponential backoff
+- FR34: The daemon can handle graceful shutdown on SIGTERM/SIGINT (complete current step, commit partial work, notify)
+- FR35: The daemon can notify the human of any blocking error (session crash, git failure, LLM provider down)
+- FR36: The daemon can validate configuration at startup and report missing or invalid settings
+- FR37: The daemon can detect an interrupted session at startup (presence of WAL file) and resume the session by reloading chat history and reconstructing the agent
+- FR38: The daemon can detect a context window limit error during a session, summarize the history via a separate LLM call, and bootstrap a fresh session with compressed context to continue the work
+
+### NonFunctional Requirements
+
+**Security**
+- NFR-SEC1: API keys and tokens never stored in committed config — secrets loaded from gitignored `.env` or secrets file
+- NFR-SEC2: Secrets never logged by `tracing` — structured logging filters sensitive fields
+- NFR-SEC3: Git credentials from environment, never hardcoded
+
+**Integration**
+- NFR-INT1: LLM provider connection failures and unexpected responses handled without crashing
+- NFR-INT2: GitHub API rate limiting (5000 req/hour authenticated) handled with retry
+- NFR-INT3: Telegram API failures do not block the pipeline — logged but do not stop story processing
+
+**Reliability**
+- NFR-REL1: Transient LLM errors (timeouts, 500s, rate limits) recovered with exponential backoff, max 3 retries per call
+- NFR-REL2: No work lost on unexpected shutdown — SIGTERM triggers graceful completion, commit, notification
+- NFR-REL3: Crash recovery produces clean state — no corrupted branches, no half-committed files. Watcher re-reads `sprint-status.yaml` and resumes
+- NFR-REL4: All errors logged via `tracing::error!()` with full context (story_id, step, error details)
+
+**Scalability (Future — v2/v3)**
+- NFR-SCA1: MVP: single daemon per project, sequential execution. No scaling requirements.
+- NFR-SCA2: Future: master daemon orchestrating workers, story parallelization, Kubernetes deployment. MVP architecture decisions must not preclude this evolution.
+
+### Additional Requirements
+
+**From Architecture — Starter/Foundation:**
+- Project initialized via `cargo init bmad-bot` + curated dependencies (no template framework)
+- Rust edition 2024, single binary target, full async tokio runtime (`features = ["full"]`)
+- Single crate with modular directory structure (not a Cargo workspace for MVP)
+- CLI framework: clap with derive API (init, start, status, logs subcommands)
+- Config loading: serde + serde_yaml for YAML, dotenvy for `.env` secrets
+- Signal handling: tokio::signal for SIGTERM/SIGINT graceful shutdown
+
+**From Architecture — Core Decisions:**
+- Decision 1 — Supervisor Interception: Hybrid Chat Loop + `ask_supervisor` rig Tool. Chat loop handles workflow-level interaction; supervisor tool handles technical/business questions. Rule engine → LLM fallback → human escalation.
+- Decision 2 — Sprint-Status Mutation: Daemon is pure reader. All mutations performed by the BMAD agent via tools.
+- Decision 3 — Session State Persistence: WAL file (`_bmad-output/implementation-artifacts/.bmad-bot-session.yaml`) persisted after each chat turn. Crash recovery reloads history. Context limit recovery summarizes history and bootstraps fresh session.
+- Decision 4 — Error Propagation: Three-tier layered. Layer 1 (HTTP transport): reqwest-middleware auto-retry. Layer 2 (Tools): domain-specific handling + bubble-up. Layer 3 (Session/Daemon): commit partial work, create PR with failure, notify.
+- Decision 5 — Agent Prompt Composition: Load BMAD dev agent file as-is as rig preamble. Append language override. First message: `"DS"`.
+- Decision 6 — Deployment Model: Foreground process via `bmad-bot start`. No self-daemonization. Logs to stdout/stderr.
+
+**From Architecture — Implementation Patterns (mandatory for all stories):**
+- Error Type Pattern: Per-module `thiserror` enums. `anyhow` only in `main.rs` / CLI layer.
+- Rig Tool Pattern: Standard structure (serializable struct + dedicated args struct + dedicated error enum + Tool trait impl).
+- Tracing Pattern: Structured spans with `story_id` context. Never `println!`/`eprintln!`.
+- Config Pattern: Validate once at startup, share via `Arc<BotConfig>`. Secrets loaded separately from `.env`.
+- Git Provider Trait Pattern: Params and returns as dedicated structs. Async trait methods.
+- Test Mock Pattern: Deterministic LLM responses. Arrange-Act-Assert. Naming: `test_{module}_{behavior}_{scenario}`.
+
+**From Architecture — External Integration Points:**
+- LLM Providers (Anthropic, OpenAI, GitHub Models) via rig-core — API key from `.env`
+- GitHub API via octocrab — Token from `.env`
+- GitLab API via reqwest — Token from `.env`
+- Telegram API via reqwest — Bot token from `.env`
+- Local git repo via git2 (libgit2) — SSH key or credential helper
+- Local filesystem via std::fs / tokio::fs
+- Local terminal via tokio::process
+
+**From Architecture — Anti-Patterns (NEVER do these):**
+- No `unwrap()` or `expect()` in production code
+- No `anyhow::Result` in library modules
+- No loose primitives as function params when 3+ params exist
+- No logging of sensitive data (API keys, tokens, passwords)
+- No real LLM API calls in unit tests
+- No skipping doc comments on public items
+
+### FR Coverage Map
+
+- FR1: Epic 2 — Detect ready-for-dev stories by polling sprint-status.yaml
+- FR2: Epic 2 — Resolve story dependencies and execution order
+- FR3: Epic 2 — Skip stories with unmet dependencies
+- FR4: Epic 2 — Cascade blocked status to dependent stories
+- FR5: Epic 4 — Review previously completed stories before starting new one
+- FR6: Epic 4 — Update current story specs based on prior implementations
+- FR7: Epic 4 — Create and checkout git branch (story/{epic}-{story})
+- FR8: Epic 4 — Instantiate rig agent session with BMAD dev agent persona
+- FR9: Epic 4 — Expose git, filesystem, terminal tools via rig tool calling
+- FR10: Epic 4 — Execute full BMAD dev-story workflow autonomously
+- FR11: Epic 4 — Inject session language override (English) via system prompt
+- FR12: Epic 3 — Intercept agent questions during development session
+- FR13: Epic 3 — Answer predictable questions via deterministic rule engine
+- FR14: Epic 3 — Answer substantive questions via LLM fallback with project docs context
+- FR15: Epic 3 — Escalate to human when neither rules nor LLM can answer confidently
+- FR16: Epic 3 — Log every decision with question, answer, reasoning, and alternatives
+- FR17: Epic 3 — Commit decisions file at implementation-artifacts path
+- FR18: Epic 5 — Optionally launch code review using separate LLM (configurable)
+- FR19: Epic 5 — Review agent commits fixes in separate commit
+- FR20: Epic 5 — Review agent posts review as PR comment
+- FR21: Epic 5 — Create Pull Request on GitHub with agent-written description
+- FR22: Epic 5 — PR description includes Supervisor Decisions section
+- FR23: Epic 5 — Create PR for blocked/failed stories with partial code and failure description
+- FR24: Epic 5 — Proceed directly to PR creation when code review is disabled
+- FR25: Epic 6 — Send Telegram notifications with run summaries
+- FR26: Epic 6 — Notifications include story ID, status, and PR link
+- FR27: Epic 1 — Run bmad-bot init for interactive config generation
+- FR28: Epic 1 — Run bmad-bot start to launch daemon
+- FR29: Epic 1 — Run bmad-bot status to view daemon state
+- FR30: Epic 1 — Run bmad-bot logs to view structured logs
+- FR31: Epic 1 — Load config from YAML with secrets separated in gitignored file
+- FR32: Epic 1 — Auto-discover BMAD version and installed modules
+- FR33: Epic 6 — Handle LLM provider rate limits with retry and exponential backoff
+- FR34: Epic 1 — Handle graceful shutdown on SIGTERM/SIGINT
+- FR35: Epic 6 — Notify human of any blocking error
+- FR36: Epic 1 — Validate configuration at startup and report issues
+- FR37: Epic 6 — Detect interrupted session at startup (WAL file) and resume
+- FR38: Epic 6 — Detect context window limit error and bootstrap fresh session with compressed context
+
+## Epic List
+
+### Epic 1: Project Foundation & CLI
+The user can install, configure, launch, and monitor the BMAD Bot daemon. This epic delivers the complete CLI interface (init, start, status, logs), configuration loading with secrets separation, BMAD auto-discovery, config validation, and graceful shutdown. After this epic, the daemon runs, stops cleanly, and the user can observe its state.
+**FRs covered:** FR27, FR28, FR29, FR30, FR31, FR32, FR34, FR36
+
+### Epic 2: Story Watching & Dependency Management
+The daemon automatically detects stories with ready-for-dev status by polling sprint-status.yaml, resolves dependency order, skips blocked stories, and cascades blocked status to dependents. After this epic, the daemon knows WHAT to work on and in what order.
+**FRs covered:** FR1, FR2, FR3, FR4
+
+### Epic 3: Intelligent Supervision
+The supervisor can intercept agent questions and answer them via a deterministic rule engine or LLM fallback with full project documentation context, escalate to human when unsure, and log every decision with reasoning and alternatives to a committed decisions file. After this epic, the ask_supervisor rig tool is built, tested, and ready to be registered with the agent.
+**FRs covered:** FR12, FR13, FR14, FR15, FR16, FR17
+
+### Epic 4: Autonomous Development Session
+The daemon launches a rig agent session with the BMAD dev agent persona and registered tools (git, filesystem, terminal, ask_supervisor). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override. After this epic, stories are developed end-to-end by the agent.
+**FRs covered:** FR5, FR6, FR7, FR8, FR9, FR10, FR11
+
+### Epic 5: Code Review & Pull Request Delivery
+The daemon optionally launches a code review via a separate LLM after the dev session, with fixes in separate commits and review posted as a PR comment. It creates a Pull Request on GitHub with an agent-written description including a Supervisor Decisions section. PRs are also created for blocked/failed stories with partial code and failure context. After this epic, the user wakes up to PRs ready for human review.
+**FRs covered:** FR18, FR19, FR20, FR21, FR22, FR23, FR24
+
+### Epic 6: Notifications & Error Resilience
+The daemon sends Telegram notifications with story status, ID, and PR links. It handles LLM rate limits with retry/backoff, notifies the human of blocking errors, detects interrupted sessions via WAL file for crash recovery, and recovers from context window limit errors by summarizing history and bootstrapping a fresh session. After this epic, the user can trust the daemon to run overnight without supervision.
+**FRs covered:** FR25, FR26, FR33, FR35, FR37, FR38
+
+---
+
+## Epic 1: Project Foundation & CLI
+
+The user can install, configure, launch, and monitor the BMAD Bot daemon. This epic delivers the complete CLI interface (init, start, status, logs), configuration loading with secrets separation, BMAD auto-discovery, config validation, and graceful shutdown.
+
+### Story 1.1: Project Scaffolding, Configuration & Validation
+
+As a developer,
+I want to initialize the BMAD Bot project with a complete module structure and robust configuration loading,
+So that I have a solid foundation to build all daemon features on.
+
+**Acceptance Criteria:**
+
+**Given** the project does not yet exist
+**When** I run `cargo init bmad-bot` and set up the project
+**Then** a Rust project is created with edition 2024, single binary target, and all required dependencies in Cargo.toml (tokio, rig-core, git2, serde, serde_yaml, dotenvy, clap, thiserror, tracing, tracing-subscriber, octocrab, reqwest, reqwest-middleware, reqwest-retry, async-trait)
+**And** the complete module directory structure is scaffolded with stub mod.rs files for all modules (cli, config, watcher, session, supervisor, review, tools, git_provider, notifier)
+
+**Given** a valid `bmad-bot.yaml` configuration file exists in the project root
+**When** the config module loads the file
+**Then** a `BotConfig` struct is deserialized via serde_yaml containing all configuration fields (polling_interval_secs, git_provider, llm providers/models, notification config, BMAD paths)
+**And** secrets are loaded separately from `.env` via dotenvy and never stored in `BotConfig`
+
+**Given** the project HTTP client is initialized
+**When** any module needs to make external HTTP calls (LLM providers, GitHub/GitLab API, Telegram API)
+**Then** a shared `reqwest` client is configured with `reqwest-middleware` and `reqwest-retry` for automatic retry with exponential backoff (max 3 retries) on transient errors (429, 500, 503, timeouts)
+**And** the retry client is available to all modules from project inception — no HTTP call in any epic runs without retry resilience
+
+**Given** a `bmad-bot.yaml` with missing or invalid fields
+**When** the config module validates the configuration
+**Then** a descriptive `ConfigError` (thiserror enum) is returned specifying exactly which field failed and why
+**And** `ConfigError` follows the per-module thiserror pattern (no anyhow in library modules)
+
+**Given** the project is initialized
+**When** I inspect the repository
+**Then** `bmad-bot.yaml.example` and `.env.example` template files exist and are committed
+**And** `.env` is listed in `.gitignore`
+
+### Story 1.2: CLI Framework & Daemon Lifecycle
+
+As a developer,
+I want to launch the daemon with `bmad-bot start` and have it run with structured logging and clean shutdown,
+So that I have a controllable long-running process as the foundation for all pipeline features.
+
+**Acceptance Criteria:**
+
+**Given** the project has the clap dependency configured
+**When** I build the CLI module
+**Then** clap with derive API defines four subcommands: `init`, `start`, `status`, `logs`
+**And** each subcommand has auto-generated `--help` documentation
+
+**Given** a valid configuration file exists
+**When** I run `bmad-bot start`
+**Then** the daemon loads and validates the config, initializes structured tracing (JSON or pretty-print based on config) to stdout/stderr, and enters a polling loop (placeholder that sleeps for the configured interval)
+**And** tracing is the only logging mechanism — no `println!` or `eprintln!` anywhere
+**And** sensitive fields (API keys, tokens) are never present in log output
+
+**Given** the daemon is running
+**When** a SIGTERM or SIGINT signal is received
+**Then** the daemon initiates graceful shutdown via tokio::signal, logs the shutdown event, and exits cleanly with code 0
+**And** no partial state is left behind
+
+### Story 1.3: Interactive Init Command
+
+As a developer setting up BMAD Bot for the first time,
+I want to run `bmad-bot init` and be guided through an interactive setup,
+So that I can generate a valid configuration without manually writing YAML.
+
+**Acceptance Criteria:**
+
+**Given** I am in a project directory without existing BMAD Bot configuration
+**When** I run `bmad-bot init`
+**Then** interactive prompts ask for: repository path, LLM provider and model for each role (dev, review, supervisor), git provider (GitHub/GitLab), Telegram notification config, and polling interval
+
+**Given** I have completed all interactive prompts
+**When** the init command finishes
+**Then** a `bmad-bot.yaml` file is generated with all user-provided settings (no secrets in this file)
+**And** a `.env` file is generated with placeholder entries for all required secrets (API keys, tokens) with comments explaining each
+
+**Given** a `bmad-bot.yaml` already exists in the directory
+**When** I run `bmad-bot init`
+**Then** the user is warned that existing config will be overwritten and asked to confirm before proceeding
+
+### Story 1.4: Status, Logs & BMAD Discovery
+
+As a developer operating BMAD Bot,
+I want to check the daemon's state, review logs, and have BMAD auto-detected,
+So that I can monitor operations and trust the daemon knows my project setup.
+
+**Acceptance Criteria:**
+
+**Given** the daemon is running or has run previously
+**When** I run `bmad-bot status`
+**Then** a summary is displayed showing: current state (running/stopped), stories processed count, stories in progress, stories blocked, and last activity timestamp
+
+**Given** the daemon has been running with structured tracing
+**When** I run `bmad-bot logs`
+**Then** structured logs are displayed with story_id, timestamps, and action fields
+**And** logs can be filtered by level (info, warn, error)
+
+**Given** the daemon starts in a project with BMAD installed
+**When** the config module initializes
+**Then** the daemon auto-discovers the BMAD version and installed modules by scanning the project repo (e.g., `_bmad/` directory structure)
+**And** the discovered information is logged at startup and available via `bmad-bot status`
+
+---
+
+## Epic 2: Story Watching & Dependency Management
+
+The daemon automatically detects stories with ready-for-dev status by polling sprint-status.yaml, resolves dependency order, skips blocked stories, and cascades blocked status to dependents. The daemon is a pure reader — it never writes to sprint-status.yaml.
+
+### Story 2.1: Sprint-Status Polling & Story Detection
+
+As a developer with stories marked ready-for-dev,
+I want the daemon to automatically detect them by polling sprint-status.yaml,
+So that stories are picked up for processing without manual intervention.
+
+**Acceptance Criteria:**
+
+**Given** a valid `sprint-status.yaml` exists at the configured output path
+**When** the watcher module polls the file at the configured interval (default 5 min)
+**Then** all stories with status `ready-for-dev` are identified and returned as `StoryInfo` structs (id, label, branch name, specs path, dependencies, status)
+**And** the polling interval is configurable via `bmad-bot.yaml`
+
+**Given** the `sprint-status.yaml` file does not exist or is malformed
+**When** the watcher attempts to read it
+**Then** a descriptive `WatcherError` (thiserror enum) is returned
+**And** the error is logged via `tracing::error!()` with full context
+**And** the daemon continues polling on the next cycle (does not crash)
+
+**Given** no stories have `ready-for-dev` status
+**When** the watcher polls
+**Then** the watcher logs an info message and sleeps until the next polling cycle
+
+### Story 2.2: Dependency Resolution & Execution Order
+
+As a developer with interdependent stories,
+I want the daemon to resolve dependencies and determine the correct execution order,
+So that stories are processed in a sequence that respects their prerequisites.
+
+**Acceptance Criteria:**
+
+**Given** the watcher has detected multiple `ready-for-dev` stories
+**When** the dependency resolution module (`deps.rs`) processes them
+**Then** a directed acyclic graph of dependencies is computed in-memory
+**And** stories are returned in topological order (prerequisites first)
+
+**Given** a story has dependencies that are not yet in `done` status
+**When** the pre-gate logic evaluates it
+**Then** the story is skipped for this cycle (not marked, not modified — pure read)
+**And** a tracing info message logs which story was skipped and which dependency is unmet
+
+**Given** a story has all dependencies in `done` status
+**When** the pre-gate logic evaluates it
+**Then** the story is marked as eligible and included in the execution queue
+
+**Given** a circular dependency exists in sprint-status.yaml
+**When** the dependency graph is computed
+**Then** a `WatcherError::CyclicDependency` error is returned with the cycle path
+**And** the error is logged and the affected stories are skipped
+
+### Story 2.3: Cascade Blocking
+
+As a developer,
+I want dependent stories to be automatically identified as blocked when a prerequisite story fails,
+So that the daemon doesn't waste time attempting stories that cannot succeed.
+
+**Acceptance Criteria:**
+
+**Given** a story has been processed and resulted in a `blocked` or `needs-clarification` status
+**When** the pre-gate logic runs on the next polling cycle
+**Then** all stories that depend (directly or transitively) on the failed story are identified as ineligible
+**And** a tracing warn message logs each cascade-blocked story with the reason (which prerequisite failed)
+
+**Given** the blocking prerequisite story is later resolved (status changes to `done`)
+**When** the next polling cycle runs
+**Then** the previously cascade-blocked dependents are re-evaluated based on current statuses
+**And** stories whose dependencies are now all `done` become eligible again
+
+**Given** the daemon has identified cascade-blocked stories
+**When** the pre-gate completes
+**Then** only truly eligible stories (all dependencies met, status `ready-for-dev`) are passed to the session module
+**And** the daemon never writes to `sprint-status.yaml` — all blocking logic is computed in-memory per cycle
+
+---
+
+## Epic 3: Intelligent Supervision
+
+The supervisor can intercept agent questions and answer them via a deterministic rule engine or LLM fallback with full project documentation context, escalate to human when unsure, and log every decision with reasoning and alternatives to a committed decisions file. After this epic, the ask_supervisor rig tool is built, tested, and ready to be registered with the agent.
+
+### Story 3.1: Supervisor Tool Skeleton & Rule Engine
+
+As a daemon operator,
+I want agent questions to be automatically intercepted and answered by a deterministic rule engine,
+So that predictable questions are resolved instantly without LLM cost.
+
+**Acceptance Criteria:**
+
+**Given** the supervisor module is initialized
+**When** the `ask_supervisor` rig tool is built
+**Then** it follows the standard rig Tool pattern (serializable struct + `AskSupervisorArgs` + `SupervisorError` thiserror enum + Tool trait impl)
+**And** the tool NAME is `ask_supervisor` (snake_case)
+**And** the tool definition description is detailed enough for the LLM agent to know when and how to call it
+
+**Given** the agent calls `ask_supervisor` with a question matching a known pattern
+**When** the rule engine in `rules.rs` evaluates the question
+**Then** the rule engine matches against deterministic patterns: confirmations ("Should I proceed?"), step-by-step detection, story selection prompts, and other predictable BMAD workflow interactions
+**And** the matched rule returns an answer immediately without any LLM call
+
+**Given** the agent calls `ask_supervisor` with a question that does not match any rule
+**When** the rule engine evaluates the question
+**Then** the rule engine returns a `NoMatch` result indicating LLM fallback is needed
+**And** the question and attempted match are logged via `tracing::info!()` with `action = "rule_engine_miss"`
+
+**Given** the rule engine is deployed
+**When** new patterns are identified from decision file analysis
+**Then** rules can be added to `rules.rs` without modifying the tool interface or supervisor module structure
+
+### Story 3.2: LLM Fallback with Project Context
+
+As a daemon operator,
+I want substantive agent questions to be answered by an LLM with full project documentation context,
+So that the agent gets accurate, context-aware answers when the rule engine cannot help.
+
+**Acceptance Criteria:**
+
+**Given** the rule engine returns `NoMatch` for a question
+**When** the supervisor LLM fallback is triggered
+**Then** a separate LLM call is made using the supervisor provider/model configured in `bmad-bot.yaml`
+**And** the LLM prompt includes the full content of project documentation: architecture.md, prd.md, project-context.md (paths resolved from `BotConfig` planning_artifacts and project_knowledge)
+
+**Given** the LLM fallback receives a question with project docs as context
+**When** the LLM returns a response
+**Then** the response is returned to the agent as the tool output
+**And** the fallback is logged via `tracing::warn!()` with `action = "supervisor_fallback"` and the question
+
+**Given** the LLM provider is unavailable or returns an error
+**When** the supervisor attempts the fallback
+**Then** the error is handled by the reqwest-middleware retry layer (exponential backoff, max 3 retries)
+**And** if all retries fail, the supervisor proceeds to human escalation
+
+### Story 3.3: Human Escalation
+
+As a developer,
+I want the supervisor to stop and escalate to me when it cannot answer a question confidently,
+So that no incorrect decision is made autonomously.
+
+**Acceptance Criteria:**
+
+**Given** the rule engine returns `NoMatch` and the LLM fallback either fails or returns a low-confidence answer
+**When** the supervisor determines it cannot answer confidently
+**Then** the `ask_supervisor` tool returns a `SupervisorError::EscalationRequired` error
+**And** this error stops the rig agent loop, returning control to the daemon session module
+
+**Given** the supervisor has escalated
+**When** the session module receives the escalation error
+**Then** the story status is set to `needs-clarification` (via the agent's last actions or session cleanup)
+**And** the escalation event is logged via `tracing::warn!()` with `action = "supervisor_escalation"`, the question, and the reason for escalation
+
+**Given** the supervisor escalates
+**When** the session handles the escalation
+**Then** partial work is preserved (commits, branch state) so the story can be resumed after human intervention
+
+### Story 3.4: Decision Logging & Traceability
+
+As a developer reviewing automated work,
+I want every supervisor decision logged with full reasoning and alternatives,
+So that I can audit, understand, and improve the supervisor's behavior over time.
+
+**Acceptance Criteria:**
+
+**Given** the supervisor answers a question (via rule engine or LLM fallback)
+**When** the decision is made
+**Then** a `DecisionRecord` is created in `decisions.rs` containing: question, chosen answer, source (rule_engine or llm_fallback), reasoning, and alternatives considered
+**And** the record is appended to an in-memory decisions list for the current session
+
+**Given** a development session completes or is interrupted
+**When** the decision logging module finalizes
+**Then** a decisions file is written to `_bmad-output/implementation-artifacts/{epic}-{story}-{label}-DECISIONS.md` containing all decisions from the session in a human-readable markdown format
+**And** the file is committed to the git branch
+
+**Given** decisions have been logged during a session
+**When** a PR is created (Epic 5)
+**Then** the decisions list is available as structured data for inclusion in the PR description's "Supervisor Decisions" section
+**And** each decision entry shows: question, decision, reasoning, and alternatives
+
+---
+
+## Epic 4: Autonomous Development Session
+
+The daemon launches a rig agent session with the BMAD dev agent persona and registered tools (git, filesystem, terminal, ask_supervisor). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override. After this epic, stories are developed end-to-end by the agent.
+
+### Story 4.1: Rig Tools Implementation (Git, Filesystem, Terminal)
+
+As a daemon operator,
+I want the agent to have access to git, filesystem, and terminal tools during development sessions,
+So that the agent can perform all operations needed to develop a story autonomously.
+
+**Acceptance Criteria:**
+
+**Given** the tools module is initialized
+**When** the git tool (`tools/git.rs`) is built
+**Then** it follows the standard rig Tool pattern (serializable struct + `GitToolArgs` + `GitToolError` thiserror enum + Tool trait impl)
+**And** it exposes git operations via git2: clone, checkout, branch create, add, commit, push, diff, status, log
+**And** the tool NAME is `git` and the definition description is detailed enough for the LLM to use correctly
+**And** every `call()` logs the action and result via `tracing` with story context
+
+**Given** the tools module is initialized
+**When** the filesystem tool (`tools/fs.rs`) is built
+**Then** it follows the standard rig Tool pattern with `FsToolArgs` + `FsToolError`
+**And** it exposes file operations via std::fs / tokio::fs: read file, write file, list directory, create directory, delete, check existence
+**And** every `call()` logs the action and result via `tracing`
+
+**Given** the tools module is initialized
+**When** the terminal tool (`tools/terminal.rs`) is built
+**Then** it follows the standard rig Tool pattern with `TerminalToolArgs` + `TerminalToolError`
+**And** it exposes command execution via tokio::process: run command, capture stdout/stderr, return exit code
+**And** every `call()` logs the command and result via `tracing`
+
+**Given** any tool encounters an error
+**When** the error is handled
+**Then** it never panics — always returns `Result` with a descriptive error
+**And** errors bubble up to the rig agent loop which decides how to proceed
+
+### Story 4.2: Agent Session Setup & Chat Loop
+
+As a daemon operator,
+I want the daemon to launch an autonomous LLM agent session with the BMAD dev persona and all registered tools,
+So that stories are developed without human intervention.
+
+**Acceptance Criteria:**
+
+**Given** the session module is initialized with a `StoryInfo` from the watcher
+**When** an agent session is created
+**Then** the BMAD dev agent file is loaded from the project's `_bmad/` directory and used as-is as the rig agent preamble
+**And** a language override (`communication_language = English`) is appended to the preamble
+**And** four tools are registered: git, filesystem, terminal, and ask_supervisor
+**And** the agent is built using the dev LLM provider/model from `BotConfig`
+
+**Given** an agent session is ready
+**When** the chat loop starts
+**Then** the first message sent is `"DS"` (triggers the dev-story workflow in the BMAD agent's menu system)
+**And** the daemon manages the chat loop via `agent.chat(message, history)`, analyzing each agent response for workflow interaction points (confirmations, "should I proceed?", step transitions)
+**And** the daemon responds automatically to workflow-level interactions
+
+**Given** the agent is working in a chat loop
+**When** the agent completes the dev-story workflow and signals completion
+**Then** the session module detects completion and exits the chat loop
+**And** the session result (success, blocked, or error) is returned to the daemon for downstream processing (review, PR, notification)
+
+**Given** a session is active
+**When** the entire session lifecycle runs
+**Then** a `story_session` tracing span wraps the whole session with `story_id` and `branch` fields
+**And** the daemon knows nothing about BMAD workflow internals — it only loads the agent file, registers tools, and manages the chat loop
+
+### Story 4.3: Pre-Development Preparation & Branch Management
+
+As a developer,
+I want the agent to review prior implementations and refresh the current story's specs before coding,
+So that each story is developed with up-to-date context and on a clean dedicated branch.
+
+**Acceptance Criteria:**
+
+**Given** a story has been selected for development and the agent session is active
+**When** the agent begins the dev-story workflow
+**Then** the agent uses the filesystem tool to read previously completed stories and their implementations
+**And** the agent updates the current story's specs and acceptance criteria based on actual implementation of prior stories (if applicable)
+
+**Given** the agent is ready to start coding
+**When** the agent prepares the development environment
+**Then** the agent uses the git tool to create and checkout a new branch following the `story/{epic}-{story}` naming convention (e.g., `story/1-2-account-management`)
+**And** the branch is created from the configured base branch (e.g., `main`)
+
+**Given** the branch already exists (e.g., from a previous interrupted session)
+**When** the agent attempts to create it
+**Then** the agent detects the existing branch, checks it out, and continues from the current state
+**And** the situation is logged via `tracing::info!()` with `action = "branch_reuse"`
+
+---
+
+## Epic 5: Code Review & Pull Request Delivery
+
+The daemon optionally launches a code review via a separate LLM after the dev session, with fixes in separate commits and review posted as a PR comment. It creates a Pull Request on GitHub or GitLab with an agent-written description including a Supervisor Decisions section. PRs are also created for blocked/failed stories with partial code and failure context. After this epic, the user wakes up to PRs ready for human review.
+
+### Story 5.1: Git Provider Trait & GitHub PR Creation
+
+As a developer using GitHub,
+I want the daemon to create Pull Requests with comprehensive descriptions after each story session,
+So that I wake up to reviewable PRs with full context on what was done and why.
+
+**Acceptance Criteria:**
+
+**Given** the git_provider module is initialized
+**When** the `GitProvider` trait is defined
+**Then** it exposes async methods: `create_pr(params: CreatePrParams) -> Result<PrInfo, GitProviderError>`, `add_comment(pr_id: &str, body: &str) -> Result<(), GitProviderError>`, `get_pr_url(pr_id: &str) -> Result<String, GitProviderError>`
+**And** `CreatePrParams`, `PrInfo`, and `GitProviderError` are dedicated structs/enums following the git provider trait pattern
+**And** the provider is selected via `bmad-bot.yaml` config (`git_provider: github | gitlab`)
+
+**Given** a development session has completed successfully
+**When** the daemon creates a PR via the GitHub implementation (octocrab)
+**Then** the PR is created with: agent-written title and description body, source branch (`story/{epic}-{story}`), target branch (configured base branch)
+**And** the PR description includes a dedicated "🤖 Supervisor Decisions" section listing all decisions from the session (question, decision, reasoning, alternatives)
+
+**Given** a development session has been blocked or failed
+**When** the daemon creates a PR for the failed story
+**Then** a PR is still created with partial code committed to the branch
+**And** the PR description includes a clear failure/blockage description explaining what happened, where it stopped, and all decisions made before the failure
+
+**Given** code review is disabled in configuration
+**When** the development session completes
+**Then** the daemon proceeds directly to PR creation without launching a review session
+
+### Story 5.2: Automated Code Review Session
+
+As a developer,
+I want an optional automated code review by a separate LLM before the PR is finalized,
+So that code quality issues are caught and fixed before I review.
+
+**Acceptance Criteria:**
+
+**Given** code review is enabled in `bmad-bot.yaml` configuration
+**When** a development session completes successfully
+**Then** the review module launches a separate LLM session using the review provider/model from `BotConfig`
+**And** the review session receives a `ReviewContext` (branch name, story info, diff summary) for analysis
+
+**Given** the review LLM identifies issues in the code
+**When** the review agent generates fixes
+**Then** fixes are committed in separate commits (distinct from the dev agent's commits) for clear visibility in the PR history
+**And** each review fix commit message references the review finding it addresses
+
+**Given** the review session completes
+**When** the review is finalized
+**Then** the full review is posted as a comment on the PR via `GitProvider::add_comment()`
+**And** the review comment includes: summary of findings, issues found, fixes applied, and any remaining concerns
+
+**Given** the review LLM provider is unavailable or errors out
+**When** the review session fails
+**Then** the daemon logs the error, skips the review, and proceeds to PR creation without review
+**And** the PR description notes that automated code review was skipped due to an error
+
+### Story 5.3: GitLab Merge Request Support
+
+As a developer using GitLab,
+I want the daemon to create Merge Requests with the same comprehensive descriptions as GitHub PRs,
+So that I get the same experience regardless of my git provider.
+
+**Acceptance Criteria:**
+
+**Given** the `bmad-bot.yaml` config specifies `git_provider: gitlab`
+**When** the GitLab implementation of `GitProvider` is initialized
+**Then** it uses reqwest direct calls to the GitLab REST API (v4) with the token loaded from `.env`
+**And** it implements all trait methods: `create_pr` (creates a Merge Request), `add_comment` (posts a note on the MR), `get_pr_url` (returns the MR web URL)
+
+**Given** a development session has completed
+**When** the daemon creates a Merge Request via the GitLab implementation
+**Then** the MR is created with: agent-written title and description, source branch, target branch
+**And** the MR description includes the "🤖 Supervisor Decisions" section, identical in format to the GitHub implementation
+
+**Given** code review is enabled and completes
+**When** the review is posted on GitLab
+**Then** the review is posted as a note (comment) on the Merge Request via the GitLab notes API
+**And** the format and content are consistent with the GitHub PR comment implementation
+
+**Given** the GitLab API returns rate limit or transient errors
+**When** the git_provider makes API calls
+**Then** errors are handled by the reqwest-middleware retry layer (exponential backoff, max 3 retries)
+**And** permanent failures return a descriptive `GitProviderError` with the HTTP status and response body
+
+---
+
+## Epic 6: Notifications & Error Resilience
+
+The daemon sends Telegram notifications with story status, ID, and PR links. It handles LLM rate limits with retry/backoff, notifies the human of blocking errors, detects interrupted sessions via WAL file for crash recovery, and recovers from context window limit errors by summarizing history and bootstrapping a fresh session. After this epic, the user can trust the daemon to run overnight without supervision.
+
+### Story 6.1: Telegram Notifications
+
+As a developer running BMAD Bot overnight,
+I want to receive Telegram notifications summarizing what happened,
+So that I know the results without checking GitHub/GitLab manually.
+
+**Acceptance Criteria:**
+
+**Given** a development session completes successfully
+**When** the notifier module sends a notification
+**Then** a Telegram message is sent via reqwest direct HTTP call to the Telegram Bot API using the bot token from `.env`
+**And** the message includes: story ID, status (✅ completed), and a direct link to the PR/MR
+
+**Given** a story is blocked or encounters an error
+**When** the notifier module sends a notification
+**Then** a Telegram message is sent with: story ID, status (⚠️ blocked or ❌ error), reason for blockage/error, and a link to the PR if one was created
+**And** the message provides enough context to understand the issue without opening the PR
+
+**Given** a full daemon run completes (all eligible stories processed)
+**When** the run summary is generated
+**Then** a summary notification is sent with: total stories processed, count by status (completed, blocked, errored), and links to all PRs created
+
+**Given** the Telegram API is unavailable or returns an error
+**When** the notifier attempts to send a message
+**Then** the failure is logged via `tracing::error!()` with full context
+**And** the notification failure does NOT block the pipeline — story processing continues normally
+**And** no retry is attempted for notification failures (non-critical path)
+
+### Story 6.2: HTTP Retry & Error Resilience
+
+As a daemon operator,
+I want all external HTTP calls to be resilient to transient failures,
+So that temporary provider outages don't derail overnight runs.
+
+**Acceptance Criteria:**
+
+**Given** all 3 retries are exhausted for an LLM provider call (retry middleware configured in Story 1.1)
+**When** the final retry fails
+**Then** the error bubbles up to the session/daemon layer (Layer 3 error propagation)
+**And** the session commits partial work, creates a PR with failure description, and notifies the human
+
+**Given** all 3 retries are exhausted for a GitHub/GitLab API call
+**When** PR creation or comment posting fails permanently
+**Then** the error is logged with full context (HTTP status, response body, story_id)
+**And** the human is notified via Telegram with the failure details and the branch name so they can create the PR manually
+
+**Given** a blocking error occurs at any point in the pipeline (session crash, git failure, all LLM providers down)
+**When** the daemon's Layer 3 error handler catches it
+**Then** a notification is sent to the human with: story ID, error type, error details, and recovery guidance
+**And** the daemon moves on to the next eligible story (does not stop the entire run)
+
+### Story 6.3: Crash Recovery via Session WAL
+
+As a developer,
+I want the daemon to recover from crashes by resuming interrupted sessions,
+So that no work is lost if the process dies unexpectedly.
+
+**Acceptance Criteria:**
+
+**Given** a development session is active
+**When** the chat loop completes a turn
+**Then** the session state is persisted to a WAL file at `_bmad-output/implementation-artifacts/.bmad-bot-session.yaml`
+**And** the WAL contains: story_id, branch name, started_at, last_activity, provider/model config, and complete chat_history (Vec<Message> serialized with role + content for each turn)
+
+**Given** a session completes successfully (PR created)
+**When** the session cleanup runs
+**Then** the WAL file is deleted
+**And** the daemon returns to the polling loop
+
+**Given** the daemon starts up
+**When** a WAL file exists from a previous interrupted session
+**Then** the daemon detects the interrupted session and logs it via `tracing::warn!()` with `action = "crash_recovery"`
+**And** the git state is verified (branch exists, dirty files confirm crash mid-session)
+**And** the chat history is reloaded from the WAL file
+**And** the agent is reconstructed with the same provider/model config from the WAL
+**And** the chat loop resumes with the loaded history — the agent has full context and continues where it left off
+
+**Given** the daemon starts up and no WAL file exists
+**When** the initialization check completes
+**Then** the daemon proceeds to normal polling (clean start)
+
+### Story 6.4: Context Window Limit Recovery
+
+As a developer,
+I want the daemon to recover from context window limit errors without losing session progress,
+So that long or complex stories can still be completed autonomously.
+
+**Acceptance Criteria:**
+
+**Given** the agent session is active and the chat history has grown large
+**When** the LLM API returns a context limit error
+**Then** the error is detected from the provider response in the chat loop
+**And** the recovery process is initiated (not a crash — a controlled recovery)
+
+**Given** a context limit error has been detected
+**When** the recovery process starts
+**Then** the full chat_history is read from the WAL file (already persisted after each turn)
+**And** the last N exchanges are extracted verbatim from the WAL as immediate context
+**And** a separate, fresh LLM call is made (new context, not the exhausted one) to summarize the full chat_history into a compact session summary
+
+**Given** the summary has been generated
+**When** the new session is bootstrapped
+**Then** a fresh agent is constructed with the same provider/model config and the same persona + tools
+**And** the new session preamble includes: agent persona + tool registrations, project context (project-context.md), the generated session summary, the last N verbatim exchanges, and the current story file reference
+**And** the session enters direct chat mode (not re-entering the full dev-story workflow pipeline, since checkboxes and Dev Agent Record are already up to date on disk)
+
+**Given** the new session is bootstrapped
+**When** the chat loop resumes
+**Then** the agent picks up the current task with full awareness of prior work
+**And** the recovery event is logged via `tracing::info!()` with `action = "context_limit_recovery"`, original history length, and summary length
+**And** the WAL file is updated with the new (compressed) session state
