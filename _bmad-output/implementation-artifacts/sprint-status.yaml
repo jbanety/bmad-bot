@@ -55,7 +55,7 @@ development_status:
 
   epic-3: in-progress
   3-1-supervisor-tool-skeleton-rule-engine: ready-for-dev
-  3-2-llm-fallback-with-project-context: backlog
+  3-2-llm-fallback-with-project-context: ready-for-dev
   3-3-human-escalation: backlog
   3-4-decision-logging-traceability: backlog
   epic-3-retrospective: optional
