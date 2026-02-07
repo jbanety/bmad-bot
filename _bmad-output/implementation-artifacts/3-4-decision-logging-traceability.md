@@ -191,6 +191,7 @@ So that I can audit, understand, and improve the supervisor's behavior over time
   - [ ] 5.5 This function is pure (no I/O, no async) — it formats data that Epic 5 will include in the PR body
 
 - [ ] Task 6: Wire decision log into session lifecycle (AC: #3, #4)
+  > **Scope note:** The full session chat loop does not exist yet (Epic 4). This task prepares the **functions, data structures, and integration points** that Epic 4 will call. Subtasks 6.1–6.5 describe the intended call sites — implement the callable functions (`write_decisions_file`, `DecisionLog` wiring) now; the actual invocation from the session loop will happen in Epic 4 Story 4.2. For this story, validate these functions via the unit tests in Task 8.3.
   - [ ] 6.1 In the session setup (where `AskSupervisor` is constructed), create a `DecisionLog::new()` and pass it to `AskSupervisor`
   - [ ] 6.2 Keep a reference to the same `DecisionLog` (it's `Clone` via `Arc`) in the session module
   - [ ] 6.3 **On session completion (normal):** After the chat loop ends successfully:
@@ -207,6 +208,7 @@ So that I can audit, understand, and improve the supervisor's behavior over time
   - [ ] 6.6 **Critical:** Decision file writing is best-effort. If it fails, log `tracing::error!()` and continue — never block session completion on a logging failure
 
 - [ ] Task 7: Update `SessionOutcome` to carry decisions data (AC: #4)
+  > **Scope note:** These are **data structure changes only**. Adding `decisions: Vec<DecisionRecord>` to `SessionOutcome` variants and optionally to `EscalationReport` prepares the types for Epic 4 (session) and Epic 5 (PR creation). Populate the new fields with `vec![]` defaults wherever `SessionOutcome` is currently constructed — Epic 4 will replace these with real data from `DecisionLog::records()`.
   - [ ] 7.1 Add a `decisions: Vec<DecisionRecord>` field to `SessionOutcome::Completed`:
     ```
     Completed {
