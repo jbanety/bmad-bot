@@ -42,7 +42,7 @@ story_location: "{project-root}/_bmad-output/implementation-artifacts"
 development_status:
   epic-1: in-progress
   1-1-project-scaffolding-configuration-validation: ready-for-dev
-  1-2-cli-framework-daemon-lifecycle: backlog
+  1-2-cli-framework-daemon-lifecycle: ready-for-dev
   1-3-interactive-init-command: backlog
   1-4-status-logs-bmad-discovery: backlog
   epic-1-retrospective: optional
