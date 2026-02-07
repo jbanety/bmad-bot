@@ -1,0 +1,80 @@
+# generated: 2026-02-07
+# project: bmad-bot
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-02-07
+project: bmad-bot
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  epic-1: backlog
+  1-1-project-scaffolding-configuration-validation: backlog
+  1-2-cli-framework-daemon-lifecycle: backlog
+  1-3-interactive-init-command: backlog
+  1-4-status-logs-bmad-discovery: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-sprint-status-polling-story-detection: backlog
+  2-2-dependency-resolution-execution-order: backlog
+  2-3-cascade-blocking: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-supervisor-tool-skeleton-rule-engine: backlog
+  3-2-llm-fallback-with-project-context: backlog
+  3-3-human-escalation: backlog
+  3-4-decision-logging-traceability: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-rig-tools-implementation-git-filesystem-terminal: backlog
+  4-2-agent-session-setup-chat-loop: backlog
+  4-3-pre-development-preparation-branch-management: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-git-provider-trait-github-pr-creation: backlog
+  5-2-automated-code-review-session: backlog
+  5-3-gitlab-merge-request-support: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog
+  6-1-telegram-notifications: backlog
+  6-2-http-retry-error-resilience: backlog
+  6-3-crash-recovery-via-session-wal: backlog
+  6-4-context-window-limit-recovery: backlog
+  epic-6-retrospective: optional
