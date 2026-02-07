@@ -12,7 +12,7 @@ So that stories are picked up for processing without manual intervention.
 
 ## Acceptance Criteria
 
-1. **Given** a valid `sprint-status.yaml` exists at the configured output path **When** the watcher module polls the file at the configured interval (default 5 min) **Then** all stories with status `ready-for-dev` are identified and returned as `StoryInfo` structs (id, label, branch name, specs path, dependencies, status) **And** the polling interval is configurable via `bmad-bot.yaml`
+1. **Given** a valid `sprint-status.yaml` exists at the configured output path **When** the watcher module polls the file at the configured interval (default 5 min) **Then** all stories with status `ready-for-dev` are identified and returned as `StoryInfo` structs (id, label, branch name, specs path, dependencies, status) **And** the polling interval is configurable via `bmad-bot.yaml` **And** the `dependencies` field is initialized empty (populated by Story 2.2)
 
 2. **Given** the `sprint-status.yaml` file does not exist or is malformed **When** the watcher attempts to read it **Then** a descriptive `WatcherError` (thiserror enum) is returned **And** the error is logged via `tracing::error!()` with full context **And** the daemon continues polling on the next cycle (does not crash)
 
@@ -23,7 +23,8 @@ So that stories are picked up for processing without manual intervention.
 - [ ] Task 0: Verify prerequisites from Epic 1 (AC: #1, #2, #3)
   - [ ] 0.1 Verify `serde_yaml = "0.9"` is in Cargo.toml (present since Story 1.1)
   - [ ] 0.2 Verify `watcher/mod.rs` and `watcher/deps.rs` stubs exist (created in Story 1.1)
-  - [ ] 0.3 Run `cargo check` to confirm clean baseline
+  - [ ] 0.3 Add `tempfile` to `[dev-dependencies]` in Cargo.toml (needed for unit tests with temp dirs)
+  - [ ] 0.4 Run `cargo check` to confirm clean baseline
 
 - [ ] Task 1: Define `WatcherError` thiserror enum in `src/watcher/mod.rs` (AC: #2)
   - [ ] 1.1 Create `WatcherError` with variants: `SprintStatusRead`, `SprintStatusParse`, `SprintStatusNotFound`, `NoEligibleStories`
@@ -31,7 +32,7 @@ So that stories are picked up for processing without manual intervention.
   - [ ] 1.3 Add `/// doc comments` on every variant
 
 - [ ] Task 2: Define `StoryInfo` struct in `src/watcher/mod.rs` (AC: #1)
-  - [ ] 2.1 Create `pub struct StoryInfo` with fields: `story_id` (String, e.g. "1.2"), `story_key` (String, e.g. "1-2-cli-framework"), `epic_num` (u32), `story_num` (u32), `title` (String), `branch_name` (String, e.g. "story/1-2-cli-framework"), `specs_path` (PathBuf), `status` (String)
+  - [ ] 2.1 Create `pub struct StoryInfo` with fields: `story_id` (String, e.g. "1.2"), `story_key` (String, e.g. "1-2-cli-framework"), `epic_num` (u32), `story_num` (u32), `label` (String, human-readable name derived from slug), `branch_name` (String, e.g. "story/1-2-cli-framework"), `specs_path` (PathBuf), `dependencies` (Vec<String>, empty for now — Story 2.2 populates), `status` (String)
   - [ ] 2.2 Derive `Debug, Clone`
   - [ ] 2.3 Implement `Display` trait for human-readable output
   - [ ] 2.4 Implement `StoryInfo::from_key_and_status(key: &str, status: &str, story_dir: &Path) -> Option<StoryInfo>` — parses the key format `N-N-slug` and derives all fields
@@ -180,13 +181,16 @@ pub enum WatcherError {
     #[error("Sprint status file not found: {path}")]
     SprintStatusNotFound { path: String },
 
-    /// Failed to read sprint-status.yaml from disk.
-    #[error("Failed to read sprint status file: {0}")]
-    SprintStatusRead(#[from] std::io::Error),
+
 
     /// sprint-status.yaml exists but contains invalid YAML.
     #[error("Failed to parse sprint status YAML: {0}")]
     SprintStatusParse(#[from] serde_yaml::Error),
+
+    /// Failed to read sprint-status.yaml from disk (non-NotFound I/O error).
+    /// Note: NotFound is handled separately as SprintStatusNotFound.
+    #[error("Failed to read sprint status file: {0}")]
+    SprintStatusRead(std::io::Error),
 
     /// No stories with `ready-for-dev` status found in current cycle.
     /// This is NOT a failure — it's an expected state when all stories are
@@ -196,7 +200,7 @@ pub enum WatcherError {
 }
 ```
 
-> **NOTE:** `NoEligibleStories` is an informational error, not a failure. The caller (polling loop) should handle it by logging at debug/info level and continuing, NOT by reporting it as a tracing::error.
+> **NOTE:** `NoEligibleStories` is an informational error, not a failure. The caller (polling loop) handles it by logging at **info** level (per AC #3) and continuing, NOT by reporting it as a tracing::error.
 
 ### StoryInfo Implementation — `src/watcher/mod.rs`
 
@@ -218,12 +222,15 @@ pub struct StoryInfo {
     pub epic_num: u32,
     /// Story number within the epic.
     pub story_num: u32,
-    /// Human-readable title derived from the slug portion of the key.
-    pub title: String,
+    /// Human-readable label derived from the slug portion of the key.
+    pub label: String,
     /// Git branch name following convention: "story/{story_key}".
     pub branch_name: String,
     /// Path to the story specs markdown file in implementation-artifacts.
     pub specs_path: PathBuf,
+    /// Story dependencies (story keys this story depends on).
+    /// Empty in Story 2.1 — populated by dependency resolution in Story 2.2.
+    pub dependencies: Vec<String>,
     /// Current status string from sprint-status.yaml.
     pub status: String,
 }
@@ -259,8 +266,8 @@ impl StoryInfo {
         let story_num: u32 = parts.next()?.parse().ok()?;
         let slug = parts.next().unwrap_or("");
 
-        // Derive title from slug: replace hyphens with spaces, title-case first word
-        let title = slug.replace('-', " ");
+        // Derive label from slug: replace hyphens with spaces
+        let label = slug.replace('-', " ");
 
         let story_id = format!("{epic_num}.{story_num}");
         let branch_name = format!("story/{key}");
@@ -271,9 +278,10 @@ impl StoryInfo {
             story_key: key.to_string(),
             epic_num,
             story_num,
-            title,
+            label,
             branch_name,
             specs_path,
+            dependencies: Vec::new(), // Populated by Story 2.2 dependency resolution
             status: status.to_string(),
         })
     }
@@ -289,7 +297,7 @@ impl fmt::Display for StoryInfo {
         write!(
             f,
             "[{}] {} (status: {}, branch: {})",
-            self.story_id, self.title, self.status, self.branch_name
+            self.story_id, self.label, self.status, self.branch_name
         )
     }
 }
@@ -319,13 +327,15 @@ impl SprintStatusFile {
     /// - `WatcherError::SprintStatusRead` if the file cannot be read
     /// - `WatcherError::SprintStatusParse` if the YAML is malformed
     pub fn load(path: &Path, story_dir: &Path) -> Result<Self, WatcherError> {
-        if !path.exists() {
-            return Err(WatcherError::SprintStatusNotFound {
-                path: path.display().to_string(),
-            });
-        }
-
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                WatcherError::SprintStatusNotFound {
+                    path: path.display().to_string(),
+                }
+            } else {
+                WatcherError::SprintStatusRead(e)
+            }
+        })?;
         let yaml: serde_yaml::Value = serde_yaml::from_str(&content)?;
 
         let mut entries = Vec::new();
@@ -569,7 +579,7 @@ async fn run_polling_loop(
                         // Story 2.2 will add dependency resolution before this point.
                     }
                     Err(crate::watcher::WatcherError::NoEligibleStories) => {
-                        tracing::debug!("No eligible stories in this cycle — waiting for next poll");
+                        tracing::info!("No eligible stories in this cycle — waiting for next poll");
                     }
                     Err(crate::watcher::WatcherError::SprintStatusNotFound { ref path }) => {
                         tracing::warn!(
@@ -604,7 +614,7 @@ async fn run_polling_loop(
 
 > **NOTE on sequential execution:** Architecture mandates "one story at a time, in sprint order." When session launching is implemented (Epic 4), the polling loop will pick the FIRST eligible story (index 0) from the ordered list. Story 2.2 will filter by dependency satisfaction before that. This story returns ALL eligible stories in document order — the caller decides which to process.
 
-### Complete `src/watcher/mod.rs` File Structure
+### Module-Level Doc Comment for `src/watcher/mod.rs`
 
 ```rust
 //! Watcher module — polls sprint-status.yaml and detects eligible stories.
@@ -615,30 +625,6 @@ async fn run_polling_loop(
 //!
 //! **Architecture Decision 2:** The daemon is a pure reader of sprint-status.yaml.
 //! All mutations are performed by the BMAD agent during development sessions.
-
-use std::fmt;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use crate::config::BotConfig;
-
-pub mod deps;
-
-// --- Error Type ---
-// (WatcherError as shown above)
-
-// --- StoryInfo ---
-// (StoryInfo struct + impl + Display as shown above)
-
-// --- SprintStatusFile ---
-// (SprintStatusFile struct + impl as shown above)
-
-// --- Watcher ---
-// (Watcher struct + impl as shown above)
-
-#[cfg(test)]
-mod tests {
-    // (Tests as shown in Testing Requirements section)
-}
 ```
 
 ### Files Modified/Created in This Story
@@ -719,9 +705,10 @@ mod tests {
         assert_eq!(info.story_num, 2);
         assert_eq!(info.story_id, "1.2");
         assert_eq!(info.story_key, "1-2-cli-framework-daemon-lifecycle");
-        assert_eq!(info.title, "cli framework daemon lifecycle");
+        assert_eq!(info.label, "cli framework daemon lifecycle");
         assert_eq!(info.branch_name, "story/1-2-cli-framework-daemon-lifecycle");
         assert_eq!(info.status, "ready-for-dev");
+        assert!(info.dependencies.is_empty(), "Dependencies should be empty in Story 2.1");
         assert_eq!(
             info.specs_path,
             PathBuf::from("/tmp/artifacts/1-2-cli-framework-daemon-lifecycle.md")
@@ -738,7 +725,7 @@ mod tests {
         let info = info.expect("Should parse single-word slug");
         assert_eq!(info.epic_num, 3);
         assert_eq!(info.story_num, 1);
-        assert_eq!(info.title, "supervisor");
+        assert_eq!(info.label, "supervisor");
     }
 
     #[test]
@@ -816,6 +803,16 @@ mod tests {
     }
 
     #[test]
+    fn test_story_info_dependencies_default_empty() {
+        let info = StoryInfo::from_key_and_status(
+            "2-1-polling",
+            "ready-for-dev",
+            Path::new("/tmp"),
+        ).unwrap();
+        assert!(info.dependencies.is_empty(), "Story 2.1 must not populate dependencies");
+    }
+
+    #[test]
     fn test_story_info_derives_correct_branch_name() {
         let info = StoryInfo::from_key_and_status(
             "4-3-pre-development-preparation",
@@ -852,6 +849,7 @@ development_status:
 
     #[test]
     fn test_sprint_status_load_missing_file() {
+        // Tests the TOCTOU-safe path: read_to_string maps NotFound directly
         let result = SprintStatusFile::load(
             Path::new("/nonexistent/sprint-status.yaml"),
             Path::new("/tmp"),
@@ -1106,9 +1104,11 @@ The `watcher → session` interface contract (from architecture) is established 
 
 ## Dev Agent Record
 
+<!-- This section is filled automatically by the dev agent post-implementation. Do not edit manually. -->
+
 ### Agent Model Used
 
-{{agent_model_name_version}}
+_(filled post-implementation)_
 
 ### Debug Log References
 
