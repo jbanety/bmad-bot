@@ -10,6 +10,7 @@ _bmad-output/implementation-artifacts/.bmad-bot-session.yaml
 # Daemon runtime files (Story 1.4)
 bmad-bot.state.json
 bmad-bot.log
+bmad-bot.yaml
 
 # OS files
 .DS_Store
