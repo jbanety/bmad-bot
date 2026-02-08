@@ -1,0 +1,40 @@
+# BMAD Bot Configuration
+# Copy this file to bmad-bot.yaml and fill in your values.
+
+# How often (seconds) the daemon polls sprint-status.yaml for new stories.
+# Default: 300 (5 minutes)
+polling_interval_secs: 300
+
+# Git hosting provider for PR creation
+git_provider:
+  provider: github            # "github" or "gitlab"
+  repo_owner: your-org
+  repo_name: your-repo
+  target_branch: main         # Branch that PRs target (default: main)
+
+# LLM provider configuration — one provider+model per role
+# Supported providers: "anthropic", "openai", "github-models"
+# API keys are loaded from .env (see .env.example), never from this file.
+llm:
+  dev:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+  review:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+  supervisor:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+
+# Notification channels
+notifications:
+  telegram:
+    enabled: false
+    chat_id: ""               # Your Telegram chat ID
+
+# BMAD project paths — adjust to match your project layout
+bmad_paths:
+  project_root: "."
+  output_folder: "_bmad-output"
+  planning_artifacts: "_bmad-output/planning-artifacts"
+  implementation_artifacts: "_bmad-output/implementation-artifacts"
