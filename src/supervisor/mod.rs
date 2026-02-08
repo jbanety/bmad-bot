@@ -21,6 +21,7 @@ pub mod rules;
 use std::sync::{Arc, Mutex};
 
 use architect::{AnswerProvider, ArchitectSession, ArchitectSessionError};
+use decisions::{DecisionLog, DecisionRecord, DecisionSource};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use rules::{RuleEngine, RuleResult};
@@ -116,6 +117,12 @@ pub struct AskSupervisor {
     /// serialization because `Arc<Mutex<_>>` is runtime state.
     #[serde(skip)]
     escalation_slot: EscalationSlot,
+    /// Thread-safe in-memory log of all supervisor decisions for the current session.
+    ///
+    /// Every `call()` invocation records a [`DecisionRecord`] before returning.
+    /// Skipped during serialization — runtime state only.
+    #[serde(skip)]
+    decision_log: DecisionLog,
 }
 
 impl AskSupervisor {
@@ -128,6 +135,7 @@ impl AskSupervisor {
             rule_engine: RuleEngine::new(),
             answer_provider: None,
             escalation_slot: Arc::new(Mutex::new(None)),
+            decision_log: DecisionLog::new(),
         }
     }
 
@@ -140,6 +148,7 @@ impl AskSupervisor {
             rule_engine: RuleEngine::new(),
             answer_provider: Some(provider),
             escalation_slot: Arc::new(Mutex::new(None)),
+            decision_log: DecisionLog::new(),
         }
     }
 
@@ -156,6 +165,24 @@ impl AskSupervisor {
             rule_engine: RuleEngine::new(),
             answer_provider: Some(provider),
             escalation_slot,
+            decision_log: DecisionLog::new(),
+        }
+    }
+
+    /// Create an AskSupervisor with an explicit [`AnswerProvider`], a shared
+    /// [`EscalationSlot`], and a shared [`DecisionLog`].
+    ///
+    /// This is the full constructor used in production by the session module.
+    pub fn with_all(
+        provider: Box<dyn AnswerProvider>,
+        escalation_slot: EscalationSlot,
+        decision_log: DecisionLog,
+    ) -> Self {
+        Self {
+            rule_engine: RuleEngine::new(),
+            answer_provider: Some(provider),
+            escalation_slot,
+            decision_log,
         }
     }
 
@@ -167,18 +194,25 @@ impl AskSupervisor {
     pub fn with_architect_from_config(
         config: &BotConfig,
         escalation_slot: EscalationSlot,
+        decision_log: DecisionLog,
     ) -> Result<Self, ArchitectSessionError> {
         let session = ArchitectSession::new(config)?;
         Ok(Self {
             rule_engine: RuleEngine::new(),
             answer_provider: Some(Box::new(session)),
             escalation_slot,
+            decision_log,
         })
     }
 
     /// Returns a clone of the escalation slot for sharing with the session chat loop.
     pub fn escalation_slot(&self) -> EscalationSlot {
         Arc::clone(&self.escalation_slot)
+    }
+
+    /// Returns a clone of the decision log for sharing with the session module.
+    pub fn decision_log(&self) -> DecisionLog {
+        self.decision_log.clone()
     }
 }
 
@@ -240,6 +274,17 @@ impl Tool for AskSupervisor {
                 ref rule_name,
                 ref answer,
             } => {
+                // Record decision BEFORE returning
+                self.decision_log.record(DecisionRecord::new(
+                    args.question.clone(),
+                    args.context.clone(),
+                    answer.clone(),
+                    DecisionSource::RuleEngine {
+                        rule_name: rule_name.clone(),
+                    },
+                    format!("Matched deterministic rule pattern: {rule_name}"),
+                    vec![],
+                ));
                 tracing::info!(
                     action = "rule_engine_match",
                     rule = %rule_name,
@@ -265,6 +310,16 @@ impl Tool for AskSupervisor {
                         );
                         match provider.ask(&args.question, args.context.as_deref()).await {
                             Ok(response) => {
+                                // Record decision BEFORE returning
+                                self.decision_log.record(DecisionRecord::new(
+                                    args.question.clone(),
+                                    args.context.clone(),
+                                    response.clone(),
+                                    DecisionSource::LlmFallback,
+                                    "Answered by BMAD Architect agent session with project context"
+                                        .to_string(),
+                                    vec!["Rule engine had no matching pattern".to_string()],
+                                ));
                                 tracing::info!(
                                     action = "supervisor_fallback_response",
                                     question = %args.question,
@@ -280,9 +335,21 @@ impl Tool for AskSupervisor {
                                     error = %e,
                                     "Architect session failed — escalating"
                                 );
-                                // Step 3: Escalate to human (Story 3.3 refines)
+                                // Step 3: Escalate to human
                                 let question = args.question;
                                 let reason = format!("Architect session failed: {e}");
+                                // Record escalation decision BEFORE setting slot and returning error
+                                self.decision_log.record(DecisionRecord::new(
+                                    question.clone(),
+                                    args.context.clone(),
+                                    String::new(),
+                                    DecisionSource::Escalation,
+                                    format!("Escalated to human: {reason}"),
+                                    vec![
+                                        "Rule engine had no matching pattern".to_string(),
+                                        "Architect session failed or could not answer".to_string(),
+                                    ],
+                                ));
                                 // Write escalation info to shared slot before returning error
                                 if let Ok(mut slot) = self.escalation_slot.lock() {
                                     *slot = Some(EscalationInfo {
@@ -295,7 +362,15 @@ impl Tool for AskSupervisor {
                         }
                     }
                     None => {
-                        // No Architect session configured — old behavior
+                        // No Architect session configured — record escalation and return old error
+                        self.decision_log.record(DecisionRecord::new(
+                            args.question.clone(),
+                            args.context.clone(),
+                            String::new(),
+                            DecisionSource::Escalation,
+                            "No LLM fallback configured — escalated".to_string(),
+                            vec!["Rule engine had no matching pattern".to_string()],
+                        ));
                         Err(SupervisorError::LlmFallbackNotImplemented)
                     }
                 }
@@ -389,6 +464,7 @@ mod tests {
     fn test_decision_record_serializable() {
         let record = decisions::DecisionRecord {
             question: "Should I proceed?".to_string(),
+            context: None,
             answer: "Yes, proceed.".to_string(),
             source: decisions::DecisionSource::RuleEngine {
                 rule_name: "confirmation_proceed".to_string(),
@@ -411,7 +487,7 @@ mod tests {
                 rule_name: "test_rule".to_string(),
             },
             decisions::DecisionSource::LlmFallback,
-            decisions::DecisionSource::HumanEscalation,
+            decisions::DecisionSource::Escalation,
         ];
         for source in sources {
             let json = serde_json::to_string(&source).expect("Should serialize");
@@ -679,5 +755,229 @@ mod tests {
         let deserialized: AskSupervisor = serde_json::from_str(&json).expect("Should deserialize");
         let guard = deserialized.escalation_slot.lock().expect("lock");
         assert!(guard.is_none());
+    }
+
+    // === Story 3.4 tests — decision logging in call() ===
+
+    #[tokio::test]
+    async fn test_call_rule_match_records_rule_engine_decision() {
+        let supervisor = AskSupervisor::new();
+        let log = supervisor.decision_log();
+        assert!(log.is_empty());
+
+        let args = AskSupervisorArgs {
+            question: "Should I proceed with the implementation?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
+
+        let records = log.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].question,
+            "Should I proceed with the implementation?"
+        );
+        assert_eq!(records[0].answer, "Yes, proceed.");
+        assert!(records[0].context.is_none());
+        match &records[0].source {
+            DecisionSource::RuleEngine { rule_name } => {
+                assert!(!rule_name.is_empty());
+            }
+            other => panic!("Expected RuleEngine source, got: {other}"),
+        }
+        assert!(
+            records[0]
+                .reasoning
+                .contains("Matched deterministic rule pattern")
+        );
+        assert!(records[0].alternatives.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_call_rule_match_with_context_records_context() {
+        let supervisor = AskSupervisor::new();
+        let log = supervisor.decision_log();
+
+        let args = AskSupervisorArgs {
+            question: "Should I proceed?".to_string(),
+            context: Some("Working on task 3".to_string()),
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
+
+        let records = log.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].context.as_deref(), Some("Working on task 3"));
+    }
+
+    #[tokio::test]
+    async fn test_call_llm_success_records_llm_fallback_decision() {
+        let mock = MockAnswerProvider {
+            response: "Use JWT with refresh tokens.".to_string(),
+            should_fail: false,
+        };
+        let supervisor = AskSupervisor::with_answer_provider(Box::new(mock));
+        let log = supervisor.decision_log();
+
+        let args = AskSupervisorArgs {
+            question: "What auth approach?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
+
+        let records = log.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].question, "What auth approach?");
+        assert_eq!(records[0].answer, "Use JWT with refresh tokens.");
+        assert_eq!(records[0].source, DecisionSource::LlmFallback);
+        assert!(records[0].reasoning.contains("Architect"));
+        assert_eq!(
+            records[0].alternatives,
+            vec!["Rule engine had no matching pattern"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_escalation_records_escalation_decision() {
+        let mock = MockAnswerProvider {
+            response: "unused".to_string(),
+            should_fail: true,
+        };
+        let supervisor = AskSupervisor::with_answer_provider(Box::new(mock));
+        let log = supervisor.decision_log();
+
+        let args = AskSupervisorArgs {
+            question: "What DB schema?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_err());
+
+        let records = log.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].question, "What DB schema?");
+        assert!(
+            records[0].answer.is_empty(),
+            "Escalation should have empty answer"
+        );
+        assert_eq!(records[0].source, DecisionSource::Escalation);
+        assert!(records[0].reasoning.contains("Escalated to human"));
+        assert_eq!(records[0].alternatives.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_call_no_architect_records_escalation_decision() {
+        let supervisor = AskSupervisor::new(); // no architect configured
+        let log = supervisor.decision_log();
+
+        let args = AskSupervisorArgs {
+            question: "What database should I use?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_err());
+
+        let records = log.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].question, "What database should I use?");
+        assert!(records[0].answer.is_empty());
+        assert_eq!(records[0].source, DecisionSource::Escalation);
+        assert!(records[0].reasoning.contains("No LLM fallback configured"));
+        assert_eq!(
+            records[0].alternatives,
+            vec!["Rule engine had no matching pattern"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_multiple_calls_accumulate_decisions() {
+        let supervisor = AskSupervisor::new();
+        let log = supervisor.decision_log();
+
+        // First call — rule match
+        let args1 = AskSupervisorArgs {
+            question: "Should I proceed?".to_string(),
+            context: None,
+        };
+        let _ = supervisor.call(args1).await;
+
+        // Second call — no match, escalation (no architect)
+        let args2 = AskSupervisorArgs {
+            question: "What database?".to_string(),
+            context: None,
+        };
+        let _ = supervisor.call(args2).await;
+
+        let records = log.records();
+        assert_eq!(records.len(), 2);
+        match &records[0].source {
+            DecisionSource::RuleEngine { .. } => {}
+            other => panic!("Expected RuleEngine for first call, got: {other}"),
+        }
+        assert_eq!(records[1].source, DecisionSource::Escalation);
+    }
+
+    #[test]
+    fn test_decision_log_accessible_via_accessor() {
+        let supervisor = AskSupervisor::new();
+        let log = supervisor.decision_log();
+        assert!(log.is_empty());
+
+        // Record directly to verify it's the same Arc
+        log.record(DecisionRecord::new(
+            "test".to_string(),
+            None,
+            "answer".to_string(),
+            DecisionSource::LlmFallback,
+            "reason".to_string(),
+            vec![],
+        ));
+        assert_eq!(supervisor.decision_log().len(), 1);
+    }
+
+    #[test]
+    fn test_ask_supervisor_serialization_skips_decision_log() {
+        let supervisor = AskSupervisor::new();
+        // Add a decision to the log
+        supervisor.decision_log.record(DecisionRecord::new(
+            "q".to_string(),
+            None,
+            "a".to_string(),
+            DecisionSource::LlmFallback,
+            "r".to_string(),
+            vec![],
+        ));
+        assert_eq!(supervisor.decision_log.len(), 1);
+
+        let json = serde_json::to_string(&supervisor).expect("Should serialize");
+        assert!(!json.contains("decision_log"));
+
+        // Deserialized version gets a fresh empty log
+        let deserialized: AskSupervisor = serde_json::from_str(&json).expect("Should deserialize");
+        assert!(deserialized.decision_log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_call_with_all_constructor_records_to_shared_log() {
+        let slot: EscalationSlot = Arc::new(Mutex::new(None));
+        let log = DecisionLog::new();
+        let mock = MockAnswerProvider {
+            response: "Use PostgreSQL.".to_string(),
+            should_fail: false,
+        };
+        let supervisor = AskSupervisor::with_all(Box::new(mock), Arc::clone(&slot), log.clone());
+
+        let args = AskSupervisorArgs {
+            question: "What database?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
+
+        // The shared log should have the record
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.records()[0].answer, "Use PostgreSQL.");
     }
 }

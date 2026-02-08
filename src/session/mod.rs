@@ -16,6 +16,7 @@ pub mod cleanup;
 pub mod escalation;
 mod state;
 
+use crate::supervisor::decisions::DecisionRecord;
 use escalation::EscalationReport;
 
 /// Errors originating from the session module.
@@ -85,15 +86,24 @@ pub enum SessionOutcome {
         story_key: String,
         /// Git branch with the completed work.
         branch: String,
+        /// All supervisor decisions made during the session.
+        decisions: Vec<DecisionRecord>,
     },
     /// Session escalated to human — needs clarification.
-    Escalated(EscalationReport),
+    Escalated {
+        /// Full escalation report for logging and notification.
+        report: EscalationReport,
+        /// All supervisor decisions made during the session (includes the escalation record).
+        decisions: Vec<DecisionRecord>,
+    },
     /// Session failed with an unrecoverable error.
     Failed {
         /// The story key that failed.
         story_key: String,
         /// Description of the failure.
         error: String,
+        /// All supervisor decisions made during the session.
+        decisions: Vec<DecisionRecord>,
     },
 }
 
@@ -170,13 +180,45 @@ mod tests {
         let outcome = SessionOutcome::Completed {
             story_key: "1-1-scaffolding".to_string(),
             branch: "story/1-1-scaffolding".to_string(),
+            decisions: vec![],
         };
         match outcome {
             SessionOutcome::Completed {
-                story_key, branch, ..
+                story_key,
+                branch,
+                decisions,
+                ..
             } => {
                 assert_eq!(story_key, "1-1-scaffolding");
                 assert_eq!(branch, "story/1-1-scaffolding");
+                assert!(decisions.is_empty());
+            }
+            _ => panic!("Expected Completed variant"),
+        }
+    }
+
+    #[test]
+    fn test_session_outcome_completed_with_decisions() {
+        use crate::supervisor::decisions::{DecisionRecord, DecisionSource};
+        let decisions = vec![DecisionRecord::new(
+            "Proceed?".to_string(),
+            None,
+            "Yes.".to_string(),
+            DecisionSource::RuleEngine {
+                rule_name: "confirm".to_string(),
+            },
+            "Matched".to_string(),
+            vec![],
+        )];
+        let outcome = SessionOutcome::Completed {
+            story_key: "1-1-scaffolding".to_string(),
+            branch: "story/1-1".to_string(),
+            decisions,
+        };
+        match outcome {
+            SessionOutcome::Completed { decisions, .. } => {
+                assert_eq!(decisions.len(), 1);
+                assert_eq!(decisions[0].question, "Proceed?");
             }
             _ => panic!("Expected Completed variant"),
         }
@@ -191,15 +233,62 @@ mod tests {
             "story/3-3".to_string(),
             "summary".to_string(),
         );
-        let outcome = SessionOutcome::Escalated(report);
+        let outcome = SessionOutcome::Escalated {
+            report,
+            decisions: vec![],
+        };
         match outcome {
-            SessionOutcome::Escalated(r) => {
+            SessionOutcome::Escalated {
+                report: r,
+                decisions,
+            } => {
                 assert_eq!(r.story_key, "3-3-human-escalation");
                 assert_eq!(r.question, "What DB?");
                 assert_eq!(r.reason, "No answer");
                 assert_eq!(r.branch_name, "story/3-3");
                 assert_eq!(r.partial_work_summary, "summary");
                 assert!(!r.escalated_at.is_empty());
+                assert!(decisions.is_empty());
+            }
+            _ => panic!("Expected Escalated variant"),
+        }
+    }
+
+    #[test]
+    fn test_session_outcome_escalated_with_decisions() {
+        use crate::supervisor::decisions::{DecisionRecord, DecisionSource};
+        let report = EscalationReport::new(
+            "3-3-test".to_string(),
+            "q".to_string(),
+            "r".to_string(),
+            "b".to_string(),
+            "s".to_string(),
+        );
+        let decisions = vec![
+            DecisionRecord::new(
+                "q1".to_string(),
+                None,
+                "a1".to_string(),
+                DecisionSource::RuleEngine {
+                    rule_name: "rule1".to_string(),
+                },
+                "r1".to_string(),
+                vec![],
+            ),
+            DecisionRecord::new(
+                "q2".to_string(),
+                None,
+                String::new(),
+                DecisionSource::Escalation,
+                "escalated".to_string(),
+                vec!["no match".to_string()],
+            ),
+        ];
+        let outcome = SessionOutcome::Escalated { report, decisions };
+        match outcome {
+            SessionOutcome::Escalated { decisions, .. } => {
+                assert_eq!(decisions.len(), 2);
+                assert_eq!(decisions[1].source, DecisionSource::Escalation);
             }
             _ => panic!("Expected Escalated variant"),
         }
@@ -210,11 +299,17 @@ mod tests {
         let outcome = SessionOutcome::Failed {
             story_key: "2-1-polling".to_string(),
             error: "timeout".to_string(),
+            decisions: vec![],
         };
         match outcome {
-            SessionOutcome::Failed { story_key, error } => {
+            SessionOutcome::Failed {
+                story_key,
+                error,
+                decisions,
+            } => {
                 assert_eq!(story_key, "2-1-polling");
                 assert_eq!(error, "timeout");
+                assert!(decisions.is_empty());
             }
             _ => panic!("Expected Failed variant"),
         }
@@ -225,6 +320,7 @@ mod tests {
         let outcome = SessionOutcome::Completed {
             story_key: "key".to_string(),
             branch: "b".to_string(),
+            decisions: vec![],
         };
         let debug = format!("{outcome:?}");
         assert!(debug.contains("Completed"));

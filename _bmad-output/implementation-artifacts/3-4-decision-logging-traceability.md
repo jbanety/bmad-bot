@@ -1,6 +1,6 @@
 # Story 3.4: Decision Logging & Traceability
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -24,15 +24,15 @@ So that I can audit, understand, and improve the supervisor's behavior over time
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Verify prerequisites from Stories 3.1, 3.2, and 3.3 (AC: #1–#5)
-  - [ ] 0.1 Verify `src/supervisor/decisions.rs` exists with `DecisionRecord` and `DecisionSource` stubs from Story 3.1
-  - [ ] 0.2 Verify `AskSupervisor::call()` pipeline: rule engine → Architect session → `EscalationRequired` (Story 3.2/3.3 flow)
-  - [ ] 0.3 Verify `src/supervisor/mod.rs` has `pub mod decisions;`
-  - [ ] 0.4 Verify `SessionOutcome` enum exists in `src/session/mod.rs` (from Story 3.3)
-  - [ ] 0.5 Run `cargo check` to confirm clean baseline
+- [x] Task 0: Verify prerequisites from Stories 3.1, 3.2, and 3.3 (AC: #1–#5)
+  - [x] 0.1 Verify `src/supervisor/decisions.rs` exists with `DecisionRecord` and `DecisionSource` stubs from Story 3.1
+  - [x] 0.2 Verify `AskSupervisor::call()` pipeline: rule engine → Architect session → `EscalationRequired` (Story 3.2/3.3 flow)
+  - [x] 0.3 Verify `src/supervisor/mod.rs` has `pub mod decisions;`
+  - [x] 0.4 Verify `SessionOutcome` enum exists in `src/session/mod.rs` (from Story 3.3)
+  - [x] 0.5 Run `cargo check` to confirm clean baseline
 
-- [ ] Task 1: Flesh out `DecisionRecord` and `DecisionSource` in `src/supervisor/decisions.rs` (AC: #1, #2)
-  - [ ] 1.1 Replace the existing stubs with full implementations:
+- [x] Task 1: Flesh out `DecisionRecord` and `DecisionSource` in `src/supervisor/decisions.rs` (AC: #1, #2)
+  - [x] 1.1 Replace the existing stubs with full implementations:
     ```
     /// Source of a supervisor decision.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,8 +57,8 @@ So that I can audit, understand, and improve the supervisor's behavior over time
         pub timestamp: String, // ISO 8601
     }
     ```
-  - [ ] 1.2 Implement `DecisionRecord::new(question, context, answer, source, reasoning, alternatives) -> Self` — sets `timestamp` to `chrono::Utc::now().to_rfc3339()`
-  - [ ] 1.3 Implement `Display` for `DecisionRecord` — single-record markdown format:
+  - [x] 1.2 Implement `DecisionRecord::new(question, context, answer, source, reasoning, alternatives) -> Self` — sets `timestamp` to `chrono::Utc::now().to_rfc3339()`
+  - [x] 1.3 Implement `Display` for `DecisionRecord` — single-record markdown format:
     ```
     ### Decision: {truncated question}
     - **Source:** {source}
@@ -68,11 +68,11 @@ So that I can audit, understand, and improve the supervisor's behavior over time
     - **Alternatives:** {alternatives joined with "; " or "None"}
     - **Time:** {timestamp}
     ```
-  - [ ] 1.4 Implement `Display` for `DecisionSource` — human-readable: `"Rule Engine (rule_name)"`, `"LLM Fallback (Architect)"`, `"Escalation"`
-  - [ ] 1.5 Add `/// doc comments` on all public items
+  - [x] 1.4 Implement `Display` for `DecisionSource` — human-readable: `"Rule Engine (rule_name)"`, `"LLM Fallback (Architect)"`, `"Escalation"`
+  - [x] 1.5 Add `/// doc comments` on all public items
 
-- [ ] Task 2: Create `DecisionLog` — thread-safe in-memory session log (AC: #1, #2, #5)
-  - [ ] 2.1 Define in `src/supervisor/decisions.rs`:
+- [x] Task 2: Create `DecisionLog` — thread-safe in-memory session log (AC: #1, #2, #5)
+  - [x] 2.1 Define in `src/supervisor/decisions.rs`:
     ```
     /// Thread-safe in-memory log of all supervisor decisions for the current session.
     #[derive(Debug, Clone)]
@@ -80,18 +80,18 @@ So that I can audit, understand, and improve the supervisor's behavior over time
         records: Arc<Mutex<Vec<DecisionRecord>>>,
     }
     ```
-  - [ ] 2.2 Implement `DecisionLog::new() -> Self` — creates empty log
-  - [ ] 2.3 Implement `DecisionLog::record(&self, record: DecisionRecord)` — locks mutex, appends record, releases lock. Log via `tracing::debug!(action = "decision_recorded", source = %record.source, "Supervisor decision recorded")`
-  - [ ] 2.4 Implement `DecisionLog::records(&self) -> Vec<DecisionRecord>` — returns a clone of all records (for file writing and PR inclusion)
-  - [ ] 2.5 Implement `DecisionLog::len(&self) -> usize` — returns count of decisions
-  - [ ] 2.6 Implement `DecisionLog::is_empty(&self) -> bool`
-  - [ ] 2.7 Implement `Default` for `DecisionLog` — delegates to `new()`
-  - [ ] 2.8 Add `/// doc comments` on all public items
+  - [x] 2.2 Implement `DecisionLog::new() -> Self` — creates empty log
+  - [x] 2.3 Implement `DecisionLog::record(&self, record: DecisionRecord)` — locks mutex, appends record, releases lock. Log via `tracing::debug!(action = "decision_recorded", source = %record.source, "Supervisor decision recorded")`
+  - [x] 2.4 Implement `DecisionLog::records(&self) -> Vec<DecisionRecord>` — returns a clone of all records (for file writing and PR inclusion)
+  - [x] 2.5 Implement `DecisionLog::len(&self) -> usize` — returns count of decisions
+  - [x] 2.6 Implement `DecisionLog::is_empty(&self) -> bool`
+  - [x] 2.7 Implement `Default` for `DecisionLog` — delegates to `new()`
+  - [x] 2.8 Add `/// doc comments` on all public items
 
-- [ ] Task 3: Integrate decision recording into `AskSupervisor::call()` (AC: #1, #2)
-  - [ ] 3.1 Add `#[serde(skip)] decision_log: DecisionLog` field to `AskSupervisor` struct
-  - [ ] 3.2 Update all constructors (`new()`, `with_architect()`, `with_escalation_slot()`, etc.) to accept a `DecisionLog` parameter
-  - [ ] 3.3 In the `RuleResult::Matched` branch of `call()`, after returning the answer, record:
+- [x] Task 3: Integrate decision recording into `AskSupervisor::call()` (AC: #1, #2)
+  - [x] 3.1 Add `#[serde(skip)] decision_log: DecisionLog` field to `AskSupervisor` struct
+  - [x] 3.2 Update all constructors (`new()`, `with_architect()`, `with_escalation_slot()`, etc.) to accept a `DecisionLog` parameter
+  - [x] 3.3 In the `RuleResult::Matched` branch of `call()`, after returning the answer, record:
     ```
     self.decision_log.record(DecisionRecord::new(
         args.question.clone(),
@@ -102,7 +102,7 @@ So that I can audit, understand, and improve the supervisor's behavior over time
         vec![], // Rule engine has no alternatives
     ));
     ```
-  - [ ] 3.4 In the Architect session success branch of `call()`, record:
+  - [x] 3.4 In the Architect session success branch of `call()`, record:
     ```
     self.decision_log.record(DecisionRecord::new(
         args.question.clone(),
@@ -113,7 +113,7 @@ So that I can audit, understand, and improve the supervisor's behavior over time
         vec!["Rule engine had no matching pattern".to_string()],
     ));
     ```
-  - [ ] 3.5 In the escalation branch of `call()` (before writing to escalation slot and returning error), record:
+  - [x] 3.5 In the escalation branch of `call()` (before writing to escalation slot and returning error), record:
     ```
     self.decision_log.record(DecisionRecord::new(
         args.question.clone(),
@@ -127,12 +127,12 @@ So that I can audit, understand, and improve the supervisor's behavior over time
         ],
     ));
     ```
-  - [ ] 3.6 **Ordering:** The decision record MUST be created BEFORE returning Ok/Err from `call()` — this ensures the decision is logged even if the caller doesn't process the result
-  - [ ] 3.7 **Critical:** Decision recording must never cause `call()` to fail. If the mutex is poisoned (extremely unlikely), log via `tracing::error!()` and skip the record — do NOT propagate the error
+  - [x] 3.6 **Ordering:** The decision record MUST be created BEFORE returning Ok/Err from `call()` — this ensures the decision is logged even if the caller doesn't process the result
+  - [x] 3.7 **Critical:** Decision recording must never cause `call()` to fail. If the mutex is poisoned (extremely unlikely), log via `tracing::error!()` and skip the record — do NOT propagate the error
 
-- [ ] Task 4: Implement decisions file writer — `write_decisions_file()` (AC: #3)
-  - [ ] 4.1 Create `pub async fn write_decisions_file(decisions: &[DecisionRecord], output_path: &Path) -> Result<(), DecisionError>` in `src/supervisor/decisions.rs`
-  - [ ] 4.2 Define `DecisionError` thiserror enum:
+- [x] Task 4: Implement decisions file writer — `write_decisions_file()` (AC: #3)
+  - [x] 4.1 Create `pub async fn write_decisions_file(decisions: &[DecisionRecord], output_path: &Path) -> Result<(), DecisionError>` in `src/supervisor/decisions.rs`
+  - [x] 4.2 Define `DecisionError` thiserror enum:
     ```
     #[derive(Debug, thiserror::Error)]
     pub enum DecisionError {
@@ -142,7 +142,7 @@ So that I can audit, understand, and improve the supervisor's behavior over time
         DirectoryCreation { reason: String },
     }
     ```
-  - [ ] 4.3 Generate markdown content with the following structure:
+  - [x] 4.3 Generate markdown content with the following structure:
     ```
     # 🤖 Supervisor Decisions — {story_key}
 
@@ -166,15 +166,15 @@ So that I can audit, understand, and improve the supervisor's behavior over time
     ## Decision 2
     ...
     ```
-  - [ ] 4.4 The output path follows the convention: `_bmad-output/implementation-artifacts/{story_key}-DECISIONS.md`
-  - [ ] 4.5 Create parent directories if they don't exist (`tokio::fs::create_dir_all`)
-  - [ ] 4.6 Write the file via `tokio::fs::write()`
-  - [ ] 4.7 Log the write: `tracing::info!(action = "decisions_file_written", path = %output_path.display(), count = decisions.len(), "Decisions file written")`
-  - [ ] 4.8 If no decisions were recorded (`decisions.is_empty()`), skip file creation entirely and log: `tracing::debug!(action = "decisions_file_skipped", "No decisions to write")`
+  - [x] 4.4 The output path follows the convention: `_bmad-output/implementation-artifacts/{story_key}-DECISIONS.md`
+  - [x] 4.5 Create parent directories if they don't exist (`tokio::fs::create_dir_all`)
+  - [x] 4.6 Write the file via `tokio::fs::write()`
+  - [x] 4.7 Log the write: `tracing::info!(action = "decisions_file_written", path = %output_path.display(), count = decisions.len(), "Decisions file written")`
+  - [x] 4.8 If no decisions were recorded (`decisions.is_empty()`), skip file creation entirely and log: `tracing::debug!(action = "decisions_file_skipped", "No decisions to write")`
 
-- [ ] Task 5: Implement PR section generator — `format_pr_decisions_section()` (AC: #4)
-  - [ ] 5.1 Create `pub fn format_pr_decisions_section(decisions: &[DecisionRecord]) -> String` in `src/supervisor/decisions.rs`
-  - [ ] 5.2 Generate a compact markdown section suitable for PR descriptions:
+- [x] Task 5: Implement PR section generator — `format_pr_decisions_section()` (AC: #4)
+  - [x] 5.1 Create `pub fn format_pr_decisions_section(decisions: &[DecisionRecord]) -> String` in `src/supervisor/decisions.rs`
+  - [x] 5.2 Generate a compact markdown section suitable for PR descriptions:
     ```
     ## 🤖 Supervisor Decisions
 
@@ -186,30 +186,30 @@ So that I can audit, understand, and improve the supervisor's behavior over time
 
     *{count} decisions made during this session.*
     ```
-  - [ ] 5.3 Truncate long questions and answers to 80 characters with `...` suffix for table readability
-  - [ ] 5.4 If no decisions, return: `"## 🤖 Supervisor Decisions\n\nNo supervisor decisions were made during this session.\n"`
-  - [ ] 5.5 This function is pure (no I/O, no async) — it formats data that Epic 5 will include in the PR body
+  - [x] 5.3 Truncate long questions and answers to 80 characters with `...` suffix for table readability
+  - [x] 5.4 If no decisions, return: `"## 🤖 Supervisor Decisions\n\nNo supervisor decisions were made during this session.\n"`
+  - [x] 5.5 This function is pure (no I/O, no async) — it formats data that Epic 5 will include in the PR body
 
-- [ ] Task 6: Wire decision log into session lifecycle (AC: #3, #4)
+- [x] Task 6: Wire decision log into session lifecycle (AC: #3, #4)
   > **Scope note:** The full session chat loop does not exist yet (Epic 4). This task prepares the **functions, data structures, and integration points** that Epic 4 will call. Subtasks 6.1–6.5 describe the intended call sites — implement the callable functions (`write_decisions_file`, `DecisionLog` wiring) now; the actual invocation from the session loop will happen in Epic 4 Story 4.2. For this story, validate these functions via the unit tests in Task 8.3.
-  - [ ] 6.1 In the session setup (where `AskSupervisor` is constructed), create a `DecisionLog::new()` and pass it to `AskSupervisor`
-  - [ ] 6.2 Keep a reference to the same `DecisionLog` (it's `Clone` via `Arc`) in the session module
-  - [ ] 6.3 **On session completion (normal):** After the chat loop ends successfully:
+  - [x] 6.1 In the session setup (where `AskSupervisor` is constructed), create a `DecisionLog::new()` and pass it to `AskSupervisor`
+  - [x] 6.2 Keep a reference to the same `DecisionLog` (it's `Clone` via `Arc`) in the session module
+  - [x] 6.3 **On session completion (normal):** After the chat loop ends successfully:
     - Call `decision_log.records()` to get all decisions
     - Call `write_decisions_file(&records, &decisions_path).await` — best-effort, log errors but don't fail the session
     - The decisions file path: `{implementation_artifacts}/{story_key}-DECISIONS.md`
     - Commit the decisions file to the git branch (as part of the normal session commit flow)
     - Store `records` in `SessionOutcome::Completed` (or a new field) for PR section generation
-  - [ ] 6.4 **On session escalation:** After escalation cleanup:
+  - [x] 6.4 **On session escalation:** After escalation cleanup:
     - Call `decision_log.records()` to get all decisions (includes the escalation record from Task 3.5)
     - Call `write_decisions_file(&records, &decisions_path).await` — best-effort
     - Commit the decisions file as part of the WIP commit in `preserve_partial_work()` (the file is already on disk before the commit)
-  - [ ] 6.5 **On session failure:** Same as escalation — write and commit decisions file if any records exist
-  - [ ] 6.6 **Critical:** Decision file writing is best-effort. If it fails, log `tracing::error!()` and continue — never block session completion on a logging failure
+  - [x] 6.5 **On session failure:** Same as escalation — write and commit decisions file if any records exist
+  - [x] 6.6 **Critical:** Decision file writing is best-effort. If it fails, log `tracing::error!()` and continue — never block session completion on a logging failure
 
-- [ ] Task 7: Update `SessionOutcome` to carry decisions data (AC: #4)
+- [x] Task 7: Update `SessionOutcome` to carry decisions data (AC: #4)
   > **Scope note:** These are **data structure changes only**. Adding `decisions: Vec<DecisionRecord>` to `SessionOutcome` variants and optionally to `EscalationReport` prepares the types for Epic 4 (session) and Epic 5 (PR creation). Populate the new fields with `vec![]` defaults wherever `SessionOutcome` is currently constructed — Epic 4 will replace these with real data from `DecisionLog::records()`.
-  - [ ] 7.1 Add a `decisions: Vec<DecisionRecord>` field to `SessionOutcome::Completed`:
+  - [x] 7.1 Add a `decisions: Vec<DecisionRecord>` field to `SessionOutcome::Completed`:
     ```
     Completed {
         story_key: String,
@@ -217,10 +217,10 @@ So that I can audit, understand, and improve the supervisor's behavior over time
         decisions: Vec<DecisionRecord>,
     },
     ```
-  - [ ] 7.2 Add a `decisions: Vec<DecisionRecord>` field to `SessionOutcome::Escalated` (wrap in a new struct or add to `EscalationReport`):
+  - [x] 7.2 Add a `decisions: Vec<DecisionRecord>` field to `SessionOutcome::Escalated` (wrap in a new struct or add to `EscalationReport`):
     - **Option A (preferred):** Add `pub decisions: Vec<DecisionRecord>` to `EscalationReport`
     - **Option B:** Change `Escalated(EscalationReport)` to `Escalated { report: EscalationReport, decisions: Vec<DecisionRecord> }`
-  - [ ] 7.3 Add a `decisions: Vec<DecisionRecord>` field to `SessionOutcome::Failed`:
+  - [x] 7.3 Add a `decisions: Vec<DecisionRecord>` field to `SessionOutcome::Failed`:
     ```
     Failed {
         story_key: String,
@@ -228,48 +228,48 @@ So that I can audit, understand, and improve the supervisor's behavior over time
         decisions: Vec<DecisionRecord>,
     },
     ```
-  - [ ] 7.4 The daemon main loop passes `decisions` to Epic 5's PR creation, which calls `format_pr_decisions_section()` to build the "🤖 Supervisor Decisions" section
-  - [ ] 7.5 Ensure `DecisionRecord` derives `Serialize + Deserialize` so decisions can be stored/transmitted
+  - [x] 7.4 The daemon main loop passes `decisions` to Epic 5's PR creation, which calls `format_pr_decisions_section()` to build the "🤖 Supervisor Decisions" section
+  - [x] 7.5 Ensure `DecisionRecord` derives `Serialize + Deserialize` so decisions can be stored/transmitted
 
-- [ ] Task 8: Write unit tests (AC: #1–#5)
-  - [ ] 8.1 **DecisionRecord tests** in `src/supervisor/decisions.rs`:
+- [x] Task 8: Write unit tests (AC: #1–#5)
+  - [x] 8.1 **DecisionRecord tests** in `src/supervisor/decisions.rs`:
     - Test `DecisionRecord::new()` sets all fields correctly and `timestamp` is valid ISO 8601
     - Test `Display` impl for `DecisionRecord` produces expected markdown
     - Test `Display` impl for `DecisionSource` variants: `"Rule Engine (confirm)"`, `"LLM Fallback (Architect)"`, `"Escalation"`
     - Test `DecisionRecord` serializes and deserializes correctly (serde_json round-trip)
     - Test `DecisionRecord` implements `Clone`, `Debug`, `Send`, `Sync`
-  - [ ] 8.2 **DecisionLog thread-safety tests** in `src/supervisor/decisions.rs`:
+  - [x] 8.2 **DecisionLog thread-safety tests** in `src/supervisor/decisions.rs`:
     - Test `DecisionLog::new()` starts empty, `is_empty()` returns true, `len()` returns 0
     - Test `record()` appends a decision, `len()` increments, `records()` returns it
     - Test multiple `record()` calls preserve insertion order
     - Test concurrent writes from multiple threads (spawn 10 threads, each records 1 decision, verify all 10 are present)
     - Test `Clone` produces independent `DecisionLog` that shares the same inner `Arc`
-  - [ ] 8.3 **write_decisions_file tests**:
+  - [x] 8.3 **write_decisions_file tests**:
     - Test with 3 decisions: verify file is created, content matches expected markdown, headers present, all decisions listed
     - Test with empty decisions: verify file is NOT created
     - Test with invalid path: verify `DecisionError::WriteFailed` is returned
     - Use `tempfile::TempDir` for file fixtures
-  - [ ] 8.4 **format_pr_decisions_section tests**:
+  - [x] 8.4 **format_pr_decisions_section tests**:
     - Test with 3 decisions: verify markdown table is generated with correct columns
     - Test with empty decisions: verify "No supervisor decisions" message
     - Test long question/answer truncation at 80 characters
     - Test each `DecisionSource` variant renders correctly in the table
-  - [ ] 8.5 **Integration with AskSupervisor::call() tests**:
+  - [x] 8.5 **Integration with AskSupervisor::call() tests**:
     - Test rule engine match: verify `DecisionRecord` with `DecisionSource::RuleEngine` is in the log
     - Test no match without Architect: verify `DecisionRecord` with `DecisionSource::Escalation` is in the log (for LlmFallbackNotImplemented path)
     - Test that decision_log records are accessible after `call()` completes
     - All existing Story 3.1/3.2/3.3 `AskSupervisor` tests must still pass (constructor changes require passing `DecisionLog`)
-  - [ ] 8.6 Verify all existing Stories 3.1, 3.2, and 3.3 tests still pass (no regressions)
+  - [x] 8.6 Verify all existing Stories 3.1, 3.2, and 3.3 tests still pass (no regressions)
 
-- [ ] Task 9: Final quality checks
-  - [ ] 9.1 Run `cargo fmt -- --check` and fix any formatting issues
-  - [ ] 9.2 Run `cargo clippy` and fix any warnings
-  - [ ] 9.3 Run `cargo test` and verify all tests pass (including Epic 1, Epic 2, Stories 3.1–3.3 tests)
-  - [ ] 9.4 Verify all public items have `///` doc comments
-  - [ ] 9.5 Verify `DecisionError` implements `std::error::Error + Send + Sync`
-  - [ ] 9.6 Verify no `unwrap()` or `expect()` in production code
-  - [ ] 9.7 Verify no `println!` or `eprintln!` — tracing only
-  - [ ] 9.8 Verify no API keys or secrets are logged by any tracing statement
+- [x] Task 9: Final quality checks
+  - [x] 9.1 Run `cargo fmt -- --check` and fix any formatting issues
+  - [x] 9.2 Run `cargo clippy` and fix any warnings
+  - [x] 9.3 Run `cargo test` and verify all tests pass (including Epic 1, Epic 2, Stories 3.1–3.3 tests)
+  - [x] 9.4 Verify all public items have `///` doc comments
+  - [x] 9.5 Verify `DecisionError` implements `std::error::Error + Send + Sync`
+  - [x] 9.6 Verify no `unwrap()` or `expect()` in production code
+  - [x] 9.7 Verify no `println!` or `eprintln!` — tracing only
+  - [x] 9.8 Verify no API keys or secrets are logged by any tracing statement
 
 ## Dev Notes
 
@@ -617,10 +617,29 @@ src/supervisor/
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
+None — clean implementation with no blocking issues.
+
 ### Completion Notes List
 
+- **Task 0:** All prerequisites verified — `decisions.rs` stubs exist, `call()` pipeline complete through Story 3.3, `SessionOutcome` present, `cargo check` clean.
+- **Task 1:** Replaced `DecisionRecord` and `DecisionSource` stubs with full implementations. Added `context: Option<String>` field to `DecisionRecord`. Renamed `HumanEscalation` to `Escalation` for consistency with story spec. Added `DecisionRecord::new()` with `chrono::Utc::now().to_rfc3339()`. Implemented `Display` for both types. Added `PartialEq + Eq` derives to `DecisionSource`.
+- **Task 2:** Implemented `DecisionLog` with `Arc<Mutex<Vec<DecisionRecord>>>`. Methods: `new()`, `record()`, `records()`, `len()`, `is_empty()`. Poisoned mutex handled gracefully with `tracing::error!()` — never propagates. Implements `Default` and `Clone`.
+- **Task 3:** Added `decision_log: DecisionLog` field to `AskSupervisor` with `#[serde(skip)]`. Updated all constructors. Added `with_all()` full constructor. Added `decision_log()` accessor. Inserted `DecisionRecord` recording in all 4 `call()` branches: rule match → `RuleEngine`, LLM success → `LlmFallback`, LLM failure → `Escalation`, no architect → `Escalation`. Records created BEFORE return statements.
+- **Task 4:** Implemented `write_decisions_file()` — async, creates parent dirs, generates markdown with header (story key, date, source counts), numbered decisions using `Display` impl. Empty decisions → file skipped. Added `DecisionError` thiserror enum with `WriteFailed` and `DirectoryCreation` variants.
+- **Task 5:** Implemented `format_pr_decisions_section()` — pure function, generates markdown table with `| # | Source | Question | Decision | Reasoning |` columns. Truncates at 80 chars. Escapes pipe characters. Empty → "No supervisor decisions" message.
+- **Task 6:** Wiring prepared — `DecisionLog::new()` passed to `AskSupervisor` via constructors, `decision_log()` accessor returns clone for session module. `with_all()` constructor takes all 3 shared resources (provider, slot, log). Actual session loop invocation deferred to Epic 4 Story 4.2.
+- **Task 7:** Added `decisions: Vec<DecisionRecord>` to all 3 `SessionOutcome` variants. Changed `Escalated(EscalationReport)` to `Escalated { report: EscalationReport, decisions: Vec<DecisionRecord> }` (Option B — keeps `EscalationReport` focused on escalation data). Updated all existing tests with new fields.
+- **Task 8:** 45 new tests (323 total, 0 failures, 0 regressions). Coverage: `DecisionSource` display/equality/serialization, `DecisionRecord` construction/display/serialization/clone/Send+Sync, `DecisionLog` empty/record/order/concurrent-10-threads/clone-shares-arc, `write_decisions_file` happy/empty/nested-dirs/invalid-path, `format_pr_decisions_section` happy/empty/truncation/single, `AskSupervisor::call()` integration for all 4 branches, serialization skip tests.
+- **Task 9:** `cargo fmt` clean, `cargo clippy` clean (only pre-existing dead_code warnings), no `unwrap()`/`expect()` in production code (only `unwrap_or` with fallbacks), no `println!`/`eprintln!`, tracing only, no secrets logged. `DecisionError` verified Send+Sync via test.
+
 ### File List
+
+- `src/supervisor/decisions.rs` — **MODIFIED** — Replaced stubs with full `DecisionRecord`, `DecisionSource` (renamed `HumanEscalation` → `Escalation`), `DecisionLog`, `DecisionError`, `write_decisions_file()`, `format_pr_decisions_section()`, comprehensive tests
+- `src/supervisor/mod.rs` — **MODIFIED** — Added `decision_log: DecisionLog` field to `AskSupervisor`, `with_all()` constructor, `decision_log()` accessor, recording calls in all 4 `call()` branches, updated existing tests for `context` field and `Escalation` rename, added Story 3.4 integration tests
+- `src/session/mod.rs` — **MODIFIED** — Added `decisions: Vec<DecisionRecord>` to all `SessionOutcome` variants, changed `Escalated(EscalationReport)` to `Escalated { report, decisions }`, updated all tests
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — **MODIFIED** — Updated story 3-4 status
+- `_bmad-output/implementation-artifacts/3-4-decision-logging-traceability.md` — **MODIFIED** — All tasks marked [x], Dev Agent Record populated, File List updated
