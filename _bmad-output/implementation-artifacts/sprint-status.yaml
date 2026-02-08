@@ -90,7 +90,7 @@ development_status:
 
   epic-7: in-progress
   7-1-integration-test-infrastructure-fixtures: ready-for-dev
-  7-2-config-startup-validation-integration-tests: backlog # depends-on: 7-1
+  7-2-config-startup-validation-integration-tests: ready-for-dev # depends-on: 7-1
   7-3-watcher-dependency-resolution-story-selection-integration-tests: backlog # depends-on: 7-1
   7-4-pipeline-orchestration-integration-tests: backlog # depends-on: 7-1
   7-5-session-wal-crash-recovery-integration-tests: backlog # depends-on: 7-1
