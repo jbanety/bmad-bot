@@ -974,9 +974,13 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
 
     let config = Arc::new(config);
 
+    // Create watcher (Story 2.1)
+    let watcher = crate::watcher::Watcher::new(Arc::clone(&config));
+
     tracing::info!(
         config_path = %config_path.display(),
         polling_interval_secs = config.polling_interval_secs,
+        sprint_status_path = %watcher.sprint_status_path().display(),
         git_provider = %config.git_provider.provider,
         log_format = %config.log_format,
         log_file = %config.log_file,
@@ -984,7 +988,7 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     );
 
     // Polling loop with graceful shutdown — pass state for touch updates
-    run_polling_loop(&config, &mut daemon_state, state_path).await?;
+    run_polling_loop(&config, &watcher, &mut daemon_state, state_path).await?;
 
     // Clean shutdown — update state and remove file
     daemon_state.mark_stopped();
@@ -999,12 +1003,13 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
 // Polling loop with graceful shutdown
 // ---------------------------------------------------------------------------
 
-/// Polling loop with graceful shutdown and state file updates.
+/// Polling loop with graceful shutdown, state file updates, and sprint-status polling.
 ///
 /// Updates the daemon state file's `last_activity` timestamp each cycle.
-/// Story 2.1 replaces the sleep with sprint-status.yaml polling.
+/// Polls sprint-status.yaml via the watcher to detect eligible stories.
 async fn run_polling_loop(
     config: &Arc<BotConfig>,
+    watcher: &crate::watcher::Watcher,
     daemon_state: &mut state::DaemonState,
     state_path: &Path,
 ) -> Result<(), CliError> {
@@ -1023,10 +1028,32 @@ async fn run_polling_loop(
                     tracing::warn!(error = %e, "Failed to update daemon state file");
                 }
 
-                tracing::debug!(
-                    interval_secs = config.polling_interval_secs,
-                    "Polling cycle — no watcher implemented yet (placeholder)"
-                );
+                // Poll for eligible stories (Story 2.1)
+                match watcher.poll() {
+                    Ok(stories) => {
+                        tracing::info!(
+                            eligible_count = stories.len(),
+                            "Found eligible stories — session launching not yet implemented (Epic 4)"
+                        );
+                        // TODO: Epic 4 — Launch dev session for first eligible story
+                        // Story 2.2 will add dependency resolution before this point.
+                    }
+                    Err(crate::watcher::WatcherError::NoEligibleStories) => {
+                        tracing::info!("No eligible stories in this cycle — waiting for next poll");
+                    }
+                    Err(crate::watcher::WatcherError::SprintStatusNotFound { ref path }) => {
+                        tracing::warn!(
+                            path = %path,
+                            "Sprint status file not found — has sprint-planning been run?"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to poll sprint status — will retry next cycle"
+                        );
+                    }
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Received SIGINT (Ctrl-C), initiating graceful shutdown");

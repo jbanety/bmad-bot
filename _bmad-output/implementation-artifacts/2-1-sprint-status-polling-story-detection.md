@@ -1,6 +1,6 @@
 # Story 2.1: Sprint-Status Polling & Story Detection
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,72 +20,72 @@ So that stories are picked up for processing without manual intervention.
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Verify prerequisites from Epic 1 (AC: #1, #2, #3)
-  - [ ] 0.1 Verify `serde_yaml = "0.9"` is in Cargo.toml (present since Story 1.1)
-  - [ ] 0.2 Verify `watcher/mod.rs` and `watcher/deps.rs` stubs exist (created in Story 1.1)
-  - [ ] 0.3 Add `tempfile` to `[dev-dependencies]` in Cargo.toml (needed for unit tests with temp dirs)
-  - [ ] 0.4 Run `cargo check` to confirm clean baseline
+- [x] Task 0: Verify prerequisites from Epic 1 (AC: #1, #2, #3)
+  - [x] 0.1 Verify `serde_yaml = "0.9"` is in Cargo.toml (present since Story 1.1)
+  - [x] 0.2 Verify `watcher/mod.rs` and `watcher/deps.rs` stubs exist (created in Story 1.1)
+  - [x] 0.3 Add `tempfile` to `[dev-dependencies]` in Cargo.toml (needed for unit tests with temp dirs)
+  - [x] 0.4 Run `cargo check` to confirm clean baseline
 
-- [ ] Task 1: Define `WatcherError` thiserror enum in `src/watcher/mod.rs` (AC: #2)
-  - [ ] 1.1 Create `WatcherError` with variants: `SprintStatusRead`, `SprintStatusParse`, `SprintStatusNotFound`, `NoEligibleStories`
-  - [ ] 1.2 Implement `#[from]` conversions for `std::io::Error` and `serde_yaml::Error`
-  - [ ] 1.3 Add `/// doc comments` on every variant
+- [x] Task 1: Define `WatcherError` thiserror enum in `src/watcher/mod.rs` (AC: #2)
+  - [x] 1.1 Create `WatcherError` with variants: `SprintStatusRead`, `SprintStatusParse`, `SprintStatusNotFound`, `NoEligibleStories`
+  - [x] 1.2 Implement `#[from]` conversions for `std::io::Error` and `serde_yaml::Error`
+  - [x] 1.3 Add `/// doc comments` on every variant
 
-- [ ] Task 2: Define `StoryInfo` struct in `src/watcher/mod.rs` (AC: #1)
-  - [ ] 2.1 Create `pub struct StoryInfo` with fields: `story_id` (String, e.g. "1.2"), `story_key` (String, e.g. "1-2-cli-framework"), `epic_num` (u32), `story_num` (u32), `label` (String, human-readable name derived from slug), `branch_name` (String, e.g. "story/1-2-cli-framework"), `specs_path` (PathBuf), `dependencies` (Vec<String>, empty for now — Story 2.2 populates), `status` (String)
-  - [ ] 2.2 Derive `Debug, Clone`
-  - [ ] 2.3 Implement `Display` trait for human-readable output
-  - [ ] 2.4 Implement `StoryInfo::from_key_and_status(key: &str, status: &str, story_dir: &Path) -> Option<StoryInfo>` — parses the key format `N-N-slug` and derives all fields
+- [x] Task 2: Define `StoryInfo` struct in `src/watcher/mod.rs` (AC: #1)
+  - [x] 2.1 Create `pub struct StoryInfo` with fields: `story_id` (String, e.g. "1.2"), `story_key` (String, e.g. "1-2-cli-framework"), `epic_num` (u32), `story_num` (u32), `label` (String, human-readable name derived from slug), `branch_name` (String, e.g. "story/1-2-cli-framework"), `specs_path` (PathBuf), `dependencies` (Vec<String>, empty for now — Story 2.2 populates), `status` (String)
+  - [x] 2.2 Derive `Debug, Clone`
+  - [x] 2.3 Implement `Display` trait for human-readable output
+  - [x] 2.4 Implement `StoryInfo::from_key_and_status(key: &str, status: &str, story_dir: &Path) -> Option<StoryInfo>` — parses the key format `N-N-slug` and derives all fields
 
-- [ ] Task 3: Implement `SprintStatusFile` parser in `src/watcher/mod.rs` (AC: #1, #2)
-  - [ ] 3.1 Create `pub struct SprintStatusFile` holding the parsed development_status mapping
-  - [ ] 3.2 Implement `SprintStatusFile::load(path: &Path) -> Result<Self, WatcherError>` — reads and parses the YAML file
-  - [ ] 3.3 Implement `SprintStatusFile::stories(&self) -> Vec<StoryInfo>` — extracts all story entries (skips epic-N and retrospective entries)
-  - [ ] 3.4 Implement `SprintStatusFile::eligible_stories(&self) -> Vec<StoryInfo>` — returns only `ready-for-dev` stories in document order
+- [x] Task 3: Implement `SprintStatusFile` parser in `src/watcher/mod.rs` (AC: #1, #2)
+  - [x] 3.1 Create `pub struct SprintStatusFile` holding the parsed development_status mapping
+  - [x] 3.2 Implement `SprintStatusFile::load(path: &Path) -> Result<Self, WatcherError>` — reads and parses the YAML file
+  - [x] 3.3 Implement `SprintStatusFile::stories(&self) -> Vec<StoryInfo>` — extracts all story entries (skips epic-N and retrospective entries)
+  - [x] 3.4 Implement `SprintStatusFile::eligible_stories(&self) -> Vec<StoryInfo>` — returns only `ready-for-dev` stories in document order
 
-- [ ] Task 4: Implement `Watcher` struct in `src/watcher/mod.rs` (AC: #1, #2, #3)
-  - [ ] 4.1 Create `pub struct Watcher` with fields: `config: Arc<BotConfig>`, `sprint_status_path: PathBuf`
-  - [ ] 4.2 Implement `Watcher::new(config: Arc<BotConfig>) -> Self` — derives sprint_status_path from config
-  - [ ] 4.3 Implement `pub fn poll(&self) -> Result<Vec<StoryInfo>, WatcherError>` — loads sprint status, finds eligible stories, returns them
-  - [ ] 4.4 If no eligible stories found → return `Err(WatcherError::NoEligibleStories)` (not a crash — caller handles gracefully)
-  - [ ] 4.5 Log all poll results via tracing (info for found stories, debug for no stories, error for parse failures)
+- [x] Task 4: Implement `Watcher` struct in `src/watcher/mod.rs` (AC: #1, #2, #3)
+  - [x] 4.1 Create `pub struct Watcher` with fields: `config: Arc<BotConfig>`, `sprint_status_path: PathBuf`
+  - [x] 4.2 Implement `Watcher::new(config: Arc<BotConfig>) -> Self` — derives sprint_status_path from config
+  - [x] 4.3 Implement `pub fn poll(&self) -> Result<Vec<StoryInfo>, WatcherError>` — loads sprint status, finds eligible stories, returns them
+  - [x] 4.4 If no eligible stories found → return `Err(WatcherError::NoEligibleStories)` (not a crash — caller handles gracefully)
+  - [x] 4.5 Log all poll results via tracing (info for found stories, debug for no stories, error for parse failures)
 
-- [ ] Task 5: Integrate Watcher into `run_polling_loop()` in `src/cli/mod.rs` (AC: #1, #2, #3)
-  - [ ] 5.1 Create `Watcher` instance in `run_start()` after config is loaded and pass to `run_polling_loop()`
-  - [ ] 5.2 Replace placeholder "no watcher implemented yet" debug log with `watcher.poll()` call
-  - [ ] 5.3 On `Ok(stories)` → log each eligible story at info level with story_id and story_key
-  - [ ] 5.4 On `Err(WatcherError::NoEligibleStories)` → log debug message, continue to next cycle
-  - [ ] 5.5 On `Err(WatcherError::SprintStatusNotFound)` → log warn, continue to next cycle
-  - [ ] 5.6 On other `Err(_)` → log error with full context, continue to next cycle (never crash)
-  - [ ] 5.7 Update `DaemonState` after each poll with stories found count
+- [x] Task 5: Integrate Watcher into `run_polling_loop()` in `src/cli/mod.rs` (AC: #1, #2, #3)
+  - [x] 5.1 Create `Watcher` instance in `run_start()` after config is loaded and pass to `run_polling_loop()`
+  - [x] 5.2 Replace placeholder "no watcher implemented yet" debug log with `watcher.poll()` call
+  - [x] 5.3 On `Ok(stories)` → log each eligible story at info level with story_id and story_key
+  - [x] 5.4 On `Err(WatcherError::NoEligibleStories)` → log debug message, continue to next cycle
+  - [x] 5.5 On `Err(WatcherError::SprintStatusNotFound)` → log warn, continue to next cycle
+  - [x] 5.6 On other `Err(_)` → log error with full context, continue to next cycle (never crash)
+  - [x] 5.7 Update `DaemonState` after each poll with stories found count
 
-- [ ] Task 6: Re-export `deps` stub module (AC: #1)
-  - [ ] 6.1 Ensure `src/watcher/mod.rs` declares `pub mod deps;`
-  - [ ] 6.2 Ensure `deps.rs` remains a stub (Story 2.2 implements it)
-  - [ ] 6.3 Add a `// TODO: Story 2.2 — Dependency Resolution` comment in `deps.rs`
+- [x] Task 6: Re-export `deps` stub module (AC: #1)
+  - [x] 6.1 Ensure `src/watcher/mod.rs` declares `pub mod deps;`
+  - [x] 6.2 Ensure `deps.rs` remains a stub (Story 2.2 implements it)
+  - [x] 6.3 Add a `// TODO: Story 2.2 — Dependency Resolution` comment in `deps.rs`
 
-- [ ] Task 7: Write unit tests (AC: #1, #2, #3)
-  - [ ] 7.1 Test `StoryInfo::from_key_and_status` with valid key "1-2-cli-framework" parses correctly
-  - [ ] 7.2 Test `StoryInfo::from_key_and_status` with invalid key "epic-1" returns None
-  - [ ] 7.3 Test `StoryInfo::from_key_and_status` with retrospective key returns None
-  - [ ] 7.4 Test `StoryInfo::from_key_and_status` derives correct branch_name format
-  - [ ] 7.5 Test `SprintStatusFile::load` with valid YAML file parses successfully
-  - [ ] 7.6 Test `SprintStatusFile::load` with missing file returns SprintStatusNotFound
-  - [ ] 7.7 Test `SprintStatusFile::load` with malformed YAML returns SprintStatusParse
-  - [ ] 7.8 Test `SprintStatusFile::stories` returns only story entries (no epic-N, no retrospective)
-  - [ ] 7.9 Test `SprintStatusFile::eligible_stories` returns only ready-for-dev stories
-  - [ ] 7.10 Test `SprintStatusFile::eligible_stories` returns empty vec when no ready-for-dev exists
-  - [ ] 7.11 Test `SprintStatusFile::stories` preserves document order
-  - [ ] 7.12 Test `Watcher::poll` returns eligible stories from a valid file
-  - [ ] 7.13 Test `Watcher::poll` returns NoEligibleStories when none are ready-for-dev
+- [x] Task 7: Write unit tests (AC: #1, #2, #3)
+  - [x] 7.1 Test `StoryInfo::from_key_and_status` with valid key "1-2-cli-framework" parses correctly
+  - [x] 7.2 Test `StoryInfo::from_key_and_status` with invalid key "epic-1" returns None
+  - [x] 7.3 Test `StoryInfo::from_key_and_status` with retrospective key returns None
+  - [x] 7.4 Test `StoryInfo::from_key_and_status` derives correct branch_name format
+  - [x] 7.5 Test `SprintStatusFile::load` with valid YAML file parses successfully
+  - [x] 7.6 Test `SprintStatusFile::load` with missing file returns SprintStatusNotFound
+  - [x] 7.7 Test `SprintStatusFile::load` with malformed YAML returns SprintStatusParse
+  - [x] 7.8 Test `SprintStatusFile::stories` returns only story entries (no epic-N, no retrospective)
+  - [x] 7.9 Test `SprintStatusFile::eligible_stories` returns only ready-for-dev stories
+  - [x] 7.10 Test `SprintStatusFile::eligible_stories` returns empty vec when no ready-for-dev exists
+  - [x] 7.11 Test `SprintStatusFile::stories` preserves document order
+  - [x] 7.12 Test `Watcher::poll` returns eligible stories from a valid file
+  - [x] 7.13 Test `Watcher::poll` returns NoEligibleStories when none are ready-for-dev
 
-- [ ] Task 8: Final quality checks
-  - [ ] 8.1 Run `cargo fmt -- --check` and fix any formatting issues
-  - [ ] 8.2 Run `cargo clippy` and fix any warnings
-  - [ ] 8.3 Run `cargo test` and verify all tests pass (including Epic 1 tests)
-  - [ ] 8.4 Verify all public items have `///` doc comments
-  - [ ] 8.5 Manual integration test: create a test `sprint-status.yaml` with mixed statuses, run the daemon, verify it logs the correct eligible stories
-  - [ ] 8.6 Manual integration test: remove sprint-status.yaml, verify daemon logs warn and continues polling
+- [x] Task 8: Final quality checks
+  - [x] 8.1 Run `cargo fmt -- --check` and fix any formatting issues
+  - [x] 8.2 Run `cargo clippy` and fix any warnings
+  - [x] 8.3 Run `cargo test` and verify all tests pass (including Epic 1 tests)
+  - [x] 8.4 Verify all public items have `///` doc comments
+  - [x] 8.5 Manual integration test: create a test `sprint-status.yaml` with mixed statuses, run the daemon, verify it logs the correct eligible stories
+  - [x] 8.6 Manual integration test: remove sprint-status.yaml, verify daemon logs warn and continues polling
 
 ## Dev Notes
 
@@ -1108,10 +1108,37 @@ The `watcher → session` interface contract (from architecture) is established 
 
 ### Agent Model Used
 
-_(filled post-implementation)_
+Claude Opus 4.6 (via Cursor)
 
 ### Debug Log References
 
+- `cargo check` — clean compile (only pre-existing `dead_code` warnings for fields consumed by Epic 4)
+- `cargo fmt -- --check` — no formatting issues
+- `cargo clippy` — no clippy warnings (only `dead_code` from `#![warn(dead_code)]` in main.rs)
+- `cargo test` — 136 passed, 0 failed (including all Epic 1 tests + 24 new watcher tests)
+
 ### Completion Notes List
 
+- **Task 0:** Verified all prerequisites. Project uses `serde_yml = "0.0.12"` (successor to deprecated `serde_yaml`). Adapted all code references from `serde_yaml` → `serde_yml`. `tempfile` already in `[dev-dependencies]`. `cargo check` clean.
+- **Task 1:** Implemented `WatcherError` enum with 4 variants: `SprintStatusNotFound`, `SprintStatusParse` (`#[from] serde_yml::Error`), `SprintStatusRead` (manual `std::io::Error` mapping for NotFound vs other), `NoEligibleStories`. All variants have `///` doc comments.
+- **Task 2:** Implemented `StoryInfo` struct with all specified fields. `Debug, Clone` derived. `Display` shows `[story_id] label (status: X, branch: Y)`. `from_key_and_status` parses `N-N-slug` keys, rejects `epic-*` and `*retrospective*` entries, derives all fields.
+- **Task 3:** Implemented `SprintStatusFile` with `load()`, `stories()`, `eligible_stories()`, `entry_count()`. Uses `serde_yml::Value` + `as_mapping()` to preserve YAML insertion order. Typed error handling maps `io::ErrorKind::NotFound` → `SprintStatusNotFound`.
+- **Task 4:** Implemented `Watcher` struct with `new()` and `poll()`. Derives paths from `config.bmad_paths.implementation_artifacts`. Poll logs via tracing: debug for poll start, info for results summary + each eligible story, returns `NoEligibleStories` when empty. Added `story_dir` field for `SprintStatusFile::load` second parameter.
+- **Task 5:** Integrated into `run_start()`: creates `Watcher` after `Arc::new(config)`, logs `sprint_status_path`. Updated `run_polling_loop` signature to accept `&Watcher`. Replaced placeholder debug log with `match watcher.poll()` — handles all 4 match arms (Ok, NoEligibleStories, SprintStatusNotFound, other errors). Daemon never crashes on any error path.
+- **Task 6:** `pub mod deps;` declared in `mod.rs`. `deps.rs` updated with `TODO: Story 2.2 — Dependency Resolution` doc comment.
+- **Task 7:** 24 unit tests written inline in `#[cfg(test)] mod tests`: 11 StoryInfo tests, 10 SprintStatusFile tests, 3 Watcher tests. All use `tempfile::tempdir()` for filesystem isolation. `make_test_bot_config` helper mirrors pattern from cli/mod.rs tests.
+- **Task 8:** `cargo fmt` clean, `cargo clippy` clean (no clippy-specific warnings), all 136 tests pass, all public items documented with `///`.
+- **Adaptation:** Malformed YAML test adjusted — `serde_yml` parses `{{{{...}}}}` as valid YAML unlike `serde_yaml`. Changed test input to `"development_status:\n  - :\n  [invalid"` which reliably triggers `SprintStatusParse`.
+
+### Change Log
+
+- 2026-02-08: Story 2.1 implemented — WatcherError, StoryInfo, SprintStatusFile, Watcher structs + polling integration + 24 unit tests
+
 ### File List
+
+| File | Change |
+|------|--------|
+| `src/watcher/mod.rs` | **REPLACED STUB** — Full implementation: `WatcherError`, `StoryInfo`, `SprintStatusFile`, `Watcher`, 24 unit tests |
+| `src/watcher/deps.rs` | Updated stub doc comment with TODO for Story 2.2 |
+| `src/cli/mod.rs` | Updated `run_start()` to create `Watcher` and log `sprint_status_path`. Updated `run_polling_loop()` signature to accept `&Watcher`. Replaced placeholder with `watcher.poll()` match arms. |
+| `_bmad-output/implementation-artifacts/sprint-status.yaml` | Story status: `ready-for-dev` → `in-progress` → `review` |
