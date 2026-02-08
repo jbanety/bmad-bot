@@ -99,5 +99,5 @@ development_status:
   7-7-notification-flow-integration-tests: ready-for-dev # depends-on: 7-1
   7-8-branch-management-git-tools-integration-tests: ready-for-dev # depends-on: 7-1
   7-9-cli-lifecycle-integration-tests: ready-for-dev # depends-on: 7-1
-  7-10-response-analyzer-supervisor-rules-integration-tests: backlog # depends-on: 7-1
+  7-10-response-analyzer-supervisor-rules-integration-tests: ready-for-dev # depends-on: 7-1
   epic-7-retrospective: optional
