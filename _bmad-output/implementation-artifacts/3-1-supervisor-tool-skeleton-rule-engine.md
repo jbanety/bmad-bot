@@ -105,7 +105,7 @@ So that predictable questions are resolved instantly without LLM cost.
 - `BotConfig` with `llm: LlmConfig` containing `supervisor: LlmRoleConfig { provider, model }` — the supervisor's LLM provider/model for Story 3.2's fallback. NOT used in this story (rule engine only), but the config structure is ready.
 - All module stubs created including `src/supervisor/mod.rs`, plus module declarations `pub mod rules;` and `pub mod decisions;` should be added
 - `ConfigError` thiserror enum as reference pattern for `SupervisorError`
-- Cargo.toml includes: `rig-core`, `serde`, `serde_json`, `serde_yaml`, `thiserror`, `tracing`, `tokio`
+- Cargo.toml includes: `rig-core`, `serde`, `serde_json`, `serde_yml`, `thiserror`, `tracing`, `tokio`
 - `build_http_client()` — shared reqwest client with retry middleware. Available for Story 3.2's LLM fallback calls.
 - `Arc<BotConfig>` sharing pattern across modules
 - rig-core Tool trait pattern documented as reference (struct + args + error + Tool impl)

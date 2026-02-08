@@ -124,7 +124,7 @@ So that no incorrect decision is made autonomously.
   - [ ] 5.3 Find the `development_status` key matching `story_key`
   - [ ] 5.4 Update the status value to `needs-clarification`
   - [ ] 5.5 Write the file back, preserving ALL comments, structure, and the STATUS DEFINITIONS header
-  - [ ] 5.6 **YAML preservation strategy:** Since `serde_yaml` strips comments, use a string-based find-and-replace approach:
+  - [ ] 5.6 **YAML preservation strategy:** Since `serde_yml` strips comments, use a string-based find-and-replace approach:
     - Read file as string
     - Find the line containing `{story_key}:` followed by the current status
     - Replace the status value with `needs-clarification`
@@ -511,7 +511,7 @@ pub async fn preserve_partial_work(
 
 ### Sprint-Status YAML Update — Comment-Preserving Strategy
 
-`serde_yaml` does NOT preserve comments. Since `sprint-status.yaml` contains extensive STATUS DEFINITIONS comments that must be preserved, use string-based replacement:
+`serde_yml` does NOT preserve comments. Since `sprint-status.yaml` contains extensive STATUS DEFINITIONS comments that must be preserved, use string-based replacement:
 
 ```rust
 use tokio::fs;
@@ -667,7 +667,7 @@ Story 3.3 adds an `escalation_slot: EscalationSlot` field to `AskSupervisor`. Th
 - ❌ **NO** retrying after escalation — escalation means STOP and wait for human input
 - ❌ **NO** auto-resolving escalation questions — the supervisor must never guess or invent answers
 - ❌ **NO** deleting the story branch on escalation — partial work is valuable
-- ❌ **NO** parsing `sprint-status.yaml` with `serde_yaml` for updates — use string-based replacement to preserve comments
+- ❌ **NO** parsing `sprint-status.yaml` with `serde_yml` for updates — use string-based replacement to preserve comments
 - ❌ **NO** blocking the daemon on escalation — update status, report, move to next poll cycle
 - ❌ **NO** using `Arc<AtomicBool>` for the escalation flag — it cannot carry question/reason context; use `Arc<Mutex<Option<EscalationInfo>>>` instead
 - ❌ **NO** using `?` operator in `preserve_partial_work` — function is best-effort, must never propagate errors

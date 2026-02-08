@@ -100,12 +100,12 @@ So that stories are processed in a sequence that respects their prerequisites.
 - `StoryInfo` struct with fields: `story_id`, `story_key`, `epic_num`, `story_num`, `label`, `branch_name`, `specs_path`, `dependencies: Vec<String>`, `status`
 - `StoryInfo::from_key_and_status()` — parses sprint-status keys, returns `None` for epics/retrospectives, initializes `dependencies` to `Vec::new()`
 - `StoryInfo::is_eligible()` — returns `true` when status == `"ready-for-dev"`
-- `SprintStatusFile` — loads and parses sprint-status.yaml, preserves document order via `serde_yaml::Mapping`
+- `SprintStatusFile` — loads and parses sprint-status.yaml, preserves document order via `serde_yml::Mapping`
 - `SprintStatusFile::load(path, story_dir)` — TOCTOU-safe file read with error mapping (`NotFound` → `SprintStatusNotFound`)
 - `SprintStatusFile::stories()` → all story entries as `Vec<StoryInfo>`
 - `SprintStatusFile::eligible_stories()` → only `ready-for-dev` stories
 - `SprintStatusFile::entry_count()` → total entries including epics/retros
-- `WatcherError` enum: `SprintStatusNotFound`, `SprintStatusRead(std::io::Error)` (no `#[from]`), `SprintStatusParse(#[from] serde_yaml::Error)`, `NoEligibleStories`
+- `WatcherError` enum: `SprintStatusNotFound`, `SprintStatusRead(std::io::Error)` (no `#[from]`), `SprintStatusParse(#[from] serde_yml::Error)`, `NoEligibleStories`
 - `Watcher` struct with `config: Arc<BotConfig>`, `sprint_status_path: PathBuf`, `story_dir: PathBuf`
 - `Watcher::poll()` → returns `Result<Vec<StoryInfo>, WatcherError>` (eligible stories)
 - Integration in `run_polling_loop()`: match on `watcher.poll()` with arms for `Ok(stories)`, `NoEligibleStories` (info log), `SprintStatusNotFound` (warn), other errors (error)
