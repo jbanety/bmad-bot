@@ -35,8 +35,15 @@ So that all integration tests can be written concisely and consistently.
 
 ## Tasks / Subtasks
 
+- [ ] Task 0: Create `src/lib.rs` to expose crate modules for integration tests (AC: #3 — BLOCKER)
+  - [ ] 0.1 Create `src/lib.rs` with `pub mod` declarations for all modules needed by integration tests: `config`, `watcher`, `git_provider`, `notifier`, `session`, `review`, `pipeline`
+  - [ ] 0.2 Remove the corresponding `mod X;` declarations from `src/main.rs` and replace with `use bmad_bot::*;` or selective `use bmad_bot::{config, watcher, ...};` imports
+  - [ ] 0.3 Keep `mod cli;` in `main.rs` (CLI is binary-only, not needed by integration tests)
+  - [ ] 0.4 Add `pub use session::state::{SessionState, ChatMessage};` re-export in `src/session/mod.rs` (currently `mod state;` is private)
+  - [ ] 0.5 Verify `cargo build` still compiles, `cargo test` passes all existing 573+ unit tests
+
 - [ ] Task 1: Create `tests/integration/` directory structure (AC: #1, #3)
-  - [ ] 1.1 Create `tests/integration/mod.rs` as the integration test entry point
+  - [ ] 1.1 Create `tests/integration.rs` as the Cargo test binary entry point
   - [ ] 1.2 Create `tests/integration/helpers/mod.rs` to re-export all helpers
   - [ ] 1.3 Create `tests/integration/helpers/mocks.rs` for mock implementations
   - [ ] 1.4 Create `tests/integration/helpers/fixtures.rs` for fixture builders
@@ -68,7 +75,7 @@ So that all integration tests can be written concisely and consistently.
   - [ ] 6.1 `make_test_config(dir)` — builds a complete valid `BotConfig` using provided temp dir
   - [ ] 6.2 `make_test_secrets()` — builds `BotSecrets` with dummy tokens for all providers
   - [ ] 6.3 `make_test_story(key, label, deps)` — parses key to build complete `StoryInfo`
-  - [ ] 6.4 `write_sprint_status(dir, stories)` — writes valid YAML from `Vec<(key, status)>`
+  - [ ] 6.4 `write_sprint_status(dir, entries)` — writes valid YAML from `Vec<(&str, &str)>` containing ALL entry types (epics, stories, retrospectives) under `development_status:`
   - [ ] 6.5 `write_wal_file(dir, state)` — writes valid WAL YAML from `SessionState`
   - [ ] 6.6 `create_test_repo(dir)` — initializes git repo with initial commit via `git2`
 
@@ -87,15 +94,52 @@ So that all integration tests can be written concisely and consistently.
 
 ### Architecture Compliance
 
+#### 🚨🚨 BLOCKER — Create `src/lib.rs` (Task 0)
+
+**The project is currently a pure binary crate** (`src/main.rs` only, no `src/lib.rs`). All modules are declared as `mod X;` (private) in `main.rs`. Integration tests in `tests/` are **separate crates** and can ONLY import from a **library crate**. Without a `lib.rs`, `use bmad_bot::anything;` will not compile.
+
+**Required fix — create `src/lib.rs`:**
+```rust
+//! bmad-bot library crate — exposes modules for integration tests.
+#![deny(clippy::all)]
+#![warn(dead_code)]
+
+pub mod config;
+pub mod git_provider;
+pub mod notifier;
+pub mod pipeline;
+pub mod review;
+pub mod session;
+pub mod supervisor;
+pub mod tools;
+pub mod watcher;
+```
+
+**Then update `src/main.rs`** — remove all `mod X;` lines (except `mod cli;` which stays binary-only) and import from the library crate:
+```rust
+#![deny(clippy::all)]
+#![warn(dead_code)]
+
+mod cli;
+
+use anyhow::Result;
+use clap::Parser;
+// All other modules now come from bmad_bot::* via lib.rs
+```
+
+**Why `mod cli;` stays in `main.rs`:** The CLI module is binary-specific (clap `Parser`, `main()` dispatch). Integration tests don't need it. Keeping it in `main.rs` avoids exposing binary concerns.
+
+**Verify after this change:** `cargo build` succeeds, `cargo test` passes all 573+ existing unit tests. The unit tests inside each module (`#[cfg(test)] mod tests`) continue to work because they're part of the library crate.
+
 #### Test Directory Convention
-- Place all integration test code under `tests/integration/` with `mod.rs` as the entry point
+- Place all integration test code under `tests/integration/` with `tests/integration.rs` as the Cargo-discovered entry point
 - The existing `tests/e2e/` directory is reserved for live LLM E2E tests (gated behind `BMAD_E2E=1`) — do NOT modify it
 - Integration tests run via `cargo test --test integration` — deterministic, no real API calls, safe for CI
 
 #### Module Visibility
-- The `bmad-bot` crate modules are `pub(crate)` or `pub` — integration tests in `tests/` can only access `pub` items
+- After creating `lib.rs`, types are accessible via `bmad_bot::{module}::{Type}` (e.g., `bmad_bot::config::BotConfig`, `bmad_bot::watcher::Watcher`)
 - Key types that must be `pub` (and already are): `BotConfig`, `BotSecrets`, `StoryInfo`, `GitProvider`, `GitProviderError`, `CreatePrParams`, `PrInfo`, `Notifier`, `NotifierError`, `StoryNotification`, `RunSummary`, `StoryStatus`, `SessionOutcome`, `ReviewOutcome`, `SprintStatusFile`
-- **🚨 CRITICAL — `SessionState` and `ChatMessage` are NOT public:** `src/session/mod.rs` declares `mod state;` (private), so `SessionState` and `ChatMessage` are inaccessible from `tests/`. **Required fix:** Add `pub use state::{SessionState, ChatMessage};` to `src/session/mod.rs` so integration tests can import them. Without this, `write_wal_file()` cannot use the `SessionState` type. If for any reason you cannot change module visibility, the fallback is to write WAL YAML manually via `serde_yml` using a local struct mirror, but the `pub use` re-export is the clean solution.
+- **🚨 `SessionState` and `ChatMessage` need re-export:** `src/session/mod.rs` declares `mod state;` (private). **Required fix in Task 0.4:** Add `pub use state::{SessionState, ChatMessage};` to `src/session/mod.rs`. Without this, `write_wal_file()` cannot use the `SessionState` type.
 - If any other type needed by integration tests is not `pub`, adjust visibility minimally with `pub use` re-exports rather than making entire modules public
 
 #### Mock Design Pattern
@@ -197,7 +241,14 @@ development_status:
   epic-1: in-progress
   1-1-story-slug: ready-for-dev
   1-2-another-story: backlog
+  epic-1-retrospective: optional
 ```
+
+**🚨 CRITICAL — `write_sprint_status()` must write ALL entry types:**
+The `entries` parameter accepts epic entries (`"epic-1", "in-progress"`), story entries (`"1-1-slug", "ready-for-dev"`), and retrospective entries (`"epic-1-retrospective", "optional"`). All go under `development_status:` as flat key-value pairs. `SprintStatusFile::load()` parses the entire mapping and `stories()` filters out non-story entries internally.
+
+**🚨 CRITICAL — Sprint-status YAML comments are NOT functional:**
+The real `sprint-status.yaml` has comments like `# depends-on: 7-1`. These are **YAML comments stripped by the parser** — they have ZERO effect on dependency resolution. Dependencies are computed **exclusively** by `derive_dependencies()` from story numbering: story N.M depends on N.(M-1) within the same epic. Never write tests that rely on YAML comments for dependency data.
 
 #### Git Repo Initialization (via `git2`)
 ```rust
@@ -225,15 +276,23 @@ No new dependencies needed.
 ### File Structure to Create
 
 ```
+src/
+├── lib.rs                   ← NEW (Task 0 — BLOCKER: enables integration test imports)
+├── main.rs                  ← MODIFIED (remove mod declarations, use bmad_bot::*)
+└── session/
+    └── mod.rs               ← MODIFIED (add pub use state::{SessionState, ChatMessage};)
+
 tests/
 ├── e2e/
 │   └── mod.rs              # (existing — DO NOT TOUCH)
+├── integration.rs           ← NEW (Cargo test binary entry point)
 └── integration/
-    ├── mod.rs               # Entry point: integration test harness
-    └── helpers/
-        ├── mod.rs           # Re-exports: mocks + fixtures
-        ├── mocks.rs         # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
-        └── fixtures.rs      # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+    ├── helpers/
+    │   ├── mod.rs           # Re-exports: pub mod mocks; pub mod fixtures;
+    │   ├── mocks.rs         # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+    │   └── fixtures.rs      # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+    ├── test_mocks.rs        # Self-verification tests for mock implementations
+    └── test_fixtures.rs     # Self-verification tests for fixture builders
 ```
 
 #### Integration Test Entry Point Pattern — Cargo Convention
@@ -271,6 +330,7 @@ tests/
 - Never leave test artifacts on disk — tempdir handles cleanup via Drop
 - All assertions use `assert!`, `assert_eq!`, `assert_ne!` — no `unwrap()` in assertions (use `.expect("reason")` if needed)
 - Test names: `test_{component}_{behavior}_{scenario}`
+- **Tracing is a no-op in tests:** Many modules call `tracing::info!()` / `tracing::warn!()`. Without a subscriber initialized, these are silent no-ops. Do NOT install a tracing subscriber in integration tests unless explicitly debugging — it adds noise without value.
 
 ### References
 

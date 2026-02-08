@@ -86,6 +86,15 @@ So that I'm confident the daemon rejects bad configs and accepts good ones end-t
 
 ### Technical Requirements
 
+#### 🚨 Prerequisite: `src/lib.rs` (from Story 7.1 Task 0)
+This story requires the `lib.rs` created by Story 7.1 Task 0. Without it, `use bmad_bot::config::BotConfig;` will not compile because the project is currently a pure binary crate (`main.rs` only). Verify that `src/lib.rs` exists with `pub mod config;` before writing any integration tests. If Story 7.1 has not been implemented yet, Task 0 from that story MUST be completed first.
+
+**Import paths after lib.rs exists:**
+```rust
+use bmad_bot::config::{BotConfig, BotSecrets, ConfigError, build_http_client};
+use bmad_bot::config::discovery::BmadDiscovery;
+```
+
 #### Config YAML Writing for Tests
 `BotConfig` derives `Serialize`, so valid configs can be written to temp files. Define a local helper in `test_config.rs` to avoid duplicating this across every test:
 ```rust
@@ -219,6 +228,8 @@ All already present — no new dependencies needed:
 - `tempfile = "3"` (dev-dependency)
 - `serde_yml = "0.0.12"` (main dependency, used for YAML serialization in tests)
 
+**Prerequisite from Story 7.1:** `src/lib.rs` must exist with `pub mod config;` — see Story 7.1 Task 0.
+
 ### File Structure
 
 ```
@@ -241,6 +252,9 @@ tests/
 - Never leave artifacts on disk — tempdir handles cleanup via Drop
 - Test names: `test_config_{behavior}_{scenario}` (e.g., `test_config_valid_roundtrip_succeeds`, `test_config_zero_polling_rejected`)
 - Use `assert!(matches!(...))` for error variant matching with field guards
+
+### Sprint-Status YAML Comments Are NOT Functional
+The real `sprint-status.yaml` has comments like `# depends-on: 7-1`. These are **YAML comments stripped by the parser** — they have ZERO effect on dependency resolution. Dependencies are computed exclusively by `derive_dependencies()` from story numbering. This is irrelevant for config tests but noted for consistency across the epic.
 
 ### References
 
