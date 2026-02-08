@@ -1,6 +1,6 @@
 # Story 3.1: Supervisor Tool Skeleton & Rule Engine
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,80 +22,80 @@ So that predictable questions are resolved instantly without LLM cost.
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Verify prerequisites from Epic 1 (AC: #1, #2, #3, #4)
-  - [ ] 0.1 Verify `src/supervisor/mod.rs` stub exists (created in Story 1.1)
-  - [ ] 0.2 Verify `src/supervisor/rules.rs` stub exists (or create alongside `decisions.rs`)
-  - [ ] 0.3 Verify `rig-core` is in Cargo.toml dependencies (added in Story 1.1)
-  - [ ] 0.4 Verify `serde_json` is in Cargo.toml dependencies (needed for ToolDefinition parameters)
-  - [ ] 0.5 Run `cargo check` to confirm clean baseline
+- [x] Task 0: Verify prerequisites from Epic 1 (AC: #1, #2, #3, #4)
+  - [x] 0.1 Verify `src/supervisor/mod.rs` stub exists (created in Story 1.1)
+  - [x] 0.2 Verify `src/supervisor/rules.rs` stub exists (or create alongside `decisions.rs`)
+  - [x] 0.3 Verify `rig-core` is in Cargo.toml dependencies (added in Story 1.1)
+  - [x] 0.4 Verify `serde_json` is in Cargo.toml dependencies (needed for ToolDefinition parameters)
+  - [x] 0.5 Run `cargo check` to confirm clean baseline
 
-- [ ] Task 1: Define `SupervisorError` thiserror enum in `src/supervisor/mod.rs` (AC: #1, #3)
-  - [ ] 1.1 Create `SupervisorError` with variants: `RuleEngineError { reason: String }`, `EscalationRequired { question: String, reason: String }` (placeholder for Story 3.3), `LlmFallbackNotImplemented` (placeholder for Story 3.2)
-  - [ ] 1.2 Implement `Display` via thiserror derive
-  - [ ] 1.3 Add `/// doc comments` on every variant explaining when it occurs
-  - [ ] 1.4 Note: `SupervisorError` must implement `std::error::Error + Send + Sync` for rig Tool compatibility
+- [x] Task 1: Define `SupervisorError` thiserror enum in `src/supervisor/mod.rs` (AC: #1, #3)
+  - [x] 1.1 Create `SupervisorError` with variants: `RuleEngineError { reason: String }`, `EscalationRequired { question: String, reason: String }` (placeholder for Story 3.3), `LlmFallbackNotImplemented` (placeholder for Story 3.2)
+  - [x] 1.2 Implement `Display` via thiserror derive
+  - [x] 1.3 Add `/// doc comments` on every variant explaining when it occurs
+  - [x] 1.4 Note: `SupervisorError` must implement `std::error::Error + Send + Sync` for rig Tool compatibility
 
-- [ ] Task 2: Define `AskSupervisorArgs` in `src/supervisor/mod.rs` (AC: #1)
-  - [ ] 2.1 Create `#[derive(Deserialize)] pub struct AskSupervisorArgs` with field: `question: String`
-  - [ ] 2.2 Add `/// doc comment` explaining this is the input from the LLM agent when it calls the tool
-  - [ ] 2.3 Optionally add `context: Option<String>` for the agent to provide additional context with the question
+- [x] Task 2: Define `AskSupervisorArgs` in `src/supervisor/mod.rs` (AC: #1)
+  - [x] 2.1 Create `#[derive(Deserialize)] pub struct AskSupervisorArgs` with field: `question: String`
+  - [x] 2.2 Add `/// doc comment` explaining this is the input from the LLM agent when it calls the tool
+  - [x] 2.3 Optionally add `context: Option<String>` for the agent to provide additional context with the question
 
-- [ ] Task 3: Implement `AskSupervisor` tool struct in `src/supervisor/mod.rs` (AC: #1)
-  - [ ] 3.1 Create `#[derive(Deserialize, Serialize)] pub struct AskSupervisor` with field: `rule_engine: RuleEngine` (from rules.rs)
-  - [ ] 3.2 Implement constructor `AskSupervisor::new() -> Self` that initializes with a default `RuleEngine`
-  - [ ] 3.3 Implement `rig::tool::Tool` trait with: `NAME = "ask_supervisor"`, `Error = SupervisorError`, `Args = AskSupervisorArgs`, `Output = String`
-  - [ ] 3.4 Implement `definition()` with a detailed description explaining to the LLM WHEN to call this tool (doubts, questions, blockers) and HOW (provide clear question text)
-  - [ ] 3.5 Implement `call()`: try rule engine first → on match, return answer → on no match, return `LlmFallbackNotImplemented` error (Story 3.2 replaces this with actual LLM call)
-  - [ ] 3.6 Log every call via `tracing::info!(action = "ask_supervisor", question = %args.question, "Supervisor tool invoked")`
-  - [ ] 3.7 Log rule engine results: match at info level, miss at info level with `action = "rule_engine_miss"`
+- [x] Task 3: Implement `AskSupervisor` tool struct in `src/supervisor/mod.rs` (AC: #1)
+  - [x] 3.1 Create `#[derive(Deserialize, Serialize)] pub struct AskSupervisor` with field: `rule_engine: RuleEngine` (from rules.rs)
+  - [x] 3.2 Implement constructor `AskSupervisor::new() -> Self` that initializes with a default `RuleEngine`
+  - [x] 3.3 Implement `rig::tool::Tool` trait with: `NAME = "ask_supervisor"`, `Error = SupervisorError`, `Args = AskSupervisorArgs`, `Output = String`
+  - [x] 3.4 Implement `definition()` with a detailed description explaining to the LLM WHEN to call this tool (doubts, questions, blockers) and HOW (provide clear question text)
+  - [x] 3.5 Implement `call()`: try rule engine first → on match, return answer → on no match, return `LlmFallbackNotImplemented` error (Story 3.2 replaces this with actual LLM call)
+  - [x] 3.6 Log every call via `tracing::info!(action = "ask_supervisor", question = %args.question, "Supervisor tool invoked")`
+  - [x] 3.7 Log rule engine results: match at info level, miss at info level with `action = "rule_engine_miss"`
 
-- [ ] Task 4: Implement `RuleEngine` in `src/supervisor/rules.rs` (AC: #2, #3, #4)
-  - [ ] 4.1 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub struct RuleEngine` holding a `Vec<Rule>`
-  - [ ] 4.2 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub struct Rule` with fields: `name: String`, `pattern: RulePattern`, `response: String`, `description: String`
-  - [ ] 4.3 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub enum RulePattern` with variants: `Contains(String)`, `StartsWithAny(Vec<String>)`, `AnyOf(Vec<RulePattern>)` for composite matching. Note: NO `Regex` variant — simple string matching is sufficient for known BMAD patterns and avoids a `regex` crate dependency
-  - [ ] 4.4 Implement `RuleEngine::new() -> Self` loading default built-in rules
-  - [ ] 4.5 Implement `RuleEngine::evaluate(&self, question: &str) -> RuleResult` — iterates rules in order, returns first match
-  - [ ] 4.6 Implement `RuleEngine::add_rule(&mut self, rule: Rule)` for extensibility (AC #4)
+- [x] Task 4: Implement `RuleEngine` in `src/supervisor/rules.rs` (AC: #2, #3, #4)
+  - [x] 4.1 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub struct RuleEngine` holding a `Vec<Rule>`
+  - [x] 4.2 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub struct Rule` with fields: `name: String`, `pattern: RulePattern`, `response: String`, `description: String`
+  - [x] 4.3 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub enum RulePattern` with variants: `Contains(String)`, `StartsWithAny(Vec<String>)`, `AnyOf(Vec<RulePattern>)` for composite matching. Note: NO `Regex` variant — simple string matching is sufficient for known BMAD patterns and avoids a `regex` crate dependency
+  - [x] 4.4 Implement `RuleEngine::new() -> Self` loading default built-in rules
+  - [x] 4.5 Implement `RuleEngine::evaluate(&self, question: &str) -> RuleResult` — iterates rules in order, returns first match
+  - [x] 4.6 Implement `RuleEngine::add_rule(&mut self, rule: Rule)` for extensibility (AC #4)
 
-- [ ] Task 5: Implement `RuleResult` enum in `src/supervisor/rules.rs` (AC: #2, #3)
-  - [ ] 5.1 Create `pub enum RuleResult { Matched { rule_name: String, answer: String }, NoMatch }`
-  - [ ] 5.2 Implement `Display` for `RuleResult`
+- [x] Task 5: Implement `RuleResult` enum in `src/supervisor/rules.rs` (AC: #2, #3)
+  - [x] 5.1 Create `pub enum RuleResult { Matched { rule_name: String, answer: String }, NoMatch }`
+  - [x] 5.2 Implement `Display` for `RuleResult`
 
-- [ ] Task 6: Implement built-in rules in `src/supervisor/rules.rs` (AC: #2)
-  - [ ] 6.1 Confirmation patterns: "Should I proceed?", "Shall I continue?", "Do you want me to", "Ready to proceed?", "Can I go ahead?" → Response: "Yes, proceed."
-  - [ ] 6.2 Step-by-step detection: "I'll do this step by step", "Let me break this down", "Here's my plan:" → Response: "Skip the step-by-step breakdown. Execute directly using yolo mode."
-  - [ ] 6.3 Story selection: "Which story should I work on?", "What's the next story?" → Response: "The story file has been provided in context. Follow the tasks and acceptance criteria in the story file."
-  - [ ] 6.4 Progress confirmation: "I've completed", "I'm done with", "Task complete" → Response: "Acknowledged. Continue to the next task."
-  - [ ] 6.5 Permission requests: "Should I create", "Should I modify", "Should I delete", "Can I update" → Response: "Yes, proceed with the action as described."
-  - [ ] 6.6 All patterns case-insensitive matching
+- [x] Task 6: Implement built-in rules in `src/supervisor/rules.rs` (AC: #2)
+  - [x] 6.1 Confirmation patterns: "Should I proceed?", "Shall I continue?", "Do you want me to", "Ready to proceed?", "Can I go ahead?" → Response: "Yes, proceed."
+  - [x] 6.2 Step-by-step detection: "I'll do this step by step", "Let me break this down", "Here's my plan:" → Response: "Skip the step-by-step breakdown. Execute directly using yolo mode."
+  - [x] 6.3 Story selection: "Which story should I work on?", "What's the next story?" → Response: "The story file has been provided in context. Follow the tasks and acceptance criteria in the story file."
+  - [x] 6.4 Progress confirmation: "I've completed", "I'm done with", "Task complete" → Response: "Acknowledged. Continue to the next task."
+  - [x] 6.5 Permission requests: "Should I create", "Should I modify", "Should I delete", "Can I update" → Response: "Yes, proceed with the action as described."
+  - [x] 6.6 All patterns case-insensitive matching
 
-- [ ] Task 7: Create `DecisionRecord` stub in `src/supervisor/decisions.rs` (AC: #2)
-  - [ ] 7.1 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub struct DecisionRecord` with fields: `question: String`, `answer: String`, `source: DecisionSource`, `reasoning: String`, `alternatives: Vec<String>`, `timestamp: String`
-  - [ ] 7.2 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub enum DecisionSource { RuleEngine { rule_name: String }, LlmFallback, HumanEscalation }`
-  - [ ] 7.3 Add `// TODO: Story 3.4 — Decision file writing and session accumulation` comment
-  - [ ] 7.4 Do NOT implement file writing or session accumulation — that's Story 3.4
+- [x] Task 7: Create `DecisionRecord` stub in `src/supervisor/decisions.rs` (AC: #2)
+  - [x] 7.1 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub struct DecisionRecord` with fields: `question: String`, `answer: String`, `source: DecisionSource`, `reasoning: String`, `alternatives: Vec<String>`, `timestamp: String`
+  - [x] 7.2 Create `#[derive(Debug, Clone, Serialize, Deserialize)] pub enum DecisionSource { RuleEngine { rule_name: String }, LlmFallback, HumanEscalation }`
+  - [x] 7.3 Add `// TODO: Story 3.4 — Decision file writing and session accumulation` comment
+  - [x] 7.4 Do NOT implement file writing or session accumulation — that's Story 3.4
 
-- [ ] Task 8: Write unit tests (AC: #1, #2, #3, #4)
-  - [ ] 8.1 Test rule engine matches confirmation patterns (multiple phrasings)
-  - [ ] 8.2 Test rule engine matches step-by-step detection patterns
-  - [ ] 8.3 Test rule engine matches story selection patterns
-  - [ ] 8.4 Test rule engine matches progress confirmation patterns
-  - [ ] 8.5 Test rule engine matches permission request patterns
-  - [ ] 8.6 Test rule engine returns NoMatch for unknown questions
-  - [ ] 8.7 Test rule engine is case-insensitive
-  - [ ] 8.8 Test rule engine returns first matching rule (priority order)
-  - [ ] 8.9 Test RuleEngine::add_rule adds new rules that can match
-  - [ ] 8.10 Test AskSupervisor::call returns answer for matching questions
-  - [ ] 8.11 Test AskSupervisor::call returns LlmFallbackNotImplemented for non-matching questions
-  - [ ] 8.12 Test AskSupervisor tool definition has correct name and non-empty description
-  - [ ] 8.13 Test DecisionRecord can be constructed and serialized
+- [x] Task 8: Write unit tests (AC: #1, #2, #3, #4)
+  - [x] 8.1 Test rule engine matches confirmation patterns (multiple phrasings)
+  - [x] 8.2 Test rule engine matches step-by-step detection patterns
+  - [x] 8.3 Test rule engine matches story selection patterns
+  - [x] 8.4 Test rule engine matches progress confirmation patterns
+  - [x] 8.5 Test rule engine matches permission request patterns
+  - [x] 8.6 Test rule engine returns NoMatch for unknown questions
+  - [x] 8.7 Test rule engine is case-insensitive
+  - [x] 8.8 Test rule engine returns first matching rule (priority order)
+  - [x] 8.9 Test RuleEngine::add_rule adds new rules that can match
+  - [x] 8.10 Test AskSupervisor::call returns answer for matching questions
+  - [x] 8.11 Test AskSupervisor::call returns LlmFallbackNotImplemented for non-matching questions
+  - [x] 8.12 Test AskSupervisor tool definition has correct name and non-empty description
+  - [x] 8.13 Test DecisionRecord can be constructed and serialized
 
-- [ ] Task 9: Final quality checks
-  - [ ] 9.1 Run `cargo fmt -- --check` and fix any formatting issues
-  - [ ] 9.2 Run `cargo clippy` and fix any warnings
-  - [ ] 9.3 Run `cargo test` and verify all tests pass (including Epic 1 and Epic 2 tests)
-  - [ ] 9.4 Verify all public items have `///` doc comments
-  - [ ] 9.5 Verify `SupervisorError` implements `std::error::Error + Send + Sync` (required by rig Tool trait)
+- [x] Task 9: Final quality checks
+  - [x] 9.1 Run `cargo fmt -- --check` and fix any formatting issues
+  - [x] 9.2 Run `cargo clippy` and fix any warnings
+  - [x] 9.3 Run `cargo test` and verify all tests pass (including Epic 1 and Epic 2 tests)
+  - [x] 9.4 Verify all public items have `///` doc comments
+  - [x] 9.5 Verify `SupervisorError` implements `std::error::Error + Send + Sync` (required by rig Tool trait)
 
 ## Dev Notes
 
@@ -1197,10 +1197,40 @@ The supervisor → session interface is partially defined:
 
 ### Agent Model Used
 
-_(filled post-implementation)_
+Claude Opus 4.6 (via Cursor)
 
 ### Debug Log References
 
+- `cargo check` clean (only pre-existing `dead_code` warnings from watcher module)
+- `cargo clippy` clean (only `dead_code` warnings — supervisor not yet wired to main, expected until Epic 4)
+- `cargo fmt -- --check` passes with no changes needed
+- `cargo test` — 205/205 tests pass, 0 failures, 0 regressions
+- Supervisor-specific tests: 37/37 pass (22 in `rules.rs`, 15 in `mod.rs`)
+
 ### Completion Notes List
 
+- **Task 0:** All prerequisites verified — stubs existed, `rig-core` and `serde_json` in Cargo.toml, clean baseline
+- **Task 1:** `SupervisorError` implemented with 3 variants (`RuleEngineError`, `EscalationRequired`, `LlmFallbackNotImplemented`). All variants have `///` doc comments. Verified `Send + Sync` via compile-time assertion test
+- **Task 2:** `AskSupervisorArgs` with `question: String` and `context: Option<String>` (with `#[serde(default)]`). Deserialization tests confirm both with/without context
+- **Task 3:** `AskSupervisor` implements `rig::tool::Tool` trait exactly per spec. `NAME = "ask_supervisor"`, detailed `definition()` with 5 explicit use cases, `call()` delegates to rule engine then returns `LlmFallbackNotImplemented` on miss. Also implements `Default` trait. Structured tracing on every call with `action` field
+- **Task 4:** `RuleEngine` with `Vec<Rule>`, `evaluate()` first-match-wins, `add_rule()` and `insert_rule()` for extensibility. Fully serializable
+- **Task 5:** `RuleResult::Matched { rule_name, answer }` and `RuleResult::NoMatch` with `Display` impl
+- **Task 6:** 6 built-in rule categories: confirmation_proceed (10 patterns), permission_action (12 prefixes), step_by_step_detection (8 patterns), story_selection (5 patterns), progress_confirmation (7 patterns), stuck_general (6 patterns). All case-insensitive via `.to_lowercase()`
+- **Task 7:** `DecisionRecord` and `DecisionSource` stubs in `decisions.rs` with 3 TODO comments for Story 3.4. No file writing implemented (out of scope)
+- **Task 8:** 37 tests total — covers all ACs. Includes pattern matching, engine evaluation, serialization round-trips, tool definition validation, error display, `Send+Sync` assertion, arg deserialization
+- **Task 9:** `cargo fmt`, `cargo clippy`, `cargo test` all pass. Doc comments on all public items. `SupervisorError` verified `Send + Sync`
+- **No new dependencies added** — all required crates were already in Cargo.toml
+- **No modules outside scope were modified** — only `src/supervisor/{mod,rules,decisions}.rs`
+
+### Change Log
+
+- 2026-02-08: Story 3.1 implemented — Supervisor Tool Skeleton & Rule Engine (all 10 tasks complete)
+
 ### File List
+
+| File | Change |
+|------|--------|
+| `src/supervisor/mod.rs` | **REPLACED STUB** — Full implementation: `SupervisorError` enum, `AskSupervisorArgs` struct, `AskSupervisor` tool with `rig::tool::Tool` trait impl, `Default` impl, 15 unit tests |
+| `src/supervisor/rules.rs` | **REPLACED STUB** — Full implementation: `RuleResult` enum with `Display`, `RulePattern` enum (Contains/StartsWithAny/AnyOf), `Rule` struct, `RuleEngine` with 6 built-in rule categories, `Default` impl, 22 unit tests |
+| `src/supervisor/decisions.rs` | **REPLACED STUB** — `DecisionSource` enum, `DecisionRecord` struct with TODO comments for Story 3.4 |
+| `_bmad-output/implementation-artifacts/sprint-status.yaml` | Updated `3-1-supervisor-tool-skeleton-rule-engine` status: `ready-for-dev` → `in-progress` → `review` |
