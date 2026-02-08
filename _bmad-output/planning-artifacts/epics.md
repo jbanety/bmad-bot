@@ -626,24 +626,36 @@ So that code quality issues are caught and fixed before I review.
 **Acceptance Criteria:**
 
 **Given** code review is enabled in `bmad-bot.yaml` configuration
-**When** a development session completes successfully
-**Then** the review module launches a separate LLM session using the review provider/model from `BotConfig`
-**And** the review session receives a `ReviewContext` (branch name, story info, diff summary) for analysis
+**When** a development session completes successfully (`SessionOutcome::Completed`)
+**Then** the daemon launches a **new rig agent session** using the review LLM provider/model from `BotConfig.llm.review`
+**And** the session loads the same BMAD dev agent persona (`dev.md`) and sends `"CR"` as the initial command
+**And** the `ResponseAnalyzer` auto-responds to the story selection prompt with the story specs file path
 
-**Given** the review LLM identifies issues in the code
-**When** the review agent generates fixes
-**Then** fixes are committed in separate commits (distinct from the dev agent's commits) for clear visibility in the PR history
-**And** each review fix commit message references the review finding it addresses
+**Given** the BMAD CR workflow asks how to handle findings (fix automatically / create action items / show details)
+**When** the daemon's `ResponseAnalyzer` detects this decision prompt
+**Then** it auto-responds with `"1"` (fix them automatically)
+**And** the review agent applies fixes to the code (but does not commit yet)
 
-**Given** the review session completes
-**When** the review is finalized
-**Then** the full review is posted as a comment on the PR via `GitProvider::add_comment()`
-**And** the review comment includes: summary of findings, issues found, fixes applied, and any remaining concerns
+**Given** the CR workflow completes (step 5 "Review Complete")
+**When** the daemon detects the review completion output
+**Then** the daemon sends a post-review message asking the agent to commit all review fixes with descriptive commit messages referencing the findings, and to provide a complete markdown review report
+**And** the agent commits the fixes in separate commits (distinct from dev agent commits) with full context
+**And** the agent's review report response is captured in `ReviewOutcome::Completed { report }`
+
+**Given** a PR is created by the orchestrator after the review
+**When** the `ReviewOutcome::Completed` contains a report
+**Then** the orchestrator posts the review report as a comment on the PR via `GitProvider::add_comment()`
+**And** the review comment includes: summary of findings, severity levels, fixes applied, and any remaining concerns
 
 **Given** the review LLM provider is unavailable or errors out
 **When** the review session fails
-**Then** the daemon logs the error, skips the review, and proceeds to PR creation without review
+**Then** the daemon logs the error, returns `ReviewOutcome::Skipped` with a reason
+**And** the orchestrator proceeds to PR creation without review
 **And** the PR description notes that automated code review was skipped due to an error
+
+**Given** code review is disabled in configuration (`code_review_enabled: false`)
+**When** a development session completes
+**Then** the daemon skips the review entirely and proceeds directly to PR creation
 
 ### Story 5.3: GitLab Merge Request Support
 
