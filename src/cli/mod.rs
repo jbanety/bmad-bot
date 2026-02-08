@@ -974,9 +974,16 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     daemon_state.write(state_path)?;
 
     let config = Arc::new(config);
+    let secrets = Arc::new(secrets);
 
     // Create watcher (Story 2.1)
     let watcher = crate::watcher::Watcher::new(Arc::clone(&config));
+
+    // Create story pipeline (Story 6.2)
+    let pipeline = crate::pipeline::StoryPipeline::new(Arc::clone(&config), Arc::clone(&secrets))
+        .map_err(|e| CliError::Init {
+        reason: format!("Failed to create story pipeline: {e}"),
+    })?;
 
     tracing::info!(
         config_path = %config_path.display(),
@@ -989,7 +996,7 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     );
 
     // Polling loop with graceful shutdown — pass state for touch updates
-    run_polling_loop(&config, &watcher, &mut daemon_state, state_path).await?;
+    run_polling_loop(&config, &watcher, &pipeline, &mut daemon_state, state_path).await?;
 
     // Clean shutdown — update state and remove file
     daemon_state.mark_stopped();
@@ -1011,6 +1018,7 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
 async fn run_polling_loop(
     config: &Arc<BotConfig>,
     watcher: &crate::watcher::Watcher,
+    pipeline: &crate::pipeline::StoryPipeline,
     daemon_state: &mut state::DaemonState,
     state_path: &Path,
 ) -> Result<(), CliError> {
@@ -1034,9 +1042,19 @@ async fn run_polling_loop(
                     Ok(stories) => {
                         tracing::info!(
                             eligible_count = stories.len(),
-                            "Found eligible stories — session launching not yet implemented (Epic 4)"
+                            "Found eligible stories — launching pipeline"
                         );
-                        // TODO: Epic 4 — Launch dev session for first eligible story
+                        let summary = pipeline.process_eligible_stories(stories).await;
+                        tracing::info!(
+                            total = summary.total_processed,
+                            completed = summary.completed,
+                            blocked = summary.blocked,
+                            errored = summary.errored,
+                            "Pipeline run complete"
+                        );
+                        for _ in 0..summary.total_processed {
+                            daemon_state.record_story_processed();
+                        }
                     }
                     Err(crate::watcher::WatcherError::NoEligibleStories) => {
                         tracing::info!("No eligible stories in this cycle — waiting for next poll");

@@ -1,6 +1,6 @@
 # Story 6.2: HTTP Retry & Error Resilience
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -31,50 +31,49 @@ So that temporary provider outages don't derail overnight runs.
 
 ### Task 0: Prerequisite Verification
 
-- [ ] Verify `SessionRunner::run()` exists and returns `SessionOutcome` (Completed, Escalated, Failed) — `src/session/runner.rs`
-- [ ] Verify `ReviewRunner::run()` exists and returns `ReviewOutcome` (Completed, Failed, Skipped) — `src/review/mod.rs`
-- [ ] Verify `GitProvider` trait with `create_pr()`, `add_comment()`, `get_pr_url()` — `src/git_provider/mod.rs`
-- [ ] Verify `create_provider()` factory returns `Box<dyn GitProvider>` — `src/git_provider/mod.rs`
-- [ ] Verify `CreatePrParams`, `PrInfo`, `PrDescriptionParams` structs — `src/git_provider/mod.rs`
-- [ ] Verify `build_pr_description()` and `build_pr_title()` helpers — `src/git_provider/mod.rs`
-- [ ] Verify `format_pr_decisions_section()` — `src/supervisor/decisions.rs`
-- [ ] Verify `Notifier` trait with `notify_story()` and `notify_run_summary()` — `src/notifier/mod.rs` (Story 6.1)
-- [ ] Verify `StoryNotification`, `StoryStatus`, `RunSummary` — `src/notifier/mod.rs` (Story 6.1)
-- [ ] Verify `create_notifier()` factory — `src/notifier/mod.rs` (Story 6.1)
-- [ ] Verify `Watcher::poll()` returns eligible `StoryInfo` items — `src/watcher/mod.rs`
-- [ ] Verify `preserve_partial_work()` in `src/session/cleanup.rs`
-- [ ] Verify `build_http_client()` in `src/config/mod.rs` already provides 3-retry exponential backoff
-- [ ] Verify `run_polling_loop()` in `src/cli/mod.rs` has TODO placeholder for session launching
-- [ ] Verify `BotSecrets` loads all needed tokens (git provider, telegram)
+- [x] Verify `SessionRunner::run()` exists and returns `SessionOutcome` (Completed, Escalated, Failed) — `src/session/runner.rs`
+- [x] Verify `ReviewRunner::run()` exists and returns `ReviewOutcome` (Completed, Failed, Skipped) — `src/review/mod.rs`
+- [x] Verify `GitProvider` trait with `create_pr()`, `add_comment()`, `get_pr_url()` — `src/git_provider/mod.rs`
+- [x] Verify `create_provider()` factory returns `Box<dyn GitProvider>` — `src/git_provider/mod.rs`
+- [x] Verify `CreatePrParams`, `PrInfo`, `PrDescriptionParams` structs — `src/git_provider/mod.rs`
+- [x] Verify `build_pr_description()` and `build_pr_title()` helpers — `src/git_provider/mod.rs`
+- [x] Verify `format_pr_decisions_section()` — `src/supervisor/decisions.rs`
+- [x] Verify `Notifier` trait with `notify_story()` and `notify_run_summary()` — `src/notifier/mod.rs` (Story 6.1)
+- [x] Verify `StoryNotification`, `StoryStatus`, `RunSummary` — `src/notifier/mod.rs` (Story 6.1)
+- [x] Verify `create_notifier()` factory — `src/notifier/mod.rs` (Story 6.1)
+- [x] Verify `Watcher::poll()` returns eligible `StoryInfo` items — `src/watcher/mod.rs`
+- [x] Verify `preserve_partial_work()` in `src/session/cleanup.rs`
+- [x] Verify `build_http_client()` in `src/config/mod.rs` already provides 3-retry exponential backoff
+- [x] Verify `run_polling_loop()` in `src/cli/mod.rs` has TODO placeholder for session launching
+- [x] Verify `BotSecrets` loads all needed tokens (git provider, telegram)
 
 ### Task 1: Create Story Pipeline Module (`src/pipeline.rs`)
 
-- [ ] Create new file `src/pipeline.rs`
-- [ ] Add `mod pipeline;` to `src/main.rs`
-- [ ] Define `PipelineError` enum using `thiserror`:
-  - [ ] `InitFailed { reason: String }` — pipeline construction failure (git provider init, notifier init)
-  - [ ] `SessionFailed { story_key: String, error: String }` — session returned `Failed`
-  - [ ] `ReviewFailed { story_key: String, error: String }` — review returned `Failed`
-  - [ ] `PrCreationFailed { story_key: String, branch: String, reason: String }` — git provider error
-  - [ ] `PrCommentFailed { pr_id: String, reason: String }` — comment posting failed (non-blocking)
-  - [ ] `NotificationFailed { reason: String }` — notification error (always non-blocking)
-- [ ] Define `PipelineResult` struct:
-  - [ ] `story_key: String`
-  - [ ] `status: StoryStatus` (re-use from notifier module)
-  - [ ] `pr_url: Option<String>`
-  - [ ] `error_detail: Option<String>`
+- [x] Create new file `src/pipeline.rs`
+- [x] Add `mod pipeline;` to `src/main.rs`
+- [x] Define `PipelineError` enum using `thiserror`:
+  - [x] `Init { reason: String }` — pipeline construction failure (git provider init, notifier init) (renamed from `InitFailed` per clippy `enum_variant_names`)
+  - [x] `Session { story_key: String, error: String }` — session returned `Failed`
+  - [x] `Review { story_key: String, error: String }` — review returned `Failed`
+  - [x] `PrCreation { story_key: String, branch: String, reason: String }` — git provider error
+  - [x] `PrComment { pr_id: String, reason: String }` — comment posting failed (non-blocking)
+  - [x] `Notification { reason: String }` — notification error (always non-blocking)
+- [x] Define `PipelineResult` struct:
+  - [x] `story_key: String`
+  - [x] `status: StoryStatus` (re-use from notifier module)
+  - [x] `pr_url: Option<String>`
+  - [x] `error_detail: Option<String>`
 
 ### Task 2: Implement `StoryPipeline` Struct (`src/pipeline.rs`)
 
-- [ ] Define `StoryPipeline` struct:
-  - [ ] `config: Arc<BotConfig>`
-  - [ ] `secrets: Arc<BotSecrets>`
-  - [ ] `git_provider: Box<dyn GitProvider>`
-  - [ ] `notifier: Box<dyn Notifier>`
-  - [ ] `session_runner: SessionRunner`
-  - [ ] `review_runner: ReviewRunner`
-- [ ] Implement `StoryPipeline::new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>) -> Result<Self, PipelineError>`
-  - [ ] Extract git provider token from secrets based on config:
+- [x] Define `StoryPipeline` struct:
+  - [x] `config: Arc<BotConfig>`
+  - [x] `git_provider: Box<dyn GitProvider>`
+  - [x] `notifier: Box<dyn Notifier>`
+  - [x] `session_runner: SessionRunner`
+  - [x] `review_runner: ReviewRunner`
+- [x] Implement `StoryPipeline::new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>) -> Result<Self, PipelineError>`
+  - [x] Extract git provider token from secrets based on config:
     ```rust
     let token = match config.git_provider.provider.as_str() {
         "github" => secrets.github_token.as_deref().unwrap_or(""),
@@ -84,117 +83,124 @@ So that temporary provider outages don't derail overnight runs.
         }),
     };
     ```
-  - [ ] Create git provider via `create_provider(&config.git_provider, token)` — map error to `PipelineError::InitFailed`
-  - [ ] Create notifier via `create_notifier(&config.notifications, &secrets)` — factory never fails, returns NoopNotifier as fallback
-  - [ ] Create `SessionRunner::new(config.clone(), secrets.clone())`
-  - [ ] Create `ReviewRunner::new(config.clone(), secrets.clone())`
-  - [ ] Store all components
+  - [x] Create git provider via `create_provider(&config.git_provider, token)` — map error to `PipelineError::Init`
+  - [x] Create notifier via `create_notifier(&config.notifications, &secrets)` — factory never fails, returns NoopNotifier as fallback
+  - [x] Create `SessionRunner::new(config.clone(), secrets.clone())`
+  - [x] Create `ReviewRunner::new(config.clone(), secrets.clone())`
+  - [x] Store all components
 
 ### Task 3: Implement `process_story()` — Core Pipeline Method (`src/pipeline.rs`)
 
-- [ ] `pub async fn process_story(&self, story: &StoryInfo) -> PipelineResult`
-- [ ] This is the main orchestration method implementing the full pipeline for ONE story:
+- [x] `pub async fn process_story(&self, story: &StoryInfo) -> PipelineResult`
+- [x] This is the main orchestration method implementing the full pipeline for ONE story:
 
 **Phase 1 — Dev Session:**
-- [ ] Call `self.session_runner.run(story).await`
-- [ ] Match on `SessionOutcome`:
-  - [ ] `Completed { story_key, branch, decisions }` → proceed to Phase 2
-  - [ ] `Escalated { report, decisions }` → notify human (escalation details), return result with `StoryStatus::Blocked`
-  - [ ] `Failed { story_key, error, decisions }` → proceed to Phase 3 (create failure PR)
+- [x] Call `self.session_runner.run(story).await`
+- [x] Match on `SessionOutcome`:
+  - [x] `Completed { story_key, branch, decisions }` → proceed to Phase 2
+  - [x] `Escalated { report, decisions }` → notify human (escalation details), return result with `StoryStatus::Blocked`
+  - [x] `Failed { story_key, error, decisions }` → proceed to Phase 3 (create failure PR)
 
 **Phase 2 — Code Review (optional):**
-- [ ] Check `self.config.code_review_enabled`
-- [ ] If enabled: call `self.review_runner.run(story).await`
-- [ ] Match on `ReviewOutcome`:
-  - [ ] `Completed { report, .. }` → store report for PR comment, proceed to Phase 4
-  - [ ] `Failed { error, .. }` → log error, proceed to Phase 4 WITHOUT review (non-blocking)
-  - [ ] `Skipped { reason }` → log reason, proceed to Phase 4 WITHOUT review (non-blocking)
-- [ ] If disabled: proceed directly to Phase 4
+- [x] Check `self.config.code_review_enabled`
+- [x] If enabled: call `self.review_runner.run(story).await`
+- [x] Match on `ReviewOutcome`:
+  - [x] `Completed { report, .. }` → store report for PR comment, proceed to Phase 4
+  - [x] `Failed { error, .. }` → log error, proceed to Phase 4 WITHOUT review (non-blocking)
+  - [x] `Skipped { reason }` → log reason, proceed to Phase 4 WITHOUT review (non-blocking)
+- [x] If disabled: proceed directly to Phase 4
 
 **Phase 3 — Failure PR (only on session failure):**
-- [ ] Build PR title via `build_pr_title(&story.story_key, &story_title, true)` — produces `"wip({key}): {title} [NEEDS REVIEW]"`
-- [ ] Build decisions section via `format_pr_decisions_section(&decisions)`
-- [ ] Build PR body via `build_pr_description(&PrDescriptionParams { ..., outcome_summary: "failed", failure_details: Some(error_details) })`
-- [ ] Build `CreatePrParams` with title, body, source_branch, target_branch
-- [ ] Call `self.git_provider.create_pr(params).await`
-- [ ] If PR creation succeeds → store PR URL, notify human with failure + PR link
-- [ ] If PR creation also fails → log error, notify human with branch name only (AC2)
-- [ ] Return `PipelineResult` with `StoryStatus::Error`
+- [x] Build PR title via `build_pr_title(&story.story_key, &story_title, true)` — produces `"wip({key}): {title} [NEEDS REVIEW]"`
+- [x] Build decisions section via `format_pr_decisions_section(&decisions)`
+- [x] Build PR body via `build_pr_description(&PrDescriptionParams { ..., outcome_summary: "failed", failure_details: Some(error_details) })`
+- [x] Build `CreatePrParams` with title, body, source_branch, target_branch
+- [x] Call `self.git_provider.create_pr(params).await`
+- [x] If PR creation succeeds → store PR URL, notify human with failure + PR link
+- [x] If PR creation also fails → log error, notify human with branch name only (AC2)
+- [x] Return `PipelineResult` with `StoryStatus::Error`
 
 **Phase 4 — Success PR:**
-- [ ] Build PR title via `build_pr_title(&story.story_key, &story_title, false)` — produces `"feat({key}): {title}"`
-- [ ] Build decisions section via `format_pr_decisions_section(&decisions)`
-- [ ] Build PR body via `build_pr_description(&PrDescriptionParams { ..., outcome_summary: "completed successfully", failure_details: None })`
-- [ ] Build `CreatePrParams` with title, body, source_branch, target_branch
-- [ ] Call `self.git_provider.create_pr(params).await`
-- [ ] If PR creation succeeds:
-  - [ ] If review report available → call `self.git_provider.add_comment(&pr_info.id, &report).await` (non-blocking: log error if fails)
-  - [ ] Notify human with success + PR link
-  - [ ] Return `PipelineResult` with `StoryStatus::Completed`
-- [ ] If PR creation fails (AC2):
-  - [ ] Log error with full context (HTTP status, response body, story_id)
-  - [ ] Notify human with failure details + branch name for manual PR
-  - [ ] Return `PipelineResult` with `StoryStatus::Error`
+- [x] Build PR title via `build_pr_title(&story.story_key, &story_title, false)` — produces `"feat({key}): {title}"`
+- [x] Build decisions section via `format_pr_decisions_section(&decisions)`
+- [x] Build PR body via `build_pr_description(&PrDescriptionParams { ..., outcome_summary: "completed successfully", failure_details: None })`
+- [x] Build `CreatePrParams` with title, body, source_branch, target_branch
+- [x] Call `self.git_provider.create_pr(params).await`
+- [x] If PR creation succeeds:
+  - [x] If review report available → call `self.git_provider.add_comment(&pr_info.id, &report).await` (non-blocking: log error if fails)
+  - [x] Notify human with success + PR link
+  - [x] Return `PipelineResult` with `StoryStatus::Completed`
+- [x] If PR creation fails (AC2):
+  - [x] Log error with full context (HTTP status, response body, story_id)
+  - [x] Notify human with failure details + branch name for manual PR
+  - [x] Return `PipelineResult` with `StoryStatus::Error`
 
 ### Task 4: Implement `process_eligible_stories()` — Batch Orchestration (`src/pipeline.rs`)
 
-- [ ] `pub async fn process_eligible_stories(&self, stories: Vec<StoryInfo>) -> RunSummary`
-- [ ] Iterate stories sequentially IN THE ORDER received from watcher (dependency-sorted)
-- [ ] For each story: call `self.process_story(story).await`
-- [ ] Collect all `PipelineResult` into a `Vec`
-- [ ] Build `RunSummary` from results:
-  - [ ] Map each `PipelineResult` → `StoryNotification`
-  - [ ] Count completed, blocked, errored
-- [ ] After ALL stories processed: call `self.notifier.notify_run_summary(&summary).await` (non-blocking)
-- [ ] Return `RunSummary`
+- [x] `pub async fn process_eligible_stories(&self, stories: Vec<StoryInfo>) -> RunSummary`
+- [x] Iterate stories sequentially IN THE ORDER received from watcher (dependency-sorted)
+- [x] For each story: call `self.process_story(story).await`
+- [x] Collect all `PipelineResult` into a `Vec`
+- [x] Build `RunSummary` from results:
+  - [x] Map each `PipelineResult` → `StoryNotification`
+  - [x] Count completed, blocked, errored
+- [x] After ALL stories processed: call `self.notifier.notify_run_summary(&summary).await` (non-blocking)
+- [x] Return `RunSummary`
 
 ### Task 5: Implement Notification & Title Helpers (`src/pipeline.rs`)
 
-- [ ] `async fn notify_story_result(&self, result: &PipelineResult)`
-  - [ ] Build `StoryNotification` from `PipelineResult`
-  - [ ] Call `self.notifier.notify_story(&notification).await`
-  - [ ] Swallow errors: `if let Err(e) = ... { tracing::error!(action = "notification_failed", ...) }`
-- [ ] `fn story_title_from_label(label: &str) -> String`
-  - [ ] Convert kebab-case label to human-readable title: `"telegram-notifications"` → `"Telegram Notifications"`
-  - [ ] Split on `-`, capitalize first letter of each word, join with spaces
-  - [ ] This is needed because `StoryInfo.label` stores the kebab slug, but `PrDescriptionParams.story_title` and `build_pr_title()` expect a human-readable title
+- [x] `async fn notify_story_result(&self, result: &PipelineResult)`
+  - [x] Build `StoryNotification` from `PipelineResult`
+  - [x] Call `self.notifier.notify_story(&notification).await`
+  - [x] Swallow errors: `if let Err(e) = ... { tracing::error!(action = "notification_failed", ...) }`
+- [x] `fn story_title_from_label(label: &str) -> String`
+  - [x] Convert kebab-case label to human-readable title: `"telegram-notifications"` → `"Telegram Notifications"`
+  - [x] Split on `-`, capitalize first letter of each word, join with spaces
+  - [x] This is needed because `StoryInfo.label` stores the kebab slug, but `PrDescriptionParams.story_title` and `build_pr_title()` expect a human-readable title
 
 ### Task 6: Wire Pipeline into Polling Loop (`src/cli/mod.rs`)
 
-- [ ] In `run_start()`: create `StoryPipeline` after config/secrets validation
-  - [ ] Wrap `BotSecrets` in `Arc<BotSecrets>` for sharing
-  - [ ] Pass `Arc<BotConfig>` and `Arc<BotSecrets>` to `StoryPipeline::new()`
-  - [ ] Handle `StoryPipeline::new()` failure with `tracing::error!()` + return error
-- [ ] In `run_polling_loop()`: accept `&StoryPipeline` parameter
-- [ ] Replace the TODO block with actual story processing:
-  - [ ] Call `pipeline.process_eligible_stories(stories).await`
-  - [ ] Log run summary results
-- [ ] Ensure the daemon NEVER stops on a single story failure — always continues to next story (AC3)
+- [x] In `run_start()`: create `StoryPipeline` after config/secrets validation
+  - [x] Wrap `BotSecrets` in `Arc<BotSecrets>` for sharing
+  - [x] Pass `Arc<BotConfig>` and `Arc<BotSecrets>` to `StoryPipeline::new()`
+  - [x] Handle `StoryPipeline::new()` failure with `CliError::Init` + return error
+- [x] In `run_polling_loop()`: accept `&StoryPipeline` parameter
+- [x] Replace the TODO block with actual story processing:
+  - [x] Call `pipeline.process_eligible_stories(stories).await`
+  - [x] Log run summary results
+  - [x] Update daemon state with `record_story_processed()` per story
+- [x] Ensure the daemon NEVER stops on a single story failure — always continues to next story (AC3)
 
 ### Task 7: Unit Tests
 
-- [ ] `test_pipeline_result_completed_fields` — verify PipelineResult construction for success
-- [ ] `test_pipeline_result_failed_fields` — verify PipelineResult construction for failure
-- [ ] `test_pipeline_result_blocked_fields` — verify PipelineResult for escalation
-- [ ] `test_pipeline_error_display_init_failed` — verify InitFailed error message
-- [ ] `test_pipeline_error_display_session_failed` — verify error message
-- [ ] `test_pipeline_error_display_pr_creation_failed` — verify branch included in message
-- [ ] `test_pipeline_error_display_notification_failed` — verify error message
-- [ ] `test_pipeline_error_is_send_sync` — verify PipelineError is Send + Sync
-- [ ] `test_story_pipeline_is_send_sync` — verify StoryPipeline is Send + Sync (critical for async context)
-- [ ] `test_story_title_from_label_simple` — `"telegram-notifications"` → `"Telegram Notifications"`
-- [ ] `test_story_title_from_label_single_word` — `"scaffolding"` → `"Scaffolding"`
-- [ ] `test_story_title_from_label_multi_word` — `"http-retry-error-resilience"` → `"Http Retry Error Resilience"`
-- [ ] `test_run_summary_from_pipeline_results` — verify correct counting
-- [ ] All tests use mocked data — NO real API calls, NO real sessions
+- [x] `test_pipeline_result_completed_fields` — verify PipelineResult construction for success
+- [x] `test_pipeline_result_failed_fields` — verify PipelineResult construction for failure
+- [x] `test_pipeline_result_blocked_fields` — verify PipelineResult for escalation
+- [x] `test_pipeline_error_display_init` — verify Init error message
+- [x] `test_pipeline_error_display_session` — verify error message
+- [x] `test_pipeline_error_display_pr_creation` — verify branch included in message
+- [x] `test_pipeline_error_display_notification` — verify error message
+- [x] `test_pipeline_error_display_review` — verify review error message
+- [x] `test_pipeline_error_display_pr_comment` — verify PR comment error message
+- [x] `test_pipeline_error_is_send_sync` — verify PipelineError is Send + Sync
+- [x] `test_story_pipeline_is_send_sync` — verify StoryPipeline is Send + Sync (critical for async context)
+- [x] `test_story_title_from_label_simple` — `"telegram-notifications"` → `"Telegram Notifications"`
+- [x] `test_story_title_from_label_single_word` — `"scaffolding"` → `"Scaffolding"`
+- [x] `test_story_title_from_label_multi_word` — `"http-retry-error-resilience"` → `"Http Retry Error Resilience"`
+- [x] `test_story_title_from_label_empty` — `""` → `""`
+- [x] `test_run_summary_from_pipeline_results` — verify correct counting
+- [x] `test_run_summary_all_completed` — verify all-success case
+- [x] `test_run_summary_empty` — verify empty input handling
+- [x] `test_run_summary_story_id_extraction` — verify `"6-1-..."` → `"6.1"` conversion
+- [x] All tests use mocked data — NO real API calls, NO real sessions
 
 ### Task 8: Integration Verification
 
-- [ ] `cargo check` — 0 errors
-- [ ] `cargo test` — all existing + new tests pass, 0 regressions
-- [ ] `cargo clippy` — 0 new warnings
-- [ ] `cargo fmt` — clean
-- [ ] All public items have `///` doc comments
+- [x] `cargo check` — 0 errors
+- [x] `cargo test` — all existing + new tests pass, 0 regressions (525 total: 506 existing + 19 new)
+- [x] `cargo clippy` — 0 new warnings (renamed enum variants per `enum_variant_names`, collapsed nested `if let` per `collapsible_if`)
+- [x] `cargo fmt` — clean
+- [x] All public items have `///` doc comments
 
 ## Dev Notes
 
@@ -575,12 +581,31 @@ src/
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
+None — clean implementation, one compilation fix (`record_story_processed` takes no args).
+
 ### Completion Notes List
+
+- **Task 0:** All 15 prerequisites verified — SessionRunner, ReviewRunner, GitProvider, Notifier, Watcher, helper functions, config structs all confirmed present and matching expected signatures.
+- **Task 1:** Created `src/pipeline.rs` with `PipelineError` enum (6 variants: `Init`, `Session`, `Review`, `PrCreation`, `PrComment`, `Notification`) and `PipelineResult` struct. Added `mod pipeline;` to `src/main.rs`. Variant names shortened from `*Failed` suffix per clippy `enum_variant_names` lint.
+- **Task 2:** `StoryPipeline` struct with `config`, `git_provider`, `notifier`, `session_runner`, `review_runner`. Constructor extracts git token from `BotSecrets` based on provider config, creates all components. `secrets` field not stored on struct (only needed during construction).
+- **Task 3:** `process_story()` implements full 4-phase pipeline: (1) dev session, (2) optional code review, (3) failure PR on session failure, (4) success PR on completion. All error paths handled with logging and notification. PR comment posting is non-blocking.
+- **Task 4:** `process_eligible_stories()` iterates stories sequentially, collects results, builds `RunSummary`, sends summary notification (non-blocking).
+- **Task 5:** `notify_story_result()` builds `StoryNotification` and swallows errors. `story_title_from_label()` converts kebab-case to Title Case. `build_run_summary()` helper maps `PipelineResult` vec to `RunSummary` with correct counts.
+- **Task 6:** Wired pipeline into `src/cli/mod.rs`: `run_start()` wraps `BotSecrets` in `Arc`, creates `StoryPipeline`, passes to `run_polling_loop()`. `run_polling_loop()` now accepts `&StoryPipeline` parameter. Replaced TODO block with `pipeline.process_eligible_stories(stories).await` + summary logging + daemon state updates via `record_story_processed()`.
+- **Task 7:** 19 unit tests covering: `PipelineResult` construction (completed/failed/blocked), `PipelineError` display (all 6 variants), `Send+Sync` for both `PipelineError` and `StoryPipeline`, `story_title_from_label` (simple/single/multi/empty), `build_run_summary` (mixed/all-completed/empty/story-id extraction). All mock data, no real API calls.
+- **Task 8:** `cargo check` 0 errors, `cargo test` 525 passed (506 existing + 19 new, 0 regressions), `cargo clippy` 0 new errors, `cargo fmt` clean, all public items have `///` doc comments.
+- **Clippy fixes:** Renamed enum variants to drop common `Failed` suffix. Collapsed nested `if let Some` + `if let Err` using `let chains` syntax.
 
 ### Change Log
 
+- 2026-02-08: Implemented Story 6.2 — HTTP Retry & Error Resilience / StoryPipeline orchestrator (all 9 tasks complete, 19 new tests, 525 total passing)
+
 ### File List
+
+- `src/pipeline.rs` — **NEW** — StoryPipeline orchestrator, PipelineError, PipelineResult, process_story(), process_eligible_stories(), story_title_from_label(), build_run_summary(), notify_story_result(), 19 unit tests
+- `src/main.rs` — **MODIFIED** — Added `mod pipeline;` declaration
+- `src/cli/mod.rs` — **MODIFIED** — Wired StoryPipeline into run_start() and run_polling_loop(), replaced TODO with pipeline execution

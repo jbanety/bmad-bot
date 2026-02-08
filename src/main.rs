@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod git_provider;
 mod notifier;
+mod pipeline;
 mod review;
 mod session;
 mod supervisor;
