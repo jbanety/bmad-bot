@@ -466,7 +466,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
 /// A header comment block includes the generation timestamp and a note about
 /// secrets being in `.env`.
 fn generate_config_yaml(config: &BotConfig) -> Result<String, CliError> {
-    let yaml_body = serde_yaml::to_string(config).map_err(|e| CliError::Init {
+    let yaml_body = serde_yml::to_string(config).map_err(|e| CliError::Init {
         reason: format!("Failed to serialize config to YAML: {e}"),
     })?;
 
@@ -852,7 +852,7 @@ mod tests {
             .filter(|l| !l.starts_with('#'))
             .collect::<Vec<_>>()
             .join("\n");
-        let parsed: BotConfig = serde_yaml::from_str(&yaml_body).unwrap();
+        let parsed: BotConfig = serde_yml::from_str(&yaml_body).unwrap();
         assert_eq!(parsed.polling_interval_secs, 300);
         assert_eq!(parsed.git_provider.provider, "github");
         assert_eq!(parsed.llm.dev.provider, "anthropic");
@@ -867,7 +867,7 @@ mod tests {
             .filter(|l| !l.starts_with('#'))
             .collect::<Vec<_>>()
             .join("\n");
-        let parsed: BotConfig = serde_yaml::from_str(&yaml_body).unwrap();
+        let parsed: BotConfig = serde_yml::from_str(&yaml_body).unwrap();
         assert!(parsed.validate().is_ok());
     }
 

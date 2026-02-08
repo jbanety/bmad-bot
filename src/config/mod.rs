@@ -30,7 +30,7 @@ pub enum ConfigError {
 
     /// The YAML content could not be parsed into [`BotConfig`].
     #[error("Failed to parse config YAML: {0}")]
-    YamlParse(#[from] serde_yaml::Error),
+    YamlParse(#[from] serde_yml::Error),
 
     /// A field was present but contained an invalid value.
     #[error("Invalid config value for '{field}': {reason}")]
@@ -197,7 +197,7 @@ impl BotConfig {
             path: path.display().to_string(),
             source,
         })?;
-        let config: Self = serde_yaml::from_str(&content)?;
+        let config: Self = serde_yml::from_str(&content)?;
         Ok(config)
     }
 
@@ -548,7 +548,7 @@ bmad_paths:
     fn test_config_default_log_format_is_pretty() {
         // YAML without log_format — should default to "pretty"
         let yaml = VALID_YAML.replace("log_format: pretty\n", "");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         assert_eq!(config.log_format, "pretty");
     }
 
@@ -556,7 +556,7 @@ bmad_paths:
     fn test_config_default_log_level_is_info() {
         // YAML without log_level — should default to "info"
         let yaml = VALID_YAML.replace("log_level: info\n", "");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         assert_eq!(config.log_level, "info");
     }
 
@@ -635,7 +635,7 @@ bmad_paths:
 
     /// Helper — parse YAML string into BotConfig.
     fn config_from_str(yaml: &str) -> Result<BotConfig, ConfigError> {
-        Ok(serde_yaml::from_str(yaml)?)
+        Ok(serde_yml::from_str(yaml)?)
     }
 
     /// Helper — build a known-valid BotConfig for mutation-based tests.
@@ -647,7 +647,7 @@ bmad_paths:
 
     #[test]
     fn test_config_load_valid_yaml() {
-        let config: BotConfig = serde_yaml::from_str(VALID_YAML).unwrap();
+        let config: BotConfig = serde_yml::from_str(VALID_YAML).unwrap();
 
         assert_eq!(config.polling_interval_secs, 60);
         assert_eq!(config.git_provider.provider, "github");
@@ -709,7 +709,7 @@ bmad_paths:
   planning_artifacts: "p"
   implementation_artifacts: "i"
 "#;
-        let result: Result<BotConfig, _> = serde_yaml::from_str(yaml);
+        let result: Result<BotConfig, _> = serde_yml::from_str(yaml);
         assert!(
             result.is_err(),
             "missing git_provider should fail deserialization"
@@ -721,7 +721,7 @@ bmad_paths:
     #[test]
     fn test_config_validate_rejects_zero_polling_interval() {
         let yaml = VALID_YAML.replace("polling_interval_secs: 60", "polling_interval_secs: 0");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         let err = config.validate().unwrap_err();
         match err {
             ConfigError::InvalidField { ref field, .. } => {
@@ -736,7 +736,7 @@ bmad_paths:
     #[test]
     fn test_config_validate_rejects_unknown_git_provider() {
         let yaml = VALID_YAML.replace("provider: github", "provider: bitbucket");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         let err = config.validate().unwrap_err();
         match err {
             ConfigError::InvalidField { ref field, .. } => {
@@ -751,7 +751,7 @@ bmad_paths:
     #[test]
     fn test_config_validate_rejects_unknown_llm_provider() {
         let yaml = VALID_YAML.replace("provider: anthropic", "provider: gemini");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         let err = config.validate().unwrap_err();
         match err {
             ConfigError::InvalidField { ref field, .. } => {
@@ -857,7 +857,7 @@ bmad_paths:
     #[test]
     fn test_secrets_validate_telegram_token_required_when_enabled() {
         let yaml = VALID_YAML.replace("enabled: false", "enabled: true");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         let secrets = BotSecrets {
             anthropic_api_key: Some("sk-ant".to_string()),
             openai_api_key: Some("sk-oai".to_string()),
@@ -912,7 +912,7 @@ bmad_paths:
   planning_artifacts: "_bmad-output/planning-artifacts"
   implementation_artifacts: "_bmad-output/implementation-artifacts"
 "#;
-        let config: BotConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(yaml).unwrap();
 
         // polling_interval_secs defaults to 300
         assert_eq!(config.polling_interval_secs, 300);
@@ -927,7 +927,7 @@ bmad_paths:
     #[test]
     fn test_config_validate_rejects_empty_project_root() {
         let yaml = VALID_YAML.replace("project_root: \".\"", "project_root: \"\"");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         let err = config.validate().unwrap_err();
         match err {
             ConfigError::MissingField { ref field } => {
@@ -940,7 +940,7 @@ bmad_paths:
     #[test]
     fn test_config_validate_rejects_whitespace_only_path() {
         let yaml = VALID_YAML.replace("output_folder: \"_bmad-output\"", "output_folder: \"   \"");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         let err = config.validate().unwrap_err();
         match err {
             ConfigError::MissingField { ref field } => {
@@ -954,7 +954,7 @@ bmad_paths:
     fn test_config_invalid_yaml_returns_parse_error() {
         let bad_yaml = "this: is: not: valid: yaml: [[[";
         let result: Result<BotConfig, ConfigError> =
-            serde_yaml::from_str::<BotConfig>(bad_yaml).map_err(ConfigError::from);
+            serde_yml::from_str::<BotConfig>(bad_yaml).map_err(ConfigError::from);
         assert!(matches!(result, Err(ConfigError::YamlParse(_))));
     }
 
@@ -986,7 +986,7 @@ bmad_paths:
   planning_artifacts: "p"
   implementation_artifacts: "i"
 "#;
-        let config: BotConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         match err {
             ConfigError::InvalidField { ref field, .. } => {
@@ -999,7 +999,7 @@ bmad_paths:
     #[test]
     fn test_config_github_models_provider_accepted() {
         let yaml = VALID_YAML.replace("provider: openai", "provider: github-models");
-        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         assert!(config.validate().is_ok());
     }
 
@@ -1013,7 +1013,7 @@ bmad_paths:
             "git_provider:\n  provider: gitlab",
             "git_provider:\n  provider: gitlab",
         );
-        let config: BotConfig = serde_yaml::from_str(&reparsed).unwrap();
+        let config: BotConfig = serde_yml::from_str(&reparsed).unwrap();
         assert!(config.validate().is_ok());
     }
 }
