@@ -23,9 +23,9 @@ async fn main() -> Result<()> {
             cli::run_start(&cli.config).await?;
         }
         cli::Commands::Init => {
-            // Minimal tracing for non-start commands — use try_init to avoid panic
+            // Tracing is global — main.rs owns the subscriber for non-start commands
             let _ = tracing_subscriber::fmt::try_init();
-            tracing::warn!("'init' command not yet implemented — see Story 1.3");
+            cli::run_init(&cli.config).await?;
         }
         cli::Commands::Status => {
             let _ = tracing_subscriber::fmt::try_init();
