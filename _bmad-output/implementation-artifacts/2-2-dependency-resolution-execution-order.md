@@ -1,6 +1,6 @@
 # Story 2.2: Dependency Resolution & Execution Order
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,75 +22,75 @@ So that stories are processed in a sequence that respects their prerequisites.
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Verify prerequisites from Story 2.1 (AC: #1, #2, #3, #4)
-  - [ ] 0.1 Verify `src/watcher/mod.rs` contains `WatcherError`, `StoryInfo`, `SprintStatusFile`, `Watcher` (from Story 2.1)
-  - [ ] 0.2 Verify `StoryInfo` has `dependencies: Vec<String>` field (added in Story 2.1 validation)
-  - [ ] 0.3 Verify `src/watcher/deps.rs` exists as a stub with `pub mod deps;` in `mod.rs`
-  - [ ] 0.4 Run `cargo check` to confirm clean baseline
+- [x] Task 0: Verify prerequisites from Story 2.1 (AC: #1, #2, #3, #4)
+  - [x] 0.1 Verify `src/watcher/mod.rs` contains `WatcherError`, `StoryInfo`, `SprintStatusFile`, `Watcher` (from Story 2.1)
+  - [x] 0.2 Verify `StoryInfo` has `dependencies: Vec<String>` field (added in Story 2.1 validation)
+  - [x] 0.3 Verify `src/watcher/deps.rs` exists as a stub with `pub mod deps;` in `mod.rs`
+  - [x] 0.4 Run `cargo check` to confirm clean baseline
 
-- [ ] Task 1: Add `CyclicDependency` variant to `WatcherError` in `src/watcher/mod.rs` (AC: #4)
-  - [ ] 1.1 Add `CyclicDependency { cycle: Vec<String> }` variant to `WatcherError`
-  - [ ] 1.2 Add `#[error("Cyclic dependency detected: {cycle:?}")]` error message
-  - [ ] 1.3 Add `/// doc comment` explaining the variant
+- [x] Task 1: Add `CyclicDependency` variant to `WatcherError` in `src/watcher/mod.rs` (AC: #4)
+  - [x] 1.1 Add `CyclicDependency { cycle: Vec<String> }` variant to `WatcherError`
+  - [x] 1.2 Add `#[error("Cyclic dependency detected: {cycle:?}")]` error message
+  - [x] 1.3 Add `/// doc comment` explaining the variant
 
-- [ ] Task 2: Implement `DependencyGraph` in `src/watcher/deps.rs` (AC: #1, #4)
-  - [ ] 2.1 Create `pub struct DependencyGraph` with fields: `adjacency: HashMap<String, Vec<String>>` (story_key → dependencies), `all_statuses: HashMap<String, String>` (story_key → current status from sprint-status), `doc_order: HashMap<String, usize>` (story_key → position in sprint-status.yaml for deterministic ordering)
-  - [ ] 2.2 Implement `DependencyGraph::new(stories: &[StoryInfo], all_statuses: &[(String, String)]) -> Self` — builds the graph from StoryInfo dependencies and full sprint status data; computes `doc_order` from the position of each story key in `all_statuses` slice
-  - [ ] 2.3 Implement `DependencyGraph::topological_sort(&self) -> Result<Vec<String>, WatcherError>` — returns story keys in dependency order using Kahn's algorithm with **sprint-order tiebreaker** (when multiple nodes have in_degree 0, dequeue by `doc_order` ascending), returns `CyclicDependency` if cycle detected
-  - [ ] 2.4 Derive `Debug`
+- [x] Task 2: Implement `DependencyGraph` in `src/watcher/deps.rs` (AC: #1, #4)
+  - [x] 2.1 Create `pub struct DependencyGraph` with fields: `adjacency: HashMap<String, Vec<String>>` (story_key → dependencies), `all_statuses: HashMap<String, String>` (story_key → current status from sprint-status), `doc_order: HashMap<String, usize>` (story_key → position in sprint-status.yaml for deterministic ordering)
+  - [x] 2.2 Implement `DependencyGraph::new(stories: &[StoryInfo], all_statuses: &[(String, String)]) -> Self` — builds the graph from StoryInfo dependencies and full sprint status data; computes `doc_order` from the position of each story key in `all_statuses` slice
+  - [x] 2.3 Implement `DependencyGraph::topological_sort(&self) -> Result<Vec<String>, WatcherError>` — returns story keys in dependency order using Kahn's algorithm with **sprint-order tiebreaker** (when multiple nodes have in_degree 0, dequeue by `doc_order` ascending), returns `CyclicDependency` if cycle detected
+  - [x] 2.4 Derive `Debug`
 
-- [ ] Task 3: Implement dependency derivation logic in `src/watcher/deps.rs` (AC: #1, #2, #3)
-  - [ ] 3.1 Implement `pub fn derive_dependencies(stories: &mut [StoryInfo], all_statuses: &[(String, String)])` — populates the `dependencies` field on each StoryInfo based on intra-epic sequential ordering rule: story N.M depends on story N.(M-1). Reuse `StoryInfo::from_key_and_status()` for parsing keys (DRY — avoid duplicating parsing logic)
-  - [ ] 3.2 Within an epic, story M depends on story M-1 being `done` (e.g., `2-2-*` depends on `2-1-*`)
-  - [ ] 3.3 The first story in each epic (story_num == 1) has no intra-epic dependency
-  - [ ] 3.4 Cross-epic dependencies are NOT enforced at pre-gate level — the BMAD agent handles those as a second layer (Architecture: two-layer dependency model)
-  - [ ] 3.5 Populate `StoryInfo.dependencies` with the resolved dependency story keys
+- [x] Task 3: Implement dependency derivation logic in `src/watcher/deps.rs` (AC: #1, #2, #3)
+  - [x] 3.1 Implement `pub fn derive_dependencies(stories: &mut [StoryInfo], all_statuses: &[(String, String)])` — populates the `dependencies` field on each StoryInfo based on intra-epic sequential ordering rule: story N.M depends on story N.(M-1). Reuse `StoryInfo::from_key_and_status()` for parsing keys (DRY — avoid duplicating parsing logic)
+  - [x] 3.2 Within an epic, story M depends on story M-1 being `done` (e.g., `2-2-*` depends on `2-1-*`)
+  - [x] 3.3 The first story in each epic (story_num == 1) has no intra-epic dependency
+  - [x] 3.4 Cross-epic dependencies are NOT enforced at pre-gate level — the BMAD agent handles those as a second layer (Architecture: two-layer dependency model)
+  - [x] 3.5 Populate `StoryInfo.dependencies` with the resolved dependency story keys
 
-- [ ] Task 4: Implement pre-gate filtering in `src/watcher/deps.rs` (AC: #2, #3)
-  - [ ] 4.1 Implement `pub fn filter_eligible(stories: Vec<StoryInfo>, all_statuses: &[(String, String)]) -> Result<Vec<StoryInfo>, WatcherError>` — the main entry point for the pre-gate
-  - [ ] 4.2 Call `derive_dependencies()` to populate dependency fields
-  - [ ] 4.3 Build `DependencyGraph` from the stories
-  - [ ] 4.4 Run `topological_sort()` to detect cycles and get ordering
-  - [ ] 4.5 For each story in topological order: check if ALL dependencies have status `done` in `all_statuses`
-  - [ ] 4.6 If any dependency is NOT `done` → skip story, log at info level: `tracing::info!(story_key = %key, unmet_dep = %dep, dep_status = %status, "Story skipped — dependency not met")`
-  - [ ] 4.7 If all dependencies are `done` → include in result vec
-  - [ ] 4.8 Return filtered stories in topological order (prerequisites first)
+- [x] Task 4: Implement pre-gate filtering in `src/watcher/deps.rs` (AC: #2, #3)
+  - [x] 4.1 Implement `pub fn filter_eligible(stories: Vec<StoryInfo>, all_statuses: &[(String, String)]) -> Result<Vec<StoryInfo>, WatcherError>` — the main entry point for the pre-gate
+  - [x] 4.2 Call `derive_dependencies()` to populate dependency fields
+  - [x] 4.3 Build `DependencyGraph` from the stories
+  - [x] 4.4 Run `topological_sort()` to detect cycles and get ordering
+  - [x] 4.5 For each story in topological order: check if ALL dependencies have status `done` in `all_statuses`
+  - [x] 4.6 If any dependency is NOT `done` → skip story, log at info level: `tracing::info!(story_key = %key, unmet_dep = %dep, dep_status = %status, "Story skipped — dependency not met")`
+  - [x] 4.7 If all dependencies are `done` → include in result vec
+  - [x] 4.8 Return filtered stories in topological order (prerequisites first)
 
-- [ ] Task 5: Integrate pre-gate into `Watcher::poll()` in `src/watcher/mod.rs` (AC: #1, #2, #3, #4)
-  - [ ] 5.1 After `SprintStatusFile::eligible_stories()` returns candidates, call `deps::filter_eligible()` with eligible stories and full entries from `SprintStatusFile`
-  - [ ] 5.2 Expose `SprintStatusFile::entries()` as `pub fn entries(&self) -> &[(String, String)]` to provide all statuses to deps module
-  - [ ] 5.3 On `Ok(filtered)` → return filtered stories (replaces raw eligible list)
-  - [ ] 5.4 On `Err(WatcherError::CyclicDependency { .. })` → log error, return the error
-  - [ ] 5.5 Log pre-gate summary: `tracing::info!(pre_gate_input = eligible.len(), pre_gate_output = filtered.len(), "Pre-gate dependency filter applied")`
-  - [ ] 5.6 Make `make_test_bot_config` accessible from `deps.rs` tests: either mark it `pub(crate)` inside `#[cfg(test)] mod tests` in `watcher/mod.rs`, or duplicate the helper in `deps.rs` tests
+- [x] Task 5: Integrate pre-gate into `Watcher::poll()` in `src/watcher/mod.rs` (AC: #1, #2, #3, #4)
+  - [x] 5.1 After `SprintStatusFile::eligible_stories()` returns candidates, call `deps::filter_eligible()` with eligible stories and full entries from `SprintStatusFile`
+  - [x] 5.2 Expose `SprintStatusFile::entries()` as `pub fn entries(&self) -> &[(String, String)]` to provide all statuses to deps module
+  - [x] 5.3 On `Ok(filtered)` → return filtered stories (replaces raw eligible list)
+  - [x] 5.4 On `Err(WatcherError::CyclicDependency { .. })` → log error, return the error
+  - [x] 5.5 Log pre-gate summary: `tracing::info!(pre_gate_input = eligible.len(), pre_gate_output = filtered.len(), "Pre-gate dependency filter applied")`
+  - [x] 5.6 Make `make_test_bot_config` accessible from `deps.rs` tests: either mark it `pub(crate)` inside `#[cfg(test)] mod tests` in `watcher/mod.rs`, or duplicate the helper in `deps.rs` tests
 
-- [ ] Task 6: Update `run_polling_loop()` in `src/cli/mod.rs` (AC: #4)
-  - [ ] 6.1 Add match arm for `WatcherError::CyclicDependency { ref cycle }` → `tracing::error!(cycle = ?cycle, "Cyclic dependency detected — affected stories skipped")`
-  - [ ] 6.2 Continue polling on next cycle (do not crash)
+- [x] Task 6: Update `run_polling_loop()` in `src/cli/mod.rs` (AC: #4)
+  - [x] 6.1 Add match arm for `WatcherError::CyclicDependency { ref cycle }` → `tracing::error!(cycle = ?cycle, "Cyclic dependency detected — affected stories skipped")`
+  - [x] 6.2 Continue polling on next cycle (do not crash)
 
-- [ ] Task 7: Write unit tests (AC: #1, #2, #3, #4)
-  - [ ] 7.1 Test `derive_dependencies` correctly sets sequential intra-epic deps (2-2 depends on 2-1)
-  - [ ] 7.2 Test `derive_dependencies` sets no deps for first story in epic (story_num == 1)
-  - [ ] 7.3 Test `derive_dependencies` handles multiple epics independently
-  - [ ] 7.4 Test `DependencyGraph::topological_sort` returns correct order for linear chain
-  - [ ] 7.5 Test `DependencyGraph::topological_sort` returns `CyclicDependency` for circular deps
-  - [ ] 7.6 Test `DependencyGraph::topological_sort` handles independent stories (no edges) and returns them in sprint-status document order
-  - [ ] 7.7 Test `filter_eligible` returns only stories with all deps `done`
-  - [ ] 7.8 Test `filter_eligible` skips story when dep is `ready-for-dev` (not done)
-  - [ ] 7.9 Test `filter_eligible` skips story when dep is `in-progress`
-  - [ ] 7.10 Test `filter_eligible` returns first story in epic even when nothing is done (no deps)
-  - [ ] 7.11 Test `filter_eligible` returns empty vec when all stories have unmet deps
-  - [ ] 7.12 Test `filter_eligible` preserves topological order with sprint-order tiebreaker in output
-  - [ ] 7.14 Test `topological_sort` determinism: independent stories from different epics returned in document order
-  - [ ] 7.13 Test full integration: `Watcher::poll()` with deps filtering active
+- [x] Task 7: Write unit tests (AC: #1, #2, #3, #4)
+  - [x] 7.1 Test `derive_dependencies` correctly sets sequential intra-epic deps (2-2 depends on 2-1)
+  - [x] 7.2 Test `derive_dependencies` sets no deps for first story in epic (story_num == 1)
+  - [x] 7.3 Test `derive_dependencies` handles multiple epics independently
+  - [x] 7.4 Test `DependencyGraph::topological_sort` returns correct order for linear chain
+  - [x] 7.5 Test `DependencyGraph::topological_sort` returns `CyclicDependency` for circular deps
+  - [x] 7.6 Test `DependencyGraph::topological_sort` handles independent stories (no edges) and returns them in sprint-status document order
+  - [x] 7.7 Test `filter_eligible` returns only stories with all deps `done`
+  - [x] 7.8 Test `filter_eligible` skips story when dep is `ready-for-dev` (not done)
+  - [x] 7.9 Test `filter_eligible` skips story when dep is `in-progress`
+  - [x] 7.10 Test `filter_eligible` returns first story in epic even when nothing is done (no deps)
+  - [x] 7.11 Test `filter_eligible` returns empty vec when all stories have unmet deps
+  - [x] 7.12 Test `filter_eligible` preserves topological order with sprint-order tiebreaker in output
+  - [x] 7.14 Test `topological_sort` determinism: independent stories from different epics returned in document order
+  - [x] 7.13 Test full integration: `Watcher::poll()` with deps filtering active
 
-- [ ] Task 8: Final quality checks
-  - [ ] 8.1 Run `cargo fmt -- --check` and fix any formatting issues
-  - [ ] 8.2 Run `cargo clippy` and fix any warnings
-  - [ ] 8.3 Run `cargo test` and verify all tests pass (including Story 2.1 tests)
-  - [ ] 8.4 Verify all public items have `///` doc comments
-  - [ ] 8.5 Manual integration test: create a sprint-status.yaml with stories where 1-1 is `done` and 1-2 is `ready-for-dev` → verify 1-2 is eligible
-  - [ ] 8.6 Manual integration test: create sprint-status where 1-1 is `in-progress` and 1-2 is `ready-for-dev` → verify 1-2 is skipped
+- [x] Task 8: Final quality checks
+  - [x] 8.1 Run `cargo fmt -- --check` and fix any formatting issues
+  - [x] 8.2 Run `cargo clippy` and fix any warnings
+  - [x] 8.3 Run `cargo test` and verify all tests pass (including Story 2.1 tests)
+  - [x] 8.4 Verify all public items have `///` doc comments
+  - [x] 8.5 Manual integration test: create a sprint-status.yaml with stories where 1-1 is `done` and 1-2 is `ready-for-dev` → verify 1-2 is eligible
+  - [x] 8.6 Manual integration test: create sprint-status where 1-1 is `in-progress` and 1-2 is `ready-for-dev` → verify 1-2 is skipped
 
 ## Dev Notes
 
@@ -898,10 +898,32 @@ The `watcher → session` interface is now dependency-aware:
 
 ### Agent Model Used
 
-_(filled post-implementation)_
+Claude Opus 4.6 (via Cursor)
 
 ### Debug Log References
 
+No debug issues encountered. One Rust 2024 edition pattern matching fix required (`&deg` → `**deg` in iterator filter). One clippy `collapsible_if` fix applied.
+
 ### Completion Notes List
 
+- ✅ Task 0: Prerequisites verified — all Story 2.1 artifacts present, `cargo check` clean
+- ✅ Task 1: Added `CyclicDependency { cycle: Vec<String> }` variant to `WatcherError` with `#[error]` and doc comment
+- ✅ Task 2: Implemented `DependencyGraph` struct with `new()`, `topological_sort()` (Kahn's algorithm + sprint-order tiebreaker via `BinaryHeap<Reverse<…>>`), and `deps_satisfied()`. Derived `Debug`.
+- ✅ Task 3: Implemented `derive_dependencies()` — intra-epic sequential ordering rule (N.M depends on N.(M-1)). Reuses `StoryInfo::from_key_and_status()` for DRY key parsing. Cross-epic deps intentionally not enforced (two-layer model).
+- ✅ Task 4: Implemented `filter_eligible()` — main pre-gate entry point. Derives deps → builds graph → topo sort → filters by `done` status → returns in topological order. Logs skipped stories with structured tracing fields.
+- ✅ Task 5: Integrated pre-gate into `Watcher::poll()`. Added `SprintStatusFile::entries()` accessor. Updated poll to pipe eligible stories through `deps::filter_eligible()`. Made `mod tests` and `make_test_bot_config` `pub(crate)` for cross-module test access.
+- ✅ Task 6: Added `CyclicDependency` match arm in `run_polling_loop()` — logs error, continues polling (no crash).
+- ✅ Task 7: All 14 unit tests written and passing: 3 derive_dependencies tests, 4 topological_sort tests, 6 filter_eligible tests, 1 Watcher::poll integration test.
+- ✅ Task 8: `cargo fmt` clean, `cargo clippy` clean (only pre-existing warnings on unused fields from future epics), `cargo test` 151/151 pass, all public items have `///` doc comments. Manual integration scenarios covered by `test_watcher_poll_with_deps_filtering` and `test_filter_eligible_skips_story_with_dep_in_progress`.
+
 ### File List
+
+| File | Change |
+|------|--------|
+| `src/watcher/deps.rs` | **REPLACED STUB** — Full implementation: `DependencyGraph`, `derive_dependencies()`, `filter_eligible()`, 14 unit tests |
+| `src/watcher/mod.rs` | Added `CyclicDependency` variant to `WatcherError`. Added `SprintStatusFile::entries()`. Updated `Watcher::poll()` to call `deps::filter_eligible()`. Changed `mod tests` to `pub(crate) mod tests` and `make_test_bot_config` to `pub(crate)`. |
+| `src/cli/mod.rs` | Added `CyclicDependency` match arm in `run_polling_loop()`. Removed outdated TODO comment. |
+
+### Change Log
+
+- 2026-02-08: Story 2.2 implemented — Dependency resolution & execution order pre-gate. 3 files modified, 14 new tests added (151 total pass). All ACs satisfied.

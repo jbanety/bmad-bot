@@ -43,6 +43,15 @@ pub enum WatcherError {
     /// either completed or not yet prepared.
     #[error("No eligible stories found (all stories are either done, in-progress, or backlog)")]
     NoEligibleStories,
+
+    /// A cyclic dependency was detected among stories in sprint-status.yaml.
+    /// Contains the list of story keys involved in the cycle. The affected
+    /// stories are skipped for this polling cycle.
+    #[error("Cyclic dependency detected: {cycle:?}")]
+    CyclicDependency {
+        /// Story keys forming the dependency cycle.
+        cycle: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +227,13 @@ impl SprintStatusFile {
             .collect()
     }
 
+    /// Returns all entries as (key, status) pairs.
+    /// Used by the dependency resolution module to check status of
+    /// non-eligible stories (e.g., whether a dependency is `done`).
+    pub fn entries(&self) -> &[(String, String)] {
+        &self.entries
+    }
+
     /// Returns the total number of entries (including epics and retrospectives).
     pub fn entry_count(&self) -> usize {
         self.entries.len()
@@ -291,16 +307,31 @@ impl Watcher {
             return Err(WatcherError::NoEligibleStories);
         }
 
-        for story in &eligible {
+        // Pre-gate: dependency resolution and filtering (Story 2.2)
+        let entries = sprint_status.entries();
+        let filtered = deps::filter_eligible(eligible, entries)?;
+
+        tracing::info!(
+            pre_gate_input = all_stories.len(),
+            pre_gate_output = filtered.len(),
+            "Pre-gate dependency filter applied"
+        );
+
+        if filtered.is_empty() {
+            return Err(WatcherError::NoEligibleStories);
+        }
+
+        for story in &filtered {
             tracing::info!(
                 story_id = %story.story_id,
                 story_key = %story.story_key,
                 branch = %story.branch_name,
-                "Eligible story detected"
+                deps = ?story.dependencies,
+                "Eligible story detected (deps satisfied)"
             );
         }
 
-        Ok(eligible)
+        Ok(filtered)
     }
 
     /// Returns the path being polled (for diagnostics/logging).
@@ -314,7 +345,7 @@ impl Watcher {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
 
@@ -638,7 +669,7 @@ development_status:
 
     /// Helper: create a minimal BotConfig for watcher tests.
     /// Only `bmad_paths.implementation_artifacts` matters for watcher.
-    fn make_test_bot_config(artifacts_dir: &Path) -> BotConfig {
+    pub(crate) fn make_test_bot_config(artifacts_dir: &Path) -> BotConfig {
         use crate::config::*;
         BotConfig {
             polling_interval_secs: 10,

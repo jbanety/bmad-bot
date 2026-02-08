@@ -1036,7 +1036,6 @@ async fn run_polling_loop(
                             "Found eligible stories — session launching not yet implemented (Epic 4)"
                         );
                         // TODO: Epic 4 — Launch dev session for first eligible story
-                        // Story 2.2 will add dependency resolution before this point.
                     }
                     Err(crate::watcher::WatcherError::NoEligibleStories) => {
                         tracing::info!("No eligible stories in this cycle — waiting for next poll");
@@ -1045,6 +1044,12 @@ async fn run_polling_loop(
                         tracing::warn!(
                             path = %path,
                             "Sprint status file not found — has sprint-planning been run?"
+                        );
+                    }
+                    Err(crate::watcher::WatcherError::CyclicDependency { ref cycle }) => {
+                        tracing::error!(
+                            cycle = ?cycle,
+                            "Cyclic dependency detected in sprint-status — affected stories skipped, will retry next cycle"
                         );
                     }
                     Err(e) => {
