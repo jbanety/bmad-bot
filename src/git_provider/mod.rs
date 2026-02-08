@@ -10,6 +10,7 @@ mod github;
 mod gitlab;
 
 pub use github::GitHubProvider;
+pub use gitlab::GitLabProvider;
 
 use async_trait::async_trait;
 
@@ -155,9 +156,10 @@ pub fn create_provider(
             let provider = GitHubProvider::new(config, token)?;
             Ok(Box::new(provider) as Box<dyn GitProvider>)
         }
-        "gitlab" => Err(GitProviderError::ProviderNotConfigured {
-            provider: "gitlab (not yet implemented)".into(),
-        }),
+        "gitlab" => {
+            let provider = GitLabProvider::new(config, token)?;
+            Ok(Box::new(provider) as Box<dyn GitProvider>)
+        }
         other => Err(GitProviderError::ProviderNotConfigured {
             provider: other.into(),
         }),
@@ -246,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_provider_gitlab_returns_not_configured() {
+    fn test_create_provider_gitlab_returns_ok() {
         let config = GitProviderConfig {
             provider: "gitlab".to_string(),
             repo_owner: "test-owner".to_string(),
@@ -254,13 +256,10 @@ mod tests {
             target_branch: "main".to_string(),
         };
         let result = create_provider(&config, "glpat-test");
-        match result {
-            Err(GitProviderError::ProviderNotConfigured { provider }) => {
-                assert!(provider.contains("gitlab"));
-            }
-            Err(other) => panic!("Expected ProviderNotConfigured, got: {other}"),
-            Ok(_) => panic!("Expected Err, got Ok"),
-        }
+        assert!(
+            result.is_ok(),
+            "Expected Ok for gitlab provider with valid token"
+        );
     }
 
     #[test]

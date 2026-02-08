@@ -1,6 +1,6 @@
 # Story 5.3: GitLab Merge Request Support
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -36,17 +36,17 @@ so that I get the same experience regardless of my git provider.
 
 ### Task 0: Prerequisite Verification
 
-- [ ] Verify Story 5.1 types are present and compilable: `GitProvider` trait, `GitProviderError`, `CreatePrParams`, `PrInfo`, `create_provider()` factory in `src/git_provider/mod.rs`
-- [ ] Verify `GitHubProvider` exists in `src/git_provider/github.rs` as implementation reference
-- [ ] Verify `build_http_client()` exists in `src/config/mod.rs` returning `reqwest_middleware::ClientWithMiddleware` with retry
-- [ ] Verify `BotSecrets.gitlab_token` field exists in `src/config/mod.rs`
-- [ ] Verify `GitProviderConfig` struct has `provider`, `repo_owner`, `repo_name`, `target_branch` fields
-- [ ] Verify `reqwest = "0.13"` (with `json` feature), `reqwest-middleware = "0.5"`, `reqwest-retry = "0.9"`, `async-trait = "0.1"`, `serde = "1"` (with `derive`), `serde_json = "1"` are in `Cargo.toml`
-- [ ] Confirm existing skeleton file: `src/git_provider/gitlab.rs` (currently TODO stub)
+- [x] Verify Story 5.1 types are present and compilable: `GitProvider` trait, `GitProviderError`, `CreatePrParams`, `PrInfo`, `create_provider()` factory in `src/git_provider/mod.rs`
+- [x] Verify `GitHubProvider` exists in `src/git_provider/github.rs` as implementation reference
+- [x] Verify `build_http_client()` exists in `src/config/mod.rs` returning `reqwest_middleware::ClientWithMiddleware` with retry
+- [x] Verify `BotSecrets.gitlab_token` field exists in `src/config/mod.rs`
+- [x] Verify `GitProviderConfig` struct has `provider`, `repo_owner`, `repo_name`, `target_branch` fields
+- [x] Verify `reqwest = "0.13"` (with `json` feature), `reqwest-middleware = "0.5"`, `reqwest-retry = "0.9"`, `async-trait = "0.1"`, `serde = "1"` (with `derive`), `serde_json = "1"` are in `Cargo.toml`
+- [x] Confirm existing skeleton file: `src/git_provider/gitlab.rs` (currently TODO stub)
 
 ### Task 1: Define GitLab API Response Types (`src/git_provider/gitlab.rs`)
 
-- [ ] Define private response structs for serde deserialization:
+- [x] Define private response structs for serde deserialization:
   - `#[derive(serde::Deserialize)] struct CreateMrResponse`:
     - `iid: u64` — merge request **internal** ID scoped to the project (⚠️ NOT `id` which is the global database ID — see "GitLab iid vs id" section in Dev Notes)
     - `web_url: String` — browser URL for the MR
@@ -56,21 +56,21 @@ so that I get the same experience regardless of my git provider.
 
 ### Task 2: Implement `GitLabProvider` (`src/git_provider/gitlab.rs`)
 
-- [ ] Define `GitLabProvider` struct:
+- [x] Define `GitLabProvider` struct:
   - `client: ClientWithMiddleware` — shared HTTP client from `build_http_client()`
   - `base_url: String` — GitLab API base URL, defaults to `"https://gitlab.com/api/v4"` (constructed in `new()`)
   - `project_path: String` — URL-encoded `"{repo_owner}/{repo_name}"` for API paths
   - `token: String` — GitLab personal access token from `.env`
   - `owner: String` — repo owner (for web URL construction)
   - `repo: String` — repo name (for web URL construction)
-- [ ] Implement `GitLabProvider::new(config: &GitProviderConfig, token: &str) -> Result<Self, GitProviderError>`:
+- [x] Implement `GitLabProvider::new(config: &GitProviderConfig, token: &str) -> Result<Self, GitProviderError>`:
   - Validate token is not empty → `GitProviderError::AuthenticationFailed { reason: "GitLab token is empty".into() }`
   - Build HTTP client via `crate::config::build_http_client()`
   - URL-encode project path: `format!("{}%2F{}", config.repo_owner, config.repo_name)` (GitLab API requires URL-encoded path for `:id` parameter)
   - Store `base_url` as `"https://gitlab.com/api/v4"` (hardcoded for MVP; could be made configurable for self-hosted GitLab in a future story)
   - Store owner, repo for web URL construction
   - Return `Ok(Self { ... })`
-- [ ] Implement `#[async_trait] GitProvider for GitLabProvider` — follow the HTTP request pattern documented in "reqwest-middleware Request Pattern" section of Dev Notes for all three methods:
+- [x] Implement `#[async_trait] GitProvider for GitLabProvider` — follow the HTTP request pattern documented in "reqwest-middleware Request Pattern" section of Dev Notes for all three methods:
   - **`create_pr`**:
     - POST `{base_url}/projects/{project_path}/merge_requests`
     - Header: `PRIVATE-TOKEN: {self.token}`
@@ -89,27 +89,27 @@ so that I get the same experience regardless of my git provider.
     - Parse `pr_id` → `u64` (same pattern as `add_comment`)
     - Construct URL deterministically: `format!("https://gitlab.com/{}/{}/-/merge_requests/{}", self.owner, self.repo, mr_iid)` — no API call needed
     - Return the URL string
-- [ ] Implement private helper `fn map_gitlab_error(status: reqwest::StatusCode, body: String) -> GitProviderError`:
+- [x] Implement private helper `fn map_gitlab_error(status: reqwest::StatusCode, body: String) -> GitProviderError`:
   - `401 | 403` → `GitProviderError::AuthenticationFailed { reason: body }`
   - `404` → `GitProviderError::ApiError { status: status.as_u16(), message: body }`
   - `422` → `GitProviderError::BranchNotFound { branch: body }` (GitLab returns 422 when source branch doesn't exist or has no diff from target)
   - `429` → `GitProviderError::RateLimited { retry_after_secs: None }` (note: transient 429s are already retried by reqwest-middleware, so this only fires after retries exhausted)
   - `_` → `GitProviderError::ApiError { status: status.as_u16(), message: body }`
-- [ ] Add `///` doc comments on all public items
+- [x] Add `///` doc comments on all public items
 
 ### Task 3: Update Factory Function (`src/git_provider/mod.rs`)
 
-- [ ] Update `create_provider()` factory function:
+- [x] Update `create_provider()` factory function:
   - Change the `"gitlab"` match arm from:
     `Err(GitProviderError::ProviderNotConfigured { provider: "gitlab (not yet implemented)".into() })`
   - To:
     `"gitlab" => GitLabProvider::new(config, token).map(|p| Box::new(p) as Box<dyn GitProvider>)`
-- [ ] Add `pub use gitlab::GitLabProvider;` re-export in `mod.rs`
-- [ ] Update the `test_create_provider_gitlab_returns_not_configured` test → rename to `test_create_provider_gitlab_returns_ok` and verify it succeeds with a valid token
+- [x] Add `pub use gitlab::GitLabProvider;` re-export in `mod.rs`
+- [x] Update the `test_create_provider_gitlab_returns_not_configured` test → rename to `test_create_provider_gitlab_returns_ok` and verify it succeeds with a valid token
 
 ### Task 4: Unit Tests
 
-- [ ] Tests in `src/git_provider/gitlab.rs` `#[cfg(test)] mod tests`:
+- [x] Tests in `src/git_provider/gitlab.rs` `#[cfg(test)] mod tests`:
   - `test_gitlab_provider_new_success` — constructor returns `Ok` with valid (non-empty) token
   - `test_gitlab_provider_new_empty_token_fails` — constructor returns `AuthenticationFailed` for empty token
   - `test_gitlab_provider_new_stores_fields` — verify struct fields (project_path encoding, owner, repo) after construction
@@ -126,17 +126,17 @@ so that I get the same experience regardless of my git provider.
   - `test_add_comment_invalid_pr_id` — verify non-numeric pr_id returns `InvalidPrId` error
   - `test_create_mr_response_deserializes_from_gitlab_json` — verify `CreateMrResponse` correctly deserializes from a realistic GitLab API JSON response (use `serde_json::from_str` with a hardcoded JSON string matching the GitLab response format, confirming `iid` and `web_url` are extracted and extra fields are ignored)
   - NOTE: No live API tests here — reqwest calls are tested in E2E only
-- [ ] Tests in `src/git_provider/mod.rs` `#[cfg(test)] mod tests`:
+- [x] Tests in `src/git_provider/mod.rs` `#[cfg(test)] mod tests`:
   - Update `test_create_provider_gitlab_returns_not_configured` → `test_create_provider_gitlab_returns_ok` — factory with `provider: "gitlab"` and valid token succeeds
 
 ### Task 5: Integration Verification
 
-- [ ] `cargo check` — zero new errors
-- [ ] `cargo test` — all new tests pass, no regressions
-- [ ] `cargo clippy` — zero new warnings
-- [ ] `cargo fmt` — all clean
-- [ ] Verify `#![deny(clippy::all)]` is respected (no new warnings)
-- [ ] Verify all public items have `///` doc comments
+- [x] `cargo check` — zero new errors
+- [x] `cargo test` — all new tests pass, no regressions (488/488 passed)
+- [x] `cargo clippy` — zero new warnings (only pre-existing dead_code warnings from unintegrated modules)
+- [x] `cargo fmt` — all clean
+- [x] Verify `#![deny(clippy::all)]` is respected (no new warnings)
+- [x] Verify all public items have `///` doc comments
 
 ## Dev Notes
 
@@ -423,10 +423,28 @@ This aligns exactly with the architecture's Complete Project Directory Structure
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
+- `reqwest_middleware::RequestBuilder` does not expose `.json()` — used manual `serde_json::to_vec()` + `Content-Type: application/json` header + `.body()` instead
+- `response.json()` also unavailable on `reqwest::Response` returned through middleware — used `response.bytes()` + `serde_json::from_slice()` instead
+
 ### Completion Notes List
 
+- **Task 0:** All 7 prerequisites verified — trait, types, factory, `build_http_client()`, `BotSecrets.gitlab_token`, `GitProviderConfig`, deps, skeleton file all present
+- **Task 1:** `CreateMrResponse` struct defined with `iid: u64` and `web_url: String` — private to `gitlab.rs`, ignores extra fields by default
+- **Task 2:** `GitLabProvider` struct with `new()` constructor (validates non-empty token, builds HTTP client via `build_http_client()`, URL-encodes project path). `GitProvider` trait impl: `create_pr` (POST merge_requests), `add_comment` (POST notes), `get_pr_url` (deterministic URL). `map_gitlab_error` maps 401/403→AuthenticationFailed, 404→ApiError, 422→BranchNotFound, 429→RateLimited, other→ApiError
+- **Task 3:** Factory updated — `"gitlab"` arm now instantiates `GitLabProvider::new()`. Added `pub use gitlab::GitLabProvider` re-export. Test renamed from `test_create_provider_gitlab_returns_not_configured` to `test_create_provider_gitlab_returns_ok`
+- **Task 4:** 16 unit tests in `gitlab.rs` (constructor success/failure/fields/encoding, Send+Sync, 6 error mapping variants, get_pr_url valid/invalid, add_comment invalid, CreateMrResponse deserialization) + 1 updated test in `mod.rs` — all 17 new/updated tests pass
+- **Task 5:** `cargo check` 0 errors, `cargo test` 488/488 passed (0 regressions), `cargo clippy` 0 new warnings, `cargo fmt` clean, all public items have `///` doc comments
+
+### Change Log
+
+- 2026-02-08: Story 5.3 implemented — GitLabProvider with full GitProvider trait impl, error mapping, 17 tests added/updated. Files: `src/git_provider/gitlab.rs` (overwrite), `src/git_provider/mod.rs` (modify factory + re-export + test)
+
 ### File List
+
+- `src/git_provider/gitlab.rs` — **OVERWRITTEN** — Full `GitLabProvider` implementation: `CreateMrResponse`, struct + `new()`, `GitProvider` trait impl (`create_pr`, `add_comment`, `get_pr_url`), `map_gitlab_error`, 16 unit tests
+- `src/git_provider/mod.rs` — **MODIFIED** — Added `pub use gitlab::GitLabProvider`, updated `create_provider()` factory `"gitlab"` arm to instantiate `GitLabProvider`, renamed test to `test_create_provider_gitlab_returns_ok`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — **MODIFIED** — `5-3-gitlab-merge-request-support: ready-for-dev → in-progress → review`

@@ -78,7 +78,7 @@ development_status:
   epic-5: in-progress
   5-1-git-provider-trait-github-pr-creation: review
   5-2-automated-code-review-session: review
-  5-3-gitlab-merge-request-support: ready-for-dev
+  5-3-gitlab-merge-request-support: review
   epic-5-retrospective: optional
 
   epic-6: backlog
