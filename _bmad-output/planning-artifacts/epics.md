@@ -793,8 +793,9 @@ So that long or complex stories can still be completed autonomously.
 
 **Given** the summary has been generated
 **When** the new session is bootstrapped
-**Then** a fresh agent is constructed with the same provider/model config and the same persona + tools
-**And** the new session preamble includes: agent persona + tool registrations, project context (project-context.md), the generated session summary, the last N verbatim exchanges, and the current story file reference
+**Then** a fresh agent is constructed with the same provider/model config and the standard dev preamble + tools
+**And** the daemon drives the BMAD activation flow as a simulated human: sends "CH" to enter chat mode, then sends "Load the project context" so the agent loads what it needs via its tools (same pattern as Story 3.2 Architect session)
+**And** the daemon then sends a recovery message containing the session summary, last N verbatim exchanges, and instruction to continue on the current story
 **And** the session enters direct chat mode (not re-entering the full dev-story workflow pipeline, since checkboxes and Dev Agent Record are already up to date on disk)
 
 **Given** the new session is bootstrapped
