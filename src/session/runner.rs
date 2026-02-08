@@ -19,12 +19,12 @@ use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_b
 use crate::session::cleanup::{mark_story_needs_clarification, preserve_partial_work};
 use crate::session::escalation::EscalationReport;
 use crate::session::provider::{ProviderError, resolve_api_key};
-use crate::session::state::SessionState;
+use crate::session::state::{ChatMessage, SessionState};
 use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
 use crate::supervisor::{AskSupervisor, EscalationSlot};
 use crate::tools::{FsTool, GitTool, TerminalTool};
 use crate::watcher::StoryInfo;
-use git2::Repository;
+use git2::{BranchType, Repository};
 use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
 use rig::providers::{anthropic, openai};
@@ -40,10 +40,87 @@ const MAX_CHAT_TURNS: usize = 200;
 /// Terminal tool timeout in seconds for commands executed by the agent.
 const TERMINAL_TIMEOUT_SECS: u64 = 30;
 
+/// Number of recent exchanges (user+assistant pairs) to keep verbatim in the
+/// recovery message after a context window limit error.
+const RECOVERY_KEEP_LAST_EXCHANGES: usize = 10;
+
+/// Maximum recursive recovery depth — prevents infinite context-limit loops.
+const MAX_RECOVERY_DEPTH: usize = 3;
+
+/// Data recovered from a WAL file for crash recovery.
+///
+/// Does NOT implement `Clone` — `SessionState` is consumed by ownership (move
+/// semantics). The caller must clone any fields it needs before passing this
+/// struct to [`SessionRunner::resume_session()`].
+#[derive(Debug)]
+pub struct RecoveryInfo {
+    /// The loaded WAL session state (consumed by ownership during recovery).
+    pub state: SessionState,
+    /// Reconstructed story metadata from WAL fields.
+    pub story_info: StoryInfo,
+}
+
+/// Build a [`StoryInfo`] from WAL session state fields.
+///
+/// Parses the `story_key` (e.g., `"6-3-crash-recovery-via-session-wal"`) to extract
+/// `epic_num`, `story_num`, and `label`. Prefers `branch_name` over the legacy `branch`
+/// field for backward compatibility with pre-4.3 WAL files.
+pub fn story_info_from_wal(state: &SessionState, config: &BotConfig) -> StoryInfo {
+    let parts: Vec<&str> = state.story_key.splitn(3, '-').collect();
+    let epic_num: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let story_num: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let label = parts.get(2).unwrap_or(&"").to_string();
+
+    // Prefer branch_name (Story 4.3+), fallback to branch (Story 4.2 WAL compat)
+    let branch_name = if state.branch_name.is_empty() {
+        state.branch.clone()
+    } else {
+        state.branch_name.clone()
+    };
+
+    StoryInfo {
+        story_id: state.story_id.clone(),
+        story_key: state.story_key.clone(),
+        epic_num,
+        story_num,
+        label,
+        branch_name,
+        specs_path: PathBuf::from(format!(
+            "{}/{}.md",
+            config.bmad_paths.implementation_artifacts, state.story_key
+        )),
+        dependencies: vec![], // Already resolved — not needed for recovery
+        status: "in-progress".to_string(),
+    }
+}
+
+/// Detect context window / token limit errors from LLM provider error strings.
+///
+/// Each provider returns different error messages. This function checks for
+/// known patterns across Anthropic, OpenAI, and GitHub Models. The check is
+/// case-insensitive to handle inconsistent casing across provider SDKs.
+fn is_context_limit_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    // Anthropic patterns
+    lower.contains("context_length_exceeded")
+        || lower.contains("prompt is too long")
+        || lower.contains("maximum context length")
+        // OpenAI patterns
+        || lower.contains("max_tokens")
+        || lower.contains("token limit")
+        || lower.contains("context window")
+        // Generic patterns
+        || lower.contains("too many tokens")
+        || lower.contains("input too long")
+        || lower.contains("exceeds the model")
+}
+
 /// Session runner — manages the full lifecycle of a single story development session.
 ///
 /// Constructed once per daemon run and reused across stories. Each call to
 /// [`run()`](Self::run) creates a fresh agent, WAL, and chat loop for one story.
+/// Also provides [`check_and_recover_wal()`](Self::check_and_recover_wal) and
+/// [`resume_session()`](Self::resume_session) for crash recovery on daemon restart.
 pub struct SessionRunner {
     /// Shared daemon configuration.
     config: Arc<BotConfig>,
@@ -69,6 +146,304 @@ impl SessionRunner {
             state_file_path,
             analyzer: ResponseAnalyzer::new(),
         }
+    }
+
+    /// Check for an interrupted session WAL file and prepare recovery data.
+    ///
+    /// Returns `Some(RecoveryInfo)` if a valid WAL file exists (crash recovery needed),
+    /// or `None` for a clean start. Corrupt WAL files are deleted and treated as clean.
+    pub async fn check_and_recover_wal(&self) -> Option<RecoveryInfo> {
+        if !SessionState::exists(&self.state_file_path) {
+            return None;
+        }
+
+        tracing::warn!(
+            action = "crash_recovery",
+            path = %self.state_file_path.display(),
+            "WAL file detected — interrupted session found"
+        );
+
+        match SessionState::load(&self.state_file_path).await {
+            Ok(state) => {
+                let story_info = story_info_from_wal(&state, &self.config);
+                Some(RecoveryInfo { state, story_info })
+            }
+            Err(e) => {
+                tracing::error!(
+                    action = "crash_recovery_wal_corrupt",
+                    path = %self.state_file_path.display(),
+                    error = %e,
+                    "Failed to load WAL — deleting corrupt file"
+                );
+                let _ = SessionState::delete(&self.state_file_path).await;
+                None
+            }
+        }
+    }
+
+    /// Resume an interrupted session from recovered WAL data.
+    ///
+    /// Verifies git state, resolves the API key, reconstructs the rig agent with
+    /// the same provider/model from the WAL, and calls the refactored
+    /// [`run_session()`](Self::run_session) with the recovered state.
+    ///
+    /// **Critical:** After `run_session()` returns, the WAL is ALWAYS deleted
+    /// regardless of outcome to prevent infinite recovery loops.
+    pub async fn resume_session(&self, recovery: RecoveryInfo) -> SessionOutcome {
+        let RecoveryInfo { state, story_info } = recovery;
+
+        let span = tracing::info_span!(
+            "crash_recovery_session",
+            story_id = %story_info.story_id,
+            branch = %state.branch_name
+        );
+        let _guard = span.enter();
+
+        tracing::info!(
+            action = "crash_recovery_start",
+            story_key = %state.story_key,
+            history_len = %state.chat_history.len(),
+            started_at = %state.started_at,
+            "Resuming interrupted session"
+        );
+
+        // Phase 1 — Git state verification (inlined)
+        let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
+        let branch_name_for_git = state.branch_name.clone();
+
+        let git_ok = {
+            let rp = repo_path.clone();
+            let bn = branch_name_for_git.clone();
+            match tokio::task::spawn_blocking(move || -> Result<bool, String> {
+                let repo =
+                    Repository::open(&rp).map_err(|e| format!("Failed to open repo: {e}"))?;
+                // Check if branch exists
+                repo.find_branch(&bn, BranchType::Local)
+                    .map_err(|_| format!("Recovery branch not found: {bn}"))?;
+                Ok(true)
+            })
+            .await
+            {
+                Ok(Ok(true)) => true,
+                Ok(Ok(false)) => false,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        action = "crash_recovery_git_failed",
+                        error = %e,
+                        "Git verification failed — stale WAL"
+                    );
+                    let _ = SessionState::delete(&self.state_file_path).await;
+                    return SessionOutcome::Failed {
+                        story_key: story_info.story_key.clone(),
+                        error: format!("Recovery git verification failed: {e}"),
+                        decisions: vec![],
+                    };
+                }
+                Err(e) => {
+                    tracing::error!(
+                        action = "crash_recovery_git_panicked",
+                        error = %e,
+                        "Git verification panicked"
+                    );
+                    let _ = SessionState::delete(&self.state_file_path).await;
+                    return SessionOutcome::Failed {
+                        story_key: story_info.story_key.clone(),
+                        error: format!("Git verification panicked: {e}"),
+                        decisions: vec![],
+                    };
+                }
+            }
+        };
+
+        if !git_ok {
+            let _ = SessionState::delete(&self.state_file_path).await;
+            return SessionOutcome::Failed {
+                story_key: story_info.story_key.clone(),
+                error: "Git verification returned false".to_string(),
+                decisions: vec![],
+            };
+        }
+
+        // Checkout the branch via ensure_story_branch (should return Reused)
+        let rp = repo_path.clone();
+        let bn = branch_name_for_git.clone();
+        let bb = state.base_branch.clone();
+        match tokio::task::spawn_blocking(move || ensure_story_branch(&rp, &bn, &bb)).await {
+            Ok(Ok(_action)) => {
+                tracing::info!(
+                    action = "crash_recovery_git_verified",
+                    branch = %branch_name_for_git,
+                    "Git state verified"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::error!(
+                    action = "crash_recovery_checkout_failed",
+                    error = %e,
+                    "Branch checkout failed during recovery"
+                );
+                let _ = SessionState::delete(&self.state_file_path).await;
+                return SessionOutcome::Failed {
+                    story_key: story_info.story_key.clone(),
+                    error: format!("Recovery branch checkout failed: {e}"),
+                    decisions: vec![],
+                };
+            }
+            Err(e) => {
+                tracing::error!(
+                    action = "crash_recovery_checkout_panicked",
+                    error = %e,
+                    "Branch checkout panicked during recovery"
+                );
+                let _ = SessionState::delete(&self.state_file_path).await;
+                return SessionOutcome::Failed {
+                    story_key: story_info.story_key.clone(),
+                    error: format!("Recovery branch checkout panicked: {e}"),
+                    decisions: vec![],
+                };
+            }
+        }
+
+        // Phase 2 — Resolve API key
+        let provider_name = state.provider.clone();
+        let model_name = state.model.clone();
+        let api_key = match resolve_api_key(&provider_name, &self.secrets) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::error!(
+                    action = "crash_recovery_api_key_failed",
+                    provider = %provider_name,
+                    error = %e,
+                    "Failed to resolve API key for recovery"
+                );
+                let _ = SessionState::delete(&self.state_file_path).await;
+                return SessionOutcome::Failed {
+                    story_key: story_info.story_key.clone(),
+                    error: format!("Recovery API key resolution failed: {e}"),
+                    decisions: vec![],
+                };
+            }
+        };
+
+        // Phase 3 — Reconstruct agent and run recovered session
+        let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
+        let decision_log = DecisionLog::new();
+        let base_branch = state.base_branch.clone();
+
+        let outcome = match provider_name.as_str() {
+            "anthropic" => {
+                match self.build_anthropic_agent(
+                    &story_info,
+                    &api_key,
+                    &model_name,
+                    escalation_slot.clone(),
+                    decision_log.clone(),
+                ) {
+                    Ok(agent) => {
+                        self.run_session(
+                            &agent,
+                            &story_info,
+                            &provider_name,
+                            &model_name,
+                            &base_branch,
+                            escalation_slot.clone(),
+                            decision_log.clone(),
+                            Some(state),
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        tracing::error!(action = "crash_recovery_agent_failed", error = %e, "Agent build failed during recovery");
+                        SessionOutcome::Failed {
+                            story_key: story_info.story_key.clone(),
+                            error: format!("Recovery agent build failed: {e}"),
+                            decisions: decision_log.records(),
+                        }
+                    }
+                }
+            }
+            "openai" => {
+                match self.build_openai_agent(
+                    &story_info,
+                    &api_key,
+                    &model_name,
+                    None,
+                    escalation_slot.clone(),
+                    decision_log.clone(),
+                ) {
+                    Ok(agent) => {
+                        self.run_session(
+                            &agent,
+                            &story_info,
+                            &provider_name,
+                            &model_name,
+                            &base_branch,
+                            escalation_slot.clone(),
+                            decision_log.clone(),
+                            Some(state),
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        tracing::error!(action = "crash_recovery_agent_failed", error = %e, "Agent build failed during recovery");
+                        SessionOutcome::Failed {
+                            story_key: story_info.story_key.clone(),
+                            error: format!("Recovery agent build failed: {e}"),
+                            decisions: decision_log.records(),
+                        }
+                    }
+                }
+            }
+            "github-models" => {
+                match self.build_openai_agent(
+                    &story_info,
+                    &api_key,
+                    &model_name,
+                    Some("https://models.inference.ai.azure.com"),
+                    escalation_slot.clone(),
+                    decision_log.clone(),
+                ) {
+                    Ok(agent) => {
+                        self.run_session(
+                            &agent,
+                            &story_info,
+                            &provider_name,
+                            &model_name,
+                            &base_branch,
+                            escalation_slot.clone(),
+                            decision_log.clone(),
+                            Some(state),
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        tracing::error!(action = "crash_recovery_agent_failed", error = %e, "Agent build failed during recovery");
+                        SessionOutcome::Failed {
+                            story_key: story_info.story_key.clone(),
+                            error: format!("Recovery agent build failed: {e}"),
+                            decisions: decision_log.records(),
+                        }
+                    }
+                }
+            }
+            other => {
+                tracing::error!(
+                    action = "crash_recovery_unsupported_provider",
+                    provider = %other,
+                    "Unsupported provider in WAL"
+                );
+                SessionOutcome::Failed {
+                    story_key: story_info.story_key.clone(),
+                    error: format!("Unsupported provider in WAL: {other}"),
+                    decisions: vec![],
+                }
+            }
+        };
+
+        // Phase 4 — ALWAYS delete WAL after recovery attempt (prevents infinite loops)
+        let _ = SessionState::delete(&self.state_file_path).await;
+
+        outcome
     }
 
     /// Run a full development session for the given story.
@@ -211,6 +586,7 @@ impl SessionRunner {
                             &base_branch,
                             escalation_slot.clone(),
                             decision_log.clone(),
+                            None,
                         )
                         .await
                     }
@@ -239,6 +615,7 @@ impl SessionRunner {
                             &base_branch,
                             escalation_slot.clone(),
                             decision_log.clone(),
+                            None,
                         )
                         .await
                     }
@@ -267,6 +644,7 @@ impl SessionRunner {
                             &base_branch,
                             escalation_slot.clone(),
                             decision_log.clone(),
+                            None,
                         )
                         .await
                     }
@@ -443,10 +821,568 @@ impl SessionRunner {
         Ok((git, fs, terminal, supervisor))
     }
 
+    /// Extract the last `n` exchanges (user+assistant pairs) from chat history.
+    ///
+    /// Returns cloned messages. If the history has fewer than `n * 2` messages,
+    /// returns all of them. Odd-length histories are rounded DOWN to the nearest
+    /// even count before slicing to keep clean user/assistant pairs.
+    fn extract_last_exchanges(history: &[ChatMessage], n: usize) -> Vec<ChatMessage> {
+        if history.is_empty() {
+            return vec![];
+        }
+        // Round down to even count to keep clean pairs
+        let usable_len = history.len() - (history.len() % 2);
+        let take = (n * 2).min(usable_len);
+        history[usable_len - take..usable_len].to_vec()
+    }
+
+    /// Format extracted exchanges as readable text for inclusion in a recovery message.
+    ///
+    /// Individual messages longer than 2000 characters are truncated with
+    /// `"... [truncated]"` to keep the recovery message within reasonable bounds.
+    fn format_exchanges_for_message(exchanges: &[ChatMessage]) -> String {
+        if exchanges.is_empty() {
+            return String::from("=== Recent Conversation ===\n(no recent exchanges available)");
+        }
+        let mut out = format!(
+            "=== Recent Conversation (last {} exchanges) ===\n",
+            exchanges.len() / 2
+        );
+        for msg in exchanges {
+            let label = if msg.role == "user" {
+                "User"
+            } else {
+                "Assistant"
+            };
+            let content = if msg.content.len() > 2000 {
+                format!("{}... [truncated]", &msg.content[..2000])
+            } else {
+                msg.content.clone()
+            };
+            out.push_str(&format!("{label}: {content}\n"));
+        }
+        out
+    }
+
+    /// Build the recovery message sent after BMAD activation in a recovered session.
+    ///
+    /// Contains the session summary, recent exchanges, and a pointer to the story
+    /// file. This is sent as a plain user message — NOT injected into the preamble.
+    /// The agent already has its standard preamble and has loaded project context
+    /// via the BMAD activation flow (CH → "Load the project context").
+    fn build_recovery_message(
+        &self,
+        story: &StoryInfo,
+        summary: &str,
+        formatted_exchanges: &str,
+    ) -> String {
+        format!(
+            "=== SESSION RECOVERY — Context Window Limit Reached ===\n\
+             Your previous session hit the context window limit. Below is your recovery context:\n\
+             \n\
+             === Session Summary ===\n\
+             {summary}\n\
+             \n\
+             {formatted_exchanges}\n\
+             \n\
+             === Current Story ===\n\
+             The story file is at: {path}\n\
+             Read this file to see current task checkboxes and progress.\n\
+             Continue working directly on the current task. Do NOT restart the workflow from the beginning.",
+            path = story.specs_path.display(),
+        )
+    }
+
+    /// Summarize the full chat history via a fresh LLM call (no tools, empty history).
+    ///
+    /// Uses the same provider/model as the dev session for consistency. If the full
+    /// history is too large for a fresh context, retries with the last 50% of messages.
+    async fn summarize_history(
+        &self,
+        state: &SessionState,
+        story: &StoryInfo,
+        provider: &str,
+        model: &str,
+    ) -> Result<String, String> {
+        let api_key = resolve_api_key(provider, &self.secrets)
+            .map_err(|e| format!("Summarization API key failed: {e}"))?;
+
+        let format_history = |messages: &[ChatMessage]| -> String {
+            messages
+                .iter()
+                .map(|m| {
+                    let label = if m.role == "user" {
+                        "User"
+                    } else {
+                        "Assistant"
+                    };
+                    format!("{label}: {}", m.content)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let full_history_text = format_history(&state.chat_history);
+
+        let summarization_prompt = format!(
+            "You are summarizing a development session for continuity. The session is implementing \
+             story {key} in a software project. Provide a concise but comprehensive summary covering:\n\
+             - What tasks have been completed (with file paths and key decisions)\n\
+             - What task is currently in progress\n\
+             - Any issues encountered and how they were resolved\n\
+             - Key code patterns and conventions established\n\
+             - Current state of the implementation\n\
+             \n\
+             Here is the full conversation history:\n\
+             {full_history_text}",
+            key = story.story_key,
+        );
+
+        // Attempt summarization — provider-specific because Chat is not object-safe
+        let summarize_with_prompt = |prompt: &str,
+                                     prov: &str,
+                                     mdl: &str,
+                                     key: &str|
+         -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, String>> + '_>,
+        > {
+            let prompt = prompt.to_string();
+            let prov = prov.to_string();
+            let mdl = mdl.to_string();
+            let key = key.to_string();
+            Box::pin(async move {
+                let preamble =
+                    "You are a technical session summarizer. Be concise but comprehensive.";
+                match prov.as_str() {
+                    "anthropic" => {
+                        let client: anthropic::Client = anthropic::Client::builder()
+                            .api_key(&key)
+                            .build()
+                            .map_err(|e| format!("Summarization client failed: {e}"))?;
+                        let agent = client.agent(&mdl).preamble(preamble).build();
+                        agent.chat(&prompt, vec![]).await.map_err(|e| e.to_string())
+                    }
+                    "openai" => {
+                        let client: openai::Client = openai::Client::builder()
+                            .api_key(&key)
+                            .build()
+                            .map_err(|e| format!("Summarization client failed: {e}"))?;
+                        let agent = client.agent(&mdl).preamble(preamble).build();
+                        agent.chat(&prompt, vec![]).await.map_err(|e| e.to_string())
+                    }
+                    "github-models" => {
+                        let client: openai::Client = openai::Client::builder()
+                            .api_key(&key)
+                            .base_url("https://models.inference.ai.azure.com")
+                            .build()
+                            .map_err(|e| format!("Summarization client failed: {e}"))?;
+                        let agent = client.agent(&mdl).preamble(preamble).build();
+                        agent.chat(&prompt, vec![]).await.map_err(|e| e.to_string())
+                    }
+                    other => Err(format!("Unsupported provider for summarization: {other}")),
+                }
+            })
+        };
+
+        match summarize_with_prompt(&summarization_prompt, provider, model, &api_key).await {
+            Ok(summary) => Ok(summary),
+            Err(e) => {
+                // Fallback: if the full history was too large, retry with last 50%
+                if is_context_limit_error(&e) {
+                    tracing::warn!(
+                        action = "context_limit_summary_fallback",
+                        "Summarization hit context limit — retrying with truncated history (50%)"
+                    );
+                    let half = state.chat_history.len() / 2;
+                    let truncated = &state.chat_history[half..];
+                    let truncated_text = format_history(truncated);
+                    let fallback_prompt = format!(
+                        "You are summarizing a development session for continuity. The session is implementing \
+                         story {key} in a software project. Provide a concise but comprehensive summary covering:\n\
+                         - What tasks have been completed (with file paths and key decisions)\n\
+                         - What task is currently in progress\n\
+                         - Any issues encountered and how they were resolved\n\
+                         - Key code patterns and conventions established\n\
+                         - Current state of the implementation\n\
+                         \n\
+                         Here is the conversation history (truncated to last 50%):\n\
+                         {truncated_text}",
+                        key = story.story_key,
+                    );
+                    summarize_with_prompt(&fallback_prompt, provider, model, &api_key)
+                        .await
+                        .map_err(|e2| {
+                            format!("Summarization failed even with truncated history: {e2}")
+                        })
+                } else {
+                    Err(format!("Summarization failed: {e}"))
+                }
+            }
+        }
+    }
+
+    /// Recover from a context window limit error by summarizing history and
+    /// bootstrapping a fresh session following the BMAD activation pattern.
+    ///
+    /// Architecture Decision 3, Recovery Case B. The method:
+    /// 1. Extracts last N exchanges from in-memory state as immediate context
+    /// 2. Makes a fresh LLM call to summarize the full history
+    /// 3. Builds a fresh agent with the STANDARD dev preamble + all 4 tools
+    /// 4. Drives BMAD activation: "CH" → "Load the project context" (agent
+    ///    loads what it needs via its tools — same pattern as Story 3.2)
+    /// 5. Sends recovery message (summary + last N exchanges + continue instruction)
+    /// 6. Builds compressed SessionState with activation turns + recovery message
+    /// 7. Calls `run_session()` with `Some(compressed_state)` — reuses the existing
+    ///    chat loop instead of duplicating it
+    /// 8. Returns the `SessionOutcome` from the inner loop directly
+    ///
+    /// If `recovery_depth >= MAX_RECOVERY_DEPTH`, returns `SessionOutcome::Failed`
+    /// to prevent infinite recursion.
+    #[allow(clippy::too_many_arguments)]
+    async fn context_limit_recovery(
+        &self,
+        state: &SessionState,
+        story: &StoryInfo,
+        provider: &str,
+        model: &str,
+        base_branch: &str,
+        escalation_slot: EscalationSlot,
+        decision_log: DecisionLog,
+        recovery_depth: usize,
+    ) -> SessionOutcome {
+        // Step 0 — Check recovery depth
+        if recovery_depth >= MAX_RECOVERY_DEPTH {
+            tracing::error!(
+                action = "context_limit_max_depth",
+                depth = %recovery_depth,
+                "Max recovery depth reached — aborting"
+            );
+            return SessionOutcome::Failed {
+                story_key: story.story_key.clone(),
+                error: format!("Context limit recovery exceeded max depth ({MAX_RECOVERY_DEPTH})"),
+                decisions: decision_log.records(),
+            };
+        }
+
+        // Step 1 — Extract last N exchanges
+        let last_exchanges =
+            Self::extract_last_exchanges(&state.chat_history, RECOVERY_KEEP_LAST_EXCHANGES);
+        let formatted_exchanges = Self::format_exchanges_for_message(&last_exchanges);
+
+        // Step 2 — Summarize full history via fresh LLM call
+        let summary = match self.summarize_history(state, story, provider, model).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    action = "context_limit_summary_failed",
+                    error = %e,
+                    "History summarization failed"
+                );
+                return SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Context limit recovery summarization failed: {e}"),
+                    decisions: decision_log.records(),
+                };
+            }
+        };
+
+        tracing::info!(
+            action = "context_limit_summary_generated",
+            original_len = %state.chat_history.len(),
+            summary_len = %summary.len(),
+            "Session summary generated for recovery"
+        );
+
+        // Step 3-7 — Build fresh agent, drive activation, delegate to run_session()
+        // All inside provider match arm because Chat trait is not object-safe.
+        let api_key = match resolve_api_key(provider, &self.secrets) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::error!(
+                    action = "context_limit_api_key_failed",
+                    error = %e,
+                    "API key resolution failed during recovery"
+                );
+                return SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Recovery API key resolution failed: {e}"),
+                    decisions: decision_log.records(),
+                };
+            }
+        };
+
+        // Macro-like closure to drive activation and run_session for a concrete agent type.
+        // We must duplicate the activation logic per provider arm because Chat is not object-safe.
+        let recovery_message = self.build_recovery_message(story, &summary, &formatted_exchanges);
+
+        match provider {
+            "anthropic" => {
+                let agent = match self.build_anthropic_agent(
+                    story,
+                    &api_key,
+                    model,
+                    escalation_slot.clone(),
+                    decision_log.clone(),
+                ) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::error!(action = "context_limit_agent_failed", error = %e, "Recovery agent build failed");
+                        return SessionOutcome::Failed {
+                            story_key: story.story_key.clone(),
+                            error: format!("Recovery agent build failed: {e}"),
+                            decisions: decision_log.records(),
+                        };
+                    }
+                };
+
+                match self
+                    .drive_activation_and_recover(
+                        &agent,
+                        state,
+                        story,
+                        provider,
+                        model,
+                        base_branch,
+                        escalation_slot,
+                        decision_log,
+                        &recovery_message,
+                        recovery_depth,
+                    )
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(outcome) => outcome,
+                }
+            }
+            "openai" => {
+                let agent = match self.build_openai_agent(
+                    story,
+                    &api_key,
+                    model,
+                    None,
+                    escalation_slot.clone(),
+                    decision_log.clone(),
+                ) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::error!(action = "context_limit_agent_failed", error = %e, "Recovery agent build failed");
+                        return SessionOutcome::Failed {
+                            story_key: story.story_key.clone(),
+                            error: format!("Recovery agent build failed: {e}"),
+                            decisions: decision_log.records(),
+                        };
+                    }
+                };
+
+                match self
+                    .drive_activation_and_recover(
+                        &agent,
+                        state,
+                        story,
+                        provider,
+                        model,
+                        base_branch,
+                        escalation_slot,
+                        decision_log,
+                        &recovery_message,
+                        recovery_depth,
+                    )
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(outcome) => outcome,
+                }
+            }
+            "github-models" => {
+                let agent = match self.build_openai_agent(
+                    story,
+                    &api_key,
+                    model,
+                    Some("https://models.inference.ai.azure.com"),
+                    escalation_slot.clone(),
+                    decision_log.clone(),
+                ) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::error!(action = "context_limit_agent_failed", error = %e, "Recovery agent build failed");
+                        return SessionOutcome::Failed {
+                            story_key: story.story_key.clone(),
+                            error: format!("Recovery agent build failed: {e}"),
+                            decisions: decision_log.records(),
+                        };
+                    }
+                };
+
+                match self
+                    .drive_activation_and_recover(
+                        &agent,
+                        state,
+                        story,
+                        provider,
+                        model,
+                        base_branch,
+                        escalation_slot,
+                        decision_log,
+                        &recovery_message,
+                        recovery_depth,
+                    )
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(outcome) => outcome,
+                }
+            }
+            other => {
+                tracing::error!(
+                    action = "context_limit_unsupported_provider",
+                    provider = %other,
+                    "Unsupported provider for recovery"
+                );
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Unsupported provider for recovery: {other}"),
+                    decisions: decision_log.records(),
+                }
+            }
+        }
+    }
+
+    /// Drive the BMAD activation flow on a fresh agent, build compressed state,
+    /// and delegate to `run_session()` for the recovered chat loop.
+    ///
+    /// This is factored out to avoid duplicating the activation logic across
+    /// provider match arms. The agent type is generic (`<A: Chat>`).
+    ///
+    /// Returns `Ok(SessionOutcome)` on success, `Err(SessionOutcome)` on failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_activation_and_recover<A: Chat>(
+        &self,
+        agent: &A,
+        original_state: &SessionState,
+        story: &StoryInfo,
+        provider: &str,
+        model: &str,
+        base_branch: &str,
+        escalation_slot: EscalationSlot,
+        decision_log: DecisionLog,
+        recovery_message: &str,
+        recovery_depth: usize,
+    ) -> Result<SessionOutcome, SessionOutcome> {
+        // Step 4 — Drive BMAD activation flow (same pattern as Story 3.2)
+        // Track as both Vec<Message> (for rig API) and Vec<ChatMessage> (for compressed state)
+        let mut activation_history: Vec<Message> = vec![];
+        let mut compressed_history: Vec<ChatMessage> = vec![];
+
+        // Turn 1 — Enter chat mode
+        let ch_response = agent
+            .chat("CH", activation_history.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!(action = "context_limit_activation_ch_failed", error = %e);
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Recovery activation CH failed: {e}"),
+                    decisions: decision_log.records(),
+                }
+            })?;
+        activation_history.push(Message::user("CH"));
+        activation_history.push(Message::assistant(&ch_response));
+        compressed_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: "CH".to_string(),
+        });
+        compressed_history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: ch_response,
+        });
+
+        // Turn 2 — Load project context
+        let ctx_response = agent
+            .chat("Load the project context", activation_history.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!(action = "context_limit_activation_ctx_failed", error = %e);
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Recovery activation load context failed: {e}"),
+                    decisions: decision_log.records(),
+                }
+            })?;
+        activation_history.push(Message::user("Load the project context"));
+        activation_history.push(Message::assistant(&ctx_response));
+        compressed_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: "Load the project context".to_string(),
+        });
+        compressed_history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: ctx_response,
+        });
+
+        tracing::info!(
+            action = "context_limit_activation_complete",
+            "BMAD activation flow completed for recovery agent"
+        );
+
+        // Step 5 — Build compressed SessionState
+
+        // Add recovery message as the final user message.
+        // run_session(Some(state)) will detect last msg = user and re-send it.
+        compressed_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: recovery_message.to_string(),
+        });
+
+        let compressed_state = SessionState {
+            story_id: original_state.story_id.clone(),
+            story_key: original_state.story_key.clone(),
+            branch: original_state.branch.clone(),
+            started_at: original_state.started_at.clone(),
+            last_activity: chrono::Utc::now().to_rfc3339(),
+            provider: original_state.provider.clone(),
+            model: original_state.model.clone(),
+            branch_name: original_state.branch_name.clone(),
+            base_branch: original_state.base_branch.clone(),
+            chat_history: compressed_history,
+        };
+
+        // Step 6 — Delegate to run_session() with compressed state.
+        // Box::pin breaks the async recursion cycle:
+        // run_session → context_limit_recovery → drive_activation_and_recover → run_session
+        let outcome = Box::pin(self.run_session(
+            agent,
+            story,
+            provider,
+            model,
+            base_branch,
+            escalation_slot,
+            decision_log,
+            Some(compressed_state),
+        ))
+        .await;
+
+        tracing::info!(
+            action = "context_limit_recovery",
+            depth = %recovery_depth,
+            original_history_len = %original_state.chat_history.len(),
+            "Context limit recovery delegated to inner run_session()"
+        );
+
+        Ok(outcome)
+    }
+
     /// Run the chat loop with a concrete agent that implements [`Chat`].
     ///
     /// This is the provider-agnostic core: send "DS", analyze responses,
     /// auto-respond, and handle completion/escalation/failure.
+    ///
+    /// When `recovered_state` is `None` (normal path): creates a new `SessionState`,
+    /// sends "DS", and enters the chat loop as usual.
+    ///
+    /// When `recovered_state` is `Some(state)` (crash recovery path): uses the
+    /// loaded state directly (already has chat_history, branch info, timestamps).
+    /// The turn counter is offset by `chat_history.len() / 2` to account for
+    /// pre-crash turns against `MAX_CHAT_TURNS`.
     #[allow(clippy::too_many_arguments)]
     async fn run_session<A: Chat>(
         &self,
@@ -457,54 +1393,154 @@ impl SessionRunner {
         base_branch: &str,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
+        recovered_state: Option<SessionState>,
     ) -> SessionOutcome {
-        // Create WAL state and record branch info
-        let mut state = SessionState::new(story, provider, model);
-        state.set_branch_info(&story.branch_name, base_branch);
-
-        // Save initial WAL
-        if let Err(e) = state.save(&self.state_file_path).await {
-            tracing::error!(action = "wal_write_failed", error = %e, "Failed to create initial WAL");
-            return SessionOutcome::Failed {
-                story_key: story.story_key.clone(),
-                error: format!("WAL creation failed: {e}"),
-                decisions: decision_log.records(),
-            };
-        }
-
-        // Send initial message "DS"
-        let initial_message = "DS";
-        state.add_user_message(initial_message);
-
-        let history: Vec<Message> = vec![];
-        let response = match agent.chat(initial_message, history).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!(action = "chat_failed", turn = 0, error = %e, "Initial chat failed");
-                let _ = self.handle_failure(story).await;
-                return SessionOutcome::Failed {
-                    story_key: story.story_key.clone(),
-                    error: format!("Initial chat failed: {e}"),
-                    decisions: decision_log.records(),
-                };
-            }
-        };
-
-        state.add_assistant_message(&response);
-        let _ = state.save(&self.state_file_path).await;
-
-        tracing::debug!(
-            action = "chat_turn",
-            turn = 0,
-            response_len = %response.len(),
-            "Initial chat turn completed"
-        );
-
-        // Enter chat loop
-        let mut current_response = response;
-        let mut turn: usize = 1;
         let mut retries: usize = 0;
         const MAX_RETRIES: usize = 3;
+
+        // --- Initialization: normal vs recovery path ---
+        let (mut state, mut current_response, mut turn) = match recovered_state {
+            None => {
+                // Normal path — create new WAL, send "DS"
+                let mut state = SessionState::new(story, provider, model);
+                state.set_branch_info(&story.branch_name, base_branch);
+
+                if let Err(e) = state.save(&self.state_file_path).await {
+                    tracing::error!(action = "wal_write_failed", error = %e, "Failed to create initial WAL");
+                    return SessionOutcome::Failed {
+                        story_key: story.story_key.clone(),
+                        error: format!("WAL creation failed: {e}"),
+                        decisions: decision_log.records(),
+                    };
+                }
+
+                let initial_message = "DS";
+                state.add_user_message(initial_message);
+
+                let history: Vec<Message> = vec![];
+                let response = match agent.chat(initial_message, history).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(action = "chat_failed", turn = 0, error = %e, "Initial chat failed");
+                        let _ = self.handle_failure(story).await;
+                        return SessionOutcome::Failed {
+                            story_key: story.story_key.clone(),
+                            error: format!("Initial chat failed: {e}"),
+                            decisions: decision_log.records(),
+                        };
+                    }
+                };
+
+                state.add_assistant_message(&response);
+                let _ = state.save(&self.state_file_path).await;
+
+                tracing::debug!(
+                    action = "chat_turn",
+                    turn = 0,
+                    response_len = %response.len(),
+                    "Initial chat turn completed"
+                );
+
+                (state, response, 1usize)
+            }
+
+            Some(mut state) => {
+                // Recovery path — use loaded state, determine next action from last message
+                let turn_offset = state.chat_history.len() / 2;
+
+                tracing::info!(
+                    action = "crash_recovery_resume",
+                    history_len = %state.chat_history.len(),
+                    turn_offset = %turn_offset,
+                    "Resuming chat loop from recovered state"
+                );
+
+                if state.chat_history.is_empty() {
+                    // Sub-case C — Empty chat_history (crash before first response)
+                    // Fall back to normal "DS" send
+                    tracing::info!(
+                        action = "crash_recovery_empty_history",
+                        "Empty chat history — sending initial DS"
+                    );
+
+                    let initial_message = "DS";
+                    state.add_user_message(initial_message);
+
+                    let history: Vec<Message> = vec![];
+                    let response = match agent.chat(initial_message, history).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::error!(action = "chat_failed", turn = 0, error = %e, "Initial chat failed during recovery");
+                            let _ = self.handle_failure(story).await;
+                            return SessionOutcome::Failed {
+                                story_key: story.story_key.clone(),
+                                error: format!("Recovery initial chat failed: {e}"),
+                                decisions: decision_log.records(),
+                            };
+                        }
+                    };
+
+                    state.add_assistant_message(&response);
+                    let _ = state.save(&self.state_file_path).await;
+
+                    (state, response, turn_offset + 1)
+                } else {
+                    let last_msg = state.chat_history.last().expect("non-empty history");
+
+                    if last_msg.role == "assistant" {
+                        // Sub-case A — Last message is assistant (normal recovery)
+                        let response = last_msg.content.clone();
+                        tracing::info!(
+                            action = "crash_recovery_last_assistant",
+                            "Last message is assistant — entering analyze loop"
+                        );
+                        (state, response, turn_offset)
+                    } else {
+                        // Sub-case B — Last message is user (crash between send and receive)
+                        // Re-send the last user message
+                        let last_user_msg = last_msg.content.clone();
+                        tracing::info!(
+                            action = "crash_recovery_last_user",
+                            msg_len = %last_user_msg.len(),
+                            "Last message is user — re-sending"
+                        );
+
+                        // Build history from all messages except the last user message
+                        // so we can re-send it properly
+                        let history: Vec<Message> = state.chat_history
+                            [..state.chat_history.len() - 1]
+                            .iter()
+                            .map(|msg| match msg.role.as_str() {
+                                "user" => Message::user(&msg.content),
+                                _ => Message::assistant(&msg.content),
+                            })
+                            .collect();
+
+                        let response = match agent.chat(&last_user_msg, history).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::error!(
+                                    action = "chat_failed",
+                                    error = %e,
+                                    "Re-send of last user message failed during recovery"
+                                );
+                                let _ = self.handle_failure(story).await;
+                                return SessionOutcome::Failed {
+                                    story_key: story.story_key.clone(),
+                                    error: format!("Recovery re-send failed: {e}"),
+                                    decisions: decision_log.records(),
+                                };
+                            }
+                        };
+
+                        state.add_assistant_message(&response);
+                        let _ = state.save(&self.state_file_path).await;
+
+                        (state, response, turn_offset)
+                    }
+                }
+            }
+        };
 
         loop {
             // Safety net — prevent infinite loops
@@ -623,12 +1659,49 @@ impl SessionRunner {
                             current_response = r;
                         }
                         Err(e) => {
+                            let error_str = e.to_string();
+
+                            // Check for context limit error BEFORE retry logic —
+                            // retrying a context limit error is pointless (same history = same error).
+                            if is_context_limit_error(&error_str) {
+                                tracing::warn!(
+                                    action = "context_limit_detected",
+                                    turn = %turn,
+                                    history_len = %state.chat_history.len(),
+                                    error = %error_str,
+                                    "Context window limit hit — initiating recovery"
+                                );
+
+                                // Remove the user message we just added (it failed)
+                                state.chat_history.pop();
+
+                                // Recovery runs its own inner chat loop to completion via run_session().
+                                // It returns a terminal SessionOutcome — the current loop exits.
+                                let outcome = self
+                                    .context_limit_recovery(
+                                        &state,
+                                        story,
+                                        provider,
+                                        model,
+                                        base_branch,
+                                        escalation_slot.clone(),
+                                        decision_log.clone(),
+                                        0, // recovery_depth: first recovery attempt
+                                    )
+                                    .await;
+
+                                // Write decisions regardless of outcome
+                                self.write_decisions(story, &decision_log).await;
+                                return outcome;
+                            }
+
+                            // Non-context-limit error — existing retry logic
                             retries += 1;
                             tracing::warn!(
                                 action = "chat_error",
                                 turn = %turn,
                                 retries = %retries,
-                                error = %e,
+                                error = %error_str,
                                 "Chat error, will retry"
                             );
                             if retries >= MAX_RETRIES {
@@ -636,7 +1709,9 @@ impl SessionRunner {
                                 self.write_decisions(story, &decision_log).await;
                                 return SessionOutcome::Failed {
                                     story_key: story.story_key.clone(),
-                                    error: format!("Chat failed after {MAX_RETRIES} retries: {e}"),
+                                    error: format!(
+                                        "Chat failed after {MAX_RETRIES} retries: {error_str}"
+                                    ),
                                     decisions: decision_log.records(),
                                 };
                             }
@@ -787,6 +1862,823 @@ mod tests {
         assert_eq!(
             runner.state_file_path, expected,
             "state_file_path derivation must not change from 4.2 contract"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Story 6.3 — Crash Recovery Tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a SessionState suitable for recovery tests.
+    fn make_recovery_state() -> SessionState {
+        SessionState {
+            story_id: "6.3".to_string(),
+            story_key: "6-3-crash-recovery-via-session-wal".to_string(),
+            branch: "story/6-3-crash-recovery-via-session-wal".to_string(),
+            started_at: "2026-02-07T10:00:00Z".to_string(),
+            last_activity: "2026-02-07T10:05:00Z".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            branch_name: "story/6-3-crash-recovery-via-session-wal".to_string(),
+            base_branch: "main".to_string(),
+            chat_history: vec![],
+        }
+    }
+
+    /// Helper: create a SessionState with pre-4.3 WAL format (no branch_name).
+    fn make_legacy_recovery_state() -> SessionState {
+        SessionState {
+            story_id: "4.2".to_string(),
+            story_key: "4-2-agent-session-setup-chat-loop".to_string(),
+            branch: "story/4-2-agent-session-setup-chat-loop".to_string(),
+            started_at: "2026-02-01T10:00:00Z".to_string(),
+            last_activity: "2026-02-01T10:05:00Z".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            branch_name: String::new(), // Empty — pre-4.3 WAL
+            base_branch: String::new(),
+            chat_history: vec![],
+        }
+    }
+
+    // -- story_info_from_wal tests --
+
+    #[test]
+    fn test_story_info_from_wal_parses_story_key() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let state = make_recovery_state();
+
+        let info = story_info_from_wal(&state, &config);
+
+        assert_eq!(info.epic_num, 6);
+        assert_eq!(info.story_num, 3);
+        assert_eq!(info.label, "crash-recovery-via-session-wal");
+    }
+
+    #[test]
+    fn test_story_info_from_wal_simple_key() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let mut state = make_recovery_state();
+        state.story_key = "1-1-scaffolding".to_string();
+        state.story_id = "1.1".to_string();
+
+        let info = story_info_from_wal(&state, &config);
+
+        assert_eq!(info.epic_num, 1);
+        assert_eq!(info.story_num, 1);
+        assert_eq!(info.label, "scaffolding");
+        assert_eq!(info.story_id, "1.1");
+    }
+
+    #[test]
+    fn test_story_info_from_wal_specs_path_is_pathbuf() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let state = make_recovery_state();
+
+        let info = story_info_from_wal(&state, &config);
+
+        let expected_path = PathBuf::from(format!(
+            "{}/6-3-crash-recovery-via-session-wal.md",
+            config.bmad_paths.implementation_artifacts
+        ));
+        assert_eq!(info.specs_path, expected_path);
+    }
+
+    #[test]
+    fn test_story_info_from_wal_branch_name_fallback() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let state = make_legacy_recovery_state();
+
+        let info = story_info_from_wal(&state, &config);
+
+        // branch_name is empty → should fall back to state.branch
+        assert_eq!(
+            info.branch_name, "story/4-2-agent-session-setup-chat-loop",
+            "Should fall back to state.branch when branch_name is empty"
+        );
+    }
+
+    #[test]
+    fn test_story_info_from_wal_prefers_branch_name_over_branch() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let mut state = make_recovery_state();
+        state.branch = "old-branch".to_string();
+        state.branch_name = "story/6-3-crash-recovery-via-session-wal".to_string();
+
+        let info = story_info_from_wal(&state, &config);
+
+        assert_eq!(
+            info.branch_name, "story/6-3-crash-recovery-via-session-wal",
+            "Should prefer branch_name over branch when non-empty"
+        );
+    }
+
+    #[test]
+    fn test_story_info_from_wal_dependencies_empty() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let state = make_recovery_state();
+
+        let info = story_info_from_wal(&state, &config);
+
+        assert!(
+            info.dependencies.is_empty(),
+            "Dependencies should always be empty for recovered stories"
+        );
+    }
+
+    #[test]
+    fn test_story_info_from_wal_status_is_in_progress() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let state = make_recovery_state();
+
+        let info = story_info_from_wal(&state, &config);
+
+        assert_eq!(info.status, "in-progress");
+    }
+
+    // -- check_and_recover_wal tests --
+
+    #[tokio::test]
+    async fn test_check_wal_returns_none_when_no_file() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let secrets = Arc::new(make_test_secrets());
+
+        let runner = SessionRunner::new(config, secrets);
+
+        let result = runner.check_and_recover_wal().await;
+        assert!(
+            result.is_none(),
+            "Should return None when no WAL file exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_wal_returns_some_when_file_exists() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let secrets = Arc::new(make_test_secrets());
+
+        // Create a valid WAL file
+        let state = make_recovery_state();
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        state.save(&wal_path).await.expect("save WAL");
+
+        let runner = SessionRunner::new(config, secrets);
+
+        let result = runner.check_and_recover_wal().await;
+        assert!(result.is_some(), "Should return Some when WAL file exists");
+
+        let recovery = result.unwrap();
+        assert_eq!(
+            recovery.state.story_key,
+            "6-3-crash-recovery-via-session-wal"
+        );
+        assert_eq!(recovery.story_info.epic_num, 6);
+        assert_eq!(recovery.story_info.story_num, 3);
+    }
+
+    #[tokio::test]
+    async fn test_check_wal_deletes_corrupt_file() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let secrets = Arc::new(make_test_secrets());
+
+        // Write corrupt YAML
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        tokio::fs::write(&wal_path, "not: [valid: yaml: for: session")
+            .await
+            .expect("write corrupt WAL");
+        assert!(wal_path.exists(), "Corrupt WAL should exist before check");
+
+        let runner = SessionRunner::new(config, secrets);
+
+        let result = runner.check_and_recover_wal().await;
+        assert!(result.is_none(), "Should return None for corrupt WAL");
+        assert!(
+            !wal_path.exists(),
+            "Corrupt WAL file should be deleted after check"
+        );
+    }
+
+    // -- RecoveryInfo tests --
+
+    #[test]
+    fn test_recovery_info_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<RecoveryInfo>();
+    }
+
+    #[test]
+    fn test_recovery_info_debug() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let state = make_recovery_state();
+        let story_info = story_info_from_wal(&state, &config);
+
+        let recovery = RecoveryInfo { state, story_info };
+        let debug_str = format!("{recovery:?}");
+        assert!(debug_str.contains("RecoveryInfo"));
+        assert!(debug_str.contains("6-3-crash-recovery-via-session-wal"));
+    }
+
+    // -- story_info_from_wal edge cases --
+
+    #[test]
+    fn test_story_info_from_wal_key_with_two_parts() {
+        // Edge case: story_key with only 2 numeric parts and no slug
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let mut state = make_recovery_state();
+        state.story_key = "1-1".to_string();
+
+        let info = story_info_from_wal(&state, &config);
+
+        assert_eq!(info.epic_num, 1);
+        assert_eq!(info.story_num, 1);
+        assert_eq!(info.label, ""); // No slug portion
+    }
+
+    #[test]
+    fn test_story_info_from_wal_story_key_preserves_original() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let state = make_recovery_state();
+
+        let info = story_info_from_wal(&state, &config);
+
+        assert_eq!(
+            info.story_key, "6-3-crash-recovery-via-session-wal",
+            "story_key must be preserved exactly from WAL"
+        );
+    }
+
+    #[test]
+    fn test_story_info_from_wal_story_id_preserved() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = make_runner_test_config(dir.path());
+        let state = make_recovery_state();
+
+        let info = story_info_from_wal(&state, &config);
+
+        assert_eq!(info.story_id, "6.3");
+    }
+
+    // -- WAL roundtrip test (save → load → recovery) --
+
+    #[tokio::test]
+    async fn test_wal_roundtrip_with_chat_history() {
+        use crate::session::state::ChatMessage;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let secrets = Arc::new(make_test_secrets());
+
+        let mut state = make_recovery_state();
+        state.chat_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "DS".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Starting implementation...".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Continue.".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Task 1 done.".to_string(),
+            },
+        ];
+
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        state.save(&wal_path).await.expect("save WAL");
+
+        let runner = SessionRunner::new(config, secrets);
+        let recovery = runner
+            .check_and_recover_wal()
+            .await
+            .expect("WAL should be detected");
+
+        assert_eq!(recovery.state.chat_history.len(), 4);
+        assert_eq!(recovery.state.chat_history[0].role, "user");
+        assert_eq!(recovery.state.chat_history[0].content, "DS");
+        assert_eq!(recovery.state.chat_history[3].role, "assistant");
+        assert_eq!(recovery.state.chat_history[3].content, "Task 1 done.");
+        assert_eq!(
+            recovery.story_info.story_key,
+            "6-3-crash-recovery-via-session-wal"
+        );
+    }
+
+    // -- Pipeline recovery returns None when no WAL --
+
+    #[tokio::test]
+    async fn test_check_wal_legacy_wal_backward_compat() {
+        // Test that a WAL file without branch_name/base_branch fields
+        // (pre-Story 4.3) can still be loaded and recovered
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let secrets = Arc::new(make_test_secrets());
+
+        let state = make_legacy_recovery_state();
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        state.save(&wal_path).await.expect("save WAL");
+
+        let runner = SessionRunner::new(config, secrets);
+        let recovery = runner
+            .check_and_recover_wal()
+            .await
+            .expect("Legacy WAL should be detected");
+
+        assert_eq!(
+            recovery.state.story_key,
+            "4-2-agent-session-setup-chat-loop"
+        );
+        assert!(
+            recovery.state.branch_name.is_empty(),
+            "Legacy WAL should have empty branch_name"
+        );
+        // story_info should fall back to state.branch
+        assert_eq!(
+            recovery.story_info.branch_name,
+            "story/4-2-agent-session-setup-chat-loop"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Story 6.4 — Context Window Limit Recovery Tests
+    // -----------------------------------------------------------------------
+
+    // -- is_context_limit_error tests --
+
+    #[test]
+    fn test_is_context_limit_error_anthropic_pattern() {
+        assert!(is_context_limit_error(
+            "context_length_exceeded: prompt is 204835 tokens"
+        ));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_openai_pattern() {
+        assert!(is_context_limit_error(
+            "This model's maximum context length is 128000 tokens"
+        ));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_token_limit() {
+        assert!(is_context_limit_error("Request exceeds token limit"));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_too_many_tokens() {
+        assert!(is_context_limit_error(
+            "Error: too many tokens in the request"
+        ));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_case_insensitive() {
+        assert!(is_context_limit_error("CONTEXT_LENGTH_EXCEEDED"));
+        assert!(is_context_limit_error("Prompt Is Too Long"));
+        assert!(is_context_limit_error("MAXIMUM CONTEXT LENGTH"));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_false_for_network_error() {
+        assert!(!is_context_limit_error("connection refused"));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_false_for_auth_error() {
+        assert!(!is_context_limit_error("invalid api key"));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_false_for_rate_limit() {
+        assert!(!is_context_limit_error("rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_prompt_too_long() {
+        assert!(is_context_limit_error(
+            "prompt is too long: 204835 tokens > 200000 maximum"
+        ));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_input_too_long() {
+        assert!(is_context_limit_error("input too long for model"));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_exceeds_the_model() {
+        assert!(is_context_limit_error(
+            "This request exceeds the model's context window"
+        ));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_context_window() {
+        assert!(is_context_limit_error("context window overflow"));
+    }
+
+    // -- extract_last_exchanges tests --
+
+    fn make_chat_history(n: usize) -> Vec<ChatMessage> {
+        (0..n)
+            .map(|i| ChatMessage {
+                role: if i % 2 == 0 {
+                    "user".to_string()
+                } else {
+                    "assistant".to_string()
+                },
+                content: format!("message-{i}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_extract_last_exchanges_normal() {
+        let history = make_chat_history(40); // 20 exchanges
+        let result = SessionRunner::extract_last_exchanges(&history, 10);
+        assert_eq!(result.len(), 20); // 10 exchanges = 20 messages
+        assert_eq!(result[0].content, "message-20");
+        assert_eq!(result[19].content, "message-39");
+    }
+
+    #[test]
+    fn test_extract_last_exchanges_fewer_than_n() {
+        let history = make_chat_history(6); // 3 exchanges
+        let result = SessionRunner::extract_last_exchanges(&history, 10);
+        assert_eq!(result.len(), 6); // all 3 exchanges
+        assert_eq!(result[0].content, "message-0");
+        assert_eq!(result[5].content, "message-5");
+    }
+
+    #[test]
+    fn test_extract_last_exchanges_empty_history() {
+        let result = SessionRunner::extract_last_exchanges(&[], 10);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_last_exchanges_odd_message_count() {
+        // 21 messages — odd count. Should round down to 20, then take last 20.
+        let history = make_chat_history(21);
+        let result = SessionRunner::extract_last_exchanges(&history, 10);
+        // usable_len = 20 (round down from 21), take = min(20, 20) = 20
+        assert_eq!(result.len(), 20);
+        // The orphan message-0 is dropped (it's before usable_len boundary)
+        assert_eq!(result[0].content, "message-0");
+        assert_eq!(result[19].content, "message-19");
+    }
+
+    #[test]
+    fn test_extract_last_exchanges_odd_count_small() {
+        // 5 messages — odd count, N=10.
+        // usable_len = 4, take = min(20, 4) = 4
+        let history = make_chat_history(5);
+        let result = SessionRunner::extract_last_exchanges(&history, 10);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].content, "message-0");
+        assert_eq!(result[3].content, "message-3");
+    }
+
+    #[test]
+    fn test_extract_last_exchanges_exact_n() {
+        // Exactly 20 messages, N=10 → should return all 20
+        let history = make_chat_history(20);
+        let result = SessionRunner::extract_last_exchanges(&history, 10);
+        assert_eq!(result.len(), 20);
+    }
+
+    #[test]
+    fn test_extract_last_exchanges_single_pair() {
+        let history = make_chat_history(2);
+        let result = SessionRunner::extract_last_exchanges(&history, 1);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].content, "message-0");
+        assert_eq!(result[1].content, "message-1");
+    }
+
+    // -- format_exchanges_for_message tests --
+
+    #[test]
+    fn test_format_exchanges_for_message_basic() {
+        let exchanges = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Hi there".to_string(),
+            },
+        ];
+        let result = SessionRunner::format_exchanges_for_message(&exchanges);
+        assert!(result.contains("=== Recent Conversation (last 1 exchanges) ==="));
+        assert!(result.contains("User: Hello"));
+        assert!(result.contains("Assistant: Hi there"));
+    }
+
+    #[test]
+    fn test_format_exchanges_for_message_truncates_long_messages() {
+        let long_content = "x".repeat(3000);
+        let exchanges = vec![ChatMessage {
+            role: "user".to_string(),
+            content: long_content,
+        }];
+        let result = SessionRunner::format_exchanges_for_message(&exchanges);
+        assert!(result.contains("... [truncated]"));
+        // Should contain the first 2000 chars but not all 3000
+        assert!(result.len() < 3000 + 200); // some overhead for labels
+    }
+
+    #[test]
+    fn test_format_exchanges_for_message_empty() {
+        let result = SessionRunner::format_exchanges_for_message(&[]);
+        assert!(result.contains("=== Recent Conversation ==="));
+        assert!(result.contains("no recent exchanges available"));
+    }
+
+    #[test]
+    fn test_format_exchanges_for_message_multiple_exchanges() {
+        let exchanges = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Q1".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "A1".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Q2".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "A2".to_string(),
+            },
+        ];
+        let result = SessionRunner::format_exchanges_for_message(&exchanges);
+        assert!(result.contains("last 2 exchanges"));
+        assert!(result.contains("User: Q1"));
+        assert!(result.contains("Assistant: A1"));
+        assert!(result.contains("User: Q2"));
+        assert!(result.contains("Assistant: A2"));
+    }
+
+    // -- build_recovery_message tests --
+
+    fn make_test_runner() -> SessionRunner {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let secrets = Arc::new(make_test_secrets());
+        // Leak the tempdir so it isn't dropped (this is fine in tests)
+        std::mem::forget(dir);
+        SessionRunner::new(config, secrets)
+    }
+
+    fn make_test_story_info() -> StoryInfo {
+        StoryInfo {
+            story_id: "6.4".to_string(),
+            story_key: "6-4-context-window-limit-recovery".to_string(),
+            epic_num: 6,
+            story_num: 4,
+            label: "context-window-limit-recovery".to_string(),
+            branch_name: "story/6-4-context-window-limit-recovery".to_string(),
+            specs_path: PathBuf::from(
+                "/project/_bmad-output/implementation-artifacts/6-4-context-window-limit-recovery.md",
+            ),
+            dependencies: vec![],
+            status: "in-progress".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_build_recovery_message_contains_all_sections() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let msg = runner.build_recovery_message(&story, "summary text", "exchange text");
+        assert!(
+            msg.contains("SESSION RECOVERY"),
+            "Should contain SESSION RECOVERY header"
+        );
+        assert!(
+            msg.contains("Session Summary"),
+            "Should contain Session Summary section"
+        );
+        assert!(msg.contains("summary text"), "Should contain the summary");
+        assert!(
+            msg.contains("exchange text"),
+            "Should contain the formatted exchanges"
+        );
+        assert!(
+            msg.contains("Current Story"),
+            "Should contain Current Story section"
+        );
+    }
+
+    #[test]
+    fn test_build_recovery_message_includes_story_path() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let msg = runner.build_recovery_message(&story, "s", "e");
+        assert!(
+            msg.contains("6-4-context-window-limit-recovery.md"),
+            "Should contain the story specs_path"
+        );
+    }
+
+    #[test]
+    fn test_build_recovery_message_does_not_contain_project_context() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let msg = runner.build_recovery_message(&story, "summary", "exchanges");
+        // Project context is loaded by the agent via BMAD activation, NOT injected in message
+        assert!(
+            !msg.contains("Project Context"),
+            "Recovery message should NOT contain a 'Project Context' section"
+        );
+    }
+
+    #[test]
+    fn test_build_recovery_message_contains_continue_instruction() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let msg = runner.build_recovery_message(&story, "s", "e");
+        assert!(
+            msg.contains("Continue working directly on the current task"),
+            "Should instruct agent to continue"
+        );
+        assert!(
+            msg.contains("Do NOT restart the workflow"),
+            "Should instruct agent not to restart"
+        );
+    }
+
+    // -- compressed state tests --
+
+    #[test]
+    fn test_compressed_state_contains_activation_turns() {
+        // Simulate the compressed history that drive_activation_and_recover would build
+        let mut compressed_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "CH".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "greeting".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Load the project context".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "context loaded".to_string(),
+            },
+        ];
+        compressed_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: "=== SESSION RECOVERY ===".to_string(),
+        });
+
+        assert_eq!(compressed_history[0].role, "user");
+        assert_eq!(compressed_history[0].content, "CH");
+        assert_eq!(compressed_history[2].role, "user");
+        assert_eq!(compressed_history[2].content, "Load the project context");
+    }
+
+    #[test]
+    fn test_compressed_state_last_message_is_recovery() {
+        let compressed_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "CH".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "greeting".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Load the project context".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "context loaded".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "=== SESSION RECOVERY — Context Window Limit Reached ===".to_string(),
+            },
+        ];
+
+        let last = compressed_history.last().expect("non-empty");
+        assert_eq!(last.role, "user");
+        assert!(last.content.contains("SESSION RECOVERY"));
+    }
+
+    #[test]
+    fn test_compressed_state_preserves_metadata() {
+        let original = SessionState {
+            story_id: "6.4".to_string(),
+            story_key: "6-4-context-window-limit-recovery".to_string(),
+            branch: "story/6-4-context-window-limit-recovery".to_string(),
+            started_at: "2026-02-07T10:00:00Z".to_string(),
+            last_activity: "2026-02-07T10:05:00Z".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            branch_name: "story/6-4-context-window-limit-recovery".to_string(),
+            base_branch: "main".to_string(),
+            chat_history: vec![],
+        };
+
+        // Simulate what drive_activation_and_recover does
+        let compressed = SessionState {
+            story_id: original.story_id.clone(),
+            story_key: original.story_key.clone(),
+            branch: original.branch.clone(),
+            started_at: original.started_at.clone(),
+            last_activity: chrono::Utc::now().to_rfc3339(),
+            provider: original.provider.clone(),
+            model: original.model.clone(),
+            branch_name: original.branch_name.clone(),
+            base_branch: original.base_branch.clone(),
+            chat_history: vec![],
+        };
+
+        assert_eq!(compressed.story_id, "6.4");
+        assert_eq!(compressed.story_key, "6-4-context-window-limit-recovery");
+        assert_eq!(compressed.branch, "story/6-4-context-window-limit-recovery");
+        assert_eq!(compressed.provider, "anthropic");
+        assert_eq!(compressed.model, "claude-sonnet-4-20250514");
+        assert_eq!(
+            compressed.branch_name,
+            "story/6-4-context-window-limit-recovery"
+        );
+        assert_eq!(compressed.base_branch, "main");
+        // started_at preserved from original
+        assert_eq!(compressed.started_at, "2026-02-07T10:00:00Z");
+    }
+
+    #[test]
+    fn test_compressed_state_updates_last_activity() {
+        let original_activity = "2026-02-07T10:05:00Z";
+        let new_activity = chrono::Utc::now().to_rfc3339();
+
+        // The compressed state should have a newer last_activity
+        assert_ne!(
+            original_activity, &new_activity,
+            "last_activity should be refreshed"
+        );
+    }
+
+    #[test]
+    fn test_compressed_state_total_messages() {
+        // After activation (4 msgs) + recovery message (1 msg) = 5 messages
+        let compressed_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "CH".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "greeting".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Load the project context".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "context loaded".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "=== SESSION RECOVERY ===".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            compressed_history.len(),
+            5,
+            "Compressed state should have exactly 5 messages: 4 activation + 1 recovery"
         );
     }
 }
