@@ -83,7 +83,7 @@ development_status:
 
   epic-6: in-progress
   6-1-telegram-notifications: ready-for-dev
-  6-2-http-retry-error-resilience: backlog
+  6-2-http-retry-error-resilience: ready-for-dev
   6-3-crash-recovery-via-session-wal: backlog
   6-4-context-window-limit-recovery: backlog
   epic-6-retrospective: optional
