@@ -4,6 +4,8 @@
 //! for environment-variable-based secret loading via dotenvy. All validation is
 //! performed through typed [`ConfigError`] variants (no `anyhow` in this module).
 
+pub mod discovery;
+
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use serde::{Deserialize, Serialize};
@@ -90,6 +92,12 @@ pub struct BotConfig {
     /// Log level filter: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`. Default: `"info"`.
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// Path to the log file for persistent structured logging.
+    /// The `logs` command reads from this file.
+    /// Default: `"bmad-bot.log"`
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
 }
 
 /// Default polling interval — 5 minutes.
@@ -105,6 +113,11 @@ fn default_log_format() -> String {
 /// Default log level — info.
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+/// Default log file path — bmad-bot.log.
+fn default_log_file() -> String {
+    "bmad-bot.log".to_string()
 }
 
 /// LLM provider configuration for each agent role.
@@ -261,6 +274,14 @@ impl BotConfig {
             &self.bmad_paths.implementation_artifacts,
         )?;
 
+        // log_file must be non-empty
+        if self.log_file.trim().is_empty() {
+            return Err(ConfigError::InvalidField {
+                field: "log_file".to_string(),
+                reason: "must be a non-empty file path".to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -333,6 +354,7 @@ impl BotConfig {
             },
             log_format: log_format.to_string(),
             log_level: log_level.to_string(),
+            log_file: "bmad-bot.log".to_string(),
         }
     }
 }
@@ -471,6 +493,7 @@ impl BotSecrets {
 /// (429, 500, 503, timeouts). Max 3 retries with exponential backoff.
 ///
 /// **ALL** HTTP calls in the project **MUST** use this client.
+#[allow(dead_code)] // Used by future stories requiring HTTP calls
 pub fn build_http_client() -> ClientWithMiddleware {
     let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
 

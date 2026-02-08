@@ -29,11 +29,11 @@ async fn main() -> Result<()> {
         }
         cli::Commands::Status => {
             let _ = tracing_subscriber::fmt::try_init();
-            tracing::warn!("'status' command not yet implemented — see Story 1.4");
+            cli::run_status(&cli.config).await?;
         }
-        cli::Commands::Logs => {
+        cli::Commands::Logs { level, tail } => {
             let _ = tracing_subscriber::fmt::try_init();
-            tracing::warn!("'logs' command not yet implemented — see Story 1.4");
+            cli::run_logs(&cli.config, level, Some(tail)).await?;
         }
     }
 

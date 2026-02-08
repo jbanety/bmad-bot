@@ -44,7 +44,7 @@ development_status:
   1-1-project-scaffolding-configuration-validation: review
   1-2-cli-framework-daemon-lifecycle: review
   1-3-interactive-init-command: review
-  1-4-status-logs-bmad-discovery: ready-for-dev
+  1-4-status-logs-bmad-discovery: review
   epic-1-retrospective: optional
 
   epic-2: in-progress

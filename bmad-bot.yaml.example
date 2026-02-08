@@ -10,6 +10,7 @@ polling_interval_secs: 300
 # Override at runtime with RUST_LOG env var for log level.
 log_format: pretty            # "pretty" or "json" (default: pretty)
 log_level: info               # "trace", "debug", "info", "warn", "error" (default: info)
+log_file: bmad-bot.log        # Path to log file for `bmad-bot logs` command (default: bmad-bot.log)
 
 # Git hosting provider for PR creation
 git_provider:

@@ -5,12 +5,15 @@
 //! and graceful shutdown via signal handling.
 //! Also provides the interactive `init` wizard for first-time setup.
 
+pub mod state;
+
+use std::fs::OpenOptions;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
 use tokio::time::{Duration, sleep};
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::{
     BmadPathsConfig, BotConfig, ConfigError, GitProviderConfig, LlmConfig, LlmRoleConfig,
@@ -47,7 +50,14 @@ pub enum Commands {
     /// Show current daemon state: stories processed, in progress, blocked.
     Status,
     /// Display structured daemon logs with filtering.
-    Logs,
+    Logs {
+        /// Minimum log level to display (trace, debug, info, warn, error).
+        #[arg(long, short)]
+        level: Option<String>,
+        /// Number of most recent log entries to show (default: 50).
+        #[arg(long, short, default_value_t = 50)]
+        tail: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -87,8 +97,23 @@ pub enum CliError {
     Io(#[from] std::io::Error),
 
     /// User cancelled an interactive operation.
+    #[allow(dead_code)] // Used by Story 1.3 interactive flows
     #[error("User cancelled operation")]
     UserCancelled,
+
+    /// State file read/write error.
+    #[error("State file error: {reason}")]
+    State {
+        /// Human-readable explanation of what went wrong.
+        reason: String,
+    },
+
+    /// Log file read/access error.
+    #[error("Log file error: {reason}")]
+    LogFile {
+        /// Human-readable explanation of what went wrong.
+        reason: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -121,39 +146,58 @@ fn default_model_for_provider(provider: &str) -> &str {
 // Tracing setup
 // ---------------------------------------------------------------------------
 
-/// Initializes structured tracing based on config.
+/// Initializes structured tracing with dual output:
+/// - **stdout**: config-driven format (pretty or JSON)
+/// - **file**: always JSON (machine-parseable for `bmad-bot logs`)
 ///
 /// Uses `RUST_LOG` env var as override if set, otherwise `config.log_level`.
-/// Supports two output formats:
-/// - `"json"` — machine-parseable structured JSON on stdout
-/// - `"pretty"` — human-readable coloured output (default)
 pub fn init_tracing(config: &BotConfig) -> Result<(), CliError> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 
-    // NOTE: Each branch calls try_init() independently — the JSON and pretty
-    // builders produce different types (JsonFields vs DefaultFields) and cannot
-    // be unified without boxing.
-    let result = match config.log_format.as_str() {
-        "json" => fmt()
+    // File appender — always JSON.
+    // CRITICAL: Raw File does NOT implement MakeWriter. Wrap in Mutex<File>
+    // which DOES implement MakeWriter (serializes writes via lock).
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config.log_file)
+        .map_err(|e| CliError::LogFile {
+            reason: format!("Cannot open log file '{}': {e}", config.log_file),
+        })?;
+    let file_writer = Mutex::new(log_file);
+
+    let file_layer = fmt::layer()
+        .json()
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_writer(file_writer)
+        .with_ansi(false); // No ANSI colors in file output
+
+    // Stdout layer — config-driven format.
+    // The two branches produce different types; `.boxed()` erases the type.
+    let stdout_layer = match config.log_format.as_str() {
+        "json" => fmt::layer()
             .json()
-            .with_env_filter(env_filter)
             .with_target(true)
             .with_thread_ids(false)
-            .try_init(),
-        _ => {
-            // "pretty" or fallback
-            fmt()
-                .with_env_filter(env_filter)
-                .with_target(true)
-                .with_thread_ids(false)
-                .try_init()
-        }
+            .boxed(),
+        _ => fmt::layer()
+            .with_target(true)
+            .with_thread_ids(false)
+            .boxed(),
     };
 
-    result.map_err(|e| CliError::TracingInit {
-        reason: e.to_string(),
-    })
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
+        .with(stdout_layer)
+        .try_init()
+        .map_err(|e| CliError::TracingInit {
+            reason: e.to_string(),
+        })?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +497,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
         },
         log_format: LOG_FORMATS[log_format_idx].to_string(),
         log_level: LOG_LEVELS[log_level_idx].to_string(),
+        log_file: "bmad-bot.log".to_string(),
     })
 }
 
@@ -557,6 +602,336 @@ fn generate_env_file(config: &BotConfig) -> Result<String, CliError> {
 }
 
 // ---------------------------------------------------------------------------
+// Sprint status summary
+// ---------------------------------------------------------------------------
+
+/// Story status counts parsed from sprint-status.yaml.
+#[derive(Debug, Default)]
+pub struct SprintSummary {
+    /// Total number of stories (excluding epics and retrospectives).
+    pub total_stories: usize,
+    /// Stories in backlog status.
+    pub backlog: usize,
+    /// Stories ready for development.
+    pub ready_for_dev: usize,
+    /// Stories currently in progress.
+    pub in_progress: usize,
+    /// Stories in review.
+    pub review: usize,
+    /// Stories completed.
+    pub done: usize,
+    /// Stories that are blocked.
+    pub blocked: usize,
+    /// Stories with an unrecognised status.
+    pub other: usize,
+    /// Total number of epics.
+    pub total_epics: usize,
+    /// Epics currently in progress.
+    pub epics_in_progress: usize,
+    /// Epics completed.
+    pub epics_done: usize,
+}
+
+impl SprintSummary {
+    /// Parse sprint-status.yaml and compute summary statistics.
+    ///
+    /// Returns a default (all zeros) summary if the file doesn't exist or can't be parsed.
+    pub fn from_file(path: &Path) -> Self {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return Self::default(),
+        };
+
+        let yaml: serde_yml::Value = match serde_yml::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => return Self::default(),
+        };
+
+        let mut summary = Self::default();
+
+        if let Some(dev_status) = yaml.get("development_status").and_then(|v| v.as_mapping()) {
+            for (key, value) in dev_status {
+                let key_str = key.as_str().unwrap_or("");
+                let status_str = value.as_str().unwrap_or("");
+
+                // Identify epic entries (format: "epic-N")
+                if key_str.starts_with("epic-") && !key_str.contains("retrospective") {
+                    summary.total_epics += 1;
+                    match status_str {
+                        "in-progress" => summary.epics_in_progress += 1,
+                        "done" => summary.epics_done += 1,
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Skip retrospective entries
+                if key_str.contains("retrospective") {
+                    continue;
+                }
+
+                // Story entries — starts with a digit (e.g., "1-2-slug")
+                if key_str.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    summary.total_stories += 1;
+                    match status_str {
+                        "backlog" => summary.backlog += 1,
+                        "ready-for-dev" => summary.ready_for_dev += 1,
+                        "in-progress" => summary.in_progress += 1,
+                        "review" => summary.review += 1,
+                        "done" => summary.done += 1,
+                        "blocked" => summary.blocked += 1,
+                        _ => summary.other += 1,
+                    }
+                }
+            }
+        }
+
+        summary
+    }
+}
+
+impl std::fmt::Display for SprintSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Sprint Status:")?;
+        writeln!(
+            f,
+            "  Epics: {} total ({} in-progress, {} done)",
+            self.total_epics, self.epics_in_progress, self.epics_done
+        )?;
+        writeln!(f, "  Stories: {} total", self.total_stories)?;
+        writeln!(f, "    \u{2705} Done:          {}", self.done)?;
+        writeln!(f, "    \u{1f50d} Review:        {}", self.review)?;
+        writeln!(f, "    \u{1f527} In Progress:   {}", self.in_progress)?;
+        writeln!(f, "    \u{1f4cb} Ready for Dev: {}", self.ready_for_dev)?;
+        writeln!(f, "    \u{1f4e6} Backlog:       {}", self.backlog)?;
+        if self.blocked > 0 {
+            writeln!(f, "    \u{1f6ab} Blocked:       {}", self.blocked)?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Status command handler
+// ---------------------------------------------------------------------------
+
+/// Runs the `status` command: displays daemon state, sprint summary, and BMAD info.
+pub async fn run_status(config_path: &Path) -> Result<(), CliError> {
+    // Try to load config for paths — if config doesn't exist, use defaults
+    let config = BotConfig::load(config_path).ok();
+
+    let state_path = Path::new(state::STATE_FILE_NAME);
+
+    println!(
+        "\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}"
+    );
+    println!("\u{2551}        BMAD Bot Status               \u{2551}");
+    println!(
+        "\u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}"
+    );
+    println!();
+
+    // --- Daemon State ---
+    match state::DaemonState::read(state_path)? {
+        Some(ds) => {
+            let alive = state::DaemonState::is_process_alive(ds.pid);
+            let effective_status = if alive {
+                "\u{1f7e2} Running"
+            } else {
+                "\u{1f534} Stopped (stale state)"
+            };
+
+            println!("Daemon: {effective_status}");
+            println!("  PID:              {}", ds.pid);
+            println!("  Started:          {}", ds.started_at);
+            println!("  Last Activity:    {}", ds.last_activity);
+            println!("  Stories Processed:{}", ds.stories_processed);
+            println!("  Log File:         {}", ds.log_file.display());
+            println!();
+
+            // BMAD discovery from state
+            if let Some(ref discovery) = ds.bmad_discovery {
+                println!("{discovery}");
+            }
+
+            // Clean up stale state if process is dead
+            if !alive {
+                state::DaemonState::cleanup(state_path)?;
+                println!("  (Stale state file cleaned up)");
+                println!();
+            }
+        }
+        None => {
+            println!("Daemon: \u{1f534} Stopped (no state file)");
+            println!();
+
+            // Run fresh BMAD discovery
+            if let Some(ref cfg) = config {
+                let discovery = crate::config::discovery::BmadDiscovery::discover(Path::new(
+                    &cfg.bmad_paths.project_root,
+                ));
+                println!("{discovery}");
+            }
+        }
+    }
+
+    // --- Sprint Summary ---
+    if let Some(ref cfg) = config {
+        let sprint_path =
+            Path::new(&cfg.bmad_paths.implementation_artifacts).join("sprint-status.yaml");
+        let summary = SprintSummary::from_file(&sprint_path);
+        if summary.total_stories > 0 {
+            println!("{summary}");
+        } else {
+            println!("Sprint Status: No sprint data found");
+            println!("  Run sprint-planning to initialize story tracking");
+        }
+    } else {
+        println!(
+            "Sprint Status: Cannot determine (no config file at {})",
+            config_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Logs command handler
+// ---------------------------------------------------------------------------
+
+/// Valid log level names for `--level` flag validation.
+const VALID_LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+
+/// Runs the `logs` command: reads and displays structured log entries from the log file.
+pub async fn run_logs(
+    config_path: &Path,
+    level: Option<String>,
+    tail: Option<usize>,
+) -> Result<(), CliError> {
+    // Validate --level flag if provided
+    if let Some(ref lvl) = level
+        && !VALID_LOG_LEVELS.contains(&lvl.to_lowercase().as_str())
+    {
+        println!(
+            "\u{26a0}\u{fe0f}  Unknown log level '{}'. Valid levels: {}",
+            lvl,
+            VALID_LOG_LEVELS.join(", ")
+        );
+        println!("   Showing all log entries (no filter applied).\n");
+    }
+
+    let config = BotConfig::load(config_path).map_err(|e| CliError::LogFile {
+        reason: format!("Cannot load config to find log file path: {e}"),
+    })?;
+
+    let log_path = Path::new(&config.log_file);
+
+    if !log_path.exists() {
+        println!("No log file found at '{}'", config.log_file);
+        println!("Has the daemon been started? Run `bmad-bot start` first.");
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(log_path)?;
+    let lines: Vec<&str> = content.lines().collect();
+
+    if lines.is_empty() {
+        println!("Log file is empty.");
+        return Ok(());
+    }
+
+    // Apply tail (default: 50 most recent entries)
+    let tail_count = tail.unwrap_or(50);
+    let start_idx = if lines.len() > tail_count {
+        lines.len() - tail_count
+    } else {
+        0
+    };
+    let visible_lines = &lines[start_idx..];
+
+    // Parse minimum log level for filtering
+    let min_level = level.as_deref().map(parse_level_priority).unwrap_or(0);
+
+    let mut displayed = 0;
+    for line in visible_lines {
+        // Each line should be a JSON object from tracing's JSON layer
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
+            let entry_level = entry
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("INFO");
+
+            // Filter by level
+            if parse_level_priority(entry_level) < min_level {
+                continue;
+            }
+
+            let timestamp = entry
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let message = entry
+                .get("fields")
+                .and_then(|f| f.get("message"))
+                .and_then(|v| v.as_str())
+                .or_else(|| entry.get("message").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let target = entry.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let story_id = entry
+                .get("fields")
+                .and_then(|f| f.get("story_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| format!(" [story:{s}]"))
+                .unwrap_or_default();
+
+            let level_icon = match entry_level.to_uppercase().as_str() {
+                "ERROR" => "\u{274c}",
+                "WARN" => "\u{26a0}\u{fe0f} ",
+                "INFO" => "\u{2139}\u{fe0f} ",
+                "DEBUG" => "\u{1f41b}",
+                "TRACE" => "\u{1f52c}",
+                _ => "  ",
+            };
+
+            println!("{level_icon} {timestamp} [{entry_level:>5}] {target}{story_id}: {message}");
+            displayed += 1;
+        } else {
+            // Non-JSON line — print as-is (resilient fallback)
+            if min_level == 0 {
+                println!("  {line}");
+                displayed += 1;
+            }
+        }
+    }
+
+    if displayed == 0 {
+        println!("No log entries match the filter criteria.");
+    } else {
+        println!(
+            "\n--- Showing {displayed} of {} total entries ---",
+            lines.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Map log level string to a numeric priority for filtering.
+///
+/// Higher number = more severe. Filter shows entries at `min_level` and above.
+fn parse_level_priority(level: &str) -> u8 {
+    match level.to_uppercase().as_str() {
+        "TRACE" => 1,
+        "DEBUG" => 2,
+        "INFO" => 3,
+        "WARN" | "WARNING" => 4,
+        "ERROR" => 5,
+        _ => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Start command handler
 // ---------------------------------------------------------------------------
 
@@ -574,6 +949,29 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     let secrets = crate::config::BotSecrets::load()?;
     secrets.validate_for_config(&config)?;
 
+    // BMAD auto-discovery
+    let discovery = crate::config::discovery::BmadDiscovery::discover(Path::new(
+        &config.bmad_paths.project_root,
+    ));
+    if discovery.bmad_detected {
+        tracing::info!(
+            bmad_version = ?discovery.bmad_version,
+            modules = ?discovery.installed_modules,
+            "BMAD installation detected"
+        );
+    } else {
+        tracing::warn!(
+            project_root = %config.bmad_paths.project_root,
+            "No BMAD installation detected — _bmad/ directory not found"
+        );
+    }
+
+    // Write daemon state file
+    let state_path = Path::new(state::STATE_FILE_NAME);
+    let mut daemon_state =
+        state::DaemonState::new_running(std::path::PathBuf::from(&config.log_file), discovery);
+    daemon_state.write(state_path)?;
+
     let config = Arc::new(config);
 
     tracing::info!(
@@ -581,11 +979,17 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
         polling_interval_secs = config.polling_interval_secs,
         git_provider = %config.git_provider.provider,
         log_format = %config.log_format,
+        log_file = %config.log_file,
         "bmad-bot daemon started"
     );
 
-    // Polling loop with graceful shutdown
-    run_polling_loop(&config).await?;
+    // Polling loop with graceful shutdown — pass state for touch updates
+    run_polling_loop(&config, &mut daemon_state, state_path).await?;
+
+    // Clean shutdown — update state and remove file
+    daemon_state.mark_stopped();
+    daemon_state.write(state_path)?;
+    state::DaemonState::cleanup(state_path)?;
 
     tracing::info!("bmad-bot daemon stopped cleanly");
     Ok(())
@@ -595,11 +999,15 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
 // Polling loop with graceful shutdown
 // ---------------------------------------------------------------------------
 
-/// Placeholder polling loop. Sleeps for the configured interval, checks for
-/// shutdown signals each cycle.
+/// Polling loop with graceful shutdown and state file updates.
 ///
+/// Updates the daemon state file's `last_activity` timestamp each cycle.
 /// Story 2.1 replaces the sleep with sprint-status.yaml polling.
-async fn run_polling_loop(config: &Arc<BotConfig>) -> Result<(), CliError> {
+async fn run_polling_loop(
+    config: &Arc<BotConfig>,
+    daemon_state: &mut state::DaemonState,
+    state_path: &Path,
+) -> Result<(), CliError> {
     let interval = Duration::from_secs(config.polling_interval_secs);
 
     // Set up SIGTERM handler (Unix only — acceptable for MVP targeting macOS/Linux)
@@ -609,6 +1017,12 @@ async fn run_polling_loop(config: &Arc<BotConfig>) -> Result<(), CliError> {
     loop {
         tokio::select! {
             _ = sleep(interval) => {
+                // Update last activity timestamp
+                daemon_state.touch();
+                if let Err(e) = daemon_state.write(state_path) {
+                    tracing::warn!(error = %e, "Failed to update daemon state file");
+                }
+
                 tracing::debug!(
                     interval_secs = config.polling_interval_secs,
                     "Polling cycle — no watcher implemented yet (placeholder)"
@@ -678,6 +1092,7 @@ mod tests {
             },
             log_format: "pretty".to_string(),
             log_level: "info".to_string(),
+            log_file: "bmad-bot.log".to_string(),
         }
     }
 
@@ -1013,5 +1428,296 @@ mod tests {
     #[test]
     fn test_default_model_for_provider_unknown() {
         assert_eq!(default_model_for_provider("unknown"), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Sprint summary tests (Story 1.4 — Task 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sprint_summary_from_valid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sprint-status.yaml");
+        let content = r#"
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: done
+  1-2-cli: in-progress
+  1-3-init: ready-for-dev
+  1-4-status: backlog
+  epic-1-retrospective: optional
+  epic-2: backlog
+  2-1-polling: backlog
+  2-2-deps: backlog
+"#;
+        std::fs::write(&path, content).unwrap();
+        let summary = SprintSummary::from_file(&path);
+        assert_eq!(summary.total_stories, 6);
+        assert_eq!(summary.done, 1);
+        assert_eq!(summary.in_progress, 1);
+        assert_eq!(summary.ready_for_dev, 1);
+        assert_eq!(summary.backlog, 3);
+        assert_eq!(summary.total_epics, 2);
+        assert_eq!(summary.epics_in_progress, 1);
+    }
+
+    #[test]
+    fn test_sprint_summary_from_missing_file() {
+        let summary = SprintSummary::from_file(Path::new("/nonexistent/path.yaml"));
+        assert_eq!(summary.total_stories, 0);
+        assert_eq!(summary.total_epics, 0);
+    }
+
+    #[test]
+    fn test_sprint_summary_from_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("empty.yaml");
+        std::fs::write(&path, "").unwrap();
+        let summary = SprintSummary::from_file(&path);
+        assert_eq!(summary.total_stories, 0);
+    }
+
+    #[test]
+    fn test_sprint_summary_counts_blocked_stories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sprint-status.yaml");
+        let content = r#"
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: done
+  1-2-cli: blocked
+  1-3-init: blocked
+"#;
+        std::fs::write(&path, content).unwrap();
+        let summary = SprintSummary::from_file(&path);
+        assert_eq!(summary.total_stories, 3);
+        assert_eq!(summary.done, 1);
+        assert_eq!(summary.blocked, 2);
+    }
+
+    #[test]
+    fn test_sprint_summary_display_includes_blocked_when_nonzero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sprint-status.yaml");
+        let content = r#"
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: blocked
+"#;
+        std::fs::write(&path, content).unwrap();
+        let summary = SprintSummary::from_file(&path);
+        let output = format!("{summary}");
+        assert!(output.contains("Blocked"));
+    }
+
+    #[test]
+    fn test_sprint_summary_display_omits_blocked_when_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sprint-status.yaml");
+        let content = r#"
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: done
+"#;
+        std::fs::write(&path, content).unwrap();
+        let summary = SprintSummary::from_file(&path);
+        let output = format!("{summary}");
+        assert!(!output.contains("Blocked"));
+    }
+
+    #[test]
+    fn test_sprint_summary_skips_retrospectives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sprint-status.yaml");
+        let content = r#"
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: done
+  epic-1-retrospective: optional
+"#;
+        std::fs::write(&path, content).unwrap();
+        let summary = SprintSummary::from_file(&path);
+        assert_eq!(summary.total_stories, 1);
+        assert_eq!(summary.total_epics, 1);
+    }
+
+    #[test]
+    fn test_sprint_summary_counts_review_stories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sprint-status.yaml");
+        let content = r#"
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: review
+  1-2-cli: review
+  1-3-init: done
+"#;
+        std::fs::write(&path, content).unwrap();
+        let summary = SprintSummary::from_file(&path);
+        assert_eq!(summary.review, 2);
+        assert_eq!(summary.done, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_level_priority tests (Story 1.4 — Task 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_level_priority_ordering() {
+        assert!(parse_level_priority("ERROR") > parse_level_priority("WARN"));
+        assert!(parse_level_priority("WARN") > parse_level_priority("INFO"));
+        assert!(parse_level_priority("INFO") > parse_level_priority("DEBUG"));
+        assert!(parse_level_priority("DEBUG") > parse_level_priority("TRACE"));
+    }
+
+    #[test]
+    fn test_parse_level_priority_case_insensitive() {
+        assert_eq!(parse_level_priority("error"), parse_level_priority("ERROR"));
+        assert_eq!(parse_level_priority("Info"), parse_level_priority("INFO"));
+        assert_eq!(parse_level_priority("warn"), parse_level_priority("WARN"));
+    }
+
+    #[test]
+    fn test_parse_level_priority_unknown_returns_zero() {
+        assert_eq!(parse_level_priority("foo"), 0);
+        assert_eq!(parse_level_priority("verbose"), 0);
+        assert_eq!(parse_level_priority(""), 0);
+    }
+
+    #[test]
+    fn test_parse_level_priority_warning_alias() {
+        assert_eq!(
+            parse_level_priority("WARNING"),
+            parse_level_priority("WARN")
+        );
+    }
+
+    #[test]
+    fn test_parse_level_priority_all_levels_nonzero() {
+        for level in &["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] {
+            assert!(
+                parse_level_priority(level) > 0,
+                "Expected nonzero priority for {level}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Config log_file validation tests (Story 1.4 — Task 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_validate_accepts_log_file() {
+        let config = make_test_config();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.log_file, "bmad-bot.log");
+    }
+
+    #[test]
+    fn test_config_validate_rejects_empty_log_file() {
+        let mut config = make_test_config();
+        config.log_file = String::new();
+        let err = config.validate().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("log_file"),
+            "Error should mention log_file: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_rejects_whitespace_only_log_file() {
+        let mut config = make_test_config();
+        config.log_file = "   ".to_string();
+        let err = config.validate().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("log_file"),
+            "Error should mention log_file: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_accepts_custom_log_file_path() {
+        let mut config = make_test_config();
+        config.log_file = "/var/log/my-daemon.log".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // CLI Logs subcommand args parsing (Story 1.4 — Task 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cli_parse_logs_with_level_and_tail() {
+        let cli =
+            Cli::try_parse_from(["bmad-bot", "logs", "--level", "warn", "--tail", "10"]).unwrap();
+        match cli.command {
+            Commands::Logs { level, tail } => {
+                assert_eq!(level, Some("warn".to_string()));
+                assert_eq!(tail, 10);
+            }
+            _ => panic!("Expected Logs command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_logs_default_tail() {
+        let cli = Cli::try_parse_from(["bmad-bot", "logs"]).unwrap();
+        match cli.command {
+            Commands::Logs { level, tail } => {
+                assert!(level.is_none());
+                assert_eq!(tail, 50);
+            }
+            _ => panic!("Expected Logs command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_logs_short_flags() {
+        let cli = Cli::try_parse_from(["bmad-bot", "logs", "-l", "error", "-t", "5"]).unwrap();
+        match cli.command {
+            Commands::Logs { level, tail } => {
+                assert_eq!(level, Some("error".to_string()));
+                assert_eq!(tail, 5);
+            }
+            _ => panic!("Expected Logs command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_logs_level_only() {
+        let cli = Cli::try_parse_from(["bmad-bot", "logs", "--level", "info"]).unwrap();
+        match cli.command {
+            Commands::Logs { level, tail } => {
+                assert_eq!(level, Some("info".to_string()));
+                assert_eq!(tail, 50); // default
+            }
+            _ => panic!("Expected Logs command"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // CliError display tests for new variants (Story 1.4 — Task 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cli_error_display_state() {
+        let err = CliError::State {
+            reason: "corrupt file".to_string(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("State file error"));
+        assert!(msg.contains("corrupt file"));
+    }
+
+    #[test]
+    fn test_cli_error_display_log_file() {
+        let err = CliError::LogFile {
+            reason: "permission denied".to_string(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("Log file error"));
+        assert!(msg.contains("permission denied"));
     }
 }

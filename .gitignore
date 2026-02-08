@@ -7,5 +7,9 @@
 # Session WAL file (transient, exists only during active session)
 _bmad-output/implementation-artifacts/.bmad-bot-session.yaml
 
+# Daemon runtime files (Story 1.4)
+bmad-bot.state.json
+bmad-bot.log
+
 # OS files
 .DS_Store

@@ -1,6 +1,6 @@
 # Story 1.4: Status, Logs & BMAD Discovery
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,87 +20,87 @@ So that I can monitor operations and trust the daemon knows my project setup.
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Backward-compatibility updates for new `log_file` field (AC: #1, #2)
-  - [ ] 0.1 Add `serde_json = "1"` to `[dependencies]` in Cargo.toml (already present from Story 1.1 — verify)
-  - [ ] 0.2 In `src/cli/mod.rs`: update `collect_config_interactively()` to set `log_file: default_log_file()` (or `"bmad-bot.log".to_string()`) when constructing `BotConfig` — no interactive prompt needed, use the default
-  - [ ] 0.3 In `src/cli/mod.rs`: update `make_test_config()` test helper to include `log_file: "bmad-bot.log".to_string()`
-  - [ ] 0.4 Verify `cargo check` and `cargo test` pass with existing Story 1.1/1.2/1.3 tests
+- [x] Task 0: Backward-compatibility updates for new `log_file` field (AC: #1, #2)
+  - [x] 0.1 Add `serde_json = "1"` to `[dependencies]` in Cargo.toml (already present from Story 1.1 — verify)
+  - [x] 0.2 In `src/cli/mod.rs`: update `collect_config_interactively()` to set `log_file: default_log_file()` (or `"bmad-bot.log".to_string()`) when constructing `BotConfig` — no interactive prompt needed, use the default
+  - [x] 0.3 In `src/cli/mod.rs`: update `make_test_config()` test helper to include `log_file: "bmad-bot.log".to_string()`
+  - [x] 0.4 Verify `cargo check` and `cargo test` pass with existing Story 1.1/1.2/1.3 tests
 
-- [ ] Task 1: Implement BMAD Discovery module — `src/config/discovery.rs` (AC: #3)
-  - [ ] 1.1 Create `src/config/discovery.rs` with `pub struct BmadDiscovery` containing: `bmad_version: Option<String>`, `installed_modules: Vec<String>`, `config_path: Option<PathBuf>`, `project_root: PathBuf`
-  - [ ] 1.2 Implement `pub fn discover(project_root: &Path) -> BmadDiscovery` that scans `{project_root}/_bmad/` directory
-  - [ ] 1.3 Parse BMAD version from `_bmad/bmm/config.yaml` if present (read the YAML frontmatter or body for version info)
-  - [ ] 1.4 Detect installed modules by checking for known subdirectories under `_bmad/` (e.g., `bmm`, `core`, `_config`, `_memory`)
-  - [ ] 1.5 Check for `_bmad/bmm/config.yaml` existence → store path in `config_path`
-  - [ ] 1.6 Implement `Display` trait for `BmadDiscovery` for formatted output
-  - [ ] 1.7 Re-export from `src/config/mod.rs` with `pub mod discovery;`
+- [x] Task 1: Implement BMAD Discovery module — `src/config/discovery.rs` (AC: #3)
+  - [x] 1.1 Create `src/config/discovery.rs` with `pub struct BmadDiscovery` containing: `bmad_version: Option<String>`, `installed_modules: Vec<String>`, `config_path: Option<PathBuf>`, `project_root: PathBuf`
+  - [x] 1.2 Implement `pub fn discover(project_root: &Path) -> BmadDiscovery` that scans `{project_root}/_bmad/` directory
+  - [x] 1.3 Parse BMAD version from `_bmad/bmm/config.yaml` if present (read the YAML frontmatter or body for version info)
+  - [x] 1.4 Detect installed modules by checking for known subdirectories under `_bmad/` (e.g., `bmm`, `core`, `_config`, `_memory`)
+  - [x] 1.5 Check for `_bmad/bmm/config.yaml` existence → store path in `config_path`
+  - [x] 1.6 Implement `Display` trait for `BmadDiscovery` for formatted output
+  - [x] 1.7 Re-export from `src/config/mod.rs` with `pub mod discovery;`
 
-- [ ] Task 2: Implement daemon state file for status tracking (AC: #1)
-  - [ ] 2.1 Define `pub struct DaemonState` in a new file `src/cli/state.rs` with fields: `pid: u32`, `started_at: String`, `last_activity: String`, `status: String` (running/stopped), `log_file: PathBuf`, `stories_processed: usize`
-  - [ ] 2.2 Implement `DaemonState::write(path: &Path) -> Result<(), CliError>` — writes JSON state to `bmad-bot.state.json` in current directory
-  - [ ] 2.3 Implement `DaemonState::read(path: &Path) -> Result<Option<DaemonState>, CliError>` — reads state file, returns None if missing
-  - [ ] 2.4 Implement `DaemonState::is_process_alive(pid: u32) -> bool` — checks if PID is still running (via `kill(pid, 0)` on Unix)
-  - [ ] 2.5 Implement `DaemonState::cleanup(path: &Path) -> Result<(), CliError>` — removes stale state file
-  - [ ] 2.6 Re-export from `src/cli/mod.rs` with `pub mod state;`
+- [x] Task 2: Implement daemon state file for status tracking (AC: #1)
+  - [x] 2.1 Define `pub struct DaemonState` in a new file `src/cli/state.rs` with fields: `pid: u32`, `started_at: String`, `last_activity: String`, `status: String` (running/stopped), `log_file: PathBuf`, `stories_processed: usize`
+  - [x] 2.2 Implement `DaemonState::write(path: &Path) -> Result<(), CliError>` — writes JSON state to `bmad-bot.state.json` in current directory
+  - [x] 2.3 Implement `DaemonState::read(path: &Path) -> Result<Option<DaemonState>, CliError>` — reads state file, returns None if missing
+  - [x] 2.4 Implement `DaemonState::is_process_alive(pid: u32) -> bool` — checks if PID is still running (via `kill(pid, 0)` on Unix)
+  - [x] 2.5 Implement `DaemonState::cleanup(path: &Path) -> Result<(), CliError>` — removes stale state file
+  - [x] 2.6 Re-export from `src/cli/mod.rs` with `pub mod state;`
 
-- [ ] Task 3: Implement log file writer in tracing setup (AC: #2)
-  - [ ] 3.1 Add `log_file` field to `BotConfig` with `#[serde(default = "default_log_file")]` → default `"bmad-bot.log"`
-  - [ ] 3.2 Update `bmad-bot.yaml.example` with `log_file` field and comment
-  - [ ] 3.3 Extend `init_tracing()` in `cli/mod.rs` to add a file appender layer alongside the stdout layer using `tracing_subscriber::Layer` composition
-  - [ ] 3.4 File layer always writes JSON format (machine-parseable) regardless of stdout format setting
-  - [ ] 3.5 Validate `log_file` path in `BotConfig::validate()` (non-empty string)
+- [x] Task 3: Implement log file writer in tracing setup (AC: #2)
+  - [x] 3.1 Add `log_file` field to `BotConfig` with `#[serde(default = "default_log_file")]` → default `"bmad-bot.log"`
+  - [x] 3.2 Update `bmad-bot.yaml.example` with `log_file` field and comment
+  - [x] 3.3 Extend `init_tracing()` in `cli/mod.rs` to add a file appender layer alongside the stdout layer using `tracing_subscriber::Layer` composition
+  - [x] 3.4 File layer always writes JSON format (machine-parseable) regardless of stdout format setting
+  - [x] 3.5 Validate `log_file` path in `BotConfig::validate()` (non-empty string)
 
-- [ ] Task 4: Integrate state tracking into `run_start()` (AC: #1, #3)
-  - [ ] 4.1 At daemon startup in `run_start()`: run BMAD discovery, log results at `info` level
-  - [ ] 4.2 Write `DaemonState` file with current PID, start timestamp, status "running"
-  - [ ] 4.3 Update `last_activity` timestamp in state file at each polling cycle
-  - [ ] 4.4 On graceful shutdown: update state file with status "stopped" and final timestamp, then remove state file
-  - [ ] 4.5 Store `BmadDiscovery` results in state file so `status` command can display them
+- [x] Task 4: Integrate state tracking into `run_start()` (AC: #1, #3)
+  - [x] 4.1 At daemon startup in `run_start()`: run BMAD discovery, log results at `info` level
+  - [x] 4.2 Write `DaemonState` file with current PID, start timestamp, status "running"
+  - [x] 4.3 Update `last_activity` timestamp in state file at each polling cycle
+  - [x] 4.4 On graceful shutdown: update state file with status "stopped" and final timestamp, then remove state file
+  - [x] 4.5 Store `BmadDiscovery` results in state file so `status` command can display them
 
-- [ ] Task 5: Implement `run_status()` command (AC: #1, #3)
-  - [ ] 5.1 Create `pub async fn run_status(config_path: &Path) -> Result<(), CliError>` in `cli/mod.rs`
-  - [ ] 5.2 Read `DaemonState` from `bmad-bot.state.json` — if missing, report "stopped (no state file)"
-  - [ ] 5.3 If state file exists, check if PID is alive → "running" or "stopped (stale state)"
-  - [ ] 5.4 Load and parse `sprint-status.yaml` from configured path → count stories by status (backlog, ready-for-dev, in-progress, review, done, blocked)
-  - [ ] 5.5 Display BMAD discovery info (version, installed modules) — either from state file or by running discovery fresh
-  - [ ] 5.6 Format output as a clean summary table to stdout
+- [x] Task 5: Implement `run_status()` command (AC: #1, #3)
+  - [x] 5.1 Create `pub async fn run_status(config_path: &Path) -> Result<(), CliError>` in `cli/mod.rs`
+  - [x] 5.2 Read `DaemonState` from `bmad-bot.state.json` — if missing, report "stopped (no state file)"
+  - [x] 5.3 If state file exists, check if PID is alive → "running" or "stopped (stale state)"
+  - [x] 5.4 Load and parse `sprint-status.yaml` from configured path → count stories by status (backlog, ready-for-dev, in-progress, review, done, blocked)
+  - [x] 5.5 Display BMAD discovery info (version, installed modules) — either from state file or by running discovery fresh
+  - [x] 5.6 Format output as a clean summary table to stdout
 
-- [ ] Task 6: Implement `run_logs()` command (AC: #2)
-  - [ ] 6.1 Create `pub async fn run_logs(config_path: &Path, level: Option<String>, tail: Option<usize>) -> Result<(), CliError>` in `cli/mod.rs`
-  - [ ] 6.2 Read the log file path from config (default: `bmad-bot.log`)
-  - [ ] 6.3 Parse JSON log lines and pretty-print with colored output (timestamp, level, message, fields)
-  - [ ] 6.4 Implement `--level` flag filtering: only show logs at specified level and above
-  - [ ] 6.5 Implement `--tail N` flag: show last N log entries (default: 50, plain `usize` not `Option` — clap `default_value_t`)
-  - [ ] 6.6 Validate `--level` flag: if provided but not one of trace/debug/info/warn/error, print a warning and list valid levels
-  - [ ] 6.7 If log file doesn't exist, report "No log file found — has the daemon been started?"
+- [x] Task 6: Implement `run_logs()` command (AC: #2)
+  - [x] 6.1 Create `pub async fn run_logs(config_path: &Path, level: Option<String>, tail: Option<usize>) -> Result<(), CliError>` in `cli/mod.rs`
+  - [x] 6.2 Read the log file path from config (default: `bmad-bot.log`)
+  - [x] 6.3 Parse JSON log lines and pretty-print with colored output (timestamp, level, message, fields)
+  - [x] 6.4 Implement `--level` flag filtering: only show logs at specified level and above
+  - [x] 6.5 Implement `--tail N` flag: show last N log entries (default: 50, plain `usize` not `Option` — clap `default_value_t`)
+  - [x] 6.6 Validate `--level` flag: if provided but not one of trace/debug/info/warn/error, print a warning and list valid levels
+  - [x] 6.7 If log file doesn't exist, report "No log file found — has the daemon been started?"
 
-- [ ] Task 7: Extend CLI with `status` and `logs` subcommand arguments (AC: #1, #2)
-  - [ ] 7.1 Add `--level` optional argument to `Logs` variant in `Commands` enum
-  - [ ] 7.2 Add `--tail` argument to `Logs` variant as plain `usize` with `default_value_t = 50` (NOT `Option<usize>` — avoids redundant unwrap)
-  - [ ] 7.3 Update main.rs dispatch for `Commands::Status` → `cli::run_status(&cli.config).await?`
-  - [ ] 7.4 Update main.rs dispatch for `Commands::Logs` → `cli::run_logs(&cli.config, level, tail).await?`
+- [x] Task 7: Extend CLI with `status` and `logs` subcommand arguments (AC: #1, #2)
+  - [x] 7.1 Add `--level` optional argument to `Logs` variant in `Commands` enum
+  - [x] 7.2 Add `--tail` argument to `Logs` variant as plain `usize` with `default_value_t = 50` (NOT `Option<usize>` — avoids redundant unwrap)
+  - [x] 7.3 Update main.rs dispatch for `Commands::Status` → `cli::run_status(&cli.config).await?`
+  - [x] 7.4 Update main.rs dispatch for `Commands::Logs` → `cli::run_logs(&cli.config, level, tail).await?`
 
-- [ ] Task 8: Write unit tests (AC: #1, #2, #3)
-  - [ ] 8.1 Test `BmadDiscovery::discover()` with a mocked _bmad directory (using tempdir)
-  - [ ] 8.2 Test `BmadDiscovery::discover()` returns empty modules when no _bmad dir exists
-  - [ ] 8.3 Test `DaemonState::write()` and `DaemonState::read()` roundtrip
-  - [ ] 8.4 Test `DaemonState::read()` returns None for missing file
-  - [ ] 8.5 Test `DaemonState::is_process_alive()` with current PID (should be alive)
-  - [ ] 8.6 Test `DaemonState::is_process_alive()` with PID 0 or max u32 (should be dead)
-  - [ ] 8.7 Test sprint-status.yaml parsing and story count aggregation
-  - [ ] 8.8 Test sprint-status.yaml parsing counts blocked stories correctly
-  - [ ] 8.9 Test log line parsing and level filtering logic
-  - [ ] 8.10 Test `parse_level_priority` returns 0 for unknown levels
-  - [ ] 8.11 Test `BotConfig::validate()` accepts new `log_file` field
-  - [ ] 8.12 Test `BotConfig::validate()` rejects empty `log_file`
-  - [ ] 8.13 Test `DaemonState::record_story_processed()` increments counter
-  - [ ] 8.14 Test `stories_processed` survives write/read roundtrip
+- [x] Task 8: Write unit tests (AC: #1, #2, #3)
+  - [x] 8.1 Test `BmadDiscovery::discover()` with a mocked _bmad directory (using tempdir)
+  - [x] 8.2 Test `BmadDiscovery::discover()` returns empty modules when no _bmad dir exists
+  - [x] 8.3 Test `DaemonState::write()` and `DaemonState::read()` roundtrip
+  - [x] 8.4 Test `DaemonState::read()` returns None for missing file
+  - [x] 8.5 Test `DaemonState::is_process_alive()` with current PID (should be alive)
+  - [x] 8.6 Test `DaemonState::is_process_alive()` with PID 0 or max u32 (should be dead)
+  - [x] 8.7 Test sprint-status.yaml parsing and story count aggregation
+  - [x] 8.8 Test sprint-status.yaml parsing counts blocked stories correctly
+  - [x] 8.9 Test log line parsing and level filtering logic
+  - [x] 8.10 Test `parse_level_priority` returns 0 for unknown levels
+  - [x] 8.11 Test `BotConfig::validate()` accepts new `log_file` field
+  - [x] 8.12 Test `BotConfig::validate()` rejects empty `log_file`
+  - [x] 8.13 Test `DaemonState::record_story_processed()` increments counter
+  - [x] 8.14 Test `stories_processed` survives write/read roundtrip
 
-- [ ] Task 9: Final quality checks
-  - [ ] 9.1 Run `cargo fmt -- --check` and fix any formatting issues
-  - [ ] 9.2 Run `cargo clippy` and fix any warnings
-  - [ ] 9.3 Run `cargo test` and verify all tests pass (including Story 1.1, 1.2, 1.3 tests)
-  - [ ] 9.4 Verify all public items have `///` doc comments
+- [x] Task 9: Final quality checks
+  - [x] 9.1 Run `cargo fmt -- --check` and fix any formatting issues
+  - [x] 9.2 Run `cargo clippy` and fix any warnings
+  - [x] 9.3 Run `cargo test` and verify all tests pass (including Story 1.1, 1.2, 1.3 tests)
+  - [x] 9.4 Verify all public items have `///` doc comments
   - [ ] 9.5 Manual integration test: start daemon with `cargo run -- start`, run `cargo run -- status` in another terminal, verify output shows running state and BMAD discovery
   - [ ] 9.6 Manual integration test: run `cargo run -- logs` and verify log output with filtering
   - [ ] 9.7 Manual integration test: run `cargo run -- logs --level warn --tail 10` and verify filtered output
@@ -1492,10 +1492,40 @@ src/
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
+- `cargo fmt -- --check` — clean, no formatting issues
+- `cargo clippy -- -D warnings` — clean after adding `#[allow(dead_code)]` on pre-existing unused items (`UserCancelled`, `build_http_client`) and future-use items (`record_story_processed`, `module_descriptions`)
+- `cargo test` — 113/113 tests pass (63 pre-existing + 14 discovery + 13 state + 23 new cli tests)
+
 ### Completion Notes List
 
+- **Task 0:** Added `log_file` field with `#[serde(default)]` to `BotConfig`, updated `collect_config_interactively()`, `make_test_config()`, and `_test_minimal()`. Verified serde_json already in Cargo.toml. All 63 pre-existing tests pass.
+- **Task 1:** Created `src/config/discovery.rs` — `BmadDiscovery` struct, `discover()` (never fails, returns empty on missing `_bmad/`), `extract_version()` (comment-style `# Version:` + YAML field `bmad_version:`), `Display` impl, `module_descriptions()`. Re-exported via `pub mod discovery;`. 14 unit tests.
+- **Task 2:** Created `src/cli/state.rs` — `DaemonState` struct with atomic write (tmp+rename), read, cleanup, PID alive check via `kill -0` (no libc/unsafe), `new_running()`, `touch()`, `mark_stopped()`, `record_story_processed()`. Extended `CliError` with `State` and `LogFile` variants. 13 unit tests.
+- **Task 3:** Replaced `init_tracing()` with dual-output: stdout (config-driven pretty/JSON via `.boxed()`) + file (always JSON via `Mutex<File>` for `MakeWriter`). Added `log_file` validation in `BotConfig::validate()`. Updated `bmad-bot.yaml.example`.
+- **Task 4:** Updated `run_start()` — BMAD discovery at startup with info/warn logging, state file write, state touch in polling loop, graceful shutdown with mark_stopped + cleanup. Updated `run_polling_loop()` signature to accept `&mut DaemonState`.
+- **Task 5:** Implemented `run_status()` — reads state file, checks PID liveness, displays daemon info with box-drawing header, shows BMAD discovery (from state or fresh), parses `sprint-status.yaml` via `SprintSummary`. Cleans up stale state files.
+- **Task 6:** Implemented `run_logs()` — reads JSON log file, `--tail N` (default 50), `--level` filtering via `parse_level_priority()`, emoji level icons, story_id extraction, invalid level warning, graceful handling of missing/empty files and non-JSON lines.
+- **Task 7:** Extended `Commands::Logs` with `--level` (`Option<String>`) and `--tail` (`usize`, `default_value_t = 50`). Updated `main.rs` dispatch for both `Status` and `Logs`.
+- **Task 8:** Added 23 new tests in `cli/mod.rs`: 8 SprintSummary tests (valid file, missing, empty, blocked, review, retrospectives, display blocked/omit), 5 parse_level_priority tests (ordering, case-insensitive, unknown, WARNING alias, all nonzero), 4 config log_file validation tests (accept, reject empty, reject whitespace, custom path), 4 CLI Logs args parsing tests (level+tail, default tail, short flags, level only), 2 CliError display tests (State, LogFile).
+- **Task 9:** `cargo fmt` clean, `cargo clippy -D warnings` clean, 113/113 tests pass. All public items have `///` doc comments. Manual integration tests (9.5–9.7) left for user to verify with running daemon.
+- **Decision:** Used `serde_yml` (project's existing YAML crate) instead of `serde_yaml` for `SprintSummary` parsing. Adapted story's reference code accordingly.
+- **Decision:** Fixed story spec test data errors: `test_sprint_summary_from_valid_file` expected 5 stories but YAML had 6, and expected 2 backlog but YAML had 3. Corrected assertions to match actual test data.
+
+### Change Log
+
+- Story 1.4 implementation complete — status, logs, BMAD discovery (Date: 2026-02-07)
+
 ### File List
+
+- `src/config/discovery.rs` — **NEW** — BMAD auto-discovery module
+- `src/config/mod.rs` — Added `pub mod discovery;`, `log_file` field to `BotConfig`, `default_log_file()`, `validate()` extension, `#[allow(dead_code)]` on `build_http_client`
+- `src/cli/state.rs` — **NEW** — Daemon state file tracking (`DaemonState`, `STATE_FILE_NAME`)
+- `src/cli/mod.rs` — Added `pub mod state;`, `run_status()`, `run_logs()`, `SprintSummary`, `parse_level_priority()`, `State`/`LogFile` CliError variants, replaced `init_tracing()` with dual-output, updated `run_start()` with discovery+state, updated `run_polling_loop()` with state touch, updated `Commands::Logs` with args, updated `collect_config_interactively()` and `make_test_config()` with `log_file`, `#[allow(dead_code)]` on `UserCancelled`, 23 new tests
+- `src/main.rs` — Replaced Status/Logs placeholder arms with `run_status()`/`run_logs()` dispatch
+- `bmad-bot.yaml.example` — Added `log_file` field
+- `.gitignore` — Added `bmad-bot.state.json`, `bmad-bot.log`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — Updated `1-4-status-logs-bmad-discovery` status to `review`
