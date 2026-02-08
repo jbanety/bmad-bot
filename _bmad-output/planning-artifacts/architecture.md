@@ -652,7 +652,7 @@ bmad-bot/
 - **watcher → session:** Passes `StoryInfo` struct (eligible story with metadata: id, label, branch name, specs path, dependencies)
 - **session → tools:** Tools registered at agent build time via `.tool()` — no direct calls from session to tools
 - **session → supervisor:** Supervisor is a rig tool called by the agent autonomously, not by the daemon
-- **session → review:** Passes post-session context (`ReviewContext`: branch name, diff summary, story info)
+- **session → review:** Passes `StoryInfo` (story_key, branch_name, specs_path). `ReviewRunner` loads the same BMAD dev persona (`dev.md`), sends `"CR"` as initial command, `ResponseAnalyzer` handles interaction patterns (story selection, fix decisions, completion detection), post-review phase captures agent commit + markdown report in `ReviewOutcome::Completed { report }`, orchestrator posts report as PR comment via `GitProvider::add_comment()`
 - **session → git_provider:** Passes `CreatePrParams` after session/review complete
 - **session → notifier:** Passes `NotificationData` (status, story info, PR link if available, error details if any)
 - **config → all:** `Arc<BotConfig>` injected at startup — read-only, never mutated
@@ -665,7 +665,7 @@ bmad-bot/
 4. **Session init:** `session/` loads BMAD dev agent file, appends language override, builds rig agent with 4 tools (git, fs, terminal, ask_supervisor)
 5. **Chat loop:** Sends `"DS"` → agent works autonomously via tools → `state.rs` persists chat history after each turn
 6. **During session:** Agent calls `ask_supervisor` tool as needed → rule engine → LLM fallback → or escalation (stops session)
-7. **Session end:** Optional `review/` launches separate LLM for code review → fixes in separate commits → review posted as PR comment
+7. **Session end:** If `code_review_enabled`, `review/ReviewRunner` launches a new rig agent session with the review LLM config, loads the same BMAD dev persona (`dev.md`), and sends `"CR"` as the initial command. The agent drives the full CR workflow autonomously (diff analysis, adversarial review, fix application). `ResponseAnalyzer` handles all interaction patterns (story selection replies, fix decisions, completion detection). On CR completion, the daemon sends a post-review message asking the agent to commit fixes with descriptive messages and produce a markdown review report. The report is captured in `ReviewOutcome::Completed { report }` and later posted as a PR comment by the orchestrator via `GitProvider::add_comment()`. Review failures are non-blocking — `ReviewOutcome::Failed` proceeds to PR creation with a note in the description
 8. **PR creation:** `git_provider/` creates PR (GitHub or GitLab) with agent-written description + Supervisor Decisions section
 9. **Notification:** `notifier/` sends Telegram message with story status + PR link
 10. **Cleanup:** `session/state.rs` deletes WAL file → return to step 3
