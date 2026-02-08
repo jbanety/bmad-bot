@@ -1,6 +1,6 @@
 # Story 1.1: Project Scaffolding, Configuration & Validation
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -24,71 +24,71 @@ So that I have a solid foundation to build all daemon features on.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Initialize Rust project (AC: #1)
-  - [ ] 1.1 Run `cargo init` with binary target
-  - [ ] 1.2 Set `edition = "2024"` in Cargo.toml
-  - [ ] 1.3 Add ALL dependencies to Cargo.toml (see Dev Notes for exact list, including `[dev-dependencies]`)
-  - [ ] 1.4 Verify `cargo check` passes with all dependencies resolved
+- [x] Task 1: Initialize Rust project (AC: #1)
+  - [x] 1.1 Run `cargo init` with binary target
+  - [x] 1.2 Set `edition = "2024"` in Cargo.toml
+  - [x] 1.3 Add ALL dependencies to Cargo.toml (see Dev Notes for exact list, including `[dev-dependencies]`)
+  - [x] 1.4 Verify `cargo check` passes with all dependencies resolved
 
-- [ ] Task 2: Scaffold module directory structure (AC: #1)
-  - [ ] 2.1 Create `src/cli/mod.rs` with placeholder public module
-  - [ ] 2.2 Create `src/config/mod.rs` with placeholder public module
-  - [ ] 2.3 Create `src/watcher/mod.rs` and `src/watcher/deps.rs` with placeholders
-  - [ ] 2.4 Create `src/session/mod.rs` and `src/session/state.rs` with placeholders
-  - [ ] 2.5 Create `src/supervisor/mod.rs`, `src/supervisor/rules.rs`, `src/supervisor/decisions.rs` with placeholders
-  - [ ] 2.6 Create `src/review/mod.rs` with placeholder
-  - [ ] 2.7 Create `src/tools/mod.rs`, `src/tools/git.rs`, `src/tools/fs.rs`, `src/tools/terminal.rs` with placeholders
-  - [ ] 2.8 Create `src/git_provider/mod.rs`, `src/git_provider/github.rs`, `src/git_provider/gitlab.rs` with placeholders
-  - [ ] 2.9 Create `src/notifier/mod.rs` with placeholder
-  - [ ] 2.10 Create `tests/e2e/mod.rs` placeholder (gated behind `BMAD_E2E=1`)
-  - [ ] 2.11 Wire all modules into `src/main.rs` using the main.rs skeleton (see Dev Notes)
-  - [ ] 2.12 Use `#![warn(dead_code)]` at crate root for this story (stubs are mostly empty); add `// FIXME: Change to #![deny(dead_code)] once all modules have real implementations`
-  - [ ] 2.13 Add `#![deny(clippy::all)]` at crate root
-  - [ ] 2.14 Verify `cargo check` passes with all modules wired
+- [x] Task 2: Scaffold module directory structure (AC: #1)
+  - [x] 2.1 Create `src/cli/mod.rs` with placeholder public module
+  - [x] 2.2 Create `src/config/mod.rs` with placeholder public module
+  - [x] 2.3 Create `src/watcher/mod.rs` and `src/watcher/deps.rs` with placeholders
+  - [x] 2.4 Create `src/session/mod.rs` and `src/session/state.rs` with placeholders
+  - [x] 2.5 Create `src/supervisor/mod.rs`, `src/supervisor/rules.rs`, `src/supervisor/decisions.rs` with placeholders
+  - [x] 2.6 Create `src/review/mod.rs` with placeholder
+  - [x] 2.7 Create `src/tools/mod.rs`, `src/tools/git.rs`, `src/tools/fs.rs`, `src/tools/terminal.rs` with placeholders
+  - [x] 2.8 Create `src/git_provider/mod.rs`, `src/git_provider/github.rs`, `src/git_provider/gitlab.rs` with placeholders
+  - [x] 2.9 Create `src/notifier/mod.rs` with placeholder
+  - [x] 2.10 Create `tests/e2e/mod.rs` placeholder (gated behind `BMAD_E2E=1`)
+  - [x] 2.11 Wire all modules into `src/main.rs` using the main.rs skeleton (see Dev Notes)
+  - [x] 2.12 Use `#![warn(dead_code)]` at crate root for this story (stubs are mostly empty); add `// FIXME: Change to #![deny(dead_code)] once all modules have real implementations`
+  - [x] 2.13 Add `#![deny(clippy::all)]` at crate root
+  - [x] 2.14 Verify `cargo check` passes with all modules wired
 
-- [ ] Task 3: Implement BotConfig struct and YAML loading (AC: #2)
-  - [ ] 3.1 Define `BotConfig` struct with all fields and serde defaults (see Dev Notes for complete struct design)
-  - [ ] 3.2 Define nested config structs: `LlmConfig`, `LlmRoleConfig`, `GitProviderConfig`, `NotificationConfig`, `BmadPathsConfig`
-  - [ ] 3.3 Implement `BotConfig::load(path: &Path) -> Result<Self, ConfigError>` using serde_yaml
-  - [ ] 3.4 Implement secrets loading from `.env` via dotenvy (separate from BotConfig)
-  - [ ] 3.5 Secrets struct: `BotSecrets` with api key fields loaded from env vars
+- [x] Task 3: Implement BotConfig struct and YAML loading (AC: #2)
+  - [x] 3.1 Define `BotConfig` struct with all fields and serde defaults (see Dev Notes for complete struct design)
+  - [x] 3.2 Define nested config structs: `LlmConfig`, `LlmRoleConfig`, `GitProviderConfig`, `NotificationConfig`, `BmadPathsConfig`
+  - [x] 3.3 Implement `BotConfig::load(path: &Path) -> Result<Self, ConfigError>` using serde_yaml
+  - [x] 3.4 Implement secrets loading from `.env` via dotenvy (separate from BotConfig)
+  - [x] 3.5 Secrets struct: `BotSecrets` with api key fields loaded from env vars
 
-- [ ] Task 4: Implement config validation (AC: #4)
-  - [ ] 4.1 Define `ConfigError` thiserror enum with descriptive variants
-  - [ ] 4.2 Implement `BotConfig::validate(&self) -> Result<(), ConfigError>`
-  - [ ] 4.3 Validate: polling_interval_secs > 0
-  - [ ] 4.4 Validate: git_provider is recognized ("github" or "gitlab")
-  - [ ] 4.5 Validate: LLM provider names are recognized ("anthropic", "openai", "github-models")
-  - [ ] 4.6 Validate: required paths are non-empty
-  - [ ] 4.7 Validate: BotSecrets has all required API keys based on configured providers
-  - [ ] 4.8 Return descriptive error messages specifying exactly which field failed and why
+- [x] Task 4: Implement config validation (AC: #4)
+  - [x] 4.1 Define `ConfigError` thiserror enum with descriptive variants
+  - [x] 4.2 Implement `BotConfig::validate(&self) -> Result<(), ConfigError>`
+  - [x] 4.3 Validate: polling_interval_secs > 0
+  - [x] 4.4 Validate: git_provider is recognized ("github" or "gitlab")
+  - [x] 4.5 Validate: LLM provider names are recognized ("anthropic", "openai", "github-models")
+  - [x] 4.6 Validate: required paths are non-empty
+  - [x] 4.7 Validate: BotSecrets has all required API keys based on configured providers
+  - [x] 4.8 Return descriptive error messages specifying exactly which field failed and why
 
-- [ ] Task 5: Set up shared HTTP client with retry middleware (AC: #3)
-  - [ ] 5.1 Create `HttpClient` wrapper or type alias using `reqwest-middleware::ClientWithMiddleware`
-  - [ ] 5.2 Configure `reqwest-retry` with `ExponentialBackoff`, max 3 retries, retry on 429/500/503/timeouts
-  - [ ] 5.3 Expose a factory function: `build_http_client() -> ClientWithMiddleware`
-  - [ ] 5.4 Store in config or pass alongside `Arc<BotConfig>` to all modules
+- [x] Task 5: Set up shared HTTP client with retry middleware (AC: #3)
+  - [x] 5.1 Create `HttpClient` wrapper or type alias using `reqwest-middleware::ClientWithMiddleware`
+  - [x] 5.2 Configure `reqwest-retry` with `ExponentialBackoff`, max 3 retries, retry on 429/500/503/timeouts
+  - [x] 5.3 Expose a factory function: `build_http_client() -> ClientWithMiddleware`
+  - [x] 5.4 Store in config or pass alongside `Arc<BotConfig>` to all modules
 
-- [ ] Task 6: Create example and gitignore files (AC: #5)
-  - [ ] 6.1 Create `bmad-bot.yaml.example` (see Dev Notes for exact content)
-  - [ ] 6.2 Create `.env.example` (see Dev Notes for exact content)
-  - [ ] 6.3 Create `.gitignore` (see Dev Notes for exact content)
+- [x] Task 6: Create example and gitignore files (AC: #5)
+  - [x] 6.1 Create `bmad-bot.yaml.example` (see Dev Notes for exact content)
+  - [x] 6.2 Create `.env.example` (see Dev Notes for exact content)
+  - [x] 6.3 Create `.gitignore` (see Dev Notes for exact content)
 
-- [ ] Task 7: Write unit tests for config module (AC: #2, #4)
-  - [ ] 7.1 Test valid config loads and deserializes correctly
-  - [ ] 7.2 Test missing required field returns descriptive ConfigError
-  - [ ] 7.3 Test invalid polling_interval (0) returns error
-  - [ ] 7.4 Test unknown git provider returns error
-  - [ ] 7.5 Test unknown LLM provider returns error
-  - [ ] 7.6 Test secrets loading from env vars
-  - [ ] 7.7 Test HTTP client builds with retry middleware
-  - [ ] 7.8 Test default values are applied when optional fields omitted
+- [x] Task 7: Write unit tests for config module (AC: #2, #4)
+  - [x] 7.1 Test valid config loads and deserializes correctly
+  - [x] 7.2 Test missing required field returns descriptive ConfigError
+  - [x] 7.3 Test invalid polling_interval (0) returns error
+  - [x] 7.4 Test unknown git provider returns error
+  - [x] 7.5 Test unknown LLM provider returns error
+  - [x] 7.6 Test secrets loading from env vars
+  - [x] 7.7 Test HTTP client builds with retry middleware
+  - [x] 7.8 Test default values are applied when optional fields omitted
 
-- [ ] Task 8: Final quality checks
-  - [ ] 8.1 Run `cargo fmt -- --check` and fix any formatting issues
-  - [ ] 8.2 Run `cargo clippy` and fix any warnings
-  - [ ] 8.3 Run `cargo test` and verify all tests pass
-  - [ ] 8.4 Verify all public items have `///` doc comments
+- [x] Task 8: Final quality checks
+  - [x] 8.1 Run `cargo fmt -- --check` and fix any formatting issues
+  - [x] 8.2 Run `cargo clippy` and fix any warnings
+  - [x] 8.3 Run `cargo test` and verify all tests pass
+  - [x] 8.4 Verify all public items have `///` doc comments
 
 ## Dev Notes
 
@@ -648,10 +648,57 @@ Use `tempfile` crate (available as dev-dependency) for file-based tests, or inli
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4 (via Windsurf)
 
 ### Debug Log References
 
+- Rust updated from 1.86.0 → 1.93.0 (required by rig-core 0.30 `let chains`)
+- Crate versions bumped to latest: git2 0.20, octocrab 0.49, reqwest 0.13, reqwest-middleware 0.5, reqwest-retry 0.9
+- Edition 2024 makes `std::env::set_var`/`remove_var` unsafe — env-dependent tests restructured to avoid parallel race conditions
+- Clippy 1.93 requires `is_none_or()` instead of `map_or(true, ...)` on `Option<&T>`
+- `serde_yaml 0.9` shows deprecated warning — upstream recommends migration, acceptable for now
+
 ### Completion Notes List
 
+- ✅ All 8 tasks and 48 subtasks implemented and verified
+- ✅ 22 unit tests passing (0 failures, 0 ignored)
+- ✅ `cargo fmt -- --check` clean
+- ✅ `cargo clippy` — zero errors, only expected `dead_code` warnings from stub modules (`#![warn(dead_code)]`)
+- ✅ All public structs, enums, functions, and fields have `///` doc comments
+- ✅ All stub modules have `//!` module doc comments with TODO references to implementing story
+- ✅ No `anyhow` in config module — typed `ConfigError` with `thiserror` exclusively
+- ✅ No `println!`/`eprintln!` — tracing only
+- ✅ `build_http_client()` factory with ExponentialBackoff, max 3 retries via reqwest-middleware
+- ✅ `BotSecrets::validate_for_config()` checks required API keys per configured provider
+
+### Change Log
+
+- 2026-02-07: Story 1.1 implementation complete — project scaffolded, config module implemented with full validation, 22 tests passing
+
 ### File List
+
+- `Cargo.toml` (new) — project manifest with all dependencies
+- `Cargo.lock` (new) — generated lockfile
+- `src/main.rs` (modified) — crate root with module declarations, `#![deny(clippy::all)]`, `#![warn(dead_code)]`, async main with tracing init
+- `src/config/mod.rs` (new) — BotConfig, BotSecrets, ConfigError, build_http_client, validation logic, 22 unit tests
+- `src/cli/mod.rs` (new) — stub
+- `src/watcher/mod.rs` (new) — stub with deps submodule
+- `src/watcher/deps.rs` (new) — stub
+- `src/session/mod.rs` (new) — stub with state submodule
+- `src/session/state.rs` (new) — stub
+- `src/supervisor/mod.rs` (new) — stub with rules and decisions submodules
+- `src/supervisor/rules.rs` (new) — stub
+- `src/supervisor/decisions.rs` (new) — stub
+- `src/review/mod.rs` (new) — stub
+- `src/tools/mod.rs` (new) — stub with git, fs, terminal submodules
+- `src/tools/git.rs` (new) — stub
+- `src/tools/fs.rs` (new) — stub
+- `src/tools/terminal.rs` (new) — stub
+- `src/git_provider/mod.rs` (new) — stub with github and gitlab submodules
+- `src/git_provider/github.rs` (new) — stub
+- `src/git_provider/gitlab.rs` (new) — stub
+- `src/notifier/mod.rs` (new) — stub
+- `tests/e2e/mod.rs` (new) — E2E test placeholder gated behind BMAD_E2E=1
+- `bmad-bot.yaml.example` (new) — canonical config template
+- `.env.example` (new) — secrets template
+- `.gitignore` (modified) — project-specific gitignore with .env exclusion
