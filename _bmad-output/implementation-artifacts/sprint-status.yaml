@@ -93,7 +93,7 @@ development_status:
   7-2-config-startup-validation-integration-tests: ready-for-dev # depends-on: 7-1
   7-3-watcher-dependency-resolution-story-selection-integration-tests: ready-for-dev # depends-on: 7-1
   7-4-pipeline-orchestration-integration-tests: ready-for-dev # depends-on: 7-1
-  7-5-session-wal-crash-recovery-integration-tests: backlog # depends-on: 7-1
+  7-5-session-wal-crash-recovery-integration-tests: ready-for-dev # depends-on: 7-1
   7-6-git-provider-pr-creation-integration-tests: backlog # depends-on: 7-1
   7-7-notification-flow-integration-tests: backlog # depends-on: 7-1
   7-8-branch-management-git-tools-integration-tests: backlog # depends-on: 7-1
