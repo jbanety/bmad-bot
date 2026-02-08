@@ -297,6 +297,19 @@ impl Watcher {
         let all_stories = sprint_status.stories();
         let eligible = sprint_status.eligible_stories();
 
+        // Log stories with needs-clarification status for observability
+        for story in &all_stories {
+            if story.status == "needs-clarification" {
+                tracing::debug!(
+                    action = "watcher_skip",
+                    story_id = %story.story_id,
+                    story_key = %story.story_key,
+                    status = "needs-clarification",
+                    "Skipping story — awaiting human clarification"
+                );
+            }
+        }
+
         tracing::info!(
             total_stories = all_stories.len(),
             eligible_count = eligible.len(),
@@ -433,6 +446,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_story_info_is_not_eligible_needs_clarification() {
+        let story = StoryInfo::from_key_and_status(
+            "3-3-human-escalation",
+            "needs-clarification",
+            Path::new("/tmp/stories"),
+        )
+        .unwrap();
+        assert!(!story.is_eligible());
+        assert_eq!(story.status, "needs-clarification");
+    }
+
+    #[test]
     fn test_story_info_display_format() {
         let info =
             StoryInfo::from_key_and_status("2-1-polling", "ready-for-dev", Path::new("/tmp"))
@@ -557,6 +582,26 @@ development_status:
         assert_eq!(eligible.len(), 2);
         assert_eq!(eligible[0].story_key, "1-2-cli");
         assert_eq!(eligible[1].story_key, "1-3-init");
+    }
+
+    #[test]
+    fn test_sprint_status_eligible_stories_excludes_needs_clarification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "development_status:\n  \
+             epic-1: in-progress\n  \
+             1-1-scaffolding: done\n  \
+             1-2-cli: needs-clarification\n  \
+             1-3-init: ready-for-dev\n";
+        let path = write_test_sprint_status(tmp.path(), content);
+        let ssf = SprintStatusFile::load(&path, tmp.path()).unwrap();
+        let eligible = ssf.eligible_stories();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].story_key, "1-3-init");
+        // Verify the needs-clarification story is in all stories but not eligible
+        let all = ssf.stories();
+        let nc = all.iter().find(|s| s.story_key == "1-2-cli").unwrap();
+        assert_eq!(nc.status, "needs-clarification");
+        assert!(!nc.is_eligible());
     }
 
     #[test]

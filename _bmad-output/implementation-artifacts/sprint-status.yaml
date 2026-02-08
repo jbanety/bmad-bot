@@ -21,6 +21,15 @@
 #   - in-progress: Developer actively working on implementation
 #   - review: Ready for code review (via Dev's code-review workflow)
 #   - done: Story completed
+#   - needs-clarification: Supervisor escalated — awaiting human input before retry
+#
+# Story Status Transitions:
+#   - backlog → ready-for-dev: When story file is created (via create-story)
+#   - ready-for-dev → in-progress: When developer starts working on implementation
+#   - in-progress → review: When developer completes implementation (via dev-story)
+#   - in-progress → needs-clarification: Automatically when supervisor escalates to human
+#   - needs-clarification → ready-for-dev: Manually after human provides clarification
+#   - review → done: When code review passes
 #
 # Retrospective Status:
 #   - optional: Can be completed but not required
@@ -56,7 +65,7 @@ development_status:
   epic-3: in-progress
   3-1-supervisor-tool-skeleton-rule-engine: review
   3-2-llm-fallback-with-project-context: review
-  3-3-human-escalation: ready-for-dev
+  3-3-human-escalation: review
   3-4-decision-logging-traceability: ready-for-dev
   epic-3-retrospective: optional
 

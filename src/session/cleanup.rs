@@ -1,0 +1,548 @@
+//! Session cleanup: partial work preservation and sprint-status updates.
+//!
+//! This module contains two key functions used during escalation cleanup:
+//!
+//! - [`preserve_partial_work`] — best-effort git operations to commit WIP changes
+//!   and build a summary. Returns `String` (never errors) so the escalation flow
+//!   is never blocked by a preservation failure.
+//!
+//! - [`mark_story_needs_clarification`] — updates a story's status in
+//!   `sprint-status.yaml` using string-based replacement to preserve comments.
+//!
+//! Both functions are designed for reuse in SIGTERM/SIGINT graceful shutdown (FR34).
+
+use std::path::Path;
+
+use crate::session::SessionError;
+
+/// Preserves partial work on the story branch during escalation.
+///
+/// This function is **best-effort** — it returns a `String` summary, NEVER an error.
+/// Every git2 operation is individually guarded: failures are logged via `tracing::error!()`
+/// and a fallback summary is returned. The escalation flow must NEVER be blocked by a
+/// preservation failure.
+///
+/// # Operations (all best-effort)
+/// 1. Open the git repo at `repo_path`
+/// 2. Check for uncommitted changes (staged or unstaged)
+/// 3. If dirty: stage all changes and commit with a WIP message including the question
+/// 4. Build a summary string with branch name, commit status, and file list
+///
+/// # Arguments
+/// - `repo_path` — path to the git repository root
+/// - `story_key` — the story being escalated (for logging)
+/// - `question` — the escalation question (included in WIP commit message)
+///
+/// # Returns
+/// A human-readable summary string describing the preserved partial work.
+pub async fn preserve_partial_work(repo_path: &Path, story_key: &str, question: &str) -> String {
+    let repo = match git2::Repository::open(repo_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(
+                action = "preserve_partial_work",
+                story_id = %story_key,
+                error = %e,
+                "Failed to open git repo — skipping preservation"
+            );
+            return format!("Preservation failed — could not open repo: {e}");
+        }
+    };
+
+    // Check for dirty state
+    let statuses = match repo.statuses(Some(
+        git2::StatusOptions::new()
+            .include_untracked(true)
+            .recurse_untracked_dirs(true),
+    )) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                action = "preserve_partial_work",
+                story_id = %story_key,
+                error = %e,
+                "Failed to check git status — skipping preservation"
+            );
+            return format!("Preservation failed — could not read status: {e}");
+        }
+    };
+
+    let changed_files: Vec<String> = statuses
+        .iter()
+        .filter_map(|s| s.path().map(String::from))
+        .collect();
+
+    let has_changes = !statuses.is_empty();
+
+    if has_changes {
+        let commit_result = (|| -> Result<(), git2::Error> {
+            let mut index = repo.index()?;
+            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+            index.write()?;
+            let tree_id = index.write_tree()?;
+            let tree = repo.find_tree(tree_id)?;
+            let head = repo.head()?.peel_to_commit()?;
+            let sig = repo
+                .signature()
+                .or_else(|_| git2::Signature::now("bmad-bot", "bmad-bot@localhost"))?;
+            let message =
+                format!("chore: WIP — escalated for human clarification\n\nQuestion: {question}");
+            repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &[&head])?;
+            Ok(())
+        })();
+
+        if let Err(e) = commit_result {
+            tracing::error!(
+                action = "preserve_partial_work",
+                story_id = %story_key,
+                error = %e,
+                "Failed to create WIP commit — changes remain unstaged"
+            );
+            // Continue to build summary anyway — partial info is better than nothing
+        }
+    }
+
+    // Build summary — each step individually guarded
+    let branch = match repo.head() {
+        Ok(head) => head
+            .shorthand()
+            .map(String::from)
+            .unwrap_or_else(|| "unknown".to_string()),
+        Err(_) => "unknown".to_string(),
+    };
+
+    let summary = format!(
+        "Branch: {}\nWIP commit: {}\nFiles touched: {}",
+        branch,
+        if has_changes {
+            "yes"
+        } else {
+            "no (clean tree)"
+        },
+        if changed_files.is_empty() {
+            "none".to_string()
+        } else {
+            changed_files.join(", ")
+        }
+    );
+
+    tracing::info!(
+        action = "preserve_partial_work",
+        story_id = %story_key,
+        summary = %summary,
+        "Partial work committed and preserved on branch"
+    );
+
+    summary
+}
+
+/// Updates a story's status to `needs-clarification` in sprint-status.yaml.
+///
+/// Uses string-based find-and-replace to preserve all comments and structure
+/// (STATUS DEFINITIONS header, formatting). Does NOT use `serde_yml` for
+/// serialization — only for reading if needed.
+///
+/// # Arguments
+/// - `sprint_status_path` — path to `sprint-status.yaml`
+/// - `story_key` — the story key to update (e.g., "3-3-human-escalation")
+///
+/// # Errors
+/// Returns [`SessionError::StateFileFailed`] if:
+/// - The file cannot be read
+/// - The story key is not found in the file
+/// - The file cannot be written back
+pub async fn mark_story_needs_clarification(
+    sprint_status_path: &Path,
+    story_key: &str,
+) -> Result<(), SessionError> {
+    let content = tokio::fs::read_to_string(sprint_status_path)
+        .await
+        .map_err(|e| SessionError::StateFileFailed {
+            reason: format!("Failed to read sprint-status: {e}"),
+        })?;
+
+    // Pattern: "  story-key: current-status" → "  story-key: needs-clarification"
+    let pattern = format!(r"(?m)(^\s*{}\s*:\s*)\S+", regex::escape(story_key));
+    let re = regex::Regex::new(&pattern).map_err(|e| SessionError::StateFileFailed {
+        reason: format!("Invalid regex for story key: {e}"),
+    })?;
+
+    if !re.is_match(&content) {
+        return Err(SessionError::StateFileFailed {
+            reason: format!("Story key '{story_key}' not found in sprint-status.yaml"),
+        });
+    }
+
+    let updated = re.replace(&content, "${1}needs-clarification").to_string();
+
+    tokio::fs::write(sprint_status_path, &updated)
+        .await
+        .map_err(|e| SessionError::StateFileFailed {
+            reason: format!("Failed to write sprint-status: {e}"),
+        })?;
+
+    tracing::info!(
+        action = "story_status_update",
+        story_id = %story_key,
+        new_status = "needs-clarification",
+        "Story marked as needs-clarification in sprint-status.yaml"
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // -----------------------------------------------------------------------
+    // mark_story_needs_clarification tests
+    // -----------------------------------------------------------------------
+
+    fn sample_sprint_status() -> String {
+        r#"# STATUS DEFINITIONS:
+# ==================
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review
+#   - done: Story completed
+
+generated: 2026-02-07
+project: test-project
+
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: done
+  1-2-cli-framework: review
+  epic-2: in-progress
+  2-1-polling: in-progress
+  2-2-deps: ready-for-dev
+  epic-3: in-progress
+  3-3-human-escalation: in-progress
+  3-4-decision-logging: ready-for-dev
+"#
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_mark_story_needs_clarification_happy_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status())
+            .await
+            .expect("write");
+
+        mark_story_needs_clarification(&path, "3-3-human-escalation")
+            .await
+            .expect("should succeed");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("3-3-human-escalation: needs-clarification"));
+    }
+
+    #[tokio::test]
+    async fn test_mark_story_needs_clarification_preserves_other_statuses() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status())
+            .await
+            .expect("write");
+
+        mark_story_needs_clarification(&path, "3-3-human-escalation")
+            .await
+            .expect("should succeed");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("1-1-scaffolding: done"));
+        assert!(content.contains("1-2-cli-framework: review"));
+        assert!(content.contains("2-1-polling: in-progress"));
+        assert!(content.contains("2-2-deps: ready-for-dev"));
+        assert!(content.contains("3-4-decision-logging: ready-for-dev"));
+    }
+
+    #[tokio::test]
+    async fn test_mark_story_needs_clarification_preserves_comments() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status())
+            .await
+            .expect("write");
+
+        mark_story_needs_clarification(&path, "3-3-human-escalation")
+            .await
+            .expect("should succeed");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("# STATUS DEFINITIONS:"));
+        assert!(content.contains("# Story Status:"));
+        assert!(content.contains("#   - backlog: Story only exists in epic file"));
+    }
+
+    #[tokio::test]
+    async fn test_mark_story_needs_clarification_missing_key_returns_error() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status())
+            .await
+            .expect("write");
+
+        let result = mark_story_needs_clarification(&path, "99-99-nonexistent").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let display = format!("{err}");
+        assert!(display.contains("99-99-nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_mark_story_needs_clarification_missing_file_returns_error() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("nonexistent.yaml");
+
+        let result = mark_story_needs_clarification(&path, "3-3-human-escalation").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let display = format!("{err}");
+        assert!(display.contains("Failed to read sprint-status"));
+    }
+
+    // -----------------------------------------------------------------------
+    // preserve_partial_work tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a git repo with an initial commit in a tempdir.
+    fn init_test_repo(dir: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(dir).expect("init repo");
+
+        // Create initial commit so HEAD exists
+        let sig = git2::Signature::now("test", "test@test.com").expect("sig");
+        {
+            let tree_id = {
+                let mut index = repo.index().expect("index");
+                index.write_tree().expect("write tree")
+            };
+            let tree = repo.find_tree(tree_id).expect("find tree");
+            repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
+                .expect("initial commit");
+        }
+
+        repo
+    }
+
+    #[tokio::test]
+    async fn test_preserve_partial_work_dirty_tree_creates_wip_commit() {
+        let dir = TempDir::new().expect("tempdir");
+        let repo_path = dir.path();
+        let _repo = init_test_repo(repo_path);
+
+        // Create a dirty file
+        std::fs::write(repo_path.join("new_file.rs"), "fn main() {}").expect("write file");
+
+        let summary = preserve_partial_work(repo_path, "3-3-test", "What DB schema?").await;
+
+        assert!(summary.contains("WIP commit: yes"), "summary: {summary}");
+        assert!(
+            summary.contains("new_file.rs"),
+            "summary should list touched files: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preserve_partial_work_clean_tree_no_commit() {
+        let dir = TempDir::new().expect("tempdir");
+        let repo_path = dir.path();
+        let _repo = init_test_repo(repo_path);
+
+        let summary = preserve_partial_work(repo_path, "3-3-test", "What DB?").await;
+
+        assert!(
+            summary.contains("WIP commit: no (clean tree)"),
+            "summary: {summary}"
+        );
+        assert!(
+            summary.contains("Files touched: none"),
+            "summary: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preserve_partial_work_summary_includes_branch_name() {
+        let dir = TempDir::new().expect("tempdir");
+        let repo_path = dir.path();
+        let _repo = init_test_repo(repo_path);
+
+        let summary = preserve_partial_work(repo_path, "3-3-test", "q").await;
+
+        // Default branch from git init — could be "main", "master", or other
+        assert!(
+            summary.starts_with("Branch: "),
+            "summary should start with branch name: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preserve_partial_work_invalid_repo_returns_fallback() {
+        let dir = TempDir::new().expect("tempdir");
+        // Don't init — not a git repo
+        let summary = preserve_partial_work(dir.path(), "3-3-test", "q").await;
+
+        assert!(
+            summary.contains("Preservation failed"),
+            "should return fallback: {summary}"
+        );
+        assert!(
+            summary.contains("could not open repo"),
+            "should mention repo open failure: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preserve_partial_work_multiple_files() {
+        let dir = TempDir::new().expect("tempdir");
+        let repo_path = dir.path();
+        let _repo = init_test_repo(repo_path);
+
+        // Create multiple dirty files
+        std::fs::write(repo_path.join("a.rs"), "a").expect("write");
+        std::fs::write(repo_path.join("b.rs"), "b").expect("write");
+
+        let summary = preserve_partial_work(repo_path, "key", "q").await;
+
+        assert!(summary.contains("WIP commit: yes"), "summary: {summary}");
+        assert!(summary.contains("a.rs"), "summary: {summary}");
+        assert!(summary.contains("b.rs"), "summary: {summary}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration: full escalation flow
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_full_escalation_flow_preserve_then_status_then_report() {
+        use crate::session::escalation::{EscalationInfo, EscalationReport};
+
+        // --- Arrange ---
+        let dir = TempDir::new().expect("tempdir");
+
+        // 1. Git repo with dirty working tree
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("mkdir");
+        let _repo = init_test_repo(&repo_path);
+        std::fs::write(repo_path.join("wip.rs"), "fn wip() {}").expect("write dirty file");
+
+        // 2. Sprint-status file
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(
+            &sprint_path,
+            "# STATUS DEFINITIONS\n\
+             development_status:\n  \
+               epic-3: in-progress\n  \
+               3-3-human-escalation: in-progress\n  \
+               3-4-decision-logging: ready-for-dev\n",
+        )
+        .await
+        .expect("write sprint-status");
+
+        // 3. Simulate escalation info from supervisor
+        let info = EscalationInfo {
+            question: "What DB schema should I use?".to_string(),
+            reason: "Architect session failed: timeout".to_string(),
+        };
+
+        let story_key = "3-3-human-escalation";
+        let question = &info.question;
+        let reason = &info.reason;
+
+        // --- Act: escalation flow (same order as session orchestration) ---
+
+        // Step 1: Preserve partial work (best-effort)
+        let summary = preserve_partial_work(&repo_path, story_key, question).await;
+        assert!(summary.contains("WIP commit: yes"), "summary: {summary}");
+        assert!(summary.contains("wip.rs"), "summary: {summary}");
+
+        // Step 2: Update sprint-status (returns Result, but failure must not block report)
+        let status_result = mark_story_needs_clarification(&sprint_path, story_key).await;
+        assert!(status_result.is_ok(), "status update should succeed");
+
+        // Verify sprint-status updated
+        let content = tokio::fs::read_to_string(&sprint_path).await.expect("read");
+        assert!(content.contains("3-3-human-escalation: needs-clarification"));
+        // Other statuses untouched
+        assert!(content.contains("3-4-decision-logging: ready-for-dev"));
+        // Comments preserved
+        assert!(content.contains("# STATUS DEFINITIONS"));
+
+        // Step 3: Build EscalationReport
+        let branch = "story/3-3-human-escalation".to_string();
+        let report = EscalationReport::new(
+            story_key.to_string(),
+            question.clone(),
+            reason.clone(),
+            branch.clone(),
+            summary.clone(),
+        );
+
+        // --- Assert: report carries full context ---
+        assert_eq!(report.story_key, "3-3-human-escalation");
+        assert_eq!(report.question, "What DB schema should I use?");
+        assert!(report.reason.contains("Architect session failed"));
+        assert_eq!(report.branch_name, "story/3-3-human-escalation");
+        assert!(report.partial_work_summary.contains("WIP commit: yes"));
+        assert!(!report.escalated_at.is_empty());
+
+        // Verify Display works for logging
+        let display = format!("{report}");
+        assert!(display.contains("Escalation Report"));
+        assert!(display.contains("3-3-human-escalation"));
+
+        // Verify serialization round-trip (for notification transport)
+        let json = serde_json::to_string(&report).expect("serialize");
+        let deser: EscalationReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(report, deser);
+    }
+
+    #[tokio::test]
+    async fn test_escalation_flow_status_update_failure_does_not_block_report() {
+        use crate::session::escalation::EscalationReport;
+
+        // --- Arrange ---
+        let dir = TempDir::new().expect("tempdir");
+
+        // Git repo (clean — no partial work to preserve)
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("mkdir");
+        let _repo = init_test_repo(&repo_path);
+
+        // Sprint-status path that does NOT exist — status update will fail
+        let sprint_path = dir.path().join("nonexistent-sprint-status.yaml");
+
+        let story_key = "3-3-human-escalation";
+        let question = "What DB schema?";
+
+        // --- Act ---
+
+        // Step 1: Preserve partial work (clean tree — no-op)
+        let summary = preserve_partial_work(&repo_path, story_key, question).await;
+        assert!(summary.contains("no (clean tree)"), "summary: {summary}");
+
+        // Step 2: Status update FAILS (file doesn't exist) — but we continue
+        let status_result = mark_story_needs_clarification(&sprint_path, story_key).await;
+        assert!(status_result.is_err(), "status update should fail");
+
+        // Step 3: Build report ANYWAY — daemon must always receive the report
+        let report = EscalationReport::new(
+            story_key.to_string(),
+            question.to_string(),
+            "Architect failed".to_string(),
+            "story/3-3-human-escalation".to_string(),
+            summary,
+        );
+
+        // --- Assert: report is valid despite status update failure ---
+        assert_eq!(report.story_key, "3-3-human-escalation");
+        assert_eq!(report.question, "What DB schema?");
+        assert!(!report.escalated_at.is_empty());
+    }
+}

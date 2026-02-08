@@ -18,6 +18,8 @@ pub mod read_tool;
 /// Deterministic rule engine for pattern-based question matching.
 pub mod rules;
 
+use std::sync::{Arc, Mutex};
+
 use architect::{AnswerProvider, ArchitectSession, ArchitectSessionError};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -26,6 +28,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::BotConfig;
+use crate::session::escalation::EscalationInfo;
+
+/// Shared escalation slot between the `AskSupervisor` tool and the session chat loop.
+///
+/// When `AskSupervisor::call()` returns `EscalationRequired`, it writes
+/// `Some(EscalationInfo)` into this slot BEFORE returning the error. The session
+/// chat loop checks the slot after each `agent.chat()` turn to detect escalation
+/// and extract the question/reason context.
+pub type EscalationSlot = Arc<Mutex<Option<EscalationInfo>>>;
 
 /// Errors originating from the supervisor module.
 ///
@@ -98,6 +109,13 @@ pub struct AskSupervisor {
     /// and non-serializable state. When deserialized, this field is `None`.
     #[serde(skip)]
     answer_provider: Option<Box<dyn AnswerProvider>>,
+    /// Shared escalation slot — written by `call()` before returning `EscalationRequired`.
+    ///
+    /// The session chat loop reads this slot after each `agent.chat()` turn to
+    /// detect escalation and extract the question/reason context. Skipped during
+    /// serialization because `Arc<Mutex<_>>` is runtime state.
+    #[serde(skip)]
+    escalation_slot: EscalationSlot,
 }
 
 impl AskSupervisor {
@@ -109,6 +127,7 @@ impl AskSupervisor {
         Self {
             rule_engine: RuleEngine::new(),
             answer_provider: None,
+            escalation_slot: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -120,19 +139,46 @@ impl AskSupervisor {
         Self {
             rule_engine: RuleEngine::new(),
             answer_provider: Some(provider),
+            escalation_slot: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Create an AskSupervisor with an [`ArchitectSession`] built from the daemon config.
+    /// Create an AskSupervisor with an explicit [`AnswerProvider`] and a shared
+    /// [`EscalationSlot`].
+    ///
+    /// The session module passes a clone of its escalation slot so it can detect
+    /// when the supervisor signals escalation during a chat turn.
+    pub fn with_answer_provider_and_slot(
+        provider: Box<dyn AnswerProvider>,
+        escalation_slot: EscalationSlot,
+    ) -> Self {
+        Self {
+            rule_engine: RuleEngine::new(),
+            answer_provider: Some(provider),
+            escalation_slot,
+        }
+    }
+
+    /// Create an AskSupervisor with an [`ArchitectSession`] built from the daemon config
+    /// and a shared [`EscalationSlot`].
     ///
     /// This reads the `architect.md` agent file, resolves the supervisor LLM
     /// provider/model/key, and stores everything for on-demand session creation.
-    pub fn with_architect_from_config(config: &BotConfig) -> Result<Self, ArchitectSessionError> {
+    pub fn with_architect_from_config(
+        config: &BotConfig,
+        escalation_slot: EscalationSlot,
+    ) -> Result<Self, ArchitectSessionError> {
         let session = ArchitectSession::new(config)?;
         Ok(Self {
             rule_engine: RuleEngine::new(),
             answer_provider: Some(Box::new(session)),
+            escalation_slot,
         })
+    }
+
+    /// Returns a clone of the escalation slot for sharing with the session chat loop.
+    pub fn escalation_slot(&self) -> EscalationSlot {
+        Arc::clone(&self.escalation_slot)
     }
 }
 
@@ -235,10 +281,16 @@ impl Tool for AskSupervisor {
                                     "Architect session failed — escalating"
                                 );
                                 // Step 3: Escalate to human (Story 3.3 refines)
-                                Err(SupervisorError::EscalationRequired {
-                                    question: args.question,
-                                    reason: format!("Architect session failed: {e}"),
-                                })
+                                let question = args.question;
+                                let reason = format!("Architect session failed: {e}");
+                                // Write escalation info to shared slot before returning error
+                                if let Ok(mut slot) = self.escalation_slot.lock() {
+                                    *slot = Some(EscalationInfo {
+                                        question: question.clone(),
+                                        reason: reason.clone(),
+                                    });
+                                }
+                                Err(SupervisorError::EscalationRequired { question, reason })
                             }
                         }
                     }
@@ -534,5 +586,98 @@ mod tests {
     fn test_ask_supervisor_new_has_no_provider() {
         let supervisor = AskSupervisor::new();
         assert!(supervisor.answer_provider.is_none());
+    }
+
+    // === Story 3.3 tests — escalation slot ===
+
+    #[tokio::test]
+    async fn test_ask_supervisor_escalation_writes_to_slot() {
+        let slot: EscalationSlot = Arc::new(Mutex::new(None));
+        let mock = MockAnswerProvider {
+            response: "unused".to_string(),
+            should_fail: true,
+        };
+        let supervisor =
+            AskSupervisor::with_answer_provider_and_slot(Box::new(mock), Arc::clone(&slot));
+        let args = AskSupervisorArgs {
+            question: "What database schema should I use?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_err());
+
+        // Verify the slot was written before the error was returned
+        let guard = slot.lock().expect("lock");
+        let info = guard.as_ref().expect("slot should contain EscalationInfo");
+        assert_eq!(info.question, "What database schema should I use?");
+        assert!(info.reason.contains("Architect session failed"));
+    }
+
+    #[tokio::test]
+    async fn test_ask_supervisor_no_escalation_slot_stays_none_on_rule_match() {
+        let slot: EscalationSlot = Arc::new(Mutex::new(None));
+        let mock = MockAnswerProvider {
+            response: "unused".to_string(),
+            should_fail: false,
+        };
+        let supervisor =
+            AskSupervisor::with_answer_provider_and_slot(Box::new(mock), Arc::clone(&slot));
+        let args = AskSupervisorArgs {
+            question: "Should I proceed?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
+
+        // Slot should remain None — no escalation occurred
+        let guard = slot.lock().expect("lock");
+        assert!(guard.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ask_supervisor_no_escalation_slot_stays_none_on_architect_success() {
+        let slot: EscalationSlot = Arc::new(Mutex::new(None));
+        let mock = MockAnswerProvider {
+            response: "Use PostgreSQL.".to_string(),
+            should_fail: false,
+        };
+        let supervisor =
+            AskSupervisor::with_answer_provider_and_slot(Box::new(mock), Arc::clone(&slot));
+        let args = AskSupervisorArgs {
+            question: "What database should I use?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
+
+        // Slot should remain None — Architect answered successfully
+        let guard = slot.lock().expect("lock");
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    fn test_ask_supervisor_escalation_slot_accessor() {
+        let supervisor = AskSupervisor::new();
+        let slot = supervisor.escalation_slot();
+        // Should be None initially
+        let guard = slot.lock().expect("lock");
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    fn test_ask_supervisor_serialization_skips_escalation_slot() {
+        let slot: EscalationSlot = Arc::new(Mutex::new(None));
+        let mock = MockAnswerProvider {
+            response: "test".to_string(),
+            should_fail: false,
+        };
+        let supervisor =
+            AskSupervisor::with_answer_provider_and_slot(Box::new(mock), Arc::clone(&slot));
+        let json = serde_json::to_string(&supervisor).expect("Should serialize");
+        assert!(!json.contains("escalation_slot"));
+        // Deserialized version gets a fresh empty slot
+        let deserialized: AskSupervisor = serde_json::from_str(&json).expect("Should deserialize");
+        let guard = deserialized.escalation_slot.lock().expect("lock");
+        assert!(guard.is_none());
     }
 }
