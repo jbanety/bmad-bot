@@ -12,11 +12,17 @@ mod tools;
 mod watcher;
 
 use anyhow::Result;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Minimal tracing init — Story 1.2 replaces with config-driven setup
-    tracing_subscriber::fmt::init();
+    // Defaults to info level; override with RUST_LOG env var
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
     tracing::info!("bmad-bot starting");
 
