@@ -1,0 +1,578 @@
+//! Response analyzer — pattern-matching engine for LLM agent responses.
+//!
+//! The [`ResponseAnalyzer`] examines each agent response and determines the
+//! appropriate [`ResponseAction`] for the session chat loop. It uses simple
+//! case-insensitive substring matching with a strict priority order to handle
+//! workflow-level interactions (confirmations, completion signals, escalations).
+//!
+//! **Design principle:** The analyzer is deliberately simple — the rule engine
+//! in the supervisor handles complex pattern matching. The analyzer only needs
+//! to handle workflow-level interactions between the daemon and the BMAD agent.
+
+use crate::supervisor::EscalationSlot;
+
+/// Action the chat loop should take after analyzing an agent response.
+///
+/// Returned by [`ResponseAnalyzer::analyze()`] based on priority-ordered
+/// pattern matching against the agent's response text and the escalation slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseAction {
+    /// Send the contained reply and continue the chat loop.
+    Continue {
+        /// The reply message to send back to the agent.
+        reply: String,
+    },
+
+    /// The agent signaled workflow completion — exit the chat loop successfully.
+    Completed,
+
+    /// Escalation detected via the shared escalation slot — exit the chat loop.
+    Escalated,
+
+    /// Reserved for future streaming/async response support where the agent may
+    /// still be processing tool calls. Currently treated as
+    /// `Continue("Continue.")` but kept as a distinct variant for
+    /// forward-compatibility with rig streaming APIs.
+    NoReply,
+}
+
+/// Completion signal phrases (case-insensitive).
+///
+/// These must be specific multi-word phrases to avoid false positives.
+/// E.g., "I'll complete the task" should NOT trigger completion, but
+/// "All tasks completed successfully" should.
+const COMPLETION_SIGNALS: &[&str] = &[
+    "all tasks completed",
+    "story implementation complete",
+    "dev-story workflow complete",
+    "story marked as done",
+    "implementation is complete",
+    "all acceptance criteria met",
+    "story is ready for review",
+    "all tasks and subtasks are marked",
+    "ready for review",
+];
+
+/// Confirmation/proceed patterns (case-insensitive).
+const PROCEED_PATTERNS: &[&str] = &[
+    "should i proceed",
+    "shall i proceed",
+    "continue?",
+    "ready to move on",
+    "shall i continue",
+    "should i continue",
+    "do you want me to proceed",
+    "do you want me to continue",
+    "would you like me to proceed",
+    "would you like me to continue",
+    "may i proceed",
+    "can i proceed",
+    "want me to go ahead",
+];
+
+/// Step-by-step detection patterns (case-insensitive).
+const STEP_BY_STEP_PATTERNS: &[&str] = &[
+    "step by step",
+    "one at a time",
+    "one step at a time",
+    "walk you through",
+    "walk through each",
+    "shall i do them one",
+    "do each step separately",
+    "handle each task individually",
+];
+
+/// YOLO/batch mode patterns (case-insensitive).
+const YOLO_PATTERNS: &[&str] = &[
+    "yolo mode",
+    "batch mode",
+    "yolo or",
+    "interactive or batch",
+    "want yolo",
+    "enable yolo",
+    "[y] yolo",
+];
+
+/// Story selection patterns (case-insensitive).
+const STORY_SELECTION_PATTERNS: &[&str] = &[
+    "which story",
+    "story to work on",
+    "what story",
+    "specify a story",
+    "provide the story",
+    "story file path",
+    "which story to develop",
+    "story would you like",
+];
+
+/// Stateless response analyzer for the session chat loop.
+///
+/// Examines agent responses using a strict priority order:
+/// 1. Escalation (slot check) — highest priority
+/// 2. Completion signals
+/// 3. Confirmation/proceed requests
+/// 4. Step-by-step detection
+/// 5. YOLO/batch mode questions
+/// 6. Story selection questions
+/// 7. Default — "Continue."
+///
+/// All pattern matching is case-insensitive substring search.
+#[derive(Debug)]
+pub struct ResponseAnalyzer;
+
+impl ResponseAnalyzer {
+    /// Create a new `ResponseAnalyzer`.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Analyze an agent response and determine the appropriate action.
+    ///
+    /// # Arguments
+    /// - `response` — the text response from the LLM agent
+    /// - `escalation_slot` — shared slot checked for supervisor escalation
+    /// - `story_key` — the current story key, used as reply for story selection questions
+    ///
+    /// # Priority Order
+    /// 1. **Escalation** — if `escalation_slot` contains `Some(EscalationInfo)`, return `Escalated`
+    /// 2. **Completion** — strong completion signals → `Completed`
+    /// 3. **Confirmation** — "Should I proceed?" → `Continue { "Yes, proceed." }`
+    /// 4. **Step-by-step** — step-by-step approval → `Continue { "Continue with all steps..." }`
+    /// 5. **YOLO/batch** — YOLO mode questions → `Continue { "Use YOLO mode..." }`
+    /// 6. **Story selection** — which story → `Continue { story_key }`
+    /// 7. **Default** — `Continue { "Continue." }`
+    pub fn analyze(
+        &self,
+        response: &str,
+        escalation_slot: &EscalationSlot,
+        story_key: &str,
+    ) -> ResponseAction {
+        // Priority 1: Escalation check
+        {
+            let guard = escalation_slot.lock().expect("escalation slot lock");
+            if guard.is_some() {
+                tracing::debug!(
+                    action = "response_analysis",
+                    priority = 1,
+                    result = "escalated",
+                    "Escalation detected in slot"
+                );
+                return ResponseAction::Escalated;
+            }
+        }
+
+        let lower = response.to_lowercase();
+
+        // Priority 2: Completion detection
+        if COMPLETION_SIGNALS
+            .iter()
+            .any(|signal| lower.contains(signal))
+        {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 2,
+                result = "completed",
+                "Completion signal detected"
+            );
+            return ResponseAction::Completed;
+        }
+
+        // Priority 3: Confirmation/proceed patterns
+        if PROCEED_PATTERNS
+            .iter()
+            .any(|pattern| lower.contains(pattern))
+        {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 3,
+                result = "proceed",
+                "Proceed confirmation detected"
+            );
+            return ResponseAction::Continue {
+                reply: "Yes, proceed.".to_string(),
+            };
+        }
+
+        // Priority 4: Step-by-step detection
+        if STEP_BY_STEP_PATTERNS
+            .iter()
+            .any(|pattern| lower.contains(pattern))
+        {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 4,
+                result = "step_by_step",
+                "Step-by-step detection"
+            );
+            return ResponseAction::Continue {
+                reply: "Continue with all steps. Do not ask for confirmation between steps."
+                    .to_string(),
+            };
+        }
+
+        // Priority 5: YOLO/mode questions
+        if YOLO_PATTERNS.iter().any(|pattern| lower.contains(pattern)) {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 5,
+                result = "yolo",
+                "YOLO mode question detected"
+            );
+            return ResponseAction::Continue {
+                reply:
+                    "Use YOLO mode. Complete all remaining work without asking for confirmation."
+                        .to_string(),
+            };
+        }
+
+        // Priority 6: Story selection
+        if STORY_SELECTION_PATTERNS
+            .iter()
+            .any(|pattern| lower.contains(pattern))
+        {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 6,
+                result = "story_selection",
+                story_key = %story_key,
+                "Story selection question detected"
+            );
+            return ResponseAction::Continue {
+                reply: story_key.to_string(),
+            };
+        }
+
+        // Priority 7: Default
+        tracing::debug!(
+            action = "response_analysis",
+            priority = 7,
+            result = "default",
+            "No pattern matched — sending default continue"
+        );
+        ResponseAction::Continue {
+            reply: "Continue.".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::escalation::EscalationInfo;
+    use std::sync::{Arc, Mutex};
+
+    /// Helper: create an empty escalation slot.
+    fn empty_slot() -> EscalationSlot {
+        Arc::new(Mutex::new(None))
+    }
+
+    /// Helper: create an escalation slot with an EscalationInfo.
+    fn filled_slot() -> EscalationSlot {
+        Arc::new(Mutex::new(Some(EscalationInfo {
+            question: "What ORM should we use?".to_string(),
+            reason: "Architect session failed".to_string(),
+        })))
+    }
+
+    #[test]
+    fn test_analyzer_detects_completion_signal() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let cases = vec![
+            "All tasks completed successfully.",
+            "The story implementation complete and ready for review.",
+            "Dev-story workflow complete — all ACs met.",
+            "Story marked as done. Next steps: code review.",
+            "The implementation is complete.",
+            "All acceptance criteria met, moving to review.",
+            "Story is ready for review now.",
+        ];
+
+        for response in cases {
+            let action = analyzer.analyze(response, &slot, "4-2-test");
+            assert_eq!(
+                action,
+                ResponseAction::Completed,
+                "Expected Completed for: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyzer_detects_proceed_question() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let cases = vec![
+            "I've finished Task 1. Should I proceed to Task 2?",
+            "Ready to move on to the next step.",
+            "Shall I continue with the implementation?",
+            "Continue? I have more tasks to complete.",
+            "Would you like me to proceed with the refactoring?",
+        ];
+
+        for response in cases {
+            let action = analyzer.analyze(response, &slot, "test-key");
+            match &action {
+                ResponseAction::Continue { reply } => {
+                    assert_eq!(reply, "Yes, proceed.", "Wrong reply for: {response}");
+                }
+                other => panic!("Expected Continue for: {response}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_analyzer_detects_step_by_step() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let cases = vec![
+            "I'll go step by step through each task.",
+            "Let me walk you through each change.",
+            "I'll handle each task individually.",
+        ];
+
+        for response in cases {
+            let action = analyzer.analyze(response, &slot, "test-key");
+            match &action {
+                ResponseAction::Continue { reply } => {
+                    assert!(
+                        reply.contains("Continue with all steps"),
+                        "Wrong reply for: {response}, got: {reply}"
+                    );
+                }
+                other => panic!("Expected Continue for: {response}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_analyzer_detects_yolo_question() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let cases = vec![
+            "Would you like to enable YOLO mode for this workflow?",
+            "[y] YOLO the rest of this document only",
+            "Interactive or batch mode?",
+        ];
+
+        for response in cases {
+            let action = analyzer.analyze(response, &slot, "test-key");
+            match &action {
+                ResponseAction::Continue { reply } => {
+                    assert!(
+                        reply.contains("YOLO mode"),
+                        "Wrong reply for: {response}, got: {reply}"
+                    );
+                }
+                other => panic!("Expected Continue for: {response}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_analyzer_detects_escalation_from_slot() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = filled_slot();
+
+        // Even though the response text looks like a completion signal,
+        // escalation takes priority because the slot is filled.
+        let action = analyzer.analyze("All tasks completed", &slot, "test-key");
+        assert_eq!(action, ResponseAction::Escalated);
+    }
+
+    #[test]
+    fn test_analyzer_escalation_takes_priority_over_completion() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = filled_slot();
+
+        let action = analyzer.analyze(
+            "Story implementation complete and all acceptance criteria met",
+            &slot,
+            "test-key",
+        );
+        assert_eq!(
+            action,
+            ResponseAction::Escalated,
+            "Escalation should take priority over completion"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_default_continues() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let action = analyzer.analyze(
+            "I'm working on implementing the database schema.",
+            &slot,
+            "test-key",
+        );
+        assert_eq!(
+            action,
+            ResponseAction::Continue {
+                reply: "Continue.".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_analyzer_case_insensitive() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // Test completion signals in various cases
+        let cases = vec![
+            "ALL TASKS COMPLETED",
+            "All Tasks Completed",
+            "all tasks completed",
+            "STORY IMPLEMENTATION COMPLETE",
+            "Story Implementation Complete",
+        ];
+
+        for response in cases {
+            let action = analyzer.analyze(response, &slot, "test-key");
+            assert_eq!(
+                action,
+                ResponseAction::Completed,
+                "Expected Completed (case-insensitive) for: {response}"
+            );
+        }
+
+        // Test proceed patterns in various cases
+        let proceed_cases = vec![
+            "SHOULD I PROCEED?",
+            "Should I Proceed?",
+            "should i proceed?",
+        ];
+
+        for response in proceed_cases {
+            let action = analyzer.analyze(response, &slot, "test-key");
+            match &action {
+                ResponseAction::Continue { reply } => {
+                    assert_eq!(
+                        reply, "Yes, proceed.",
+                        "Case-insensitive proceed for: {response}"
+                    );
+                }
+                other => panic!("Expected Continue for: {response}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_analyzer_completion_various_phrases() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // Each completion signal phrase should trigger Completed
+        for signal in COMPLETION_SIGNALS {
+            let response = format!("Here is the result: {signal}.");
+            let action = analyzer.analyze(&response, &slot, "test-key");
+            assert_eq!(
+                action,
+                ResponseAction::Completed,
+                "Expected Completed for signal: {signal}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyzer_proceed_various_phrases() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        for pattern in PROCEED_PATTERNS {
+            let response = format!("I've done the work. {pattern}");
+            let action = analyzer.analyze(&response, &slot, "test-key");
+            match &action {
+                ResponseAction::Continue { reply } => {
+                    assert_eq!(
+                        reply, "Yes, proceed.",
+                        "Expected proceed reply for pattern: {pattern}"
+                    );
+                }
+                other => panic!("Expected Continue for pattern: {pattern}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_analyzer_story_selection_replies_with_story_key() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let cases = vec![
+            "Which story would you like me to work on?",
+            "Please provide the story file path to develop.",
+            "What story should I develop next?",
+        ];
+
+        for response in cases {
+            let action = analyzer.analyze(response, &slot, "4-2-agent-session-setup-chat-loop");
+            match &action {
+                ResponseAction::Continue { reply } => {
+                    assert_eq!(
+                        reply, "4-2-agent-session-setup-chat-loop",
+                        "Expected story_key reply for: {response}"
+                    );
+                }
+                other => panic!("Expected Continue with story_key for: {response}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_analyzer_no_false_positive_completion() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // These should NOT trigger completion
+        let non_completion = vec![
+            "I'll complete the task now.",
+            "Working on implementing the feature.",
+            "Task 1 is done, moving to task 2.",
+            "This step is finished.",
+        ];
+
+        for response in non_completion {
+            let action = analyzer.analyze(response, &slot, "test-key");
+            assert_ne!(
+                action,
+                ResponseAction::Completed,
+                "Should NOT trigger completion for: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_response_action_debug() {
+        let action = ResponseAction::Continue {
+            reply: "test".to_string(),
+        };
+        let debug = format!("{action:?}");
+        assert!(debug.contains("Continue"));
+        assert!(debug.contains("test"));
+
+        let completed = format!("{:?}", ResponseAction::Completed);
+        assert!(completed.contains("Completed"));
+
+        let escalated = format!("{:?}", ResponseAction::Escalated);
+        assert!(escalated.contains("Escalated"));
+
+        let no_reply = format!("{:?}", ResponseAction::NoReply);
+        assert!(no_reply.contains("NoReply"));
+    }
+
+    #[test]
+    fn test_response_action_clone() {
+        let action = ResponseAction::Continue {
+            reply: "Yes, proceed.".to_string(),
+        };
+        let cloned = action.clone();
+        assert_eq!(action, cloned);
+    }
+}

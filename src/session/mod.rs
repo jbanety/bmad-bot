@@ -7,14 +7,30 @@
 //! Key types:
 //! - [`SessionError`] — typed errors for session-level failures
 //! - [`SessionOutcome`] — the three possible results of a session run
+//! - [`SessionRunner`] — the main session lifecycle manager
+//! - [`ResponseAnalyzer`] — pattern-matching engine for agent responses
+//! - [`SessionState`] — WAL state for crash recovery
 //! - [`escalation::EscalationInfo`] — lightweight escalation data carrier
-//! - [`escalation::EscalationReport`] — full report for daemon/notification
+//! - [`escalation::EscalationReport`] — full report returned to the daemon for logging,
+//!   notification (Epic 6), and PR creation (Epic 5).
 
+/// Response analyzer — pattern matching for workflow interactions.
+pub mod analyzer;
 /// Session cleanup: partial work preservation and sprint-status updates.
 pub mod cleanup;
 /// Escalation types for supervisor-to-session communication.
 pub mod escalation;
+/// LLM provider factory — multi-provider support.
+pub mod provider;
+/// Session runner — build agent, chat loop, lifecycle management.
+pub mod runner;
+/// WAL state file — session persistence for crash recovery.
 mod state;
+
+pub use analyzer::ResponseAnalyzer;
+pub use provider::create_completion_model;
+pub use runner::SessionRunner;
+pub use state::SessionState;
 
 use crate::supervisor::decisions::DecisionRecord;
 use escalation::EscalationReport;
