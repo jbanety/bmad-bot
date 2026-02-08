@@ -54,6 +54,7 @@ development_status:
   1-2-cli-framework-daemon-lifecycle: review
   1-3-interactive-init-command: review
   1-4-status-logs-bmad-discovery: review
+  1-5-git-remote-auto-detection-init: ready-for-dev
   epic-1-retrospective: optional
 
   epic-2: in-progress
@@ -96,7 +97,7 @@ development_status:
   7-5-session-wal-crash-recovery-integration-tests: ready-for-dev # depends-on: 7-1
   7-6-git-provider-pr-creation-integration-tests: ready-for-dev # depends-on: 7-1
   7-7-notification-flow-integration-tests: ready-for-dev # depends-on: 7-1
-  7-8-branch-management-git-tools-integration-tests: backlog # depends-on: 7-1
+  7-8-branch-management-git-tools-integration-tests: ready-for-dev # depends-on: 7-1
   7-9-cli-lifecycle-integration-tests: backlog # depends-on: 7-1
   7-10-response-analyzer-supervisor-rules-integration-tests: backlog # depends-on: 7-1
   epic-7-retrospective: optional
