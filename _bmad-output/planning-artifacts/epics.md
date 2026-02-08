@@ -178,7 +178,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 ## Epic List
 
 ### Epic 1: Project Foundation & CLI
-The user can install, configure, launch, and monitor the BMAD Bot daemon. This epic delivers the complete CLI interface (init, start, status, logs), configuration loading with secrets separation, BMAD auto-discovery, config validation, and graceful shutdown. After this epic, the daemon runs, stops cleanly, and the user can observe its state.
+The user can install, configure, launch, and monitor the BMAD Bot daemon. This epic delivers the complete CLI interface (init, start, status, logs), configuration loading with secrets separation, BMAD auto-discovery, config validation, graceful shutdown, and smart git auto-detection during setup. After this epic, the daemon runs, stops cleanly, and the user can observe its state.
 **FRs covered:** FR27, FR28, FR29, FR30, FR31, FR32, FR34, FR36
 
 ### Epic 2: Story Watching & Dependency Management
@@ -309,6 +309,48 @@ So that I can monitor operations and trust the daemon knows my project setup.
 **When** the config module initializes
 **Then** the daemon auto-discovers the BMAD version and installed modules by scanning the project repo (e.g., `_bmad/` directory structure)
 **And** the discovered information is logged at startup and available via `bmad-bot status`
+
+### Story 1.5: Git Remote Auto-Detection in Init Command
+
+As a developer setting up BMAD Bot for the first time,
+I want the `bmad-bot init` command to auto-detect my git provider, repository owner, repository name, and default branch from the local `.git` configuration,
+So that I can complete the setup faster with fewer manual inputs and zero risk of typos on repository information.
+
+**Acceptance Criteria:**
+
+**Given** I am in a directory with an initialized git repository that has an `origin` remote configured
+**When** I run `bmad-bot init`
+**Then** the git provider, repo owner, repo name, and target branch are auto-detected from the `origin` remote URL
+**And** a summary of detected values is displayed for confirmation before proceeding
+
+**Given** the auto-detected git settings are displayed
+**When** I confirm them (default: Yes)
+**Then** the init command skips the individual git provider/owner/repo/branch prompts and uses the detected values
+
+**Given** the auto-detected git settings are displayed
+**When** I decline them
+**Then** the init command falls back to the standard manual prompts for git provider, repo owner, repo name, and target branch (existing Story 1.3 behavior)
+
+**Given** I am in a directory without a `.git` directory or without any remote configured
+**When** I run `bmad-bot init`
+**Then** the init command silently skips auto-detection and falls back to manual prompts without any error message
+
+**Given** the `origin` remote URL uses SSH format (`git@github.com:owner/repo.git`) or HTTPS format (`https://github.com/owner/repo.git`)
+**When** auto-detection runs
+**Then** the provider, owner, and repo name are correctly parsed from either format
+
+**Given** the `origin` remote URL points to an unrecognized host (not `github.com` or `gitlab.com`)
+**When** auto-detection runs
+**Then** the owner and repo name are still pre-filled
+**And** the git provider prompt falls back to manual selection with a note that the host was not recognized
+
+**Given** the repository has multiple remotes but no `origin`
+**When** auto-detection runs
+**Then** the available remote names are listed and the user is prompted to select one
+
+**Given** auto-detection successfully identifies git settings
+**When** the final `bmad-bot.yaml` is generated
+**Then** the generated config contains the correct git_provider, repo_owner, repo_name, and target_branch values identical to what was confirmed by the user
 
 ---
 
