@@ -93,9 +93,6 @@ so that code quality issues are caught and fixed before I review the PR.
       "what should i do with these findings",
   ];
   ```
-- [ ] Insert new priority level between YOLO (5) and Story Selection (6) in `analyze()`:
-  - Priority 5.5 (renumber as needed): if `REVIEW_FIX_PATTERNS` matches → `Continue { reply: "1".to_string() }` (fix automatically)
-  - Log: `tracing::debug!(action = "response_analysis", result = "review_fix_decision", "Review fix decision detected — auto-fixing")`
 - [ ] Add new constant `REVIEW_COMPLETE_PATTERNS` to detect CR workflow step 5 completion:
   ```rust
   const REVIEW_COMPLETE_PATTERNS: &[&str] = &[
@@ -107,9 +104,14 @@ so that code quality issues are caught and fixed before I review the PR.
       "sprint status synced",
   ];
   ```
-- [ ] Insert new priority level (after review fix decision, before story selection) in `analyze()`:
+- [ ] Insert `REVIEW_COMPLETE_PATTERNS` at **priority 1.5** (after Escalation priority 1, BEFORE existing `COMPLETION_SIGNALS` priority 2) in `analyze()`:
   - If `REVIEW_COMPLETE_PATTERNS` matches → `Completed` (triggers post-review phase in `drive_review_session`)
   - Log: `tracing::debug!(action = "response_analysis", result = "review_complete", "CR workflow completion detected")`
+  - ⚠️ **No overlap with existing `COMPLETION_SIGNALS`:** The CR workflow outputs "Review Complete!", "Code review complete!" — none of these match the existing dev-session signals ("all tasks completed", "story implementation complete", "story is ready for review", etc.). Verified against `src/session/analyzer.rs` `COMPLETION_SIGNALS` constant.
+- [ ] Insert `REVIEW_FIX_PATTERNS` at **priority 5.5** (between YOLO priority 5 and Story Selection priority 6) in `analyze()`:
+  - If `REVIEW_FIX_PATTERNS` matches → `Continue { reply: "1".to_string() }` (fix automatically)
+  - Log: `tracing::debug!(action = "response_analysis", result = "review_fix_decision", "Review fix decision detected — auto-fixing")`
+  - ⚠️ **Must be AFTER `REVIEW_COMPLETE_PATTERNS`:** The step 5 summary contains "Issues Fixed:" which could match `REVIEW_FIX_PATTERNS`. Since `REVIEW_COMPLETE_PATTERNS` is at priority 1.5, it fires first and returns `Completed` — the fix patterns at 5.5 never see the step 5 output.
 - [ ] Add unit tests:
   - `test_analyzer_detects_review_fix_decision` — verify "Choose [1], [2], or specify" → replies "1"
   - `test_analyzer_detects_fix_automatically_pattern` — verify "Fix them automatically" → replies "1"
@@ -163,17 +165,16 @@ so that code quality issues are caught and fixed before I review the PR.
   1. Send `"CR"` as initial message
   2. Initialize `post_review_phase = false`
   3. Enter chat loop (same pattern as `SessionRunner::run_session`):
-     - Use `self.analyzer.analyze(response, &escalation_slot, &story_reply)` for each response
-     - `story_reply` = **story specs file path** (`story.specs_path.display().to_string()`), NOT the story key — CR workflow needs the file path
-     - Handle `ResponseAction::Continue { reply }` → send reply, continue loop
-     - Handle `ResponseAction::Escalated` → `ReviewOutcome::Failed { story_key, error: "Review escalated" }`
-     - Handle `ResponseAction::Completed`:
-       - **If `post_review_phase == false`**: Do NOT return yet. Set `post_review_phase = true`. Send post-review message:
-         `"Commit all your review fixes with descriptive commit messages that reference the findings. Then provide a complete markdown summary of your code review (findings, severity, fixes applied, remaining concerns) suitable for posting as a PR comment."`
-         Continue loop.
-       - **If `post_review_phase == true`**: Capture the agent's response as `report`. Return `ReviewOutcome::Completed { story_key, branch, report }`
+     - **If `post_review_phase == true`**: Skip the analyzer entirely. The agent's response IS the report. Capture it and return `ReviewOutcome::Completed { story_key, branch, report }`.
+     - **If `post_review_phase == false`**: Use `self.analyzer.analyze(response, &escalation_slot, &story_reply)` for each response
+       - `story_reply` = **story specs file path** (`story.specs_path.display().to_string()`), NOT the story key — CR workflow needs the file path
+       - Handle `ResponseAction::Continue { reply }` → send reply, continue loop
+       - Handle `ResponseAction::Escalated` → `ReviewOutcome::Failed { story_key, error: "Review escalated" }`
+       - Handle `ResponseAction::Completed`: Set `post_review_phase = true`. Send `POST_REVIEW_MESSAGE`. Continue loop.
      - Max turns: `MAX_REVIEW_TURNS = 100` (safety net)
   4. On chat error → `ReviewOutcome::Failed`
+  
+  **Why skip the analyzer in post_review_phase?** After `POST_REVIEW_MESSAGE`, the agent commits via GitTool and responds with a markdown report. This response won't contain any `COMPLETION_SIGNALS` or `REVIEW_COMPLETE_PATTERNS` — it's free-form text. Trying to detect completion here would require fragile pattern matching. Instead, we treat the next response as the final report by design. One message in, one report out.
 - [ ] Create `ResponseAnalyzer` instance in `ReviewRunner` (same as `SessionRunner`)
 - [ ] Add `///` doc comments on all public items
 
@@ -304,24 +305,35 @@ The CR workflow (step 5) outputs a completion summary:
 Code review complete!
 ```
 
-The analyzer needs `REVIEW_COMPLETE_PATTERNS` to detect this output and return `ResponseAction::Completed`. However, in `drive_review_session()`, this `Completed` action does **not** immediately end the session. Instead:
+The analyzer needs `REVIEW_COMPLETE_PATTERNS` to detect this output and return `ResponseAction::Completed`. In `drive_review_session()`, this triggers the post-review phase:
 
-1. The chat loop checks `post_review_phase` flag
-2. **First `Completed`** (`post_review_phase == false`): The CR workflow just finished. The loop sets `post_review_phase = true` and sends `POST_REVIEW_MESSAGE` — asking the agent to commit its review fixes with descriptive messages and produce a markdown review report.
-3. **Second `Completed`** (`post_review_phase == true`): The agent has committed and produced the report. The loop captures the agent's last response as `report` and returns `ReviewOutcome::Completed { story_key, branch, report }`.
+1. The chat loop checks `post_review_phase` flag **before** calling the analyzer
+2. **If `post_review_phase == false`**: Analyze response normally. On `Completed` → set `post_review_phase = true`, send `POST_REVIEW_MESSAGE`, continue loop.
+3. **If `post_review_phase == true`**: **Skip the analyzer entirely.** The agent's response IS the report — it's free-form markdown (commit confirmations + review summary). No completion patterns will be present. Capture the response as `report` and return `ReviewOutcome::Completed { story_key, branch, report }`.
+
+**Why skip the analyzer in post_review_phase?** After `POST_REVIEW_MESSAGE`, the agent commits via GitTool and responds with a markdown report. This response won't contain any `COMPLETION_SIGNALS` or `REVIEW_COMPLETE_PATTERNS` — it's free-form text. Trying to detect completion here would require fragile pattern matching. Instead, we treat the next response as the final report by design. One message in, one report out.
 
 This two-phase approach ensures:
 - The BMAD agent commits with full context (it knows what it fixed and why → good commit messages)
 - The review report is authored by the agent (no parsing needed by the daemon)
 - The daemon remains a launcher — the only "intelligence" is the `POST_REVIEW_MESSAGE` constant
+- No fragile pattern matching on the report response — it's captured directly
 
-**Priority ordering in `analyze()`:**
-The `REVIEW_COMPLETE_PATTERNS` priority must be **higher** (checked before) than `REVIEW_FIX_PATTERNS` to avoid the step 5 summary (which contains words like "Issues Fixed") from accidentally triggering the fix-decision auto-response. Suggested order:
-1. ... (existing priorities 1-5)
-2. Review completion detection (`REVIEW_COMPLETE_PATTERNS` → `Completed`)
-3. Review fix decision (`REVIEW_FIX_PATTERNS` → `Continue { reply: "1" }`)
-4. Story selection (`STORY_SELECTION_PATTERNS` → `Continue { reply: story_reply }`)
-5. ... (remaining priorities)
+**Priority ordering in `analyze()` — interaction with existing `COMPLETION_SIGNALS`:**
+
+The existing `analyzer.rs` has `COMPLETION_SIGNALS` at priority 2, matching dev-session phrases like "all tasks completed", "story implementation complete", "story is ready for review". The CR workflow's step 5 output ("Review Complete!", "Code review complete!") does **NOT** match any existing `COMPLETION_SIGNALS` — they are dev-session specific.
+
+`REVIEW_COMPLETE_PATTERNS` must be checked **before** both `COMPLETION_SIGNALS` (priority 2) and `REVIEW_FIX_PATTERNS` to avoid the step 5 summary (which contains words like "Issues Fixed") from accidentally triggering the fix-decision auto-response. Suggested priority order:
+
+1. Escalation (existing priority 1) — `escalation_slot` check
+2. **Review completion detection** (`REVIEW_COMPLETE_PATTERNS` → `Completed`) — NEW
+3. Completion signals (existing priority 2) — `COMPLETION_SIGNALS` (dev-session only)
+4. Confirmation/proceed (existing priority 3)
+5. Step-by-step (existing priority 4)
+6. YOLO (existing priority 5)
+7. **Review fix decision** (`REVIEW_FIX_PATTERNS` → `Continue { reply: "1" }`) — NEW
+8. Story selection (`STORY_SELECTION_PATTERNS` → `Continue { reply: story_reply }`)
+9. Default fallback
 
 ### Provider Match-Arm Pattern (from `SessionRunner` and `ArchitectSession`)
 
@@ -350,16 +362,16 @@ The review chat loop follows `SessionRunner::run_session()` with one key additio
 
 1. Send initial message (`"CR"` instead of `"DS"`)
 2. Initialize `post_review_phase = false`
-3. Analyze response with `ResponseAnalyzer`
-4. On `Continue { reply }` → send reply, continue
-5. On `Escalated` → return `ReviewOutcome::Failed` (review escalation is treated as failure, non-blocking)
-6. On `Completed`:
-   - **If `post_review_phase == false`**: Do NOT return yet. Set `post_review_phase = true`. Send post-review message:
-     `"Commit all your review fixes with descriptive commit messages that reference the findings. Then provide a complete markdown summary of your code review (findings, severity, fixes applied, remaining concerns) suitable for posting as a PR comment."`
-     Continue loop.
-   - **If `post_review_phase == true`**: Capture the agent's last response as `report`. Return `ReviewOutcome::Completed { story_key, branch, report }`
-7. Max turns safety net: `MAX_REVIEW_TURNS = 100`
-8. On chat error: retry up to 3 times (same as dev session), then `ReviewOutcome::Failed`
+3. On each agent response, check `post_review_phase` **first**:
+   - **If `post_review_phase == true`**: **Skip the analyzer entirely.** The agent's response IS the report (free-form markdown with commit confirmations + review summary). Capture it as `report` and return `ReviewOutcome::Completed { story_key, branch, report }`.
+   - **If `post_review_phase == false`**: Analyze response with `ResponseAnalyzer` normally:
+     - On `Continue { reply }` → send reply, continue
+     - On `Escalated` → return `ReviewOutcome::Failed` (review escalation is treated as failure, non-blocking)
+     - On `Completed` → set `post_review_phase = true`, send `POST_REVIEW_MESSAGE`, continue loop
+4. Max turns safety net: `MAX_REVIEW_TURNS = 100`
+5. On chat error: retry up to 3 times (same as dev session), then `ReviewOutcome::Failed`
+
+**Why skip the analyzer in post_review_phase?** After `POST_REVIEW_MESSAGE`, the agent commits via GitTool and responds with a markdown report. This response won't contain any `COMPLETION_SIGNALS` or `REVIEW_COMPLETE_PATTERNS` — it's free-form text. Trying to detect completion here would require fragile pattern matching. Instead, we treat the next response as the final report by design. One message in, one report out.
 
 **Post-review message constant:**
 ```rust
@@ -396,6 +408,10 @@ These are all read-only imports — no circular dependencies. The `review` modul
 - ❌ Does NOT manage branch creation — already on story branch from dev session
 - ❌ Does NOT write WAL files — review is non-critical, no crash recovery
 - ❌ Does NOT know anything about BMAD workflows — it's just a session launcher with a post-review phase
+
+### Edge Case: No Code Changes After Review
+
+The CR workflow is adversarial (minimum 3-10 issues), but some findings may be non-code (documentation gaps, naming suggestions noted but not auto-fixed, architecture observations). If `POST_REVIEW_MESSAGE` asks the agent to "commit all your review fixes" and there are no staged changes, the agent should respond that there is nothing to commit and still provide the review report. This is a valid `ReviewOutcome::Completed` — the `report` field captures the findings summary regardless of whether commits were made. The orchestrator posts the report as a PR comment either way.
 
 ### Error Handling — Non-Blocking Review Failures
 
@@ -491,6 +507,8 @@ This aligns with the architecture's Complete Project Directory Structure.
 
 ### References
 
+- [Source: src/watcher/mod.rs#StoryInfo] — `specs_path: PathBuf` field used as `story_reply` parameter in `ResponseAnalyzer.analyze()` for CR workflow story selection
+- [Source: src/session/analyzer.rs#COMPLETION_SIGNALS] — Existing dev-session completion patterns (priority 2). `REVIEW_COMPLETE_PATTERNS` must not overlap — verified no conflict
 - [Source: _bmad/bmm/agents/dev.md#menu] — `[CR] Code Review` menu item triggers `code-review/workflow.yaml`
 - [Source: _bmad/bmm/workflows/4-implementation/code-review/workflow.yaml] — Full CR workflow config
 - [Source: _bmad/bmm/workflows/4-implementation/code-review/instructions.xml] — CR workflow steps: discover changes, review, fix, update status
