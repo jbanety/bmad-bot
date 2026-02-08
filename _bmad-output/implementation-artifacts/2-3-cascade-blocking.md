@@ -1,6 +1,6 @@
 # Story 2.3: Cascade Blocking
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,64 +20,64 @@ So that the daemon doesn't waste time attempting stories that cannot succeed.
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Verify prerequisites from Story 2.2 (AC: #1, #2, #3)
-  - [ ] 0.1 Verify `src/watcher/deps.rs` contains `DependencyGraph`, `derive_dependencies()`, `filter_eligible()` (from Story 2.2)
-  - [ ] 0.2 Verify `DependencyGraph` has `adjacency`, `all_statuses`, `doc_order` fields
-  - [ ] 0.3 Verify `DependencyGraph::deps_satisfied()` returns `(bool, Option<(String, String)>)` — the unmet dep key and its status
-  - [ ] 0.4 Verify `WatcherError::CyclicDependency` variant exists (from Story 2.2)
-  - [ ] 0.5 Run `cargo check` to confirm clean baseline
+- [x] Task 0: Verify prerequisites from Story 2.2 (AC: #1, #2, #3)
+  - [x] 0.1 Verify `src/watcher/deps.rs` contains `DependencyGraph`, `derive_dependencies()`, `filter_eligible()` (from Story 2.2)
+  - [x] 0.2 Verify `DependencyGraph` has `adjacency`, `all_statuses`, `doc_order` fields
+  - [x] 0.3 Verify `DependencyGraph::deps_satisfied()` returns `(bool, Option<(String, String)>)` — the unmet dep key and its status
+  - [x] 0.4 Verify `WatcherError::CyclicDependency` variant exists (from Story 2.2)
+  - [x] 0.5 Run `cargo check` to confirm clean baseline
 
-- [ ] Task 1: Define cascade-blocking status constants in `src/watcher/deps.rs` (AC: #1)
-  - [ ] 1.1 Add `const BLOCKING_STATUSES: &[&str] = &["blocked", "needs-clarification"]` — statuses that trigger cascade blocking
-  - [ ] 1.2 Add `/// doc comment` explaining that these statuses indicate a story cannot proceed without human intervention, as opposed to "in-progress" or "backlog" which are transient
+- [x] Task 1: Define cascade-blocking status constants in `src/watcher/deps.rs` (AC: #1)
+  - [x] 1.1 Add `const BLOCKING_STATUSES: &[&str] = &["blocked", "needs-clarification"]` — statuses that trigger cascade blocking
+  - [x] 1.2 Add `/// doc comment` explaining that these statuses indicate a story cannot proceed without human intervention, as opposed to "in-progress" or "backlog" which are transient
 
-- [ ] Task 2: Implement `CascadeBlockInfo` struct in `src/watcher/deps.rs` (AC: #1)
-  - [ ] 2.1 Create `#[derive(Debug, Clone)] pub struct CascadeBlockInfo` with fields: `blocked_story: String` (the story being blocked), `root_cause_story: String` (the original story with blocking status), `root_cause_status: String` (e.g. "blocked" or "needs-clarification"), `chain: Vec<String>` (full dependency chain from root cause to blocked story)
-  - [ ] 2.2 Implement `Display` for `CascadeBlockInfo` for human-readable log output
+- [x] Task 2: Implement `CascadeBlockInfo` struct in `src/watcher/deps.rs` (AC: #1)
+  - [x] 2.1 Create `#[derive(Debug, Clone)] pub struct CascadeBlockInfo` with fields: `blocked_story: String` (the story being blocked), `root_cause_story: String` (the original story with blocking status), `root_cause_status: String` (e.g. "blocked" or "needs-clarification"), `chain: Vec<String>` (full dependency chain from root cause to blocked story)
+  - [x] 2.2 Implement `Display` for `CascadeBlockInfo` for human-readable log output
 
-- [ ] Task 3: Implement `find_cascade_blocks()` in `src/watcher/deps.rs` (AC: #1, #2)
-  - [ ] 3.1 Implement `pub fn find_cascade_blocks(stories: &[StoryInfo], all_statuses: &HashMap<String, String>) -> Vec<CascadeBlockInfo>` — discovers all cascade blocks by traversing dependency chains
-  - [ ] 3.2 For each story, walk its dependency chain transitively: if any ancestor has a blocking status, record a `CascadeBlockInfo` with the full chain
-  - [ ] 3.3 Handle transitive chains: if 1-1 is blocked, 1-2 depends on 1-1, 1-3 depends on 1-2 → both 1-2 AND 1-3 are cascade-blocked with root_cause = 1-1
-  - [ ] 3.4 Use iterative traversal (not recursion) to avoid stack overflow on deep chains
-  - [ ] 3.5 If a dependency is not in `all_statuses` at all, treat it as unmet but NOT cascade-blocked (it's an unknown, not a failure)
+- [x] Task 3: Implement `find_cascade_blocks()` in `src/watcher/deps.rs` (AC: #1, #2)
+  - [x] 3.1 Implement `pub fn find_cascade_blocks(stories: &[StoryInfo], all_statuses: &HashMap<String, String>) -> Vec<CascadeBlockInfo>` — discovers all cascade blocks by traversing dependency chains
+  - [x] 3.2 For each story, walk its dependency chain transitively: if any ancestor has a blocking status, record a `CascadeBlockInfo` with the full chain
+  - [x] 3.3 Handle transitive chains: if 1-1 is blocked, 1-2 depends on 1-1, 1-3 depends on 1-2 → both 1-2 AND 1-3 are cascade-blocked with root_cause = 1-1
+  - [x] 3.4 Use iterative traversal (not recursion) to avoid stack overflow on deep chains
+  - [x] 3.5 If a dependency is not in `all_statuses` at all, treat it as unmet but NOT cascade-blocked (it's an unknown, not a failure)
 
-- [ ] Task 4: Integrate cascade detection into `filter_eligible()` in `src/watcher/deps.rs` (AC: #1, #2, #3)
-  - [ ] 4.1 After `derive_dependencies()` and `topological_sort()`, call `find_cascade_blocks()` to identify cascade-blocked stories
-  - [ ] 4.2 For each cascade-blocked story, log at **warn** level: `tracing::warn!(story_key = %info.blocked_story, root_cause = %info.root_cause_story, root_status = %info.root_cause_status, chain = ?info.chain, "Story cascade-blocked — prerequisite failed")`
-  - [ ] 4.3 For stories skipped due to deps not yet `done` (but not cascade-blocked), keep existing **info** level log from Story 2.2
-  - [ ] 4.4 Exclude cascade-blocked stories from the eligible result — they are a subset of "deps not satisfied" but with distinct logging
-  - [ ] 4.5 Return only stories that pass BOTH checks: deps satisfied AND not cascade-blocked
+- [x] Task 4: Integrate cascade detection into `filter_eligible()` in `src/watcher/deps.rs` (AC: #1, #2, #3)
+  - [x] 4.1 After `derive_dependencies()` and `topological_sort()`, call `find_cascade_blocks()` to identify cascade-blocked stories
+  - [x] 4.2 For each cascade-blocked story, log at **warn** level: `tracing::warn!(story_key = %info.blocked_story, root_cause = %info.root_cause_story, root_status = %info.root_cause_status, chain = ?info.chain, "Story cascade-blocked — prerequisite failed")`
+  - [x] 4.3 For stories skipped due to deps not yet `done` (but not cascade-blocked), keep existing **info** level log from Story 2.2
+  - [x] 4.4 Exclude cascade-blocked stories from the eligible result — they are a subset of "deps not satisfied" but with distinct logging
+  - [x] 4.5 Return only stories that pass BOTH checks: deps satisfied AND not cascade-blocked
 
-- [ ] Task 5: Add `cascade_blocked_count` to pre-gate log in `Watcher::poll()` (AC: #1, #3)
-  - [ ] 5.1 Update the pre-gate summary log in `Watcher::poll()` to include cascade-blocked count: `tracing::info!(pre_gate_input = eligible.len(), pre_gate_output = filtered.len(), cascade_blocked = cascade_count, "Pre-gate dependency filter applied")`
-  - [ ] 5.2 `filter_eligible` should return cascade block count alongside filtered stories — update return type to `Result<(Vec<StoryInfo>, usize), WatcherError>` OR pass cascade count through a separate mechanism (simplest: return tuple)
+- [x] Task 5: Add `cascade_blocked_count` to pre-gate log in `Watcher::poll()` (AC: #1, #3)
+  - [x] 5.1 Update the pre-gate summary log in `Watcher::poll()` to include cascade-blocked count: `tracing::info!(pre_gate_input = eligible.len(), pre_gate_output = filtered.len(), cascade_blocked = cascade_count, "Pre-gate dependency filter applied")`
+  - [x] 5.2 `filter_eligible` should return cascade block count alongside filtered stories — update return type to `Result<(Vec<StoryInfo>, usize), WatcherError>` OR pass cascade count through a separate mechanism (simplest: return tuple)
 
-- [ ] Task 6: Write unit tests (AC: #1, #2, #3)
-  - [ ] 6.1 Test `find_cascade_blocks` detects direct cascade: story 1-2 blocked when dep 1-1 is `blocked`
-  - [ ] 6.2 Test `find_cascade_blocks` detects transitive cascade: 1-3 cascade-blocked through 1-2 → 1-1(blocked)
-  - [ ] 6.3 Test `find_cascade_blocks` returns correct root cause across chain
-  - [ ] 6.4 Test `find_cascade_blocks` detects `needs-clarification` as blocking status
-  - [ ] 6.5 Test `find_cascade_blocks` does NOT cascade on `in-progress` or `backlog` (these are transient, not failures)
-  - [ ] 6.5b Test `find_cascade_blocks` does NOT cascade on `review` status (transient — code review in progress)
-  - [ ] 6.6 Test `find_cascade_blocks` returns empty when no blocking statuses exist
-  - [ ] 6.7 Test `find_cascade_blocks` handles story with unknown/missing dependency gracefully
-  - [ ] 6.8 Test `filter_eligible` excludes cascade-blocked stories from result
-  - [ ] 6.9 Test `filter_eligible` returns cascade count correctly
-  - [ ] 6.10 Test re-evaluation: if blocking dep changes to `done`, cascade-blocked stories become eligible on next call
-  - [ ] 6.11 Test multiple independent cascades: epic 1 has a blocker, epic 2 is unaffected
-  - [ ] 6.12 Test full integration: `Watcher::poll()` with cascade-blocked stories logged at warn
-  - [ ] 6.13 Test `build_full_dependency_map` builds correct dep map from sprint-status entries (skips epics, retros, includes sequential deps)
-  - [ ] 6.14 Test `reconstruct_chain` produces correct ordered chain from root cause to blocked story
-  - [ ] 6.15 Test `find_root_blocker` returns None when no blocking ancestor exists
+- [x] Task 6: Write unit tests (AC: #1, #2, #3)
+  - [x] 6.1 Test `find_cascade_blocks` detects direct cascade: story 1-2 blocked when dep 1-1 is `blocked`
+  - [x] 6.2 Test `find_cascade_blocks` detects transitive cascade: 1-3 cascade-blocked through 1-2 → 1-1(blocked)
+  - [x] 6.3 Test `find_cascade_blocks` returns correct root cause across chain
+  - [x] 6.4 Test `find_cascade_blocks` detects `needs-clarification` as blocking status
+  - [x] 6.5 Test `find_cascade_blocks` does NOT cascade on `in-progress` or `backlog` (these are transient, not failures)
+  - [x] 6.5b Test `find_cascade_blocks` does NOT cascade on `review` status (transient — code review in progress)
+  - [x] 6.6 Test `find_cascade_blocks` returns empty when no blocking statuses exist
+  - [x] 6.7 Test `find_cascade_blocks` handles story with unknown/missing dependency gracefully
+  - [x] 6.8 Test `filter_eligible` excludes cascade-blocked stories from result
+  - [x] 6.9 Test `filter_eligible` returns cascade count correctly
+  - [x] 6.10 Test re-evaluation: if blocking dep changes to `done`, cascade-blocked stories become eligible on next call
+  - [x] 6.11 Test multiple independent cascades: epic 1 has a blocker, epic 2 is unaffected
+  - [x] 6.12 Test full integration: `Watcher::poll()` with cascade-blocked stories logged at warn
+  - [x] 6.13 Test `build_full_dependency_map` builds correct dep map from sprint-status entries (skips epics, retros, includes sequential deps)
+  - [x] 6.14 Test `reconstruct_chain` produces correct ordered chain from root cause to blocked story
+  - [x] 6.15 Test `find_root_blocker` returns None when no blocking ancestor exists
 
-- [ ] Task 7: Final quality checks
-  - [ ] 7.1 Run `cargo fmt -- --check` and fix any formatting issues
-  - [ ] 7.2 Run `cargo clippy` and fix any warnings
-  - [ ] 7.3 Run `cargo test` and verify all tests pass (including Story 2.1 and 2.2 tests)
-  - [ ] 7.4 Verify all public items have `///` doc comments
-  - [ ] 7.5 Manual integration test: create sprint-status with 1-1 as `blocked`, 1-2 and 1-3 as `ready-for-dev` → verify both are cascade-blocked with correct root cause
-  - [ ] 7.6 Manual integration test: change 1-1 to `done` → verify 1-2 becomes eligible and 1-3 remains skipped (dep 1-2 not done yet)
+- [x] Task 7: Final quality checks
+  - [x] 7.1 Run `cargo fmt -- --check` and fix any formatting issues
+  - [x] 7.2 Run `cargo clippy` and fix any warnings
+  - [x] 7.3 Run `cargo test` and verify all tests pass (including Story 2.1 and 2.2 tests)
+  - [x] 7.4 Verify all public items have `///` doc comments
+  - [x] 7.5 Manual integration test: create sprint-status with 1-1 as `blocked`, 1-2 and 1-3 as `ready-for-dev` → verify both are cascade-blocked with correct root cause
+  - [x] 7.6 Manual integration test: change 1-1 to `done` → verify 1-2 becomes eligible and 1-3 remains skipped (dep 1-2 not done yet)
 
 ## Dev Notes
 
@@ -1018,10 +1018,32 @@ The watcher → session interface contract is now fully defined:
 
 ### Agent Model Used
 
-_(filled post-implementation)_
+Claude Opus 4.6 (via Zed)
 
 ### Debug Log References
 
+- 169 tests passing (18 new cascade-specific tests + 151 existing, 0 regressions)
+- `cargo clippy` clean (only pre-existing `dead_code` warnings for `specs_path` and `entry_count`)
+- `cargo fmt -- --check` clean
+
 ### Completion Notes List
 
+- **Task 0:** All Story 2.2 prerequisites verified: `DependencyGraph`, `derive_dependencies()`, `filter_eligible()`, `deps_satisfied()` signature, `WatcherError::CyclicDependency`. Baseline: 151 tests green, `cargo check` clean.
+- **Task 1:** Added `BLOCKING_STATUSES` constant with doc comment explaining blocking vs transient statuses.
+- **Task 2:** Implemented `CascadeBlockInfo` struct with `Display` impl. Struct is `pub` for forward-compatibility with Epic 6 notifications.
+- **Task 3:** Implemented two-phase cascade detection: `find_root_blocker()` (iterative DFS) finds the blocking ancestor, `reconstruct_chain()` (BFS forward) builds the correct root→blocked path. `find_cascade_blocks()` orchestrates both phases per story. All traversal is iterative (no recursion).
+- **Task 4:** Updated `filter_eligible()` return type from `Result<Vec<StoryInfo>, WatcherError>` to `Result<(Vec<StoryInfo>, usize), WatcherError>`. Integrated cascade detection after topo sort: cascade-blocked stories logged at `warn`, non-blocking skips remain at `info`. Added `build_full_dependency_map()` for transitive traversal across all sprint-status entries.
+- **Task 5:** Updated `Watcher::poll()` to destructure tuple, added `cascade_blocked` field to pre-gate summary log, updated story detection log message to include "not cascade-blocked".
+- **Task 6:** 18 new tests covering all specified scenarios: direct/transitive cascade, needs-clarification, no-cascade on transient statuses, unknown deps, filter_eligible integration, re-evaluation on resolution, independent epics, Watcher::poll integration, build_full_dependency_map, reconstruct_chain, find_root_blocker, and CascadeBlockInfo Display. Updated 8 existing Story 2.2 tests for new tuple return type.
+- **Task 7:** `cargo fmt`, `cargo clippy`, `cargo test` all clean. All public items have `///` doc comments. Integration scenarios verified via `test_watcher_poll_with_cascade_blocking` and `test_filter_eligible_re_evaluation_on_resolution`.
+- **Breaking change:** `filter_eligible()` return type changed — all callers updated (Story 2.2 tests + `Watcher::poll()`).
+- **Design decision:** No new `WatcherError` variants added — cascade blocks are informational (warn log), not error conditions, per story scope.
+
+### Change Log
+
+- 2026-02-08: Story 2.3 Cascade Blocking implemented — `BLOCKING_STATUSES`, `CascadeBlockInfo`, `find_root_blocker()`, `reconstruct_chain()`, `find_cascade_blocks()`, `build_full_dependency_map()` added to `deps.rs`; `filter_eligible()` return type updated to include cascade count; `Watcher::poll()` updated for new return type and logging; 18 new tests, 8 existing tests updated.
+
 ### File List
+
+- `src/watcher/deps.rs` — Added `BLOCKING_STATUSES`, `CascadeBlockInfo`, `find_root_blocker()`, `reconstruct_chain()`, `find_cascade_blocks()`, `build_full_dependency_map()`. Updated `filter_eligible()` return type to `(Vec<StoryInfo>, usize)` with cascade detection integration. Added `HashSet`, `VecDeque`, `fmt` imports. 18 new tests, 8 existing tests updated for tuple return.
+- `src/watcher/mod.rs` — Updated `Watcher::poll()` to destructure `(filtered, cascade_count)` tuple from `filter_eligible()`, added `cascade_blocked` field to pre-gate summary log, updated story detection log message.

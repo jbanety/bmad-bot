@@ -307,13 +307,14 @@ impl Watcher {
             return Err(WatcherError::NoEligibleStories);
         }
 
-        // Pre-gate: dependency resolution and filtering (Story 2.2)
+        // Pre-gate: dependency resolution, cascade detection, and filtering
         let entries = sprint_status.entries();
-        let filtered = deps::filter_eligible(eligible, entries)?;
+        let (filtered, cascade_count) = deps::filter_eligible(eligible, entries)?;
 
         tracing::info!(
             pre_gate_input = all_stories.len(),
             pre_gate_output = filtered.len(),
+            cascade_blocked = cascade_count,
             "Pre-gate dependency filter applied"
         );
 
@@ -327,7 +328,7 @@ impl Watcher {
                 story_key = %story.story_key,
                 branch = %story.branch_name,
                 deps = ?story.dependencies,
-                "Eligible story detected (deps satisfied)"
+                "Eligible story detected (deps satisfied, not cascade-blocked)"
             );
         }
 
