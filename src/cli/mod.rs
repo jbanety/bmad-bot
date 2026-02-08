@@ -463,6 +463,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
     // Build BotConfig
     Ok(BotConfig {
         polling_interval_secs,
+        code_review_enabled: true,
         git_provider: GitProviderConfig {
             provider: git_provider_name,
             repo_owner,
@@ -1090,6 +1091,7 @@ mod tests {
     fn make_test_config() -> BotConfig {
         BotConfig {
             polling_interval_secs: 300,
+            code_review_enabled: true,
             git_provider: GitProviderConfig {
                 provider: "github".to_string(),
                 repo_owner: "test-org".to_string(),

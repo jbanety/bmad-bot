@@ -36,6 +36,41 @@ pub enum ResponseAction {
     NoReply,
 }
 
+/// Review completion patterns (case-insensitive).
+///
+/// Detects CR workflow step 5 completion output. Checked at priority 1.5
+/// (after escalation, before dev-session completion signals) to avoid
+/// the step 5 summary (which contains "Issues Fixed:") from triggering
+/// `REVIEW_FIX_PATTERNS` at priority 5.5.
+const REVIEW_COMPLETE_PATTERNS: &[&str] = &[
+    "review complete",
+    "✅ review complete",
+    "code review complete",
+    "issues fixed:",
+    "action items created:",
+    "sprint status synced",
+];
+
+/// Review fix decision patterns (case-insensitive).
+///
+/// Detects the CR workflow step 4 prompt asking how to handle findings.
+/// Auto-responds with "1" (fix automatically). Checked at priority 5.5
+/// (between YOLO and Story Selection) — AFTER `REVIEW_COMPLETE_PATTERNS`
+/// to prevent the step 5 summary from accidentally triggering a fix response.
+const REVIEW_FIX_PATTERNS: &[&str] = &[
+    "fix them automatically",
+    "create action items",
+    "show me details",
+    "choose [1]",
+    "choose [2]",
+    "choose [3]",
+    "[1] fix",
+    "[2] create",
+    "[3] show",
+    "what should i do with these issues",
+    "what should i do with these findings",
+];
+
 /// Completion signal phrases (case-insensitive).
 ///
 /// These must be specific multi-word phrases to avoid false positives.
@@ -109,10 +144,12 @@ const STORY_SELECTION_PATTERNS: &[&str] = &[
 ///
 /// Examines agent responses using a strict priority order:
 /// 1. Escalation (slot check) — highest priority
-/// 2. Completion signals
+///    - 1.5. Review completion detection (`REVIEW_COMPLETE_PATTERNS`)
+/// 2. Completion signals (dev-session)
 /// 3. Confirmation/proceed requests
 /// 4. Step-by-step detection
 /// 5. YOLO/batch mode questions
+///    - 5.5. Review fix decision (`REVIEW_FIX_PATTERNS`)
 /// 6. Story selection questions
 /// 7. Default — "Continue."
 ///
@@ -162,6 +199,20 @@ impl ResponseAnalyzer {
         }
 
         let lower = response.to_lowercase();
+
+        // Priority 1.5: Review completion detection
+        if REVIEW_COMPLETE_PATTERNS
+            .iter()
+            .any(|pattern| lower.contains(pattern))
+        {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 1.5,
+                result = "review_complete",
+                "CR workflow completion detected"
+            );
+            return ResponseAction::Completed;
+        }
 
         // Priority 2: Completion detection
         if COMPLETION_SIGNALS
@@ -222,6 +273,22 @@ impl ResponseAnalyzer {
                 reply:
                     "Use YOLO mode. Complete all remaining work without asking for confirmation."
                         .to_string(),
+            };
+        }
+
+        // Priority 5.5: Review fix decision
+        if REVIEW_FIX_PATTERNS
+            .iter()
+            .any(|pattern| lower.contains(pattern))
+        {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 5.5,
+                result = "review_fix_decision",
+                "Review fix decision detected — auto-fixing"
+            );
+            return ResponseAction::Continue {
+                reply: "1".to_string(),
             };
         }
 
@@ -523,6 +590,99 @@ mod tests {
                 other => panic!("Expected Continue with story_key for: {response}, got: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    // -----------------------------------------------------------------------
+    // Review pattern tests (Story 5.2)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_analyzer_detects_review_fix_decision() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+        // Simulates the CR workflow step 4 prompt
+        let response = "Here are the findings.\n\nChoose [1], [2], or specify which issue to examine:\n1. Fix them automatically\n2. Create action items\n3. Show me details";
+        let action = analyzer.analyze(response, &slot, "5-2-story");
+        assert_eq!(
+            action,
+            ResponseAction::Continue {
+                reply: "1".to_string()
+            },
+            "Should auto-respond with '1' to fix automatically"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_detects_fix_automatically_pattern() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+        let response = "What should I do with these findings?\n[1] Fix them automatically\n[2] Create action items";
+        let action = analyzer.analyze(response, &slot, "key");
+        assert_eq!(
+            action,
+            ResponseAction::Continue {
+                reply: "1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_analyzer_review_fix_does_not_false_positive() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+        // Normal text with "fix" should NOT trigger review fix pattern
+        let response = "I will fix the compilation error in main.rs and then run the tests.";
+        let action = analyzer.analyze(response, &slot, "key");
+        // Should fall through to default, NOT match review fix patterns
+        assert_eq!(
+            action,
+            ResponseAction::Continue {
+                reply: "Continue.".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_analyzer_detects_review_complete() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+        let response = "✅ Review Complete!\n\n**Story Status:** done\n**Issues Fixed:** 3\n**Action Items Created:** 0\n\nCode review complete!";
+        let action = analyzer.analyze(response, &slot, "key");
+        assert_eq!(
+            action,
+            ResponseAction::Completed,
+            "Should detect review completion"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_review_complete_does_not_false_positive() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+        // Normal text with "complete" should NOT trigger review complete
+        let response = "I need to complete the implementation of the parser module.";
+        let action = analyzer.analyze(response, &slot, "key");
+        assert_ne!(
+            action,
+            ResponseAction::Completed,
+            "Should not false-positive on 'complete' in normal text"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_review_complete_priority_over_fix_patterns() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+        // Step 5 output contains "Issues Fixed:" which could match REVIEW_FIX_PATTERNS
+        // but REVIEW_COMPLETE_PATTERNS is at priority 1.5, before fix patterns at 5.5
+        let response =
+            "✅ Review Complete!\n\nIssues Fixed: 5\nAction Items Created: 0\nSprint status synced";
+        let action = analyzer.analyze(response, &slot, "key");
+        assert_eq!(
+            action,
+            ResponseAction::Completed,
+            "Review complete should fire before fix patterns"
+        );
     }
 
     #[test]

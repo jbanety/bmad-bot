@@ -98,6 +98,17 @@ pub struct BotConfig {
     /// Default: `"bmad-bot.log"`
     #[serde(default = "default_log_file")]
     pub log_file: String,
+
+    /// Whether to run automated code review after dev sessions.
+    /// When enabled, a separate LLM runs the BMAD CR workflow before PR creation.
+    /// Default: `true`.
+    #[serde(default = "default_code_review_enabled")]
+    pub code_review_enabled: bool,
+}
+
+/// Default code review enabled — true (review runs by default).
+fn default_code_review_enabled() -> bool {
+    true
 }
 
 /// Default polling interval — 5 minutes.
@@ -320,6 +331,7 @@ impl BotConfig {
     pub fn _test_minimal(log_format: &str, log_level: &str) -> Self {
         Self {
             polling_interval_secs: 300,
+            code_review_enabled: true,
             git_provider: GitProviderConfig {
                 provider: "github".to_string(),
                 repo_owner: "test".to_string(),
@@ -1024,6 +1036,26 @@ bmad_paths:
         let yaml = VALID_YAML.replace("provider: openai", "provider: github-models");
         let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_code_review_enabled_defaults_to_true() {
+        // VALID_YAML does not contain code_review_enabled — should default to true
+        let config: BotConfig = serde_yml::from_str(VALID_YAML).unwrap();
+        assert!(
+            config.code_review_enabled,
+            "code_review_enabled should default to true"
+        );
+    }
+
+    #[test]
+    fn test_config_code_review_disabled_parses() {
+        let yaml = format!("{VALID_YAML}code_review_enabled: false\n");
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        assert!(
+            !config.code_review_enabled,
+            "code_review_enabled should be false when explicitly set"
+        );
     }
 
     #[test]

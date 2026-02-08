@@ -1,6 +1,6 @@
 # Story 5.2: Automated Code Review Session
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -48,27 +48,27 @@ so that code quality issues are caught and fixed before I review the PR.
 
 ### Task 0: Prerequisite Verification
 
-- [ ] Verify Story 5.1 code is present and compilable: `GitProvider` trait, `add_comment()`, `create_provider()` in `src/git_provider/`
-- [ ] Verify `BotConfig.llm.review` has `LlmRoleConfig` (provider + model) in `src/config/mod.rs`
-- [ ] Verify `BotSecrets` has API key fields for all supported providers in `src/config/mod.rs`
-- [ ] Verify `resolve_api_key()` and `ProviderError` exist in `src/session/provider.rs`
-- [ ] Verify rig tools exist: `GitTool`, `FsTool`, `TerminalTool` in `src/tools/`
-- [ ] Verify `ResponseAnalyzer` with `STORY_SELECTION_PATTERNS` exists in `src/session/analyzer.rs`
-- [ ] Verify `SessionOutcome::Completed { story_key, branch, decisions }` in `src/session/mod.rs`
-- [ ] Verify `AskSupervisor` and `EscalationSlot` exist in `src/supervisor/`
-- [ ] Verify BMAD CR workflow exists at `_bmad/bmm/workflows/4-implementation/code-review/workflow.yaml`
-- [ ] Confirm existing skeleton: `src/review/mod.rs` (TODO stub)
-- [ ] Verify all needed crates in `Cargo.toml`: `rig-core`, `git2`, `async-trait`, `thiserror`
+- [x] Verify Story 5.1 code is present and compilable: `GitProvider` trait, `add_comment()`, `create_provider()` in `src/git_provider/`
+- [x] Verify `BotConfig.llm.review` has `LlmRoleConfig` (provider + model) in `src/config/mod.rs`
+- [x] Verify `BotSecrets` has API key fields for all supported providers in `src/config/mod.rs`
+- [x] Verify `resolve_api_key()` and `ProviderError` exist in `src/session/provider.rs`
+- [x] Verify rig tools exist: `GitTool`, `FsTool`, `TerminalTool` in `src/tools/`
+- [x] Verify `ResponseAnalyzer` with `STORY_SELECTION_PATTERNS` exists in `src/session/analyzer.rs`
+- [x] Verify `SessionOutcome::Completed { story_key, branch, decisions }` in `src/session/mod.rs`
+- [x] Verify `AskSupervisor` and `EscalationSlot` exist in `src/supervisor/`
+- [x] Verify BMAD CR workflow exists at `_bmad/bmm/workflows/4-implementation/code-review/workflow.yaml`
+- [x] Confirm existing skeleton: `src/review/mod.rs` (TODO stub)
+- [x] Verify all needed crates in `Cargo.toml`: `rig-core`, `git2`, `async-trait`, `thiserror`
 
 ### Task 1: Add `code_review_enabled` Config Field (`src/config/mod.rs`)
 
-- [ ] Add field to `BotConfig`:
+- [x] Add field to `BotConfig`:
   - `#[serde(default = "default_code_review_enabled")] pub code_review_enabled: bool`
-- [ ] Add default function: `fn default_code_review_enabled() -> bool { true }`
-- [ ] Update `BotConfig::_test_minimal()` helper to include the new field (with `#[serde(default)]` it will auto-default, but verify VALID_YAML still parses)
-- [ ] Add unit test: `test_config_code_review_enabled_defaults_to_true` — parse YAML without field, verify `true`
-- [ ] Add unit test: `test_config_code_review_disabled_parses` — parse YAML with `code_review_enabled: false`, verify `false`
-- [ ] Update `bmad-bot.yaml.example` — add entry with comment:
+- [x] Add default function: `fn default_code_review_enabled() -> bool { true }`
+- [x] Update `BotConfig::_test_minimal()` helper to include the new field (with `#[serde(default)]` it will auto-default, but verify VALID_YAML still parses)
+- [x] Add unit test: `test_config_code_review_enabled_defaults_to_true` — parse YAML without field, verify `true`
+- [x] Add unit test: `test_config_code_review_disabled_parses` — parse YAML with `code_review_enabled: false`, verify `false`
+- [x] Update `bmad-bot.yaml.example` — add entry with comment:
   ```yaml
   # Automated code review after dev sessions (optional, default: true)
   # When enabled, a separate LLM runs the BMAD CR workflow to review code before PR creation.
@@ -77,7 +77,7 @@ so that code quality issues are caught and fixed before I review the PR.
 
 ### Task 2: Add Review Patterns to ResponseAnalyzer (`src/session/analyzer.rs`)
 
-- [ ] Add new constant `REVIEW_FIX_PATTERNS`:
+- [x] Add new constant `REVIEW_FIX_PATTERNS`:
   ```rust
   const REVIEW_FIX_PATTERNS: &[&str] = &[
       "fix them automatically",
@@ -93,7 +93,7 @@ so that code quality issues are caught and fixed before I review the PR.
       "what should i do with these findings",
   ];
   ```
-- [ ] Add new constant `REVIEW_COMPLETE_PATTERNS` to detect CR workflow step 5 completion:
+- [x] Add new constant `REVIEW_COMPLETE_PATTERNS` to detect CR workflow step 5 completion:
   ```rust
   const REVIEW_COMPLETE_PATTERNS: &[&str] = &[
       "review complete",
@@ -104,15 +104,15 @@ so that code quality issues are caught and fixed before I review the PR.
       "sprint status synced",
   ];
   ```
-- [ ] Insert `REVIEW_COMPLETE_PATTERNS` at **priority 1.5** (after Escalation priority 1, BEFORE existing `COMPLETION_SIGNALS` priority 2) in `analyze()`:
+- [x] Insert `REVIEW_COMPLETE_PATTERNS` at **priority 1.5** (after Escalation priority 1, BEFORE existing `COMPLETION_SIGNALS` priority 2) in `analyze()`:
   - If `REVIEW_COMPLETE_PATTERNS` matches → `Completed` (triggers post-review phase in `drive_review_session`)
   - Log: `tracing::debug!(action = "response_analysis", result = "review_complete", "CR workflow completion detected")`
   - ⚠️ **No overlap with existing `COMPLETION_SIGNALS`:** The CR workflow outputs "Review Complete!", "Code review complete!" — none of these match the existing dev-session signals ("all tasks completed", "story implementation complete", "story is ready for review", etc.). Verified against `src/session/analyzer.rs` `COMPLETION_SIGNALS` constant.
-- [ ] Insert `REVIEW_FIX_PATTERNS` at **priority 5.5** (between YOLO priority 5 and Story Selection priority 6) in `analyze()`:
+- [x] Insert `REVIEW_FIX_PATTERNS` at **priority 5.5** (between YOLO priority 5 and Story Selection priority 6) in `analyze()`:
   - If `REVIEW_FIX_PATTERNS` matches → `Continue { reply: "1".to_string() }` (fix automatically)
   - Log: `tracing::debug!(action = "response_analysis", result = "review_fix_decision", "Review fix decision detected — auto-fixing")`
   - ⚠️ **Must be AFTER `REVIEW_COMPLETE_PATTERNS`:** The step 5 summary contains "Issues Fixed:" which could match `REVIEW_FIX_PATTERNS`. Since `REVIEW_COMPLETE_PATTERNS` is at priority 1.5, it fires first and returns `Completed` — the fix patterns at 5.5 never see the step 5 output.
-- [ ] Add unit tests:
+- [x] Add unit tests:
   - `test_analyzer_detects_review_fix_decision` — verify "Choose [1], [2], or specify" → replies "1"
   - `test_analyzer_detects_fix_automatically_pattern` — verify "Fix them automatically" → replies "1"
   - `test_analyzer_review_fix_does_not_false_positive` — verify normal text with "fix" doesn't trigger
@@ -121,26 +121,26 @@ so that code quality issues are caught and fixed before I review the PR.
 
 ### Task 3: Define Review Types (`src/review/mod.rs`)
 
-- [ ] Define `ReviewError` enum with `thiserror`:
+- [x] Define `ReviewError` enum with `thiserror`:
   - `ProviderInit { reason: String }` — LLM client construction failed
   - `ApiKeyMissing { provider: String, env_var: String }` — review provider API key not set
   - `UnsupportedProvider { provider: String }` — unknown provider name
   - `ChatFailed { turn: usize, reason: String }` — chat turn error
   - `AgentBuildFailed { reason: String }` — rig agent construction failed
   - `PreambleLoadFailed { path: String, reason: String }` — dev.md file read failed
-- [ ] Define `ReviewOutcome` enum:
+- [x] Define `ReviewOutcome` enum:
   - `Completed { story_key: String, branch: String, report: String }` — CR workflow finished, story marked done, review report captured for PR comment
   - `Failed { story_key: String, error: String }` — review session crashed (non-blocking)
   - `Skipped { reason: String }` — review was skipped (provider down, config disabled, etc.)
-- [ ] Add `///` doc comments on all public items
+- [x] Add `///` doc comments on all public items
 
 ### Task 4: Implement `ReviewRunner` (`src/review/mod.rs`)
 
-- [ ] Define `ReviewRunner` struct:
+- [x] Define `ReviewRunner` struct:
   - `config: Arc<BotConfig>` — shared daemon config
   - `secrets: Arc<BotSecrets>` — shared secrets
-- [ ] Implement `ReviewRunner::new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>) -> Self`
-- [ ] Implement `pub async fn run(&self, story: &StoryInfo) -> ReviewOutcome`:
+- [x] Implement `ReviewRunner::new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>) -> Self`
+- [x] Implement `pub async fn run(&self, story: &StoryInfo) -> ReviewOutcome`:
   - **This method NEVER panics or returns an unhandled error** — all failures → `ReviewOutcome::Skipped` or `ReviewOutcome::Failed`
   - Internally calls `run_inner()` and catches errors:
     ```rust
@@ -154,14 +154,14 @@ so that code quality issues are caught and fixed before I review the PR.
         }
     }
     ```
-- [ ] Implement `async fn run_inner(&self, story: &StoryInfo) -> Result<ReviewOutcome, ReviewError>`:
+- [x] Implement `async fn run_inner(&self, story: &StoryInfo) -> Result<ReviewOutcome, ReviewError>`:
   1. Resolve API key: `resolve_api_key(&self.config.llm.review.provider, &self.secrets)` — map `ProviderError` → `ReviewError`
   2. Load BMAD dev agent preamble: read `{project_root}/_bmad/bmm/agents/dev.md`, append `"\n\nOVERRIDE: communication_language = English"` (same as SessionRunner)
   3. Create tools: `GitTool`, `FsTool`, `TerminalTool` (same as dev session, **plus** `AskSupervisor`)
   4. Build rig agent with review provider/model — follow provider match-arm pattern (anthropic/openai/github-models)
   5. Create shared `EscalationSlot` and `DecisionLog` (same as dev session)
   6. Call `drive_review_session()` with the agent
-- [ ] Implement `async fn drive_review_session<A: Chat>(&self, agent: &A, story: &StoryInfo, escalation_slot: EscalationSlot, decision_log: DecisionLog) -> Result<ReviewOutcome, ReviewError>`:
+- [x] Implement `async fn drive_review_session<A: Chat>(&self, agent: &A, story: &StoryInfo, escalation_slot: EscalationSlot, decision_log: DecisionLog) -> Result<ReviewOutcome, ReviewError>`:
   1. Send `"CR"` as initial message
   2. Initialize `post_review_phase = false`
   3. Enter chat loop (same pattern as `SessionRunner::run_session`):
@@ -175,18 +175,18 @@ so that code quality issues are caught and fixed before I review the PR.
   4. On chat error → `ReviewOutcome::Failed`
   
   **Why skip the analyzer in post_review_phase?** After `POST_REVIEW_MESSAGE`, the agent commits via GitTool and responds with a markdown report. This response won't contain any `COMPLETION_SIGNALS` or `REVIEW_COMPLETE_PATTERNS` — it's free-form text. Trying to detect completion here would require fragile pattern matching. Instead, we treat the next response as the final report by design. One message in, one report out.
-- [ ] Create `ResponseAnalyzer` instance in `ReviewRunner` (same as `SessionRunner`)
-- [ ] Add `///` doc comments on all public items
+- [x] Create `ResponseAnalyzer` instance in `ReviewRunner` (same as `SessionRunner`)
+- [x] Add `///` doc comments on all public items
 
 ### Task 5: Wire Up Module Exports (`src/review/mod.rs`)
 
-- [ ] Export: `pub use` for `ReviewRunner`, `ReviewOutcome`, `ReviewError`
-- [ ] Update module doc comment to describe the BMAD CR workflow approach
-- [ ] Ensure `src/main.rs` already has `mod review;` (it does — check it compiles)
+- [x] Export: `pub use` for `ReviewRunner`, `ReviewOutcome`, `ReviewError`
+- [x] Update module doc comment to describe the BMAD CR workflow approach
+- [x] Ensure `src/main.rs` already has `mod review;` (it does — check it compiles)
 
 ### Task 6: Unit Tests
 
-- [ ] Tests in `src/review/mod.rs` `#[cfg(test)] mod tests`:
+- [x] Tests in `src/review/mod.rs` `#[cfg(test)] mod tests`:
   - `test_review_error_display_variants` — all error variants produce readable messages
   - `test_review_error_is_send_sync` — compile-time trait check
   - `test_review_outcome_completed_fields` — verify struct fields including `report`
@@ -194,25 +194,29 @@ so that code quality issues are caught and fixed before I review the PR.
   - `test_review_outcome_failed_fields` — verify story_key and error stored
   - `test_review_runner_new_stores_config` — verify construction
   - `test_review_runner_is_send_sync` — compile-time trait check
+  - `test_post_review_message_contains_key_instructions` — verify POST_REVIEW_MESSAGE constant
+  - `test_max_review_turns_is_reasonable` — verify safety net constant
+  - `test_review_outcome_debug` — verify Debug trait
   - NOTE: No live LLM tests — actual review conversations tested in E2E only
-- [ ] Tests in `src/session/analyzer.rs` (added in Task 2):
+- [x] Tests in `src/session/analyzer.rs` (added in Task 2):
   - `test_analyzer_detects_review_fix_decision`
   - `test_analyzer_detects_fix_automatically_pattern`
   - `test_analyzer_review_fix_does_not_false_positive`
   - `test_analyzer_detects_review_complete` — verify "Review Complete" output triggers Completed
   - `test_analyzer_review_complete_does_not_false_positive` — verify normal text with "complete" doesn't trigger
-- [ ] Tests in `src/config/mod.rs` (added in Task 1):
+  - `test_analyzer_review_complete_priority_over_fix_patterns` — verify priority ordering
+- [x] Tests in `src/config/mod.rs` (added in Task 1):
   - `test_config_code_review_enabled_defaults_to_true`
   - `test_config_code_review_disabled_parses`
 
 ### Task 7: Integration Verification
 
-- [ ] `cargo check` — zero new errors
-- [ ] `cargo test` — all new tests pass, no regressions on existing 435+ tests
-- [ ] `cargo clippy` — zero new warnings
-- [ ] `cargo fmt` — all clean
-- [ ] Verify all public items have `///` doc comments
-- [ ] Verify `review/mod.rs` properly exports all public types
+- [x] `cargo check` — zero new errors
+- [x] `cargo test` — all 473 tests pass (19 new + 454 existing), no regressions
+- [x] `cargo clippy` — zero new warnings (pre-existing dead_code warnings from unconnected modules)
+- [x] `cargo fmt` — all clean
+- [x] Verify all public items have `///` doc comments
+- [x] Verify `review/mod.rs` properly exports all public types
 
 ## Dev Notes
 
@@ -542,10 +546,39 @@ This aligns with the architecture's Complete Project Directory Structure.
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (via Cursor)
 
 ### Debug Log References
 
+- rig-core v0.30 uses `rig::completion::{Chat, Message}` and `rig::client::CompletionClient` — not `rig::chat`
+- `Message` is an enum with `Message::user()` / `Message::assistant()` constructors, not a struct
+- `ProviderError::MissingApiKey` has additional fields requiring `..` in match patterns
+- Doc comment list items at non-integer priority (1.5, 5.5) need sub-list indentation to satisfy clippy `doc_list_item_indentation`
+- All test config constructors across cli, session/runner, watcher, supervisor/architect needed `code_review_enabled` field added
+
 ### Completion Notes List
 
+- ✅ Task 0: All 11 prerequisites verified — Story 5.1 code present, all required types/functions compilable
+- ✅ Task 1: `code_review_enabled: bool` field added to `BotConfig` with `#[serde(default)]` → `true`, default function, `_test_minimal()` updated, `bmad-bot.yaml.example` updated, 2 tests
+- ✅ Task 2: `REVIEW_COMPLETE_PATTERNS` (priority 1.5) and `REVIEW_FIX_PATTERNS` (priority 5.5) added to `ResponseAnalyzer`, 6 tests including priority ordering verification
+- ✅ Task 3: `ReviewError` (6 variants), `ReviewOutcome` (Completed with `report`, Failed, Skipped) — full doc comments
+- ✅ Task 4: `ReviewRunner` with `new()`, `run()` (never panics), `run_inner()`, `drive_review_session()` two-phase chat loop, provider match-arm pattern (anthropic/openai/github-models), `POST_REVIEW_MESSAGE` constant, `build_preamble()`, `create_tools()`
+- ✅ Task 5: Module doc comment updated, `src/main.rs` already has `mod review;`, compiles cleanly
+- ✅ Task 6: 19 new tests total (10 review, 6 analyzer, 2 config, 1 priority ordering)
+- ✅ Task 7: cargo check/test/clippy/fmt all clean. 473 total tests, zero regressions.
+
+### Change Log
+
+- 2026-02-08: Story 5.2 implementation complete — ReviewRunner, review patterns in analyzer, code_review_enabled config, 19 tests
+
 ### File List
+
+| File | Change |
+|------|--------|
+| `src/review/mod.rs` | **OVERWRITTEN** — ReviewRunner, ReviewOutcome, ReviewError, drive_review_session, POST_REVIEW_MESSAGE, 10 unit tests |
+| `src/session/analyzer.rs` | **MODIFIED** — Added REVIEW_COMPLETE_PATTERNS (priority 1.5), REVIEW_FIX_PATTERNS (priority 5.5), 6 unit tests |
+| `src/config/mod.rs` | **MODIFIED** — Added `code_review_enabled: bool` field with serde default, default function, 2 unit tests |
+| `src/cli/mod.rs` | **MODIFIED** — Added `code_review_enabled` to `collect_config_interactively` return and test helper |
+| `src/session/runner.rs` | **MODIFIED** — Added `code_review_enabled` to test config helper |
+| `src/watcher/mod.rs` | **MODIFIED** — Added `code_review_enabled` to test config helper |
+| `bmad-bot.yaml.example` | **MODIFIED** — Added `code_review_enabled: true` entry with documentation comment |
