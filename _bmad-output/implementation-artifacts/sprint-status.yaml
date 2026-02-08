@@ -71,8 +71,8 @@ development_status:
 
   epic-4: in-progress
   4-1-rig-tools-implementation-git-filesystem-terminal: ready-for-dev
-  4-2-agent-session-setup-chat-loop: backlog
-  4-3-pre-development-preparation-branch-management: backlog
+  4-2-agent-session-setup-chat-loop: ready-for-dev # depends-on: 4-1
+  4-3-pre-development-preparation-branch-management: backlog # depends-on: 4-2
   epic-4-retrospective: optional
 
   epic-5: backlog
