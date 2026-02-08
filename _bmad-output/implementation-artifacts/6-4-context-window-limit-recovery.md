@@ -16,7 +16,7 @@ So that long or complex stories can still be completed autonomously.
 
 2. **Given** a context limit error has been detected **When** the recovery process starts **Then** the full chat_history is read from the in-memory `SessionState` (which mirrors the WAL, already persisted after each turn) **And** the last N exchanges are extracted verbatim as immediate context **And** a separate, fresh LLM call is made (new context, not the exhausted one) to summarize the full chat_history into a compact session summary
 
-3. **Given** the summary has been generated **When** the new session is bootstrapped **Then** a fresh agent is constructed with the same provider/model config and the same persona + tools **And** the new session preamble includes: agent persona + tool registrations, project context (project-context.md), the generated session summary, the last N verbatim exchanges, and the current story file reference **And** the session enters direct chat mode (not re-entering the full dev-story workflow pipeline, since checkboxes and Dev Agent Record are already up to date on disk)
+3. **Given** the summary has been generated **When** the new session is bootstrapped **Then** a fresh agent is constructed with the same provider/model config and the standard dev preamble + tools **And** the daemon drives the BMAD activation flow as a simulated human: sends "CH" to enter chat mode, then sends "Load the project context" so the agent loads what it needs via its tools (same pattern as Story 3.2 Architect session) **And** the daemon then sends a recovery message containing the session summary, last N verbatim exchanges, and instruction to continue on the current story **And** the session enters direct chat mode (not re-entering the full dev-story workflow pipeline, since checkboxes and Dev Agent Record are already up to date on disk)
 
 4. **Given** the new session is bootstrapped **When** the chat loop resumes **Then** the agent picks up the current task with full awareness of prior work **And** the recovery event is logged via `tracing::info!()` with `action = "context_limit_recovery"`, original history length, and summary length **And** the WAL file is updated with the new (compressed) session state
 
@@ -120,7 +120,9 @@ So that long or complex stories can still be completed autonomously.
 
 ### Task 3: Implement `context_limit_recovery()` Method (`src/session/runner.rs`)
 
-This is the unified recovery method. It summarizes history, builds a fresh agent with an enhanced preamble, then delegates to `run_session(Some(compressed_state))` for the inner chat loop. It returns `SessionOutcome` directly — the caller treats recovery as a terminal action.
+This is the unified recovery method. It summarizes history, builds a fresh agent with the **standard** dev preamble, drives the BMAD activation flow (CH → Load project context) as a simulated human (same pattern as Story 3.2 Architect session), then sends a recovery message and delegates to `run_session(Some(compressed_state))` for the inner chat loop. It returns `SessionOutcome` directly — the caller treats recovery as a terminal action.
+
+**Key design principle (from Story 3.2):** "Treat it like a human" — the agent knows WHAT project files to load and HOW to interpret them. The daemon does NOT inject project context into the preamble. Instead, the daemon drives the standard BMAD activation flow, and the agent loads its own context via its tools.
 
 - [ ] Add constants:
   ```rust
@@ -131,16 +133,19 @@ This is the unified recovery method. It summarizes history, builds a fresh agent
 - [ ] Add method signature to `SessionRunner`:
   ```rust
   /// Recover from a context window limit error by summarizing history and
-  /// bootstrapping a fresh session via `run_session(Some(compressed_state))`.
+  /// bootstrapping a fresh session following the BMAD activation pattern.
   ///
   /// Architecture Decision 3, Recovery Case B. The method:
   /// 1. Extracts last N exchanges from in-memory state as immediate context
   /// 2. Makes a fresh LLM call to summarize the full history
-  /// 3. Builds an enhanced preamble with summary + last N exchanges + project context
-  /// 4. Builds a fresh agent (provider-matched) with enhanced preamble + all tools
-  /// 5. Calls `run_session()` with `Some(compressed_state)` — reuses the existing
+  /// 3. Builds a fresh agent with the STANDARD dev preamble + all tools
+  /// 4. Drives BMAD activation: "CH" → "Load the project context" (agent
+  ///    loads what it needs via its tools — same pattern as Story 3.2)
+  /// 5. Sends recovery message (summary + last N exchanges + continue instruction)
+  /// 6. Builds compressed SessionState with activation turns + recovery message
+  /// 7. Calls `run_session()` with `Some(compressed_state)` — reuses the existing
   ///    chat loop instead of duplicating it
-  /// 6. Returns the `SessionOutcome` from the inner loop directly
+  /// 8. Returns the `SessionOutcome` from the inner loop directly
   ///
   /// If `recovery_depth >= MAX_RECOVERY_DEPTH`, returns `SessionOutcome::Failed`
   /// to prevent infinite recursion.
@@ -174,25 +179,49 @@ This is the unified recovery method. It summarizes history, builds a fresh agent
 
 - [ ] **Step 1 — Extract last N exchanges:**
   - [ ] Call `extract_last_exchanges(&state.chat_history, RECOVERY_KEEP_LAST_EXCHANGES)` (see Task 4 helpers)
-  - [ ] Call `format_exchanges_for_preamble(&last_exchanges)` for preamble injection
+  - [ ] Call `format_exchanges_for_message(&last_exchanges)` to format for the recovery message
 
 - [ ] **Step 2 — Summarize full history via fresh LLM call:**
   - [ ] Call `self.summarize_history(state, story, provider, model).await`
   - [ ] If summarization fails → return `SessionOutcome::Failed` with error detail
   - [ ] Log: `tracing::info!(action = "context_limit_summary_generated", original_len = %state.chat_history.len(), summary_len = %summary.len())`
 
-- [ ] **Step 3 — Build enhanced preamble:**
-  - [ ] Call `self.build_recovery_preamble(story, &summary, &formatted_exchanges)`
-  - [ ] If preamble build fails → return `SessionOutcome::Failed`
-  - [ ] Enhanced preamble format:
+- [ ] **Step 3 — Build fresh agent with STANDARD preamble + tools:**
+  - [ ] Use `self.build_preamble(story)` — the standard dev agent preamble, NOT an enhanced one
+  - [ ] Resolve API key via `resolve_api_key(provider, &self.secrets)`
+  - [ ] Match on provider string (same pattern as `run()` and `resume_session()`):
+    - [ ] `"anthropic"` → build Anthropic client, create agent with **standard preamble** + all 4 tools
+    - [ ] `"openai"` → build OpenAI client, same pattern
+    - [ ] `"github-models"` → build OpenAI client with base URL override, same pattern
+  - [ ] The `Chat` trait is NOT object-safe — `agent` must be built and used within the same match arm. All subsequent steps (4, 5, 6) happen **inside** the match arm.
+
+- [ ] **Step 4 — Drive BMAD activation flow (inside provider match arm):**
+  This follows the exact same pattern as Story 3.2 (Architect session). The daemon acts as a simulated human driving the agent through its activation steps.
+  - [ ] Initialize `activation_history: Vec<Message>` as empty
+  - [ ] **Turn 1 — Enter chat mode:**
+    ```rust
+    let response = agent.chat("CH", activation_history.clone()).await
+        .map_err(|e| format!("Recovery activation CH failed: {e}"))?;
+    activation_history.push(Message::user("CH"));
+    activation_history.push(Message::assistant(&response));
+    // Response is the agent greeting — discard content, keep in history for context
     ```
-    {original_preamble}
+  - [ ] **Turn 2 — Load project context:**
+    ```rust
+    let response = agent.chat("Load the project context", activation_history.clone()).await
+        .map_err(|e| format!("Recovery activation load context failed: {e}"))?;
+    activation_history.push(Message::user("Load the project context"));
+    activation_history.push(Message::assistant(&response));
+    // Agent uses ReadFile/tools to load config, architecture, PRD, etc. — discard response content
+    ```
+  - [ ] If either activation turn fails → return `SessionOutcome::Failed` with error detail
+  - [ ] Log: `tracing::info!(action = "context_limit_activation_complete", "BMAD activation flow completed for recovery agent")`
 
+- [ ] **Step 5 — Build recovery message and compressed SessionState:**
+  - [ ] Build the recovery message (sent as the last user message in the compressed state):
+    ```
     === SESSION RECOVERY — Context Window Limit Reached ===
-    Your previous session hit the context window limit. Below is your session context:
-
-    === Project Context ===
-    {project_context}
+    Your previous session hit the context window limit. Below is your recovery context:
 
     === Session Summary ===
     {summary}
@@ -204,39 +233,33 @@ This is the unified recovery method. It summarizes history, builds a fresh agent
     Read this file to see current task checkboxes and progress.
     Continue working directly on the current task. Do NOT restart the workflow from the beginning.
     ```
+  - [ ] Build compressed `SessionState` (see Task 5 for details):
+    - [ ] `chat_history` = activation turns (CH + response, Load context + response) + recovery_message as final user message
+    - [ ] The recovery message is the LAST message (role = user) — `run_session(Some(state))` will detect this and re-send it to the agent (Story 6.3 recovery path: "last msg = user → re-send last user message")
+  - [ ] Metadata (story_id, branch, provider, model, etc.) preserved from original state
 
-- [ ] **Step 4 — Build compressed `SessionState` and fresh agent, then delegate to `run_session()`:**
-  - [ ] Build compressed state (see Task 5 for details)
-  - [ ] Resolve API key via `resolve_api_key(provider, &self.secrets)`
-  - [ ] Match on provider string (same pattern as `run()` and `resume_session()`):
-    - [ ] `"anthropic"` → build Anthropic client, create agent with **enhanced preamble** + all 4 tools
-    - [ ] `"openai"` → build OpenAI client, same pattern
-    - [ ] `"github-models"` → build OpenAI client with base URL override, same pattern
-  - [ ] **Within each match arm**, call `run_session()` with `recovered_state: Some(compressed_state)`:
-    ```rust
-    // Inside the "anthropic" match arm (openai/github-models are identical pattern):
-    let agent = client.agent(model)
-        .preamble(&enhanced_preamble)
-        .tool(git).tool(fs).tool(terminal).tool(supervisor)
-        .build();
+- [ ] **Step 6 — Delegate to `run_session()` with compressed state (still inside match arm):**
+  ```rust
+  // Inside the "anthropic" match arm (openai/github-models are identical pattern):
+  // Agent already built in Step 3 with standard preamble + tools
+  // Activation turns already completed in Step 4
 
-    // Delegate to run_session() — reuses the existing chat loop
-    // The inner loop handles completion/escalation/failure normally
-    let outcome = self.run_session(
-        &agent, story, provider, model, base_branch,
-        escalation_slot.clone(), decision_log.clone(),
-        Some(compressed_state), // ← This is the key: recovery state passed in
-    ).await;
-    ```
-  - [ ] The `Chat` trait is NOT object-safe — `agent` must be built and used within the same match arm. `run_session()` is generic over `<A: Chat>`, so each concrete agent type works.
+  // Delegate to run_session() — reuses the existing chat loop
+  // run_session sees last msg = user (recovery message) → re-sends it → agent responds → loop continues
+  let outcome = self.run_session(
+      &agent, story, provider, model, base_branch,
+      escalation_slot.clone(), decision_log.clone(),
+      Some(compressed_state), // ← recovery state with activation turns + recovery message
+  ).await;
+  ```
   - [ ] IMPORTANT: `EscalationSlot` and `DecisionLog` are the SAME instances from the parent call — decision continuity is preserved across recovery boundary
 
-- [ ] **Step 5 — Log and return:**
+- [ ] **Step 7 — Log and return:**
   - [ ] `tracing::info!(action = "context_limit_recovery", depth = %recovery_depth, original_history_len = %state.chat_history.len(), "Context limit recovery delegated to inner run_session()")`
   - [ ] Return the `SessionOutcome` from the inner `run_session()` call directly
   - [ ] If another context limit is hit inside the inner loop, `run_session()` will call `context_limit_recovery()` again with `recovery_depth + 1` — the depth check in Step 0 prevents infinite recursion
 
-**Design rationale:** By delegating to `run_session(Some(compressed_state))`, we reuse ALL existing chat loop logic (completion detection, escalation handling, failure handling, WAL management, turn counting). No code duplication. The fresh agent has a clean context (enhanced preamble only), and the compressed state's `chat_history` contains only the last N exchanges.
+**Design rationale:** By following the BMAD activation pattern (Story 3.2), the agent loads its own project context via its tools — it knows WHAT to load and HOW to interpret it. The daemon does not need to decide which docs are relevant or inject them into the preamble. By delegating to `run_session(Some(compressed_state))`, we reuse ALL existing chat loop logic (completion detection, escalation handling, failure handling, WAL management, turn counting). No code duplication. The fresh agent has a clean context with proper BMAD activation, and the compressed state's `chat_history` contains the activation turns plus the recovery message.
 
 ### Task 4: Implement Helper Functions (`src/session/runner.rs`)
 
@@ -246,15 +269,15 @@ This is the unified recovery method. It summarizes history, builds a fresh agent
   - [ ] **Odd message count handling:** If history length is odd (e.g., 21 messages — unpaired trailing user message), round DOWN to the nearest even number before slicing. The orphan message is excluded to keep clean user/assistant pairs. Example: history of 21, N=10 → take last 20 messages (10 pairs), the orphan 1st message is dropped.
   - [ ] Return cloned messages (`ChatMessage` derives `Clone`)
 
-- [ ] `fn format_exchanges_for_preamble(exchanges: &[ChatMessage]) -> String`:
-  - [ ] Format as readable text:
+- [ ] `fn format_exchanges_for_message(exchanges: &[ChatMessage]) -> String`:
+  - [ ] Format as readable text for inclusion in the recovery message:
     ```
     === Recent Conversation (last N exchanges) ===
     User: {content}
     Assistant: {content}
     ...
     ```
-  - [ ] Truncate individual messages if extremely long (> 2000 chars) with `"... [truncated]"` to keep preamble within reasonable bounds
+  - [ ] Truncate individual messages if extremely long (> 2000 chars) with `"... [truncated]"` to keep the recovery message within reasonable bounds
 
 - [ ] `async fn summarize_history(&self, state: &SessionState, story: &StoryInfo, provider: &str, model: &str) -> Result<String, String>`:
   - [ ] Format the full `state.chat_history` as text (`"User: {content}\nAssistant: {content}\n..."`)
@@ -286,24 +309,46 @@ This is the unified recovery method. It summarizes history, builds a fresh agent
   - [ ] **Fallback on failure:** If the summarization call fails with a context limit error (the history itself is too large for a fresh context), retry with truncated history (last 50% of messages). If that also fails → return `Err("Summarization failed even with truncated history: {e}")`
   - [ ] Return the summary string
 
-- [ ] `fn build_recovery_preamble(&self, story: &StoryInfo, summary: &str, formatted_exchanges: &str) -> Result<String, String>`:
-  - [ ] Load original preamble via `self.build_preamble(story)`
-  - [ ] Load project-context.md from `config.bmad_paths.output_folder + "/project-context.md"`
-  - [ ] Assemble the enhanced preamble (see format in Task 3, Step 3)
-  - [ ] Include the current task name in the story reference section for immediate context. Instead of just "Continue working on the current task", identify the last unchecked task from the story file path if possible:
+- [ ] `fn build_recovery_message(&self, story: &StoryInfo, summary: &str, formatted_exchanges: &str) -> String`:
+  - [ ] Assemble the recovery message that will be sent as a user message after BMAD activation:
     ```
+    === SESSION RECOVERY — Context Window Limit Reached ===
+    Your previous session hit the context window limit. Below is your recovery context:
+
+    === Session Summary ===
+    {summary}
+
+    {formatted_exchanges}
+
     === Current Story ===
     The story file is at: {specs_path}
     Read this file to see current task checkboxes and progress.
     Continue working directly on the current task. Do NOT restart the workflow from the beginning.
     ```
-  - [ ] Return the full preamble string
+  - [ ] This is a plain user message, NOT a preamble — the agent already has its standard preamble and has already loaded project context via the BMAD activation flow (CH → Load project context)
+  - [ ] Return the message string
 
 ### Task 5: Build New Compressed `SessionState` (`src/session/runner.rs`)
 
-- [ ] When building the new state after recovery:
+- [ ] When building the new state after BMAD activation (Step 4 in Task 3), include the activation turns and recovery message:
   ```rust
-  let mut new_state = SessionState {
+  // activation_history contains: CH/response + "Load the project context"/response (4 messages)
+  // Convert activation_history (Vec<Message>) to Vec<ChatMessage> for SessionState
+  let mut compressed_history: Vec<ChatMessage> = activation_history.iter().map(|msg| {
+      ChatMessage {
+          role: match msg { Message::User(_) => "user", Message::Assistant(_) => "assistant", .. }.to_string(),
+          content: msg.content().to_string(),
+      }
+  }).collect();
+
+  // Add recovery message as the final user message
+  // run_session(Some(state)) will detect last msg = user and re-send it
+  compressed_history.push(ChatMessage {
+      role: "user".to_string(),
+      content: recovery_message.clone(),
+  });
+
+  let new_state = SessionState {
       story_id: state.story_id.clone(),
       story_key: state.story_key.clone(),
       branch: state.branch.clone(),
@@ -313,12 +358,16 @@ This is the unified recovery method. It summarizes history, builds a fresh agent
       model: state.model.clone(),
       branch_name: state.branch_name.clone(),
       base_branch: state.base_branch.clone(),
-      chat_history: last_exchanges.clone(),   // ONLY the last N exchanges, not full history
+      chat_history: compressed_history,       // activation turns + recovery message (user)
   };
   ```
-- [ ] The compressed state's `chat_history` starts with ONLY the last N exchanges
+- [ ] The compressed state's `chat_history` contains:
+  1. Activation turns: "CH" / response / "Load the project context" / response (4 messages)
+  2. Recovery message as the last user message (1 message)
+  3. Total: 5 messages — the recovery message is pending (no assistant response yet)
+- [ ] `run_session(Some(state))` sees the last message is `role = "user"` → pops and re-sends the recovery message → agent responds with its plan to continue → normal chat loop resumes
 - [ ] New messages from the recovered session are appended normally after this
-- [ ] The WAL is overwritten with the compressed state — the full history is gone from disk (the summary captures it in the preamble)
+- [ ] The WAL is overwritten with the compressed state — the full history is gone from disk (the summary is captured in the recovery message, and the agent has loaded project context itself)
 - [ ] This ensures the WAL file stays small even across multiple recovery events
 
 ### Task 6: Unit Tests
@@ -335,13 +384,15 @@ This is the unified recovery method. It summarizes history, builds a fresh agent
 - [ ] `test_extract_last_exchanges_fewer_than_n` — verify 3-exchange history returns all 6 messages when N=10
 - [ ] `test_extract_last_exchanges_empty_history` — verify empty history returns empty vec
 - [ ] `test_extract_last_exchanges_odd_message_count` — verify odd-length history (e.g., 21 messages) rounds DOWN to nearest even count before slicing, dropping the orphan message to keep clean user/assistant pairs
-- [ ] `test_format_exchanges_for_preamble_basic` — verify correct "User: / Assistant:" formatting
-- [ ] `test_format_exchanges_for_preamble_truncates_long_messages` — verify messages > 2000 chars are truncated
-- [ ] `test_format_exchanges_for_preamble_empty` — verify empty exchanges produce reasonable output
-- [ ] `test_build_recovery_preamble_contains_all_sections` — verify output contains "SESSION RECOVERY", "Project Context", "Session Summary", "Recent Conversation", "Current Story"
-- [ ] `test_build_recovery_preamble_includes_story_path` — verify `specs_path` is in the output
+- [ ] `test_format_exchanges_for_message_basic` — verify correct "User: / Assistant:" formatting
+- [ ] `test_format_exchanges_for_message_truncates_long_messages` — verify messages > 2000 chars are truncated
+- [ ] `test_format_exchanges_for_message_empty` — verify empty exchanges produce reasonable output
+- [ ] `test_build_recovery_message_contains_all_sections` — verify output contains "SESSION RECOVERY", "Session Summary", "Recent Conversation", "Current Story"
+- [ ] `test_build_recovery_message_includes_story_path` — verify `specs_path` is in the output
+- [ ] `test_build_recovery_message_does_not_contain_project_context` — verify output does NOT contain "Project Context" section (project context is loaded by the agent via BMAD activation, not injected in the message)
+- [ ] `test_compressed_state_contains_activation_turns` — verify `chat_history` starts with "CH" user message and "Load the project context" user message
+- [ ] `test_compressed_state_last_message_is_recovery` — verify last message in `chat_history` is role "user" containing "SESSION RECOVERY"
 - [ ] `test_compressed_state_preserves_metadata` — verify `story_id`, `story_key`, `branch`, `provider`, `model` are preserved from original state
-- [ ] `test_compressed_state_has_only_last_exchanges` — verify `chat_history` length is `min(N*2, original_len)`
 - [ ] `test_compressed_state_updates_last_activity` — verify `last_activity` is refreshed
 - [ ] All tests use mocked data — NO real LLM calls, NO real file I/O (except tempdir for WAL)
 
@@ -401,7 +452,9 @@ This is the unified recovery method. It summarizes history, builds a fresh agent
 
 ### Core Design — Context Window Limit Recovery Flow
 
-Architecture Decision 3, Recovery Case B. This is a controlled, mid-session recovery — NOT a crash. Recovery is a **terminal action** for the current chat loop — it builds a fresh agent, delegates to a NEW `run_session()` call, and returns the outcome.
+Architecture Decision 3, Recovery Case B. This is a controlled, mid-session recovery — NOT a crash. Recovery is a **terminal action** for the current chat loop — it builds a fresh agent, drives the BMAD activation flow, then delegates to a NEW `run_session()` call and returns the outcome.
+
+**Key principle (from Story 3.2):** "Treat it like a human" — the daemon drives the agent through its standard activation flow. The agent loads its own project context via its tools. The daemon does NOT inject project files into the preamble.
 
 ```
 chat loop running
@@ -412,25 +465,28 @@ chat loop running
             ├── check recovery_depth < MAX_RECOVERY_DEPTH (3)
             │   └── depth exceeded → return SessionOutcome::Failed
             ├── extract last N exchanges from state.chat_history (clone)
-            ├── format exchanges for preamble injection
+            ├── format exchanges for recovery message
             ├── summarize_history() — fresh LLM call with full history
             │   ├── build minimal agent (no tools, just summarization prompt)
             │   ├── call agent.chat(summarization_prompt, [])
             │   └── return summary string
-            ├── build_recovery_preamble()
-            │   ├── original preamble (build_preamble)
-            │   ├── + project-context.md content
-            │   ├── + session summary
-            │   ├── + last N verbatim exchanges
-            │   └── + story file reference with "continue" instruction
-            ├── build compressed SessionState (last N exchanges only)
-            ├── match on provider → build fresh agent with enhanced preamble + 4 tools
+            ├── build fresh agent with STANDARD preamble (build_preamble) + 4 tools
+            ├── drive BMAD activation flow (same pattern as Story 3.2):
+            │   ├── agent.chat("CH", []) → greeting [discard, keep in history]
+            │   ├── agent.chat("Load the project context", history) →
+            │   │   agent uses tools to load config, architecture, PRD, etc.
+            │   │   [discard response, keep in history]
+            │   └── activation_history now has 4 messages (2 exchanges)
+            ├── build_recovery_message(summary + last N exchanges + continue instruction)
+            ├── build compressed SessionState:
+            │   └── chat_history = activation turns + recovery_message (as last user msg)
             ├── call run_session(&agent, ..., Some(compressed_state))
-            │   └── inner loop runs to completion with fresh context
-            │       ├── if context limit hit again → recursive recovery(depth+1)
-            │       ├── Completed → WAL deleted, return Completed
-            │       ├── Escalated → WAL deleted, return Escalated
-            │       └── Failed → WAL preserved, return Failed
+            │   └── run_session sees last msg = user → re-sends recovery message
+            │       └── inner loop runs to completion with fresh context
+            │           ├── if context limit hit again → recursive recovery(depth+1)
+            │           ├── Completed → WAL deleted, return Completed
+            │           ├── Escalated → WAL deleted, return Escalated
+            │           └── Failed → WAL preserved, return Failed
             └── return SessionOutcome from inner run_session()
                 └── caller does `return outcome` — exits the outer loop
 ```
@@ -441,6 +497,7 @@ chat loop running
 - Crash recovery re-enters `run_session()` — context limit recovery ALSO re-enters `run_session()` but with a fresh agent and compressed state
 - Crash recovery always deletes WAL after — context limit overwrites WAL with compressed state (handled by inner `run_session()`)
 - Context limit recovery has a depth limit (`MAX_RECOVERY_DEPTH = 3`) to prevent infinite recursion
+- Context limit recovery drives the BMAD activation flow (CH → Load project context) before resuming — the agent loads its own context via tools, just like a human would drive it
 
 ### How `agent.chat()` Errors Surface
 
@@ -466,22 +523,22 @@ The summarization call uses a FRESH LLM context (empty history). Key constraints
 3. **Preamble:** Simple instruction: "You are summarizing a development session"
 4. **Input:** The full `chat_history` formatted as text (user/assistant turns)
 5. **Risk:** If the full history is SO large it exceeds context even for summarization → fallback to truncated history (last 50%)
-6. **Output:** A structured summary suitable for injection into a new preamble
+6. **Output:** A structured summary suitable for inclusion in the recovery message
 
-### Enhanced Preamble Size Considerations
+### Token Budget — BMAD Activation + Recovery Message
 
-The enhanced preamble must fit within the context window alongside new conversation. Budget:
+The recovery approach uses the standard preamble (not enhanced) and drives BMAD activation turns. Token budget:
 
 | Component | Estimated tokens |
 |---|---|
-| Original preamble (dev.md + override) | ~2,000-5,000 |
-| Project context (project-context.md) | ~1,000-3,000 |
-| Session summary | ~500-2,000 |
-| Last 10 exchanges (possibly truncated) | ~2,000-10,000 |
-| Story file reference | ~100 |
-| **Total preamble** | **~5,600-20,100** |
+| Standard preamble (dev.md + override) | ~2,000-5,000 |
+| BMAD activation turns (CH + Load context — 4 messages) | ~2,000-8,000 (varies: agent loads files via tools) |
+| Recovery message (summary + last N exchanges + story ref) | ~2,500-12,000 |
+| **Total initial context** | **~6,500-25,000** |
 
-This leaves 180K-195K tokens for new conversation (Anthropic 200K window). OpenAI models with smaller windows may need fewer kept exchanges — but N=10 is a reasonable default for MVP.
+This leaves 175K-193K tokens for new conversation (Anthropic 200K window). The BMAD activation turns are slightly more expensive than injecting project-context.md directly into the preamble, because the agent may load additional files it deems relevant. However, this is the correct trade-off: the agent knows WHAT context it needs and loads it through the standard workflow, producing better results than a daemon-curated preamble.
+
+OpenAI models with smaller windows may need fewer kept exchanges — but N=10 is a reasonable default for MVP.
 
 ### Design Decision: Chat Trait Not Object-Safe — Implications for Recovery
 
@@ -489,7 +546,8 @@ The `Chat` trait in rig 0.30 is NOT object-safe (`fn chat()` returns `impl Futur
 
 - Cannot use `Box<dyn Chat>` — must match on provider string and build concrete agent types
 - The old agent's context is exhausted after a context limit error — cannot reuse it
-- **Solution:** `context_limit_recovery()` builds a fresh agent inside a provider match arm, then calls `run_session(Some(compressed_state))` within the same arm. This reuses the existing chat loop and all completion/escalation/failure handling. The method returns `SessionOutcome` directly — the outer loop exits.
+- **Solution:** `context_limit_recovery()` builds a fresh agent inside a provider match arm, drives BMAD activation turns (`agent.chat("CH", ...)` and `agent.chat("Load the project context", ...)`) within the same arm, then calls `run_session(Some(compressed_state))` also within that arm. This reuses the existing chat loop and all completion/escalation/failure handling. The method returns `SessionOutcome` directly — the outer loop exits.
+- The BMAD activation turns (CH + Load project context) happen on the SAME agent instance that is passed to `run_session()` — rig agents are stateless (history is passed as parameter), so the activation context is carried via the compressed state's `chat_history`
 - Recursive recovery (if inner loop also hits context limit) is bounded by `MAX_RECOVERY_DEPTH = 3`
 
 ### Error Handling in Context Limit Recovery
@@ -533,10 +591,12 @@ The `Chat` trait in rig 0.30 is NOT object-safe (`fn chat()` returns `impl Futur
 | `DecisionLog` | `src/supervisor/decisions.rs` | Decision tracking (shared across recovery boundary) |
 | `SessionOutcome` | `src/session/mod.rs` | `Completed`, `Escalated`, `Failed` |
 | `run_session()` | `src/session/runner.rs` | Reuse for inner loop after recovery (with `Some(compressed_state)`) |
+| Story 3.2 pattern | `src/supervisor/architect.rs` | BMAD activation flow: CH → Load project context → question (same simulated-human pattern) |
 
 ⚠️ **Do NOT reimplement any of these.** In particular:
 - Do NOT create a new chat loop — reuse `run_session()` with `Some(compressed_state)` for the inner loop
-- Do NOT create new standalone agent builder methods — build recovery agents **inline** within `context_limit_recovery()` using the same rig client/agent builder pattern as `build_anthropic_agent()`/`build_openai_agent()`, but with the **enhanced preamble** instead of `self.build_preamble()`. The existing builders hardcode the standard preamble and cannot be reused directly for recovery.
+- Do NOT create an "enhanced preamble" that injects project-context.md — the agent loads its own context via the BMAD activation flow (CH → "Load the project context"), same pattern as Story 3.2's Architect session. Use `self.build_preamble()` for the standard preamble.
+- Do NOT try to pre-select which project files the agent needs — the agent knows WHAT to load and HOW to interpret it (Story 3.2 principle: "Treat it like a human")
 - Do NOT create a new WAL format — overwrite existing WAL with compressed `SessionState`
 - Do NOT create a summarization-specific LLM infrastructure — build a minimal temp agent inline (no tools, summarization preamble only)
 
@@ -556,7 +616,7 @@ The `Chat` trait in rig 0.30 is NOT object-safe (`fn chat()` returns `impl Futur
 ### File Structure Requirements
 
 **Files to modify:**
-- `src/session/runner.rs` — **MODIFY** — Add `is_context_limit_error()`, `context_limit_recovery()`, `summarize_history()`, `build_recovery_preamble()`, `extract_last_exchanges()`, `format_exchanges_for_preamble()`. Modify `run_session()` error handling to intercept context limit errors before retry logic.
+- `src/session/runner.rs` — **MODIFY** — Add `is_context_limit_error()`, `context_limit_recovery()`, `summarize_history()`, `build_recovery_message()`, `extract_last_exchanges()`, `format_exchanges_for_message()`. Modify `run_session()` error handling to intercept context limit errors before retry logic.
 
 **Files NOT to touch:**
 - `src/session/state.rs` — WAL infrastructure is complete
@@ -594,9 +654,12 @@ All tests inline in `#[cfg(test)] mod tests` at the bottom of `src/session/runne
 - ❌ Do NOT use `Box<dyn Chat>` — `Chat` is not object-safe in rig 0.30. Match on provider and build concrete types
 - ❌ Do NOT try to swap the agent variable in the outer loop — the original agent's context is exhausted. Delegate to a NEW `run_session()` call with `Some(compressed_state)` and return its outcome
 - ❌ Do NOT return `(SessionState, String)` from recovery and `continue` in the loop — the old agent variable is still bound to the exhausted context. Recovery MUST be a terminal action that returns `SessionOutcome`
-- ❌ Do NOT keep full history in the compressed WAL — only last N exchanges. The summary is in the preamble, not the WAL
+- ❌ Do NOT inject project-context.md (or any project files) into the preamble or recovery message — the agent loads its own project context via the BMAD activation flow ("CH" → "Load the project context"). The daemon does NOT decide which docs are relevant. Follow the Story 3.2 pattern: "Treat it like a human"
+- ❌ Do NOT build an "enhanced preamble" — use the standard `build_preamble()`. Context is loaded by the agent via its tools during BMAD activation, not pre-injected by the daemon
+- ❌ Do NOT skip the BMAD activation flow (CH → Load project context) — the agent needs its standard activation to operate correctly with full project awareness
+- ❌ Do NOT keep full history in the compressed WAL — only activation turns + recovery message. The summary is in the recovery message, not the preamble
 - ❌ Do NOT use a different LLM provider/model for summarization — use the same one for consistency
-- ❌ Do NOT send "DS" as the continuation prompt — that restarts the entire workflow. The inner `run_session(Some(state))` handles this via Story 6.3's recovery path (last message analysis)
+- ❌ Do NOT send "DS" as the continuation prompt — that restarts the entire workflow. The recovery message is sent as the last user message in the compressed state, and `run_session(Some(state))` re-sends it via Story 6.3's recovery path (last message = user → re-send)
 - ❌ Do NOT duplicate the chat loop — reuse `run_session()` with `Some(compressed_state)`
 - ❌ Do NOT allow infinite recursive recoveries — cap at `MAX_RECOVERY_DEPTH = 3` via `recovery_depth` parameter
 - ❌ Do NOT omit `recovery_depth` from the `context_limit_recovery()` signature — it is required for recursion safety
@@ -611,9 +674,10 @@ All tests inline in `#[cfg(test)] mod tests` at the bottom of `src/session/runne
 - Context limit error detection from provider error strings (`is_context_limit_error()`)
 - Interception in `run_session()` error handler — before retry logic
 - Chat history summarization via fresh LLM call
-- Enhanced preamble construction with summary + last N exchanges + project context + story reference
-- Fresh agent construction with enhanced preamble and same tools
-- Compressed `SessionState` with only last N exchanges
+- Fresh agent construction with standard preamble and same tools
+- BMAD activation flow (CH → "Load the project context") driven by daemon as simulated human (Story 3.2 pattern)
+- Recovery message construction with summary + last N exchanges + story reference (sent as user message, NOT in preamble)
+- Compressed `SessionState` with activation turns + recovery message
 - WAL overwrite with compressed state (handled by inner `run_session()`)
 - Inner chat loop via `run_session()` with `Some(compressed_state)` — returns `SessionOutcome`
 - Recovery depth limit (`MAX_RECOVERY_DEPTH = 3`) to prevent infinite recursion
@@ -626,7 +690,7 @@ All tests inline in `#[cfg(test)] mod tests` at the bottom of `src/session/runne
 - Changes to pipeline or CLI (recovery is invisible — contained within `run_session()`)
 - Streaming API support (future — rig 0.30 uses request/response)
 - Dynamic N calculation based on model context window size (MVP uses fixed N=10; for small-context models like 8K, N=10 may need to be reduced — future enhancement)
-- Persistent summary storage (summary lives only in the preamble of the recovered session)
+- Persistent summary storage (summary lives only in the recovery message of the recovered session)
 - Changes to `ResponseAnalyzer` patterns
 - New dependencies
 
