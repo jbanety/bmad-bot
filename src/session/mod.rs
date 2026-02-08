@@ -1,7 +1,8 @@
-//! Session module — manages rig agent setup, chat loops, and story execution sessions.
+//! Session module — manages rig agent setup, chat loops, branch management, and story execution sessions.
 //!
-//! This module orchestrates development sessions: setting up the rig agent with
-//! tools (git, filesystem, terminal, ask_supervisor), running the chat loop,
+//! This module orchestrates development sessions: resolving the correct base branch,
+//! creating/reusing story branches, setting up the rig agent with tools
+//! (git, filesystem, terminal, ask_supervisor), running the chat loop,
 //! and handling session outcomes (completion, escalation, failure).
 //!
 //! Key types:
@@ -10,12 +11,16 @@
 //! - [`SessionRunner`] — the main session lifecycle manager
 //! - [`ResponseAnalyzer`] — pattern-matching engine for agent responses
 //! - [`SessionState`] — WAL state for crash recovery
+//! - [`BranchAction`] — result of branch setup (created or reused)
+//! - [`BranchError`] — typed errors for branch operations
 //! - [`escalation::EscalationInfo`] — lightweight escalation data carrier
 //! - [`escalation::EscalationReport`] — full report returned to the daemon for logging,
 //!   notification (Epic 6), and PR creation (Epic 5).
 
 /// Response analyzer — pattern matching for workflow interactions.
 pub mod analyzer;
+/// Branch management — dependency-aware branch chaining for story sessions.
+pub mod branch;
 /// Session cleanup: partial work preservation and sprint-status updates.
 pub mod cleanup;
 /// Escalation types for supervisor-to-session communication.
@@ -31,6 +36,8 @@ pub use analyzer::ResponseAnalyzer;
 pub use provider::create_completion_model;
 pub use runner::SessionRunner;
 pub use state::SessionState;
+
+pub use branch::{BranchAction, BranchError, determine_base_branch, ensure_story_branch};
 
 use crate::supervisor::decisions::DecisionRecord;
 use escalation::EscalationReport;

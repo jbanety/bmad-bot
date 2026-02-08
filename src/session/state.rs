@@ -94,6 +94,18 @@ pub struct SessionState {
     pub provider: String,
     /// LLM model name for reconstruction on recovery.
     pub model: String,
+    /// The story branch name used for this session (e.g., "story/4-3-branch-mgmt").
+    ///
+    /// Added in Story 4.3. `serde(default)` ensures backward-compatibility with
+    /// WAL files from Story 4.2 that lack this field.
+    #[serde(default)]
+    pub branch_name: String,
+    /// The base branch this story branch was created from (e.g., "main" or "story/4-2-...").
+    ///
+    /// Used by Epic 5 (PR creation) to set the PR target branch, and by Story 6.3
+    /// (crash recovery) to verify branch state on restart.
+    #[serde(default)]
+    pub base_branch: String,
     /// Complete serialized chat history.
     pub chat_history: Vec<ChatMessage>,
 }
@@ -113,8 +125,19 @@ impl SessionState {
             last_activity: now,
             provider: provider.to_string(),
             model: model.to_string(),
+            branch_name: String::new(),
+            base_branch: String::new(),
             chat_history: Vec::new(),
         }
+    }
+
+    /// Set the branch info after successful branch setup.
+    ///
+    /// Called by `SessionRunner::run()` after `ensure_story_branch()` succeeds.
+    /// The WAL should be saved immediately after calling this method.
+    pub fn set_branch_info(&mut self, branch_name: &str, base_branch: &str) {
+        self.branch_name = branch_name.to_string();
+        self.base_branch = base_branch.to_string();
     }
 
     /// Append a user message to the chat history and update `last_activity`.
@@ -253,6 +276,9 @@ mod tests {
         assert!(state.chat_history.is_empty());
         assert!(!state.started_at.is_empty());
         assert!(!state.last_activity.is_empty());
+        // Branch fields default to empty (set later by set_branch_info)
+        assert!(state.branch_name.is_empty());
+        assert!(state.base_branch.is_empty());
     }
 
     #[test]
@@ -414,5 +440,54 @@ mod tests {
     fn test_state_error_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<StateError>();
+    }
+
+    // -----------------------------------------------------------------------
+    // Branch info tests (Story 4.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_state_branch_fields_default_empty() {
+        // Simulate deserializing a WAL from Story 4.2 (no branch fields)
+        let yaml = r#"
+story_id: "4.2"
+story_key: "4-2-agent-session-setup-chat-loop"
+branch: "story/4-2-agent-session-setup-chat-loop"
+started_at: "2026-02-07T00:00:00Z"
+last_activity: "2026-02-07T00:00:00Z"
+provider: "anthropic"
+model: "claude-sonnet-4-20250514"
+chat_history: []
+"#;
+        let state: SessionState = serde_yml::from_str(yaml).expect("deserialize old WAL");
+        assert!(
+            state.branch_name.is_empty(),
+            "branch_name should default to empty"
+        );
+        assert!(
+            state.base_branch.is_empty(),
+            "base_branch should default to empty"
+        );
+    }
+
+    #[test]
+    fn test_session_state_set_branch_info_roundtrip() {
+        let story = make_test_story();
+        let mut state = SessionState::new(&story, "anthropic", "test-model");
+
+        state.set_branch_info("story/4-3-branch-mgmt", "story/4-2-session-setup");
+
+        assert_eq!(state.branch_name, "story/4-3-branch-mgmt");
+        assert_eq!(state.base_branch, "story/4-2-session-setup");
+
+        // Serialize and deserialize to verify roundtrip
+        let yaml = serde_yml::to_string(&state).expect("serialize");
+        let loaded: SessionState = serde_yml::from_str(&yaml).expect("deserialize");
+
+        assert_eq!(loaded.branch_name, "story/4-3-branch-mgmt");
+        assert_eq!(loaded.base_branch, "story/4-2-session-setup");
+        // Verify other fields preserved
+        assert_eq!(loaded.story_id, state.story_id);
+        assert_eq!(loaded.story_key, state.story_key);
     }
 }

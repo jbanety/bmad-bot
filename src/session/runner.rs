@@ -15,6 +15,7 @@
 use crate::config::{BotConfig, BotSecrets};
 use crate::session::SessionOutcome;
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
+use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
 use crate::session::cleanup::{mark_story_needs_clarification, preserve_partial_work};
 use crate::session::escalation::EscalationReport;
 use crate::session::provider::{ProviderError, resolve_api_key};
@@ -23,6 +24,7 @@ use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
 use crate::supervisor::{AskSupervisor, EscalationSlot};
 use crate::tools::{FsTool, GitTool, TerminalTool};
 use crate::watcher::StoryInfo;
+use git2::Repository;
 use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
 use rig::providers::{anthropic, openai};
@@ -106,6 +108,83 @@ impl SessionRunner {
             }
         };
 
+        // --- Branch setup (BEFORE agent build) ---
+        let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
+        let default_branch = self.config.git_provider.target_branch.clone();
+        let branch_name = story.branch_name.clone();
+
+        // Resolve base branch (needs repo open for branch lookup)
+        let base_branch = match Repository::open(&repo_path) {
+            Ok(repo) => determine_base_branch(story, &repo, &default_branch),
+            Err(e) => {
+                tracing::error!(
+                    action = "session_failed",
+                    error = %e,
+                    "Failed to open repo for base branch resolution"
+                );
+                return SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Failed to open repo: {e}"),
+                    decisions: vec![],
+                };
+            }
+        };
+
+        // Create/checkout story branch — wrap blocking git2 call in spawn_blocking
+        let rp = repo_path.clone();
+        let bn = branch_name.clone();
+        let bb = base_branch.clone();
+
+        let branch_result =
+            match tokio::task::spawn_blocking(move || ensure_story_branch(&rp, &bn, &bb)).await {
+                Ok(Ok(action)) => action,
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        action = "session_failed",
+                        error = %e,
+                        "Branch setup failed"
+                    );
+                    return SessionOutcome::Failed {
+                        story_key: story.story_key.clone(),
+                        error: format!("Branch setup failed: {e}"),
+                        decisions: vec![],
+                    };
+                }
+                Err(e) => {
+                    tracing::error!(
+                        action = "session_failed",
+                        error = %e,
+                        "Branch setup panicked"
+                    );
+                    return SessionOutcome::Failed {
+                        story_key: story.story_key.clone(),
+                        error: format!("Branch setup panicked: {e}"),
+                        decisions: vec![],
+                    };
+                }
+            };
+
+        match &branch_result {
+            BranchAction::Created {
+                branch_name: bn,
+                base_branch: bb,
+            } => {
+                tracing::info!(
+                    action = "branch_ready",
+                    branch = %bn,
+                    base = %bb,
+                    "Story branch created"
+                );
+            }
+            BranchAction::Reused { branch_name: bn } => {
+                tracing::info!(
+                    action = "branch_ready",
+                    branch = %bn,
+                    "Story branch reused"
+                );
+            }
+        }
+
         // Create shared resources for supervisor
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
         let decision_log = DecisionLog::new();
@@ -129,6 +208,7 @@ impl SessionRunner {
                             story,
                             provider,
                             model,
+                            &base_branch,
                             escalation_slot.clone(),
                             decision_log.clone(),
                         )
@@ -156,6 +236,7 @@ impl SessionRunner {
                             story,
                             provider,
                             model,
+                            &base_branch,
                             escalation_slot.clone(),
                             decision_log.clone(),
                         )
@@ -183,6 +264,7 @@ impl SessionRunner {
                             story,
                             provider,
                             model,
+                            &base_branch,
                             escalation_slot.clone(),
                             decision_log.clone(),
                         )
@@ -365,17 +447,20 @@ impl SessionRunner {
     ///
     /// This is the provider-agnostic core: send "DS", analyze responses,
     /// auto-respond, and handle completion/escalation/failure.
+    #[allow(clippy::too_many_arguments)]
     async fn run_session<A: Chat>(
         &self,
         agent: &A,
         story: &StoryInfo,
         provider: &str,
         model: &str,
+        base_branch: &str,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
     ) -> SessionOutcome {
-        // Create WAL state
+        // Create WAL state and record branch info
         let mut state = SessionState::new(story, provider, model);
+        state.set_branch_info(&story.branch_name, base_branch);
 
         // Save initial WAL
         if let Err(e) = state.save(&self.state_file_path).await {
@@ -684,5 +769,23 @@ mod tests {
 
         let expected = dir.path().join(".bmad-bot-session.yaml");
         assert_eq!(runner.state_file_path, expected);
+    }
+
+    #[test]
+    fn test_session_runner_state_file_path_unchanged() {
+        // Verify that adding branch setup in Story 4.3 did not change
+        // the state_file_path derivation from Story 4.2
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let secrets = Arc::new(make_test_secrets());
+
+        let runner = SessionRunner::new(config, secrets);
+
+        // Must still be {implementation_artifacts}/.bmad-bot-session.yaml
+        let expected = dir.path().join(".bmad-bot-session.yaml");
+        assert_eq!(
+            runner.state_file_path, expected,
+            "state_file_path derivation must not change from 4.2 contract"
+        );
     }
 }
