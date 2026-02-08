@@ -1,6 +1,6 @@
 # Story 6.1: Telegram Notifications
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -30,94 +30,94 @@ So that I know the results without checking GitHub/GitLab manually.
 
 ### Task 0: Prerequisite Verification
 
-- [ ] Verify `src/notifier/mod.rs` skeleton exists (currently contains only TODO comment)
-- [ ] Verify `TelegramConfig` struct exists in `src/config/mod.rs` with `enabled: bool` and `chat_id: String`
-- [ ] Verify `BotSecrets.telegram_bot_token` field exists and is loaded from `TELEGRAM_BOT_TOKEN` env var
-- [ ] Verify `BotSecrets::validate_for_config()` already validates telegram token when enabled
-- [ ] Verify `build_http_client()` exists in `src/config/mod.rs` and returns `ClientWithMiddleware`
-- [ ] Verify `reqwest` (with `json` feature) and `reqwest-middleware` are in `Cargo.toml`
-- [ ] Verify `serde`, `serde_json`, `tracing`, `thiserror`, `async-trait` are available
+- [x] Verify `src/notifier/mod.rs` skeleton exists (currently contains only TODO comment)
+- [x] Verify `TelegramConfig` struct exists in `src/config/mod.rs` with `enabled: bool` and `chat_id: String`
+- [x] Verify `BotSecrets.telegram_bot_token` field exists and is loaded from `TELEGRAM_BOT_TOKEN` env var
+- [x] Verify `BotSecrets::validate_for_config()` already validates telegram token when enabled
+- [x] Verify `build_http_client()` exists in `src/config/mod.rs` and returns `ClientWithMiddleware`
+- [x] Verify `reqwest` (with `json` feature) and `reqwest-middleware` are in `Cargo.toml`
+- [x] Verify `serde`, `serde_json`, `tracing`, `thiserror`, `async-trait` are available
 
 ### Task 1: Define Notifier Error Type (`src/notifier/mod.rs`)
 
-- [ ] Define `NotifierError` enum using `thiserror`
-  - [ ] `HttpRequest { reason: String }` — network/middleware send failure (store as String, not the original error — matches gitlab.rs pattern)
-  - [ ] `ApiError { status: u16, body: String }` — Telegram API returned non-ok response (carry HTTP status code + response body)
-  - [ ] `ResponseParse { reason: String }` — deserialization failure (store message as String via `.to_string()`)
-  - [ ] `Disabled` — notification attempted but Telegram is disabled in config
-- [ ] All variants must produce human-readable error messages via `#[error(...)]`
-- [ ] Do NOT use `#[from]` on `reqwest_middleware::Error` or `serde_json::Error` — use `.map_err(|e| NotifierError::Variant { reason: e.to_string() })` inline (same pattern as `GitProviderError` in `src/git_provider/gitlab.rs`)
+- [x] Define `NotifierError` enum using `thiserror`
+  - [x] `HttpRequest { reason: String }` — network/middleware send failure (store as String, not the original error — matches gitlab.rs pattern)
+  - [x] `ApiError { status: u16, body: String }` — Telegram API returned non-ok response (carry HTTP status code + response body)
+  - [x] `ResponseParse { reason: String }` — deserialization failure (store message as String via `.to_string()`)
+  - [x] `Disabled` — notification attempted but Telegram is disabled in config
+- [x] All variants must produce human-readable error messages via `#[error(...)]`
+- [x] Do NOT use `#[from]` on `reqwest_middleware::Error` or `serde_json::Error` — use `.map_err(|e| NotifierError::Variant { reason: e.to_string() })` inline (same pattern as `GitProviderError` in `src/git_provider/gitlab.rs`)
 
 ### Task 2: Define Data Types (`src/notifier/mod.rs`)
 
-- [ ] Define `StoryStatus` enum: `Completed`, `Blocked`, `Error`
-  - [ ] Implement `Display` to emit emoji+label: ✅ completed, ⚠️ blocked, ❌ error
-- [ ] Define `StoryNotification` struct:
-  - [ ] `story_id: String` (e.g. "6.1")
-  - [ ] `story_key: String` (e.g. "6-1-telegram-notifications")
-  - [ ] `status: StoryStatus`
-  - [ ] `pr_url: Option<String>`
-  - [ ] `reason: Option<String>` (for blocked/error context)
-- [ ] Define `RunSummary` struct:
-  - [ ] `stories: Vec<StoryNotification>`
-  - [ ] `total_processed: usize`
-  - [ ] `completed: usize`
-  - [ ] `blocked: usize`
-  - [ ] `errored: usize`
-- [ ] Define internal `TelegramResponse` struct (for deserializing API response):
-  - [ ] `ok: bool`
-  - [ ] `description: Option<String>`
+- [x] Define `StoryStatus` enum: `Completed`, `Blocked`, `Error`
+  - [x] Implement `Display` to emit emoji+label: ✅ completed, ⚠️ blocked, ❌ error
+- [x] Define `StoryNotification` struct:
+  - [x] `story_id: String` (e.g. "6.1")
+  - [x] `story_key: String` (e.g. "6-1-telegram-notifications")
+  - [x] `status: StoryStatus`
+  - [x] `pr_url: Option<String>`
+  - [x] `reason: Option<String>` (for blocked/error context)
+- [x] Define `RunSummary` struct:
+  - [x] `stories: Vec<StoryNotification>`
+  - [x] `total_processed: usize`
+  - [x] `completed: usize`
+  - [x] `blocked: usize`
+  - [x] `errored: usize`
+- [x] Define internal `TelegramResponse` struct (for deserializing API response):
+  - [x] `ok: bool`
+  - [x] `description: Option<String>`
 
 ### Task 3: Define Notifier Trait (`src/notifier/mod.rs`)
 
-- [ ] Define `#[async_trait] pub trait Notifier: Send + Sync`
-  - [ ] `async fn notify_story(&self, notification: &StoryNotification) -> Result<(), NotifierError>`
-  - [ ] `async fn notify_run_summary(&self, summary: &RunSummary) -> Result<(), NotifierError>`
-- [ ] Trait is object-safe for future extensibility (Slack, email, etc.)
+- [x] Define `#[async_trait] pub trait Notifier: Send + Sync`
+  - [x] `async fn notify_story(&self, notification: &StoryNotification) -> Result<(), NotifierError>`
+  - [x] `async fn notify_run_summary(&self, summary: &RunSummary) -> Result<(), NotifierError>`
+- [x] Trait is object-safe for future extensibility (Slack, email, etc.)
 
 ### Task 4: Implement `TelegramNotifier` (`src/notifier/mod.rs`)
 
-- [ ] Define `TelegramNotifier` struct:
-  - [ ] `http_client: ClientWithMiddleware` (from `build_http_client()`)
-  - [ ] `bot_token: String` (from `BotSecrets.telegram_bot_token`)
-  - [ ] `chat_id: String` (from `TelegramConfig.chat_id`)
-- [ ] Implement `TelegramNotifier::new(config: &TelegramConfig, bot_token: String) -> Result<Self, NotifierError>`
-  - [ ] Return `NotifierError::Disabled` if `!config.enabled`
-  - [ ] Build HTTP client via `build_http_client()`
-  - [ ] Store chat_id and bot_token
-- [ ] Implement private `async fn send_message(&self, text: &str) -> Result<(), NotifierError>`
-  - [ ] POST to `https://api.telegram.org/bot{token}/sendMessage`
-  - [ ] Build JSON body manually via `serde_json::to_vec` (see reqwest-middleware pattern below)
-  - [ ] Body: `{ "chat_id": "{chat_id}", "text": "{text}", "parse_mode": "HTML" }`
-  - [ ] Handle messages > 4096 chars: truncate at 4093 chars and append `"..."` (see Telegram message limit section below)
-  - [ ] Parse response via `response.bytes()` + `serde_json::from_slice::<TelegramResponse>()`
-  - [ ] If HTTP status is not success → return `NotifierError::ApiError` with status + body text
-  - [ ] If `!response.ok` in parsed body → return `NotifierError::ApiError` with description
-  - [ ] Log success via `tracing::info!(action = "telegram_send", "Notification sent")`
-- [ ] Implement `Notifier` trait for `TelegramNotifier`:
-  - [ ] `notify_story`: Format a single-story message and call `send_message`
-  - [ ] `notify_run_summary`: Format a run summary message and call `send_message`
+- [x] Define `TelegramNotifier` struct:
+  - [x] `http_client: ClientWithMiddleware` (from `build_http_client()`)
+  - [x] `bot_token: String` (from `BotSecrets.telegram_bot_token`)
+  - [x] `chat_id: String` (from `TelegramConfig.chat_id`)
+- [x] Implement `TelegramNotifier::new(config: &TelegramConfig, bot_token: String) -> Result<Self, NotifierError>`
+  - [x] Return `NotifierError::Disabled` if `!config.enabled`
+  - [x] Build HTTP client via `build_http_client()`
+  - [x] Store chat_id and bot_token
+- [x] Implement private `async fn send_message(&self, text: &str) -> Result<(), NotifierError>`
+  - [x] POST to `https://api.telegram.org/bot{token}/sendMessage`
+  - [x] Build JSON body manually via `serde_json::to_vec` (see reqwest-middleware pattern below)
+  - [x] Body: `{ "chat_id": "{chat_id}", "text": "{text}", "parse_mode": "HTML" }`
+  - [x] Handle messages > 4096 chars: truncate at 4093 chars and append `"..."` (see Telegram message limit section below)
+  - [x] Parse response via `response.bytes()` + `serde_json::from_slice::<TelegramResponse>()`
+  - [x] If HTTP status is not success → return `NotifierError::ApiError` with status + body text
+  - [x] If `!response.ok` in parsed body → return `NotifierError::ApiError` with description
+  - [x] Log success via `tracing::info!(action = "telegram_send", "Notification sent")`
+- [x] Implement `Notifier` trait for `TelegramNotifier`:
+  - [x] `notify_story`: Format a single-story message and call `send_message`
+  - [x] `notify_run_summary`: Format a run summary message and call `send_message`
 
 ### Task 5: Implement Message Formatting & HTML Escaping
 
-- [ ] `fn escape_html(text: &str) -> String`
-  - [ ] Replace `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`
-  - [ ] This MUST be applied to all dynamic text inserted into HTML-formatted messages (story keys, error reasons, etc.)
-  - [ ] PR URLs go inside `href="..."` attributes and do NOT need HTML escaping (only the display text does)
-- [ ] `fn format_story_message(notification: &StoryNotification) -> String`
-  - [ ] Include: status emoji + label, story ID, story key (HTML-escaped)
-  - [ ] If PR URL present: include clickable link via `<a href="...">PR</a>`
-  - [ ] If reason present: include HTML-escaped reason on separate line
+- [x] `fn escape_html(text: &str) -> String`
+  - [x] Replace `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`
+  - [x] This MUST be applied to all dynamic text inserted into HTML-formatted messages (story keys, error reasons, etc.)
+  - [x] PR URLs go inside `href="..."` attributes and do NOT need HTML escaping (only the display text does)
+- [x] `fn format_story_message(notification: &StoryNotification) -> String`
+  - [x] Include: status emoji + label, story ID, story key (HTML-escaped)
+  - [x] If PR URL present: include clickable link via `<a href="...">PR</a>`
+  - [x] If reason present: include HTML-escaped reason on separate line
   - [ ] Example output:
     ```
     ✅ Story 6.1 completed
     <b>6-1-telegram-notifications</b>
     PR: <a href="https://github.com/org/repo/pull/42">PR #42</a>
     ```
-- [ ] `fn format_run_summary(summary: &RunSummary) -> String`
-  - [ ] Header line: "🏁 BMAD Bot Run Complete"
-  - [ ] Stats: total, completed, blocked, errored counts
-  - [ ] List each story with status emoji, HTML-escaped key, and PR link
+- [x] `fn format_run_summary(summary: &RunSummary) -> String`
+  - [x] Header line: "🏁 BMAD Bot Run Complete"
+  - [x] Stats: total, completed, blocked, errored counts
+  - [x] List each story with status emoji, HTML-escaped key, and PR link
   - [ ] Example output:
     ```
     🏁 BMAD Bot Run Complete
@@ -130,46 +130,46 @@ So that I know the results without checking GitHub/GitLab manually.
 
 ### Task 6: Implement `NoopNotifier` (`src/notifier/mod.rs`)
 
-- [ ] Define `NoopNotifier` struct (unit struct, no fields)
-- [ ] Implement `Notifier` trait — both methods log via `tracing::debug!()` and return `Ok(())`
-- [ ] This is used when `telegram.enabled = false`
+- [x] Define `NoopNotifier` struct (unit struct, no fields)
+- [x] Implement `Notifier` trait — both methods log via `tracing::debug!()` and return `Ok(())`
+- [x] This is used when `telegram.enabled = false`
 
 ### Task 7: Factory Function (`src/notifier/mod.rs`)
 
-- [ ] `pub fn create_notifier(config: &NotificationConfig, secrets: &BotSecrets) -> Box<dyn Notifier>`
-  - [ ] If `config.telegram.enabled` and token is available → `Box::new(TelegramNotifier::new(...))`
-  - [ ] Else → `Box::new(NoopNotifier)` with `tracing::info!("Telegram notifications disabled")`
-- [ ] Factory never fails — worst case returns NoopNotifier with a warning log
+- [x] `pub fn create_notifier(config: &NotificationConfig, secrets: &BotSecrets) -> Box<dyn Notifier>`
+  - [x] If `config.telegram.enabled` and token is available → `Box::new(TelegramNotifier::new(...))`
+  - [x] Else → `Box::new(NoopNotifier)` with `tracing::info!("Telegram notifications disabled")`
+- [x] Factory never fails — worst case returns NoopNotifier with a warning log
 
 ### Task 8: Unit Tests
 
-- [ ] `test_story_status_display_completed` — verify ✅ emoji
-- [ ] `test_story_status_display_blocked` — verify ⚠️ emoji
-- [ ] `test_story_status_display_error` — verify ❌ emoji
-- [ ] `test_escape_html_special_chars` — verify `<`, `>`, `&` are escaped
-- [ ] `test_escape_html_no_change_for_safe_text` — verify plain text passes through
-- [ ] `test_format_story_message_completed_with_pr` — verify message includes PR link
-- [ ] `test_format_story_message_blocked_with_reason` — verify HTML-escaped reason included
-- [ ] `test_format_story_message_error_no_pr` — verify graceful handling when no PR
-- [ ] `test_format_story_message_escapes_html_in_reason` — verify `<timeout>` in reason doesn't break HTML
-- [ ] `test_format_run_summary_mixed_statuses` — verify counts and per-story lines
-- [ ] `test_format_run_summary_all_completed` — verify happy path
-- [ ] `test_format_run_summary_truncation_long_message` — verify messages > 4096 chars are handled
-- [ ] `test_noop_notifier_returns_ok` — verify NoopNotifier doesn't error
-- [ ] `test_noop_notifier_story_returns_ok` — verify NoopNotifier story notification
-- [ ] `test_telegram_notifier_new_disabled` — verify returns Disabled error when not enabled
-- [ ] `test_telegram_notifier_send_sync` — verify `TelegramNotifier` is `Send + Sync`
-- [ ] `test_create_notifier_disabled_returns_noop` — verify factory when disabled
-- [ ] `test_create_notifier_enabled_returns_telegram` — verify factory when enabled (mock-friendly)
-- [ ] All tests use mocked data — NO real Telegram API calls
+- [x] `test_story_status_display_completed` — verify ✅ emoji
+- [x] `test_story_status_display_blocked` — verify ⚠️ emoji
+- [x] `test_story_status_display_error` — verify ❌ emoji
+- [x] `test_escape_html_special_chars` — verify `<`, `>`, `&` are escaped
+- [x] `test_escape_html_no_change_for_safe_text` — verify plain text passes through
+- [x] `test_format_story_message_completed_with_pr` — verify message includes PR link
+- [x] `test_format_story_message_blocked_with_reason` — verify HTML-escaped reason included
+- [x] `test_format_story_message_error_no_pr` — verify graceful handling when no PR
+- [x] `test_format_story_message_escapes_html_in_reason` — verify `<timeout>` in reason doesn't break HTML
+- [x] `test_format_run_summary_mixed_statuses` — verify counts and per-story lines
+- [x] `test_format_run_summary_all_completed` — verify happy path
+- [x] `test_format_run_summary_truncation_long_message` — verify messages > 4096 chars are handled
+- [x] `test_noop_notifier_returns_ok` — verify NoopNotifier doesn't error
+- [x] `test_noop_notifier_story_returns_ok` — verify NoopNotifier story notification
+- [x] `test_telegram_notifier_new_disabled` — verify returns Disabled error when not enabled
+- [x] `test_telegram_notifier_send_sync` — verify `TelegramNotifier` is `Send + Sync`
+- [x] `test_create_notifier_disabled_returns_noop` — verify factory when disabled
+- [x] `test_create_notifier_enabled_returns_telegram` — verify factory when enabled (mock-friendly)
+- [x] All tests use mocked data — NO real Telegram API calls
 
 ### Task 9: Integration Verification
 
-- [ ] `cargo check` — 0 errors
-- [ ] `cargo test` — all existing + new tests pass, 0 regressions
-- [ ] `cargo clippy` — 0 new warnings
-- [ ] `cargo fmt` — clean
-- [ ] All public items have `///` doc comments
+- [x] `cargo check` — 0 errors
+- [x] `cargo test` — all existing + new tests pass, 0 regressions (506 total: 488 existing + 18 new)
+- [x] `cargo clippy` — 0 new warnings (collapsed nested `if let` per clippy suggestion)
+- [x] `cargo fmt` — clean
+- [x] All public items have `///` doc comments
 
 ## Dev Notes
 
@@ -423,12 +423,31 @@ This aligns with the architecture document's project structure specification. Th
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
+None — clean implementation, no debugging required.
+
 ### Completion Notes List
+
+- **Task 0:** All prerequisites verified — skeleton `mod.rs`, `TelegramConfig`, `BotSecrets.telegram_bot_token`, `validate_for_config()`, `build_http_client()`, and all dependencies confirmed present.
+- **Task 1:** `NotifierError` enum with 4 variants (`HttpRequest`, `ApiError`, `ResponseParse`, `Disabled`) — `thiserror` derive, `{ reason: String }` pattern, no `#[from]`.
+- **Task 2:** `StoryStatus` enum with `Display` (emoji+label), `StoryNotification`, `RunSummary`, and internal `TelegramResponse` structs.
+- **Task 3:** `Notifier` trait with `#[async_trait]`, `Send + Sync` bounds, two async methods (`notify_story`, `notify_run_summary`).
+- **Task 4:** `TelegramNotifier` with `new()` constructor (returns `Disabled` if not enabled), `send_message()` using verified `reqwest-middleware` pattern (manual `serde_json::to_vec` + `Content-Type` header + `body()`), message truncation at 4096 chars, full error mapping.
+- **Task 5:** `escape_html()` for `&`, `<`, `>` entities; `format_story_message()` with emoji/status/PR link/reason; `format_run_summary()` with header, stats line, per-story lines; `truncate_message()` helper.
+- **Task 6:** `NoopNotifier` unit struct — both trait methods log at `debug` level and return `Ok(())`.
+- **Task 7:** `create_notifier()` factory — returns `TelegramNotifier` when enabled with valid token, `NoopNotifier` otherwise. Never panics.
+- **Task 8:** 18 unit tests covering all story requirements — `StoryStatus` display, HTML escaping, message formatting (completed/blocked/error, with/without PR, HTML in reason), run summary (mixed statuses, all completed, truncation), `NoopNotifier` (story + summary), `TelegramNotifier` constructor (disabled, Send+Sync), factory (disabled→noop, enabled→telegram). All mock data, no real API calls.
+- **Task 9:** `cargo check` 0 errors, `cargo test` 506 passed (488 existing + 18 new, 0 regressions), `cargo clippy` 0 new warnings, `cargo fmt` clean, all public items have `///` doc comments.
+- **Clippy fix:** Collapsed nested `if let Some(ref token)` + `if !token.is_empty()` into single `if let` with `.as_ref().filter(|t| !t.is_empty())` per clippy `collapsible_if` lint.
+- **Added `#[derive(Debug)]`** on `TelegramNotifier` — required by `Result::unwrap_err()` in test.
 
 ### Change Log
 
+- 2026-02-08: Implemented Story 6.1 — Telegram Notifications (all 10 tasks complete, 18 new tests, 506 total passing)
+
 ### File List
+
+- `src/notifier/mod.rs` — **OVERWRITTEN** — Full implementation replacing TODO skeleton (NotifierError, StoryStatus, StoryNotification, RunSummary, TelegramResponse, Notifier trait, TelegramNotifier, NoopNotifier, create_notifier factory, escape_html, format_story_message, format_run_summary, truncate_message, 18 unit tests)
