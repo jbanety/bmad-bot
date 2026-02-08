@@ -995,6 +995,16 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
         "bmad-bot daemon started"
     );
 
+    // Crash recovery — check for interrupted session WAL before polling
+    if let Some(result) = pipeline.recover_and_process().await {
+        tracing::info!(
+            action = "crash_recovery_complete",
+            story_key = %result.story_key,
+            status = ?result.status,
+            "Crash recovery processed — entering normal polling"
+        );
+    }
+
     // Polling loop with graceful shutdown — pass state for touch updates
     run_polling_loop(&config, &watcher, &pipeline, &mut daemon_state, state_path).await?;
 

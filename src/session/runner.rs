@@ -1647,7 +1647,6 @@ impl SessionRunner {
                         ResponseAction::Continue { reply } => reply,
                         _ => "Continue.".to_string(),
                     };
-
                     state.add_user_message(&reply);
                     let history = state.to_rig_messages();
 

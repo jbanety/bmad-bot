@@ -32,13 +32,6 @@ pub mod runner;
 /// WAL state file — session persistence for crash recovery.
 mod state;
 
-pub use analyzer::ResponseAnalyzer;
-pub use provider::create_completion_model;
-pub use runner::SessionRunner;
-pub use state::SessionState;
-
-pub use branch::{BranchAction, BranchError, determine_base_branch, ensure_story_branch};
-
 use crate::supervisor::decisions::DecisionRecord;
 use escalation::EscalationReport;
 

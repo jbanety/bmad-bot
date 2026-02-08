@@ -417,6 +417,218 @@ impl StoryPipeline {
             );
         }
     }
+
+    /// Check for an interrupted session WAL and process recovery if needed.
+    ///
+    /// Returns `Some(PipelineResult)` if a WAL was found and recovery was attempted,
+    /// or `None` for a clean start (no WAL). Recovery failure does NOT prevent the
+    /// daemon from entering the polling loop — all errors are handled internally.
+    ///
+    /// **Critical:** This must be called BEFORE the polling loop starts. The daemon
+    /// must not poll for new stories while a recovered session is in progress.
+    pub async fn recover_and_process(&self) -> Option<PipelineResult> {
+        let recovery = self.session_runner.check_and_recover_wal().await?;
+
+        // Clone StoryInfo fields BEFORE consuming recovery (SessionState has no Clone)
+        let story_for_pipeline = StoryInfo {
+            story_id: recovery.story_info.story_id.clone(),
+            story_key: recovery.story_info.story_key.clone(),
+            epic_num: recovery.story_info.epic_num,
+            story_num: recovery.story_info.story_num,
+            label: recovery.story_info.label.clone(),
+            branch_name: recovery.story_info.branch_name.clone(),
+            specs_path: recovery.story_info.specs_path.clone(),
+            dependencies: vec![],
+            status: "in-progress".to_string(),
+        };
+
+        let outcome = self.session_runner.resume_session(recovery).await;
+        let result = self
+            .process_recovered_session(&story_for_pipeline, outcome)
+            .await;
+        self.notify_story_result(&result).await;
+        Some(result)
+    }
+
+    /// Process the outcome of a recovered session through the post-session pipeline.
+    ///
+    /// Reuses the same post-session logic as [`process_story()`]: code review → PR → notification.
+    async fn process_recovered_session(
+        &self,
+        story: &StoryInfo,
+        outcome: SessionOutcome,
+    ) -> PipelineResult {
+        let story_title = story_title_from_label(&story.label);
+
+        match outcome {
+            SessionOutcome::Completed {
+                story_key,
+                branch,
+                decisions,
+            } => {
+                // Optional code review
+                let review_report = if self.config.code_review_enabled {
+                    match self.review_runner.run(story).await {
+                        ReviewOutcome::Completed { report, .. } => Some(report),
+                        ReviewOutcome::Failed {
+                            story_key: rk,
+                            error,
+                        } => {
+                            tracing::warn!(
+                                action = "recovery_review_failed",
+                                story_key = %rk,
+                                error = %error,
+                                "Code review failed after recovery — continuing to PR creation"
+                            );
+                            None
+                        }
+                        ReviewOutcome::Skipped { reason } => {
+                            tracing::info!(
+                                action = "recovery_review_skipped",
+                                reason = %reason,
+                                "Code review skipped after recovery — continuing to PR creation"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Success PR
+                let decisions_section = format_pr_decisions_section(&decisions);
+                let pr_title = build_pr_title(&story_key, &story_title, false);
+                let pr_body = build_pr_description(&PrDescriptionParams {
+                    story_key: story_key.clone(),
+                    story_title: story_title.clone(),
+                    outcome_summary: "completed successfully (recovered from crash)".to_string(),
+                    decisions_section,
+                    failure_details: None,
+                });
+                let pr_params = CreatePrParams {
+                    title: pr_title,
+                    body: pr_body,
+                    source_branch: branch.clone(),
+                    target_branch: self.config.git_provider.target_branch.clone(),
+                };
+
+                match self.git_provider.create_pr(pr_params).await {
+                    Ok(pr_info) => {
+                        if let Some(ref report) = review_report
+                            && let Err(e) = self.git_provider.add_comment(&pr_info.id, report).await
+                        {
+                            tracing::error!(
+                                action = "recovery_pr_comment_failed",
+                                pr_id = %pr_info.id,
+                                error = %e,
+                                "Failed to post review comment after recovery"
+                            );
+                        }
+
+                        PipelineResult {
+                            story_key: story_key.clone(),
+                            status: StoryStatus::Completed,
+                            pr_url: Some(pr_info.url.clone()),
+                            error_detail: None,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            action = "recovery_pr_creation_failed",
+                            story_key = %story_key,
+                            branch = %branch,
+                            error = %e,
+                            "PR creation failed after recovery"
+                        );
+                        PipelineResult {
+                            story_key: story_key.clone(),
+                            status: StoryStatus::Error,
+                            pr_url: None,
+                            error_detail: Some(format!(
+                                "PR creation failed after recovery: {e}. Branch: {branch}"
+                            )),
+                        }
+                    }
+                }
+            }
+
+            SessionOutcome::Escalated { report, decisions } => {
+                tracing::warn!(
+                    action = "recovery_session_escalated",
+                    story_key = %report.story_key,
+                    question = %report.question,
+                    "Recovered session escalated — needs human clarification"
+                );
+                let _ = &decisions;
+                PipelineResult {
+                    story_key: report.story_key.clone(),
+                    status: StoryStatus::Blocked,
+                    pr_url: None,
+                    error_detail: Some(format!(
+                        "Escalated after recovery: {} — {}",
+                        report.question, report.reason
+                    )),
+                }
+            }
+
+            SessionOutcome::Failed {
+                story_key,
+                error,
+                decisions,
+            } => {
+                tracing::error!(
+                    action = "recovery_session_failed",
+                    story_key = %story_key,
+                    error = %error,
+                    "Recovered session failed — creating failure PR"
+                );
+
+                // Failure PR
+                let branch = format!("story/{story_key}");
+                let decisions_section = format_pr_decisions_section(&decisions);
+                let pr_title = build_pr_title(&story_key, &story_title, true);
+                let pr_body = build_pr_description(&PrDescriptionParams {
+                    story_key: story_key.clone(),
+                    story_title: story_title.clone(),
+                    outcome_summary: "failed (crash recovery attempted)".to_string(),
+                    decisions_section,
+                    failure_details: Some(error.clone()),
+                });
+                let pr_params = CreatePrParams {
+                    title: pr_title,
+                    body: pr_body,
+                    source_branch: branch.clone(),
+                    target_branch: self.config.git_provider.target_branch.clone(),
+                };
+
+                match self.git_provider.create_pr(pr_params).await {
+                    Ok(pr_info) => PipelineResult {
+                        story_key: story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: Some(pr_info.url.clone()),
+                        error_detail: Some(error),
+                    },
+                    Err(pr_err) => {
+                        tracing::error!(
+                            action = "recovery_failure_pr_creation_failed",
+                            story_key = %story_key,
+                            branch = %branch,
+                            error = %pr_err,
+                            "Failed to create failure PR after recovery"
+                        );
+                        PipelineResult {
+                            story_key: story_key.clone(),
+                            status: StoryStatus::Error,
+                            pr_url: None,
+                            error_detail: Some(format!(
+                                "Recovery session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
