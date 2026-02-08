@@ -201,6 +201,9 @@ The daemon optionally launches a code review via a separate LLM after the dev se
 The daemon sends Telegram notifications with story status, ID, and PR links. It handles LLM rate limits with retry/backoff, notifies the human of blocking errors, detects interrupted sessions via WAL file for crash recovery, and recovers from context window limit errors by summarizing history and bootstrapping a fresh session. After this epic, the user can trust the daemon to run overnight without supervision.
 **FRs covered:** FR25, FR26, FR33, FR35, FR37, FR38
 
+### Epic 7: Integration Tests
+All 6 functional epics have been implemented and pass 573 unit tests. This epic introduces integration tests that validate the interactions between modules at their boundaries — ensuring the daemon works as a cohesive system, not just as isolated pieces. These tests are deterministic (no real LLM calls), run in CI, and use mocked external dependencies.
+
 ---
 
 ## Epic 1: Project Foundation & CLI
@@ -803,3 +806,465 @@ So that long or complex stories can still be completed autonomously.
 **Then** the agent picks up the current task with full awareness of prior work
 **And** the recovery event is logged via `tracing::info!()` with `action = "context_limit_recovery"`, original history length, and summary length
 **And** the WAL file is updated with the new (compressed) session state
+
+---
+
+## Epic 7: Integration Tests
+
+### Overview
+
+All 6 functional epics have been implemented and pass 573 unit tests. This epic introduces **integration tests** that validate the interactions between modules at their boundaries — ensuring the daemon works as a cohesive system, not just as isolated pieces. These tests are deterministic (no real LLM calls), run in CI, and use mocked external dependencies.
+
+**Why now:** Unit tests verify each module in isolation. Integration tests verify that the contracts between modules hold — that `watcher` feeds the right data to `pipeline`, that `pipeline` orchestrates `session → review → git_provider → notifier` correctly, that crash recovery actually reconstructs a valid session from a WAL file, and that the CLI lifecycle works end-to-end.
+
+**Scope boundary:** This epic covers **deterministic integration tests only**. True E2E tests involving live LLM calls remain gated behind `BMAD_E2E=1` and are out of scope.
+
+### Integration Test Strategy
+
+#### What We're Testing
+
+| Test Category | Modules Under Test | External Deps |
+|---------------|-------------------|---------------|
+| Config → Startup | `config/`, `cli/`, `config/discovery.rs` | Filesystem (temp dirs) |
+| Watcher → Pipeline Dispatch | `watcher/`, `watcher/deps.rs`, `pipeline.rs` | Filesystem (temp YAML) |
+| Pipeline Orchestration | `pipeline.rs`, `session/runner.rs`, `review/`, `git_provider/`, `notifier/` | All mocked via traits |
+| Session WAL Recovery | `session/state.rs`, `session/runner.rs`, `pipeline.rs` | Filesystem (temp WAL) |
+| Git Provider PR Flow | `git_provider/mod.rs`, `git_provider/github.rs`, `git_provider/gitlab.rs` | HTTP mocked |
+| Notifier Flow | `notifier/mod.rs` | HTTP mocked |
+| CLI Lifecycle | `cli/mod.rs`, `cli/state.rs` | Filesystem, process signals |
+| Branch Management | `session/branch.rs`, `tools/git.rs` | Real git2 on temp repos |
+
+#### Mock Strategy
+
+All integration tests follow the architecture's **Test Mock Pattern**:
+- LLM responses: static/deterministic — never call real providers
+- GitHub/GitLab API: mock HTTP server (or trait mock returning canned responses)
+- Telegram API: mock HTTP server (or NoopNotifier verification)
+- Filesystem: `tempfile` crate for isolated temp directories
+- Git repos: real `git2` operations on temp repos (fast, deterministic)
+
+#### Test Infrastructure Needed
+
+- **Mock `GitProvider` implementation** — returns canned `PrInfo` responses
+- **Mock `Notifier` implementation** — captures sent notifications for assertion
+- **Mock `SessionRunner` wrapper** — returns configurable `SessionOutcome` without LLM calls
+- **Mock `ReviewRunner` wrapper** — returns configurable `ReviewOutcome` without LLM calls
+- **Test fixture helpers** — functions to create valid `BotConfig`, `BotSecrets`, `StoryInfo`, sprint-status YAML, and WAL files
+
+---
+
+### Story 7.1: Integration Test Infrastructure & Fixtures
+
+As a developer,
+I want a shared test infrastructure with mock implementations and fixture builders,
+So that all integration tests can be written concisely and consistently.
+
+**Acceptance Criteria:**
+
+**Given** a new `tests/integration/` directory is created
+**When** I inspect the test helpers module
+**Then** the following mock implementations exist:
+- `MockGitProvider` implementing `GitProvider` trait — configurable to return `Ok(PrInfo { ... })` or `Err(GitProviderError::...)` for `create_pr`, `add_comment`, and `get_pr_url`
+- `MockNotifier` implementing `Notifier` trait — captures all `notify_story` and `notify_run_summary` calls into a `Vec` for later assertion
+- `MockSessionRunner` — wraps `SessionRunner` or provides a standalone struct that returns a configurable `SessionOutcome` (Completed / Escalated / Failed)
+- `MockReviewRunner` — returns a configurable `ReviewOutcome` (Completed / Skipped / Failed)
+
+**Given** the fixture module exists
+**When** I call fixture builder functions
+**Then** the following helpers are available:
+- `make_test_config()` → valid `BotConfig` with sensible defaults (polling=60, provider=github, review=enabled)
+- `make_test_secrets()` → valid `BotSecrets` with dummy tokens (never real keys)
+- `make_test_story(key, label, deps)` → valid `StoryInfo` with specified key, label, branch, and dependency list
+- `write_sprint_status(dir, stories)` → writes a valid `sprint-status.yaml` to a temp directory with given story entries and statuses
+- `write_wal_file(dir, state)` → writes a valid `.bmad-bot-session.yaml` WAL file to a temp directory
+- `create_test_repo(dir)` → initializes a git repo with an initial commit in a temp directory
+
+**Given** the test infrastructure is built
+**When** I run `cargo test --test integration`
+**Then** all infrastructure tests compile and pass
+**And** the mock implementations satisfy the trait bounds (`Send + Sync`)
+
+**Technical Notes:**
+- Place all test code under `tests/integration/` with a `mod.rs` entry point
+- Use `#[cfg(test)]` and feature gate if needed, but prefer the `tests/` directory convention
+- Mock implementations must be `Send + Sync` to satisfy async trait bounds
+- All fixtures use `tempfile::tempdir()` for filesystem isolation
+
+**Story Points:** 3
+
+---
+
+### Story 7.2: Config → Startup Validation Integration Tests
+
+As a developer,
+I want integration tests that verify the full config loading and validation pipeline,
+So that I'm confident the daemon rejects bad configs and accepts good ones end-to-end.
+
+**Acceptance Criteria:**
+
+**Given** a temp directory with a valid `bmad-bot.yaml` and `.env` file
+**When** the integration test loads config via `BotConfig::load()` then `BotConfig::validate()` then `BotSecrets::load()` then `BotSecrets::validate_for_config()`
+**Then** the full pipeline succeeds and returns a valid `Arc<BotConfig>` and `Arc<BotSecrets>`
+
+**Given** a temp directory with a `bmad-bot.yaml` missing a required field (e.g., `polling_interval_secs: 0`)
+**When** the integration test runs the full load → validate pipeline
+**Then** a descriptive `ConfigError` is returned at the validation step
+**And** the error message identifies the exact field that failed
+
+**Given** a temp directory with valid config but `.env` missing a required API key for the configured LLM provider
+**When** the integration test runs load → validate → secrets-validate pipeline
+**Then** a `ConfigError::MissingSecret` (or equivalent) is returned
+**And** the error identifies which provider key is missing
+
+**Given** a temp directory with a valid config
+**When** `BmadDiscovery::discover()` is called on a directory with a `_bmad/` structure
+**Then** the discovery detects BMAD, finds installed modules, and extracts the version
+**And** calling it on a directory without `_bmad/` returns `bmad_detected: false`
+
+**Given** a valid config is loaded
+**When** `build_http_client()` is called
+**Then** a `ClientWithMiddleware` is returned with retry middleware configured (3 retries, exponential backoff)
+
+**Dependencies:** Story 7.1
+**Story Points:** 2
+
+---
+
+### Story 7.3: Watcher → Dependency Resolution → Story Selection Integration Tests
+
+As a developer,
+I want integration tests that verify the full watcher → deps → eligible story selection chain,
+So that I'm confident the daemon picks the right stories in the right order.
+
+**Acceptance Criteria:**
+
+**Given** a temp directory with a `sprint-status.yaml` containing 5 stories:
+- Story 1-1: `done`
+- Story 1-2: `ready-for-dev`, depends on 1-1
+- Story 1-3: `ready-for-dev`, depends on 1-2
+- Story 2-1: `ready-for-dev`, no deps
+- Story 2-2: `backlog`
+**When** the watcher polls and deps resolution runs
+**Then** eligible stories returned are `[1-2, 2-1]` (1-1 is done, 1-3's dep not met, 2-2 not ready)
+**And** stories are returned in dependency-valid order
+
+**Given** a `sprint-status.yaml` where story 1-1 has status `blocked`
+**When** cascade blocking runs for stories depending on 1-1
+**Then** story 1-2 (depends on 1-1) is marked as cascade-blocked
+**And** story 1-3 (transitive dependency through 1-2) is also cascade-blocked
+
+**Given** a `sprint-status.yaml` where ALL stories are `done`
+**When** the watcher polls
+**Then** an empty eligible list (or `NoEligibleStories` error) is returned
+
+**Given** a `sprint-status.yaml` with circular dependencies (1-1 depends on 1-2, 1-2 depends on 1-1)
+**When** the dependency resolution runs
+**Then** the system handles this gracefully (no infinite loop, both stories skipped or error reported)
+
+**Given** a missing `sprint-status.yaml` file
+**When** the watcher polls
+**Then** a clear error is returned (not a panic)
+
+**Dependencies:** Story 7.1
+**Story Points:** 3
+
+---
+
+### Story 7.4: Pipeline Orchestration Integration Tests
+
+As a developer,
+I want integration tests that verify the full `StoryPipeline.process_story()` flow with mocked dependencies,
+So that I'm confident the orchestration logic correctly chains session → review → PR → notification.
+
+**Acceptance Criteria:**
+
+**Given** a `StoryPipeline` constructed with:
+- MockSessionRunner returning `SessionOutcome::Completed`
+- MockReviewRunner returning `ReviewOutcome::Completed { report: "LGTM" }`
+- MockGitProvider returning `Ok(PrInfo { id: "42", url: "https://...", number: 42 })`
+- MockNotifier capturing notifications
+**When** `process_story()` is called with a valid `StoryInfo`
+**Then** the pipeline returns `PipelineResult` with `status: Completed` and `pr_url: Some("https://...")`
+**And** MockNotifier captured exactly one story notification with the correct story key and PR link
+**And** MockGitProvider received a `create_pr` call with a title matching `feat({story_key}): ...`
+**And** MockGitProvider received an `add_comment` call with the review report as body
+
+**Given** the same setup but MockSessionRunner returns `SessionOutcome::Failed { error: "LLM timeout" }`
+**When** `process_story()` is called
+**Then** the pipeline returns `PipelineResult` with `status: Failed` and `error_detail: Some("LLM timeout")`
+**And** a PR is still created (partial work PR) with title containing `[NEEDS REVIEW]`
+**And** MockNotifier captured a notification with failure status
+
+**Given** the same setup but MockSessionRunner returns `SessionOutcome::Escalated { question: "..." }`
+**When** `process_story()` is called
+**Then** the pipeline returns `PipelineResult` with `status: Blocked`
+**And** a PR is created with the escalation context in the description
+**And** MockNotifier captured a notification with blocked/escalated status
+
+**Given** a `StoryPipeline` with `code_review_enabled: false` in config
+**When** `process_story()` is called and session succeeds
+**Then** MockReviewRunner is NOT called (review skipped)
+**And** PR is created without a review comment
+**And** the pipeline result is still `Completed`
+
+**Given** a `StoryPipeline` where MockGitProvider's `create_pr` returns an error
+**When** `process_story()` is called and session succeeds
+**Then** the pipeline returns `PipelineResult` with `pr_url: None` and an error detail about PR creation failure
+**And** MockNotifier still receives a notification (notification is best-effort, never blocks)
+
+**Dependencies:** Story 7.1
+**Story Points:** 5
+
+---
+
+### Story 7.5: Session WAL Crash Recovery Integration Tests
+
+As a developer,
+I want integration tests that verify crash recovery from WAL files reconstructs a valid session,
+So that I'm confident the daemon can survive crashes and resume work without data loss.
+
+**Acceptance Criteria:**
+
+**Given** a temp directory with a valid `.bmad-bot-session.yaml` WAL file containing:
+- `story_key: "1-2-cli"`, `branch_name: "story/1-2-cli"`, `base_branch: "main"`
+- Chat history with 4 messages (2 user, 2 assistant)
+- `provider: "anthropic"`, `model: "claude-sonnet-4-20250514"`
+**When** `SessionRunner::check_and_recover_wal()` is called
+**Then** it returns `Some(RecoveryInfo)` with the correct story info and state
+**And** `story_info_from_wal()` produces a `StoryInfo` with matching key, branch, and label
+
+**Given** a recovered WAL state
+**When** `SessionState::to_rig_messages()` is called
+**Then** the returned `Vec<Message>` contains all 4 messages in the correct order with correct roles
+
+**Given** a WAL file with corrupted/invalid YAML content
+**When** `check_and_recover_wal()` is called
+**Then** the WAL file is deleted (preventing infinite recovery loops)
+**And** `None` is returned (clean start)
+
+**Given** NO WAL file exists
+**When** `check_and_recover_wal()` is called
+**Then** `None` is returned immediately
+
+**Given** a valid WAL file exists
+**When** `recover_and_process()` runs with mocked session/review/git_provider/notifier
+**Then** the full pipeline executes for the recovered story
+**And** the WAL file is deleted after processing (regardless of success or failure)
+
+**Given** a WAL file exists AND new eligible stories are found in sprint-status
+**When** the daemon startup sequence runs
+**Then** crash recovery is processed FIRST, before any new stories are polled
+
+**Dependencies:** Story 7.1
+**Story Points:** 3
+
+---
+
+### Story 7.6: Git Provider & PR Creation Integration Tests
+
+As a developer,
+I want integration tests that verify PR creation, commenting, and description building work correctly,
+So that I'm confident the daemon produces well-formed PRs on both GitHub and GitLab.
+
+**Acceptance Criteria:**
+
+**Given** a `GitProviderConfig` with `provider: "github"`
+**When** `create_provider()` is called with a valid token
+**Then** a `Box<dyn GitProvider>` is returned containing a `GitHubProvider`
+
+**Given** a `GitProviderConfig` with `provider: "gitlab"`
+**When** `create_provider()` is called with a valid token
+**Then** a `Box<dyn GitProvider>` is returned containing a `GitLabProvider`
+
+**Given** a `GitProviderConfig` with `provider: "bitbucket"` (unsupported)
+**When** `create_provider()` is called
+**Then** a `GitProviderError::UnsupportedProvider` error is returned
+
+**Given** a `GitLabProvider` constructed with an empty token
+**When** `new()` is called
+**Then** `GitProviderError::AuthenticationFailed` is returned
+
+**Given** a successful story with supervisor decisions
+**When** `build_pr_description()` is called with `PrDescriptionParams` including decisions text
+**Then** the generated description contains:
+- Story key and title in the header
+- Outcome summary
+- A "Supervisor Decisions" section with the decisions content
+**And** `build_pr_title()` returns `feat({story_key}): {title}`
+
+**Given** a failed story
+**When** `build_pr_description()` is called with failure details
+**Then** the description contains a "⚠️ Failure Details" section
+**And** `build_pr_title()` returns `wip({story_key}): {title} [NEEDS REVIEW]`
+
+**Dependencies:** Story 7.1
+**Story Points:** 2
+
+---
+
+### Story 7.7: Notification Flow Integration Tests
+
+As a developer,
+I want integration tests that verify notification construction and delivery logic,
+So that I'm confident the daemon sends correct, well-formatted notifications.
+
+**Acceptance Criteria:**
+
+**Given** a `TelegramNotifier` constructed with a valid config and bot token
+**When** `notify_story()` is called with a `StoryNotification` (completed, with PR link)
+**Then** the formatted message contains the story ID, "completed" status, and the PR URL
+
+**Given** a `NotificationConfig` with `telegram.enabled: false`
+**When** `create_notifier()` is called
+**Then** a `NoopNotifier` is returned (not a `TelegramNotifier`)
+**And** calling `notify_story()` on the noop notifier succeeds silently
+
+**Given** a `NotificationConfig` with `telegram.enabled: true` but no bot token in secrets
+**When** `create_notifier()` is called
+**Then** a `NoopNotifier` is returned as graceful fallback
+**And** a warning is logged (not an error — notifications are non-blocking)
+
+**Given** a list of `PipelineResult` items (2 completed, 1 failed, 1 blocked)
+**When** `build_run_summary()` constructs the `RunSummary`
+**Then** the summary correctly counts: 4 total, 2 completed, 1 failed, 1 blocked
+**And** `notify_run_summary()` on MockNotifier captures a message with all counts
+
+**Dependencies:** Story 7.1
+**Story Points:** 2
+
+---
+
+### Story 7.8: Branch Management & Git Tools Integration Tests
+
+As a developer,
+I want integration tests that verify branch creation, base branch resolution, and git tool operations on real (temp) repositories,
+So that I'm confident the daemon manages git state correctly.
+
+**Acceptance Criteria:**
+
+**Given** a temp git repo with a `main` branch and an initial commit
+**When** `ensure_story_branch("story/1-2-cli", "main")` is called
+**Then** a new branch `story/1-2-cli` is created from `main`
+**And** the repo HEAD is on `story/1-2-cli`
+
+**Given** a temp git repo where branch `story/1-2-cli` already exists
+**When** `ensure_story_branch("story/1-2-cli", "main")` is called again
+**Then** the existing branch is checked out (not duplicated)
+**And** no error is returned
+
+**Given** a `StoryInfo` with dependencies `["1-1-scaffolding"]`
+**And** a temp git repo with branches `main` and `story/1-1-scaffolding`
+**When** `determine_base_branch()` is called
+**Then** it returns `"story/1-1-scaffolding"` (last dependency's branch)
+
+**Given** a `StoryInfo` with no dependencies
+**When** `determine_base_branch()` is called
+**Then** it returns the default branch (`"main"`)
+
+**Given** a temp git repo with uncommitted changes
+**When** `preserve_partial_work()` is called
+**Then** all changes are staged and committed with a descriptive message containing the story key
+**And** the commit exists in the repo's log
+
+**Dependencies:** Story 7.1
+**Story Points:** 3
+
+---
+
+### Story 7.9: CLI Lifecycle Integration Tests
+
+As a developer,
+I want integration tests that verify the CLI commands interact correctly with daemon state,
+So that I'm confident the user experience of init → start → status → logs → stop is coherent.
+
+**Acceptance Criteria:**
+
+**Given** a temp directory with no daemon state file
+**When** `DaemonState::read()` is called
+**Then** `Ok(None)` is returned
+
+**Given** a `DaemonState::new_running()` is created and written to a temp state file
+**When** `DaemonState::read()` is called on that file
+**Then** the state is deserialized correctly with matching PID, started_at, and status "running"
+
+**Given** a running state is written
+**When** `touch()` is called, then `record_story_processed()` twice, then state is re-written and re-read
+**Then** `stories_processed == 2` and `last_activity` is updated
+
+**Given** a running state is written
+**When** `mark_stopped()` is called and state is re-written
+**Then** re-reading shows `status: "stopped"`
+
+**Given** a state file exists
+**When** `cleanup()` is called
+**Then** the file is removed
+**And** subsequent `read()` returns `Ok(None)`
+
+**Given** a valid `bmad-bot.yaml` is generated via the init flow helpers
+**When** `BotConfig::load()` is called on the generated file
+**Then** the config loads and validates successfully (round-trip test)
+
+**Dependencies:** Story 7.1
+**Story Points:** 2
+
+---
+
+### Story 7.10: Response Analyzer & Supervisor Rules Integration Tests
+
+As a developer,
+I want integration tests that verify the response analyzer and supervisor rule engine work correctly together,
+So that I'm confident the chat loop handles all agent response patterns.
+
+**Acceptance Criteria:**
+
+**Given** an agent response containing a completion signal (e.g., "Implementation complete. All acceptance criteria met.")
+**When** `ResponseAnalyzer::analyze()` processes it
+**Then** it returns an action indicating session completion
+
+**Given** an agent response asking which story to work on (e.g., "Which story should I implement?")
+**When** `ResponseAnalyzer::analyze()` processes it
+**Then** it returns a `Continue` action with the correct story key to reply with
+
+**Given** an agent response asking for confirmation (e.g., "Should I proceed with the implementation?")
+**When** the supervisor rule engine processes it
+**Then** a deterministic "Yes, proceed." response is returned without LLM fallback
+
+**Given** an agent response with a substantive question that doesn't match any rule
+**When** the supervisor rule engine processes it
+**Then** it falls through to LLM fallback (verified by checking that rules returned no match)
+
+**Given** an agent response indicating step-by-step detection (e.g., "I'll work through this step by step...")
+**When** `ResponseAnalyzer::analyze()` processes it
+**Then** it returns a `Continue` action (agent should keep working)
+
+**Dependencies:** Story 7.1
+**Story Points:** 3
+
+---
+
+### Epic Summary
+
+| Story | Title | Points | Dependencies |
+|-------|-------|--------|--------------|
+| 7.1 | Integration Test Infrastructure & Fixtures | 3 | — |
+| 7.2 | Config → Startup Validation | 2 | 7.1 |
+| 7.3 | Watcher → Deps → Story Selection | 3 | 7.1 |
+| 7.4 | Pipeline Orchestration | 5 | 7.1 |
+| 7.5 | Session WAL Crash Recovery | 3 | 7.1 |
+| 7.6 | Git Provider & PR Creation | 2 | 7.1 |
+| 7.7 | Notification Flow | 2 | 7.1 |
+| 7.8 | Branch Management & Git Tools | 3 | 7.1 |
+| 7.9 | CLI Lifecycle | 2 | 7.1 |
+| 7.10 | Response Analyzer & Supervisor Rules | 3 | 7.1 |
+
+**Total Story Points:** 28
+
+**Execution Strategy:**
+- Story 7.1 must be completed first (all others depend on the test infrastructure)
+- Stories 7.2–7.10 can be parallelized (independent module boundaries)
+- Recommended priority order: 7.4 (pipeline — highest risk) → 7.5 (crash recovery — critical path) → 7.3 (watcher — core loop) → 7.8 (git — data integrity) → 7.10 (analyzer — chat correctness) → 7.6, 7.7, 7.9, 7.2
+
+**CI Integration:**
+- All integration tests run via `cargo test --test integration` (no special env vars needed)
+- Tests must complete in < 30 seconds total (no network calls, no LLM, only temp filesystem + git2)
+- E2E tests (with real LLM) remain separate, gated behind `BMAD_E2E=1`
