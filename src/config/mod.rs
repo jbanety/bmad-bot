@@ -82,11 +82,29 @@ pub struct BotConfig {
     pub notifications: NotificationConfig,
     /// Paths to BMAD project artifacts.
     pub bmad_paths: BmadPathsConfig,
+
+    /// Log output format: `"json"` or `"pretty"`. Default: `"pretty"`.
+    #[serde(default = "default_log_format")]
+    pub log_format: String,
+
+    /// Log level filter: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`. Default: `"info"`.
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 /// Default polling interval — 5 minutes.
 fn default_polling_interval() -> u64 {
     300
+}
+
+/// Default log format — human-readable pretty-print.
+fn default_log_format() -> String {
+    "pretty".to_string()
+}
+
+/// Default log level — info.
+fn default_log_level() -> String {
+    "info".to_string()
 }
 
 /// LLM provider configuration for each agent role.
@@ -196,6 +214,24 @@ impl BotConfig {
             });
         }
 
+        // log_format
+        let valid_log_formats = ["json", "pretty"];
+        if !valid_log_formats.contains(&self.log_format.as_str()) {
+            return Err(ConfigError::InvalidField {
+                field: "log_format".to_string(),
+                reason: format!("must be one of: {}", valid_log_formats.join(", ")),
+            });
+        }
+
+        // log_level
+        let valid_log_levels = ["trace", "debug", "info", "warn", "error"];
+        if !valid_log_levels.contains(&self.log_level.as_str()) {
+            return Err(ConfigError::InvalidField {
+                field: "log_level".to_string(),
+                reason: format!("must be one of: {}", valid_log_levels.join(", ")),
+            });
+        }
+
         // git_provider.provider
         if !VALID_GIT_PROVIDERS.contains(&self.git_provider.provider.as_str()) {
             return Err(ConfigError::InvalidField {
@@ -255,6 +291,49 @@ impl BotConfig {
             });
         }
         Ok(())
+    }
+
+    /// Creates a minimal `BotConfig` for CLI/tracing tests.
+    /// Not public API — only used by `cli::tests`.
+    #[doc(hidden)]
+    pub fn _test_minimal(log_format: &str, log_level: &str) -> Self {
+        Self {
+            polling_interval_secs: 300,
+            git_provider: GitProviderConfig {
+                provider: "github".to_string(),
+                repo_owner: "test".to_string(),
+                repo_name: "test".to_string(),
+                target_branch: "main".to_string(),
+            },
+            llm: LlmConfig {
+                dev: LlmRoleConfig {
+                    provider: "anthropic".to_string(),
+                    model: "test".to_string(),
+                },
+                review: LlmRoleConfig {
+                    provider: "anthropic".to_string(),
+                    model: "test".to_string(),
+                },
+                supervisor: LlmRoleConfig {
+                    provider: "anthropic".to_string(),
+                    model: "test".to_string(),
+                },
+            },
+            notifications: NotificationConfig {
+                telegram: TelegramConfig {
+                    enabled: false,
+                    chat_id: String::new(),
+                },
+            },
+            bmad_paths: BmadPathsConfig {
+                project_root: ".".to_string(),
+                output_folder: "_bmad-output".to_string(),
+                planning_artifacts: "_bmad-output/planning-artifacts".to_string(),
+                implementation_artifacts: "_bmad-output/implementation-artifacts".to_string(),
+            },
+            log_format: log_format.to_string(),
+            log_level: log_level.to_string(),
+        }
     }
 }
 
@@ -412,6 +491,8 @@ mod tests {
     /// Minimal valid YAML that deserializes into a complete [`BotConfig`].
     const VALID_YAML: &str = r#"
 polling_interval_secs: 60
+log_format: pretty
+log_level: info
 git_provider:
   provider: github
   repo_owner: test-org
@@ -436,6 +517,121 @@ bmad_paths:
   planning_artifacts: "_bmad-output/planning-artifacts"
   implementation_artifacts: "_bmad-output/implementation-artifacts"
 "#;
+
+    // -----------------------------------------------------------------------
+    // log_format / log_level tests (Story 1.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_validate_rejects_invalid_log_format() {
+        let mut config = valid_config();
+        config.log_format = "xml".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidField { ref field, .. } if field == "log_format"),
+            "Expected InvalidField for log_format, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_rejects_invalid_log_level() {
+        let mut config = valid_config();
+        config.log_level = "verbose".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidField { ref field, .. } if field == "log_level"),
+            "Expected InvalidField for log_level, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_default_log_format_is_pretty() {
+        // YAML without log_format — should default to "pretty"
+        let yaml = VALID_YAML.replace("log_format: pretty\n", "");
+        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.log_format, "pretty");
+    }
+
+    #[test]
+    fn test_config_default_log_level_is_info() {
+        // YAML without log_level — should default to "info"
+        let yaml = VALID_YAML.replace("log_level: info\n", "");
+        let config: BotConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
+    fn test_config_log_format_json_accepted() {
+        let mut config = valid_config();
+        config.log_format = "json".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_log_level_all_valid_values() {
+        for level in ["trace", "debug", "info", "warn", "error"] {
+            let mut config = valid_config();
+            config.log_level = level.to_string();
+            assert!(
+                config.validate().is_ok(),
+                "Expected log_level '{level}' to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_secrets_validate_for_config_missing_anthropic_key() {
+        let config = valid_config();
+        let secrets = BotSecrets {
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_models_api_key: None,
+            github_token: Some("ghp_test".to_string()),
+            gitlab_token: None,
+            telegram_bot_token: None,
+        };
+        let err = secrets.validate_for_config(&config).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::MissingSecret { ref env_var, .. } if env_var == "ANTHROPIC_API_KEY"),
+            "Expected MissingSecret for ANTHROPIC_API_KEY, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_secrets_validate_for_config_missing_github_token() {
+        let config = valid_config();
+        let secrets = BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: Some("sk-openai-test".to_string()),
+            github_models_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        };
+        let err = secrets.validate_for_config(&config).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::MissingSecret { ref env_var, .. } if env_var == "GITHUB_TOKEN"),
+            "Expected MissingSecret for GITHUB_TOKEN, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_secrets_validate_for_config_telegram_not_required_when_disabled() {
+        let mut config = valid_config();
+        config.notifications.telegram.enabled = false;
+        let secrets = BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: Some("sk-openai-test".to_string()),
+            github_models_api_key: None,
+            github_token: Some("ghp_test".to_string()),
+            gitlab_token: None,
+            telegram_bot_token: None,
+        };
+        assert!(
+            secrets.validate_for_config(&config).is_ok(),
+            "Telegram token should not be required when notifications are disabled"
+        );
+    }
 
     /// Helper — parse YAML string into BotConfig.
     fn config_from_str(yaml: &str) -> Result<BotConfig, ConfigError> {

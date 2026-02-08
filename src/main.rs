@@ -12,20 +12,30 @@ mod tools;
 mod watcher;
 
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
+use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Minimal tracing init — Story 1.2 replaces with config-driven setup
-    // Defaults to info level; override with RUST_LOG env var
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    let cli = cli::Cli::parse();
 
-    tracing::info!("bmad-bot starting");
+    match cli.command {
+        cli::Commands::Start => {
+            cli::run_start(&cli.config).await?;
+        }
+        cli::Commands::Init => {
+            // Minimal tracing for non-start commands — use try_init to avoid panic
+            let _ = tracing_subscriber::fmt::try_init();
+            tracing::warn!("'init' command not yet implemented — see Story 1.3");
+        }
+        cli::Commands::Status => {
+            let _ = tracing_subscriber::fmt::try_init();
+            tracing::warn!("'status' command not yet implemented — see Story 1.4");
+        }
+        cli::Commands::Logs => {
+            let _ = tracing_subscriber::fmt::try_init();
+            tracing::warn!("'logs' command not yet implemented — see Story 1.4");
+        }
+    }
 
-    // Story 1.2 adds CLI dispatch (clap) and daemon lifecycle here
     Ok(())
 }

@@ -5,6 +5,12 @@
 # Default: 300 (5 minutes)
 polling_interval_secs: 300
 
+# Logging configuration
+# log_format: "pretty" for human-readable, "json" for structured (machine-parseable)
+# Override at runtime with RUST_LOG env var for log level.
+log_format: pretty            # "pretty" or "json" (default: pretty)
+log_level: info               # "trace", "debug", "info", "warn", "error" (default: info)
+
 # Git hosting provider for PR creation
 git_provider:
   provider: github            # "github" or "gitlab"
