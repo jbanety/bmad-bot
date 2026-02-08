@@ -1,7 +1,16 @@
-//! Tool registration helpers — exposes git, filesystem, and terminal tools to the rig agent.
+//! Tool modules for the rig agent — git, filesystem, and terminal.
 //!
-//! TODO: Implemented in Story 4.1
+//! This module exposes three tools that the LLM agent uses during autonomous
+//! development sessions:
+//!
+//! - **[`GitTool`]** — Git operations (clone, checkout, branch, add, commit, push, diff, status, log) via `git2`
+//! - **[`FsTool`]** — Filesystem operations (read, write, list, mkdir, delete, exists) with project-root security boundary
+//! - **[`TerminalTool`]** — Shell command execution via `tokio::process` with timeout protection
 
-mod fs;
-mod git;
-mod terminal;
+pub mod fs;
+pub mod git;
+pub mod terminal;
+
+pub use fs::FsTool;
+pub use git::GitTool;
+pub use terminal::TerminalTool;
