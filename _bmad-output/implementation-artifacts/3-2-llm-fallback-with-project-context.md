@@ -1,6 +1,6 @@
 # Story 3.2: LLM Fallback with Project Context
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -24,34 +24,34 @@ So that the developer agent gets expert, context-aware architectural answers whe
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Verify prerequisites from Story 3.1 and Epic 1 (AC: #1–#5)
-  - [ ] 0.1 Verify `src/supervisor/mod.rs` contains full `AskSupervisor` tool implementation with `SupervisorError`, `AskSupervisorArgs`, Tool trait impl
-  - [ ] 0.2 Verify `AskSupervisor::call()` currently returns `Err(SupervisorError::LlmFallbackNotImplemented)` on `NoMatch`
-  - [ ] 0.3 Verify `BotConfig` (from Story 1.1) has `llm: LlmConfig` with `supervisor: LlmRoleConfig { provider, model, api_key_env }` fields
-  - [ ] 0.4 Verify `BotConfig` has path fields: `bmad_agent_path` (or resolvable path to `_bmad/bmm/agents/`), `project_root`
-  - [ ] 0.5 Run `cargo check` to confirm clean baseline
+- [x] Task 0: Verify prerequisites from Story 3.1 and Epic 1 (AC: #1–#5)
+  - [x] 0.1 Verify `src/supervisor/mod.rs` contains full `AskSupervisor` tool implementation with `SupervisorError`, `AskSupervisorArgs`, Tool trait impl
+  - [x] 0.2 Verify `AskSupervisor::call()` currently returns `Err(SupervisorError::LlmFallbackNotImplemented)` on `NoMatch`
+  - [x] 0.3 Verify `BotConfig` (from Story 1.1) has `llm: LlmConfig` with `supervisor: LlmRoleConfig { provider, model, api_key_env }` fields
+  - [x] 0.4 Verify `BotConfig` has path fields: `bmad_agent_path` (or resolvable path to `_bmad/bmm/agents/`), `project_root`
+  - [x] 0.5 Run `cargo check` to confirm clean baseline
 
-- [ ] Task 1: Create minimal `ReadFile` rig tool in `src/supervisor/read_tool.rs` (AC: #1)
-  - [ ] 1.1 Create new file `src/supervisor/read_tool.rs`
-  - [ ] 1.2 Add `pub mod read_tool;` to `src/supervisor/mod.rs`
-  - [ ] 1.3 Define `#[derive(Debug, Serialize, Deserialize)] pub struct ReadFile` — empty struct (no state needed)
-  - [ ] 1.4 Define `#[derive(Debug, Deserialize)] pub struct ReadFileArgs { pub path: String }`
-  - [ ] 1.5 Define `#[derive(Debug, thiserror::Error)] pub enum ReadFileError` with variants: `NotFound { path: String }`, `ReadFailed { path: String, reason: String }`, `PathDenied { path: String, reason: String }`
-  - [ ] 1.6 Implement `Tool for ReadFile` with `NAME = "read_file"`, `Output = String`:
+- [x] Task 1: Create minimal `ReadFile` rig tool in `src/supervisor/read_tool.rs` (AC: #1)
+  - [x] 1.1 Create new file `src/supervisor/read_tool.rs`
+  - [x] 1.2 Add `pub mod read_tool;` to `src/supervisor/mod.rs`
+  - [x] 1.3 Define `#[derive(Debug, Serialize, Deserialize)] pub struct ReadFile` — empty struct (no state needed)
+  - [x] 1.4 Define `#[derive(Debug, Deserialize)] pub struct ReadFileArgs { pub path: String }`
+  - [x] 1.5 Define `#[derive(Debug, thiserror::Error)] pub enum ReadFileError` with variants: `NotFound { path: String }`, `ReadFailed { path: String, reason: String }`, `PathDenied { path: String, reason: String }`
+  - [x] 1.6 Implement `Tool for ReadFile` with `NAME = "read_file"`, `Output = String`:
     - Read the file at the given path via `tokio::fs::read_to_string()`
     - Return the file content as a string
     - Return `ReadFileError::NotFound` if the file does not exist
     - Return `ReadFileError::ReadFailed` on I/O errors
-  - [ ] 1.7 **Security:** Implement a path allowlist or project-root boundary check — the ReadFile tool must ONLY allow reading files under `{project_root}` (prevent directory traversal or reading system files). Return `ReadFileError::PathDenied` for paths outside the boundary
-  - [ ] 1.8 The tool definition description must explain to the LLM: "Read a file from the project. Provide the relative path from the project root."
-  - [ ] 1.9 Log every read via `tracing::debug!(action = "supervisor_read_file", path = %args.path, "Architect reading file")`
-  - [ ] 1.10 Add `/// doc comments` on all public items
-  - [ ] 1.11 **Note:** This is a minimal read-only tool for the supervisor Architect session. The full filesystem tool (read + write) is in Epic 4, Story 4.1. This tool is intentionally separate and limited.
+  - [x] 1.7 **Security:** Implement a path allowlist or project-root boundary check — the ReadFile tool must ONLY allow reading files under `{project_root}` (prevent directory traversal or reading system files). Return `ReadFileError::PathDenied` for paths outside the boundary
+  - [x] 1.8 The tool definition description must explain to the LLM: "Read a file from the project. Provide the relative path from the project root."
+  - [x] 1.9 Log every read via `tracing::debug!(action = "supervisor_read_file", path = %args.path, "Architect reading file")`
+  - [x] 1.10 Add `/// doc comments` on all public items
+  - [x] 1.11 **Note:** This is a minimal read-only tool for the supervisor Architect session. The full filesystem tool (read + write) is in Epic 4, Story 4.1. This tool is intentionally separate and limited.
 
-- [ ] Task 2: Create `ArchitectSession` in `src/supervisor/architect.rs` (AC: #1, #2, #3, #4, #5)
-  - [ ] 2.1 Create new file `src/supervisor/architect.rs`
-  - [ ] 2.2 Add `pub mod architect;` to `src/supervisor/mod.rs`
-  - [ ] 2.3 Define `#[derive(Debug, thiserror::Error)] pub enum ArchitectSessionError` with variants:
+- [x] Task 2: Create `ArchitectSession` in `src/supervisor/architect.rs` (AC: #1, #2, #3, #4, #5)
+  - [x] 2.1 Create new file `src/supervisor/architect.rs`
+  - [x] 2.2 Add `pub mod architect;` to `src/supervisor/mod.rs`
+  - [x] 2.3 Define `#[derive(Debug, thiserror::Error)] pub enum ArchitectSessionError` with variants:
     - `AgentFileNotFound { path: String }` — architect.md not found
     - `AgentFileReadFailed { path: String, reason: String }` — I/O error reading architect.md
     - `ProviderInit { reason: String }` — failed to create rig provider client
@@ -59,20 +59,20 @@ So that the developer agent gets expert, context-aware architectural answers whe
     - `UnsupportedProvider { provider: String }` — provider string not recognized
     - `ChatFailed { turn: u32, reason: String }` — a chat turn failed
     - `NoResponse` — architect returned empty response
-  - [ ] 2.4 Define `pub struct ArchitectSession` — holds the configuration needed to create sessions on demand:
+  - [x] 2.4 Define `pub struct ArchitectSession` — holds the configuration needed to create sessions on demand:
     - `agent_file_content: String` — pre-loaded content of `architect.md`
     - `provider: String` — provider name from config
     - `model: String` — model name from config
     - `api_key: String` — resolved API key value (read from env at construction)
     - `project_root: PathBuf` — for the ReadFile tool boundary
-  - [ ] 2.5 Implement `ArchitectSession::new(config: &BotConfig) -> Result<Self, ArchitectSessionError>`:
+  - [x] 2.5 Implement `ArchitectSession::new(config: &BotConfig) -> Result<Self, ArchitectSessionError>`:
     - Resolve the path to `architect.md` from `{project_root}/_bmad/bmm/agents/architect.md`
     - Read the full file content
     - Read the supervisor LLM config from `config.llm.supervisor` (provider, model, api_key_env)
     - Read the API key from the environment variable named in `api_key_env`
     - Store everything for later session creation
     - **Do NOT create a rig agent yet** — that happens per question in `ask()`
-  - [ ] 2.6 Implement `ArchitectSession::ask(&self, question: &str, context: Option<&str>) -> Result<String, ArchitectSessionError>`:
+  - [x] 2.6 Implement `ArchitectSession::ask(&self, question: &str, context: Option<&str>) -> Result<String, ArchitectSessionError>`:
     - **Step 1:** Create the rig provider client (Anthropic, OpenAI, or GitHub Models) using stored config
     - **Step 2:** Build a rig agent with: preamble = `self.agent_file_content`, tool = `ReadFile` (with project_root boundary)
     - **Step 3:** Drive the multi-turn chat conversation:
@@ -81,73 +81,73 @@ So that the developer agent gets expert, context-aware architectural answers whe
       - Turn 3: Send the question message (see 2.7 below) → **capture and return this response**
     - **Step 4:** Return the Architect's answer from Turn 3
     - On any turn failure, return `ArchitectSessionError::ChatFailed` with the turn number and error
-  - [ ] 2.7 The question message format for Turn 3:
+  - [x] 2.7 The question message format for Turn 3:
     - Without context: `"A developer agent working on this project has the following question: {question}"`
     - With context: `"A developer agent working on this project has the following question: {question}\n\nAdditional context from the developer: {context}"`
-  - [ ] 2.8 Log each turn: `tracing::warn!(action = "supervisor_fallback", turn = turn_num, "Architect session turn")` and log the final answer: `tracing::info!(action = "supervisor_fallback_response", response_len = response.len(), "Architect answered")`
-  - [ ] 2.9 **Provider selection logic:**
+  - [x] 2.8 Log each turn: `tracing::warn!(action = "supervisor_fallback", turn = turn_num, "Architect session turn")` and log the final answer: `tracing::info!(action = "supervisor_fallback_response", response_len = response.len(), "Architect answered")`
+  - [x] 2.9 **Provider selection logic:**
     - `"anthropic"` → `anthropic::Client::new(&self.api_key)` + `client.agent(model)`
     - `"openai"` → `openai::Client::new(&self.api_key)` + `client.agent(model)` (rig reads OPENAI_API_KEY but we use explicit key)
     - `"github-models"` → `openai::Client::new("https://models.inference.ai.azure.com", &self.api_key)` + `client.agent(model)` (OpenAI-compatible API)
     - Any other provider → return `ArchitectSessionError::UnsupportedProvider`
-  - [ ] 2.10 **rig chat API usage:** Use `agent.chat(message, chat_history)` in a loop, accumulating `chat_history` across turns. Each call returns the agent response and updated history. The agent may invoke the ReadFile tool autonomously during any turn (rig handles tool calls internally within `chat()`).
-  - [ ] 2.11 Add `/// doc comments` on all public items
+  - [x] 2.10 **rig chat API usage:** Use `agent.chat(message, chat_history)` in a loop, accumulating `chat_history` across turns. Each call returns the agent response and updated history. The agent may invoke the ReadFile tool autonomously during any turn (rig handles tool calls internally within `chat()`).
+  - [x] 2.11 Add `/// doc comments` on all public items
 
-- [ ] Task 3: Modify `AskSupervisor` struct to hold optional Architect session (AC: #1, #2, #3)
-  - [ ] 3.1 Add field `#[serde(skip)] architect_session: Option<ArchitectSession>` to `AskSupervisor` — must be `#[serde(skip)]` because `ArchitectSession` holds an API key and is not serializable. `AskSupervisor` derives `Serialize + Deserialize` for the rig Tool trait. The field is `Option` to support construction without LLM (for testing and backward compatibility)
-  - [ ] 3.2 Update `AskSupervisor::new()` to remain a simple constructor with just `RuleEngine` (no Architect session) — used in tests and when LLM is not configured
-  - [ ] 3.3 Add `AskSupervisor::with_architect(session: ArchitectSession) -> Self` constructor that initializes with both rule engine and Architect session
-  - [ ] 3.4 Add `AskSupervisor::with_architect_from_config(config: &BotConfig) -> Result<Self, ArchitectSessionError>` convenience constructor that reads config and builds the `ArchitectSession`
-  - [ ] 3.5 `Default` impl remains unchanged (no Architect session, no LLM fallback)
+- [x] Task 3: Modify `AskSupervisor` struct to hold optional Architect session (AC: #1, #2, #3)
+  - [x] 3.1 Add field `#[serde(skip)] architect_session: Option<ArchitectSession>` to `AskSupervisor` — must be `#[serde(skip)]` because `ArchitectSession` holds an API key and is not serializable. `AskSupervisor` derives `Serialize + Deserialize` for the rig Tool trait. The field is `Option` to support construction without LLM (for testing and backward compatibility)
+  - [x] 3.2 Update `AskSupervisor::new()` to remain a simple constructor with just `RuleEngine` (no Architect session) — used in tests and when LLM is not configured
+  - [x] 3.3 Add `AskSupervisor::with_architect(session: ArchitectSession) -> Self` constructor that initializes with both rule engine and Architect session
+  - [x] 3.4 Add `AskSupervisor::with_architect_from_config(config: &BotConfig) -> Result<Self, ArchitectSessionError>` convenience constructor that reads config and builds the `ArchitectSession`
+  - [x] 3.5 `Default` impl remains unchanged (no Architect session, no LLM fallback)
 
-- [ ] Task 4: Update `AskSupervisor::call()` with Architect session fallback logic (AC: #1, #2, #3, #4, #5)
-  - [ ] 4.1 In the `RuleResult::NoMatch` branch, replace `Err(SupervisorError::LlmFallbackNotImplemented)` with:
+- [x] Task 4: Update `AskSupervisor::call()` with Architect session fallback logic (AC: #1, #2, #3, #4, #5)
+  - [x] 4.1 In the `RuleResult::NoMatch` branch, replace `Err(SupervisorError::LlmFallbackNotImplemented)` with:
     - Check if `self.architect_session` is `Some`
     - If `Some`: call `session.ask(&args.question, args.context.as_deref()).await`
     - On success: log `tracing::warn!(action = "supervisor_fallback", question = %args.question, "Architect session answered")` and return `Ok(response)`
     - On error: log `tracing::error!(action = "supervisor_fallback_failed", question = %args.question, error = %e, "Architect session failed — escalating")` and return `Err(SupervisorError::EscalationRequired { question, reason })`
     - If `None` (no Architect configured): return `Err(SupervisorError::LlmFallbackNotImplemented)` (preserves existing behavior for tests)
-  - [ ] 4.2 Ensure the tracing log for rule engine miss still fires before attempting Architect fallback
-  - [ ] 4.3 The full call() pipeline is now: rule engine → Architect session → escalation error
+  - [x] 4.2 Ensure the tracing log for rule engine miss still fires before attempting Architect fallback
+  - [x] 4.3 The full call() pipeline is now: rule engine → Architect session → escalation error
 
-- [ ] Task 5: Add or update `SupervisorError` variants in `src/supervisor/mod.rs` (AC: #4)
-  - [ ] 5.1 Optionally add `ArchitectSessionFailed { question: String, reason: String }` variant — or reuse `EscalationRequired` when the Architect session fails (choose the simpler approach)
-  - [ ] 5.2 Keep the existing `LlmFallbackNotImplemented` variant for when no Architect session is configured
-  - [ ] 5.3 Ensure `SupervisorError` still implements `std::error::Error + Send + Sync`
+- [x] Task 5: Add or update `SupervisorError` variants in `src/supervisor/mod.rs` (AC: #4)
+  - [x] 5.1 Optionally add `ArchitectSessionFailed { question: String, reason: String }` variant — or reuse `EscalationRequired` when the Architect session fails (choose the simpler approach)
+  - [x] 5.2 Keep the existing `LlmFallbackNotImplemented` variant for when no Architect session is configured
+  - [x] 5.3 Ensure `SupervisorError` still implements `std::error::Error + Send + Sync`
 
-- [ ] Task 6: Write unit tests (AC: #1–#5)
-  - [ ] 6.1 **ReadFile tool tests** in `src/supervisor/read_tool.rs`:
+- [x] Task 6: Write unit tests (AC: #1–#5)
+  - [x] 6.1 **ReadFile tool tests** in `src/supervisor/read_tool.rs`:
     - Test reading an existing file returns its content
     - Test reading a non-existent file returns `ReadFileError::NotFound`
     - Test reading a file outside project root returns `ReadFileError::PathDenied`
     - Test tool definition has correct name (`read_file`) and non-empty description
     - Use `tempfile::TempDir` for test fixtures
-  - [ ] 6.2 **ArchitectSession construction tests** in `src/supervisor/architect.rs`:
+  - [x] 6.2 **ArchitectSession construction tests** in `src/supervisor/architect.rs`:
     - Test `ArchitectSession::new()` with missing architect.md returns `AgentFileNotFound`
     - Test `ArchitectSession::new()` with missing API key env var returns `ApiKeyMissing`
     - Test `ArchitectSession::new()` with unsupported provider returns `UnsupportedProvider`
     - Test `ArchitectSessionError` variants display correctly and implement `Send + Sync`
-  - [ ] 6.3 **AskSupervisor integration tests** in `src/supervisor/mod.rs`:
+  - [x] 6.3 **AskSupervisor integration tests** in `src/supervisor/mod.rs`:
     - Test `AskSupervisor::new()` (no Architect) still returns `LlmFallbackNotImplemented` on `NoMatch` (backward compat)
     - Test `AskSupervisor::call()` with matching rule still returns rule engine answer (Architect not invoked)
     - Test `AskSupervisor` serialization/deserialization still works (`architect_session` skipped via `serde(skip)`)
     - All existing Story 3.1 tests must still pass (no regressions)
-  - [ ] 6.4 **Mock-based Architect test strategy:**
+  - [x] 6.4 **Mock-based Architect test strategy:**
     - The `ArchitectSession::ask()` method calls real LLM APIs and cannot be unit-tested without mocking
     - **Recommended approach:** Extract an `AnswerProvider` trait with `async fn ask(question, context) -> Result<String, _>` and have `ArchitectSession` implement it. In tests, create a `MockAnswerProvider` that returns deterministic responses. `AskSupervisor` holds `Option<Box<dyn AnswerProvider>>` instead of `Option<ArchitectSession>` directly
     - This enables testing the full `call()` pipeline (rule engine miss → fallback → answer returned) without real API calls
     - If the trait approach adds too much complexity, test the `ask()` integration path in E2E tests only (`tests/e2e/`, gated behind `BMAD_E2E=1`)
-  - [ ] 6.5 Verify all existing Story 3.1 tests still pass (no regressions)
+  - [x] 6.5 Verify all existing Story 3.1 tests still pass (no regressions)
 
-- [ ] Task 7: Final quality checks
-  - [ ] 7.1 Run `cargo fmt -- --check` and fix any formatting issues
-  - [ ] 7.2 Run `cargo clippy` and fix any warnings
-  - [ ] 7.3 Run `cargo test` and verify all tests pass (including Epic 1, Epic 2, and Story 3.1 tests)
-  - [ ] 7.4 Verify all public items have `///` doc comments
-  - [ ] 7.5 Verify `SupervisorError` still implements `std::error::Error + Send + Sync`
-  - [ ] 7.6 Verify no `unwrap()` or `expect()` in production code
-  - [ ] 7.7 Verify no `println!` or `eprintln!` — tracing only
-  - [ ] 7.8 Verify no API keys or secrets are logged by any tracing statement
+- [x] Task 7: Final quality checks
+  - [x] 7.1 Run `cargo fmt -- --check` and fix any formatting issues
+  - [x] 7.2 Run `cargo clippy` and fix any warnings
+  - [x] 7.3 Run `cargo test` and verify all tests pass (including Epic 1, Epic 2, and Story 3.1 tests)
+  - [x] 7.4 Verify all public items have `///` doc comments
+  - [x] 7.5 Verify `SupervisorError` still implements `std::error::Error + Send + Sync`
+  - [x] 7.6 Verify no `unwrap()` or `expect()` in production code
+  - [x] 7.7 Verify no `println!` or `eprintln!` — tracing only
+  - [x] 7.8 Verify no API keys or secrets are logged by any tracing statement
 
 ## Dev Notes
 
@@ -917,10 +917,42 @@ Add to `Cargo.toml` under `[dev-dependencies]` (if not already present):
 
 ### Agent Model Used
 
-_(filled post-implementation)_
+Claude Opus 4.6 (via Cursor)
 
 ### Debug Log References
 
+- `cargo check` clean (only pre-existing `dead_code` warnings — supervisor module not yet wired to main)
+- `cargo clippy` clean (only `dead_code` warnings, no clippy-specific lints)
+- `cargo fmt -- --check` passes with no changes needed
+- `cargo test` — 234/234 tests pass, 0 failures, 0 regressions
+- Supervisor-specific tests: 66/66 pass (22 in `rules.rs`, 8 in `read_tool.rs`, 17 in `architect.rs`, 19 in `mod.rs`)
+- Verified: no `unwrap()`/`expect()` in production code, no `println!`/`eprintln!`, no secrets in tracing
+
 ### Completion Notes List
 
+- **Task 0:** All prerequisites verified — Story 3.1 implementation in place, `BotConfig` has `llm.supervisor` with `provider`/`model`, `bmad_paths.project_root` available, `cargo check` clean
+- **Task 1:** `ReadFile` rig tool in `src/supervisor/read_tool.rs` — `Tool` trait impl with `NAME = "read_file"`, project-root boundary via `canonicalize()` + `starts_with()`, `ReadFileError` thiserror enum (NotFound/ReadFailed/PathDenied), 8 unit tests
+- **Task 2:** `ArchitectSession` in `src/supervisor/architect.rs` — `ArchitectSessionError` with 7 variants, `AnswerProvider` async trait (via `async-trait` crate for object safety), `ArchitectSession::new()` reads architect.md + resolves API key from env, `ask()` creates fresh rig agent per call with 3-turn conversation (CH → load context → question), provider dispatch via match arms (Anthropic/OpenAI/GitHub Models), `MockAnswerProvider` for testing. 17 unit tests
+- **Task 3:** `AskSupervisor` updated with `#[serde(skip)] answer_provider: Option<Box<dyn AnswerProvider>>` field. New constructors: `with_answer_provider()` and `with_architect_from_config()`. `Default`/`new()` unchanged (no provider)
+- **Task 4:** `call()` pipeline updated: rule engine match → return answer, no match → check `answer_provider` → `Some` → call `provider.ask()` → success returns Ok, failure returns `EscalationRequired` → `None` → returns `LlmFallbackNotImplemented` (backward compat)
+- **Task 5:** Reused `EscalationRequired` variant for Architect session failures (simpler than adding a new variant). `LlmFallbackNotImplemented` retained for no-provider case. `SupervisorError` verified `Send + Sync`
+- **Task 6:** 29 new tests total (8 read_tool + 17 architect + 4 new mod.rs tests). Full mock-based `call()` pipeline testing via `MockAnswerProvider` — covers fallback success, fallback with context, fallback failure → escalation, rule match bypasses architect, serialization skips provider
+- **Task 7:** All quality checks pass — `fmt`, `clippy`, 234/234 tests, doc comments, `Send+Sync`, no unwrap in prod, no println, no secrets logged
+- **Design decision:** Used `AnswerProvider` trait + `Box<dyn AnswerProvider>` instead of `Option<ArchitectSession>` directly — enables full pipeline unit testing without real LLM calls. `async-trait` crate (already in deps) provides object safety for the async `ask()` method
+- **No new dependencies added** — `async-trait` and `tempfile` were already in Cargo.toml
+- **No modules outside scope were modified** — only `src/supervisor/{mod,architect,read_tool}.rs`; `rules.rs` and `decisions.rs` unchanged
+
+### Change Log
+
+- 2026-02-08: Story 3.2 implemented — LLM Fallback with Project Context (all 8 tasks complete)
+
 ### File List
+
+| File | Change |
+|------|--------|
+| `src/supervisor/mod.rs` | **MODIFIED** — Added `pub mod architect;`, `pub mod read_tool;`, `answer_provider: Option<Box<dyn AnswerProvider>>` field with `#[serde(skip)]`, `with_answer_provider()` and `with_architect_from_config()` constructors, updated `call()` with Architect fallback logic, 4 new tests (19 total) |
+| `src/supervisor/read_tool.rs` | **CREATED** — `ReadFile` rig tool (`Tool` trait), `ReadFileArgs`, `ReadFileError`, project-root path boundary via canonicalize, 8 unit tests |
+| `src/supervisor/architect.rs` | **CREATED** — `ArchitectSessionError` (7 variants), `AnswerProvider` trait, `ArchitectSession` struct with `new()` and `ask()`, provider factory (Anthropic/OpenAI/GitHub Models), 3-turn chat conversation driver, `MockAnswerProvider` for testing, 17 unit tests |
+| `src/supervisor/rules.rs` | **NO CHANGE** |
+| `src/supervisor/decisions.rs` | **NO CHANGE** |
+| `_bmad-output/implementation-artifacts/sprint-status.yaml` | Updated `3-2-llm-fallback-with-project-context` status: `ready-for-dev` → `in-progress` → `review` |

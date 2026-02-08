@@ -5,20 +5,27 @@
 //! during dev-story workflow execution.
 //!
 //! **Processing pipeline (three-tier architecture):**
-//! 1. Rule engine (deterministic, free, fast) — matches known patterns (this story)
-//! 2. LLM fallback (context-aware) — loads project docs to answer (Story 3.2)
+//! 1. Rule engine (deterministic, free, fast) — matches known patterns
+//! 2. LLM fallback (context-aware) — BMAD Architect session with project docs
 //! 3. Human escalation — stops agent, notifies human (Story 3.3)
 
+/// BMAD Architect session for supervisor LLM fallback.
+pub mod architect;
 /// Decision logging and traceability types for supervisor decisions.
 pub mod decisions;
+/// Minimal read-only file tool for the supervisor Architect session.
+pub mod read_tool;
 /// Deterministic rule engine for pattern-based question matching.
 pub mod rules;
 
+use architect::{AnswerProvider, ArchitectSession, ArchitectSessionError};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use rules::{RuleEngine, RuleResult};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use crate::config::BotConfig;
 
 /// Errors originating from the supervisor module.
 ///
@@ -48,8 +55,7 @@ pub enum SupervisorError {
     },
 
     /// LLM fallback is not yet implemented.
-    /// Placeholder for Story 3.2 — replaced by actual LLM call.
-    /// For now, returned when no rule matches the question.
+    /// Returned when no Architect session is configured and no rule matches.
     #[error("LLM fallback not implemented — no rule matched the question")]
     LlmFallbackNotImplemented,
 }
@@ -77,7 +83,7 @@ pub struct AskSupervisorArgs {
 ///
 /// **Processing pipeline:**
 /// 1. Rule engine (deterministic, free) — matches known patterns
-/// 2. LLM fallback (Story 3.2) — context-aware answer from project docs
+/// 2. LLM fallback — BMAD Architect session with project docs
 /// 3. Human escalation (Story 3.3) — stops agent, notifies human
 ///
 /// **Architecture Decision 1:** The supervisor is an internal rig tool, not an
@@ -86,14 +92,47 @@ pub struct AskSupervisorArgs {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AskSupervisor {
     rule_engine: RuleEngine,
+    /// Optional LLM fallback provider (Architect session or mock).
+    ///
+    /// Skipped during serialization because the provider holds an API key
+    /// and non-serializable state. When deserialized, this field is `None`.
+    #[serde(skip)]
+    answer_provider: Option<Box<dyn AnswerProvider>>,
 }
 
 impl AskSupervisor {
-    /// Create a new AskSupervisor with the default rule engine.
+    /// Create a new AskSupervisor with the default rule engine and **no** Architect session.
+    ///
+    /// Used in tests and when LLM fallback is not configured. On `NoMatch`,
+    /// returns `SupervisorError::LlmFallbackNotImplemented`.
     pub fn new() -> Self {
         Self {
             rule_engine: RuleEngine::new(),
+            answer_provider: None,
         }
+    }
+
+    /// Create an AskSupervisor with an explicit [`AnswerProvider`].
+    ///
+    /// Used in tests (with `MockAnswerProvider`) and when you have a
+    /// pre-built provider instance.
+    pub fn with_answer_provider(provider: Box<dyn AnswerProvider>) -> Self {
+        Self {
+            rule_engine: RuleEngine::new(),
+            answer_provider: Some(provider),
+        }
+    }
+
+    /// Create an AskSupervisor with an [`ArchitectSession`] built from the daemon config.
+    ///
+    /// This reads the `architect.md` agent file, resolves the supervisor LLM
+    /// provider/model/key, and stores everything for on-demand session creation.
+    pub fn with_architect_from_config(config: &BotConfig) -> Result<Self, ArchitectSessionError> {
+        let session = ArchitectSession::new(config)?;
+        Ok(Self {
+            rule_engine: RuleEngine::new(),
+            answer_provider: Some(Box::new(session)),
+        })
     }
 }
 
@@ -169,9 +208,45 @@ impl Tool for AskSupervisor {
                     question = %args.question,
                     "Rule engine miss — no matching pattern found"
                 );
-                // TODO: Story 3.2 — Replace with LLM fallback call
-                // TODO: Story 3.3 — If LLM also fails, escalate to human
-                Err(SupervisorError::LlmFallbackNotImplemented)
+
+                // Step 2: Try Architect session (BMAD agent, costs tokens)
+                match &self.answer_provider {
+                    Some(provider) => {
+                        tracing::warn!(
+                            action = "supervisor_fallback",
+                            question = %args.question,
+                            "Launching Architect session for question"
+                        );
+                        match provider.ask(&args.question, args.context.as_deref()).await {
+                            Ok(response) => {
+                                tracing::info!(
+                                    action = "supervisor_fallback_response",
+                                    question = %args.question,
+                                    response_len = response.len(),
+                                    "Architect session answered successfully"
+                                );
+                                Ok(response)
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    action = "supervisor_fallback_failed",
+                                    question = %args.question,
+                                    error = %e,
+                                    "Architect session failed — escalating"
+                                );
+                                // Step 3: Escalate to human (Story 3.3 refines)
+                                Err(SupervisorError::EscalationRequired {
+                                    question: args.question,
+                                    reason: format!("Architect session failed: {e}"),
+                                })
+                            }
+                        }
+                    }
+                    None => {
+                        // No Architect session configured — old behavior
+                        Err(SupervisorError::LlmFallbackNotImplemented)
+                    }
+                }
             }
         }
     }
@@ -180,6 +255,9 @@ impl Tool for AskSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use architect::MockAnswerProvider;
+
+    // === Story 3.1 tests (backward compatibility) ===
 
     #[tokio::test]
     async fn test_ask_supervisor_returns_answer_for_matching_question() {
@@ -194,7 +272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ask_supervisor_returns_error_for_no_match() {
+    async fn test_ask_supervisor_returns_error_for_no_match_without_architect() {
         let supervisor = AskSupervisor::new();
         let args = AskSupervisorArgs {
             question: "What database schema should I use for the users table?".to_string(),
@@ -317,8 +395,9 @@ mod tests {
     #[test]
     fn test_ask_supervisor_default_trait() {
         let supervisor = AskSupervisor::default();
-        // Default should produce a working supervisor with rules
+        // Default should produce a working supervisor with rules but no architect
         assert!(supervisor.rule_engine.rule_count() > 0);
+        assert!(supervisor.answer_provider.is_none());
     }
 
     #[test]
@@ -337,14 +416,123 @@ mod tests {
         assert_eq!(args.context.unwrap(), "Working on task 3");
     }
 
+    // === Story 3.2 tests — serialization with serde(skip) ===
+
     #[test]
-    fn test_ask_supervisor_serializable() {
+    fn test_ask_supervisor_serialization_skips_answer_provider() {
         let supervisor = AskSupervisor::new();
         let json = serde_json::to_string(&supervisor).expect("Should serialize");
+        assert!(!json.contains("answer_provider"));
         let deserialized: AskSupervisor = serde_json::from_str(&json).expect("Should deserialize");
+        // Deserialized supervisor has no answer provider
+        assert!(deserialized.answer_provider.is_none());
+    }
+
+    #[test]
+    fn test_ask_supervisor_with_mock_serialization_skips_provider() {
+        let mock = MockAnswerProvider {
+            response: "test".to_string(),
+            should_fail: false,
+        };
+        let supervisor = AskSupervisor::with_answer_provider(Box::new(mock));
+        let json = serde_json::to_string(&supervisor).expect("Should serialize");
+        assert!(!json.contains("answer_provider"));
+        assert!(!json.contains("mock"));
+        // Deserialized version loses the provider
+        let deserialized: AskSupervisor = serde_json::from_str(&json).expect("Should deserialize");
+        assert!(deserialized.answer_provider.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ask_supervisor_rule_match_bypasses_architect() {
+        // Even with an Architect session configured, rule engine match
+        // should return immediately without launching a session.
+        let mock = MockAnswerProvider {
+            response: "Should not be called".to_string(),
+            should_fail: false,
+        };
+        let supervisor = AskSupervisor::with_answer_provider(Box::new(mock));
+        let args = AskSupervisorArgs {
+            question: "Should I proceed?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Yes, proceed.");
+    }
+
+    // === Story 3.2 tests — mock Architect fallback ===
+
+    #[tokio::test]
+    async fn test_ask_supervisor_fallback_to_architect_on_no_match() {
+        let mock = MockAnswerProvider {
+            response: "Use JWT with refresh tokens for authentication.".to_string(),
+            should_fail: false,
+        };
+        let supervisor = AskSupervisor::with_answer_provider(Box::new(mock));
+        let args = AskSupervisorArgs {
+            question: "What authentication approach should I use?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
         assert_eq!(
-            deserialized.rule_engine.rule_count(),
-            supervisor.rule_engine.rule_count()
+            result.unwrap(),
+            "Use JWT with refresh tokens for authentication."
         );
+    }
+
+    #[tokio::test]
+    async fn test_ask_supervisor_fallback_with_context() {
+        let mock = MockAnswerProvider {
+            response: "Given the JWT context, use refresh token rotation.".to_string(),
+            should_fail: false,
+        };
+        let supervisor = AskSupervisor::with_answer_provider(Box::new(mock));
+        let args = AskSupervisorArgs {
+            question: "What authentication approach should I use?".to_string(),
+            context: Some("Currently using JWT tokens".to_string()),
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("refresh token rotation"));
+    }
+
+    #[tokio::test]
+    async fn test_ask_supervisor_fallback_failure_escalates() {
+        let mock = MockAnswerProvider {
+            response: "unused".to_string(),
+            should_fail: true,
+        };
+        let supervisor = AskSupervisor::with_answer_provider(Box::new(mock));
+        let args = AskSupervisorArgs {
+            question: "What database schema should I use?".to_string(),
+            context: None,
+        };
+        let result = supervisor.call(args).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SupervisorError::EscalationRequired { question, reason } => {
+                assert_eq!(question, "What database schema should I use?");
+                assert!(reason.contains("Architect session failed"));
+            }
+            other => panic!("Expected EscalationRequired, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_ask_supervisor_with_answer_provider_has_provider() {
+        let mock = MockAnswerProvider {
+            response: "test".to_string(),
+            should_fail: false,
+        };
+        let supervisor = AskSupervisor::with_answer_provider(Box::new(mock));
+        assert!(supervisor.answer_provider.is_some());
+    }
+
+    #[test]
+    fn test_ask_supervisor_new_has_no_provider() {
+        let supervisor = AskSupervisor::new();
+        assert!(supervisor.answer_provider.is_none());
     }
 }
