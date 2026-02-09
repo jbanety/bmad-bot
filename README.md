@@ -75,7 +75,7 @@ BMAD Bot is a Rust daemon that autonomously picks up user stories from a sprint 
 ## Key Features
 
 - **Autonomous Story Implementation** — LLM agents execute the full BMAD `dev-story` workflow with git, filesystem, and terminal tools
-- **Multi-Provider LLM Support** — Anthropic (Claude), OpenAI (GPT), and GitHub Models — configure different providers per role (dev, review, supervisor)
+- **Multi-Provider LLM Support** — Anthropic (Claude), OpenAI (GPT), and GitHub Copilot — configure different providers per role (dev, review, supervisor)
 - **Intelligent Supervisor** — Three-tier question handling: deterministic rule engine → LLM fallback with project context → human escalation
 - **Automated Code Review** — Optional adversarial review by a separate LLM session before PR creation
 - **Dependency Resolution** — Topological sort with cascade blocking — stories are processed in the correct order
@@ -116,7 +116,7 @@ The daemon uses [rig](https://github.com/0xPlaygrounds/rig) as the LLM orchestra
 - **LLM API Key** — At least one of:
   - [Anthropic API Key](https://console.anthropic.com/) (recommended: Claude Sonnet)
   - [OpenAI API Key](https://platform.openai.com/)
-  - [GitHub Models](https://github.com/marketplace/models) access
+  - [GitHub Copilot](https://github.com/marketplace/models) access
 - **Git Provider Token** — One of:
   - [GitHub Personal Access Token](https://github.com/settings/tokens) with `repo` scope
   - [GitLab Personal Access Token](https://gitlab.com/-/user_settings/personal_access_tokens) with `api` scope
@@ -245,7 +245,7 @@ git_provider:
   target_branch: main
 
 # LLM providers — one provider+model per role
-# Supported: "anthropic", "openai", "github-models"
+# Supported: "anthropic", "openai", "github-copilot"
 llm:
   dev:
     provider: anthropic

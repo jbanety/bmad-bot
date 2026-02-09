@@ -19,7 +19,7 @@ use crate::config::{BotSecrets, LlmRoleConfig};
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     /// The configured LLM provider is not supported.
-    #[error("Unsupported LLM provider: '{provider}'. Supported: anthropic, openai, github-models")]
+    #[error("Unsupported LLM provider: '{provider}'. Supported: anthropic, openai, github-copilot")]
     UnsupportedProvider {
         /// The unsupported provider name from config.
         provider: String,
@@ -52,12 +52,15 @@ pub enum ProviderError {
 /// # Supported providers
 /// - `"anthropic"` → `ANTHROPIC_API_KEY`
 /// - `"openai"` → `OPENAI_API_KEY`
-/// - `"github-models"` → `GITHUB_MODELS_API_KEY`
+/// - `"github-copilot"` → `GITHUB_COPILOT_OAUTH_TOKEN`
 pub fn resolve_api_key(provider: &str, secrets: &BotSecrets) -> Result<String, ProviderError> {
     let (key_opt, env_var) = match provider {
         "anthropic" => (&secrets.anthropic_api_key, "ANTHROPIC_API_KEY"),
         "openai" => (&secrets.openai_api_key, "OPENAI_API_KEY"),
-        "github-models" => (&secrets.github_models_api_key, "GITHUB_MODELS_API_KEY"),
+        "github-copilot" => (
+            &secrets.github_copilot_oauth_token,
+            "GITHUB_COPILOT_OAUTH_TOKEN",
+        ),
         other => {
             return Err(ProviderError::UnsupportedProvider {
                 provider: other.to_string(),
@@ -95,7 +98,7 @@ pub fn create_completion_model(
 ) -> Result<String, ProviderError> {
     // Validate provider is supported
     match role_config.provider.as_str() {
-        "anthropic" | "openai" | "github-models" => {}
+        "anthropic" | "openai" | "github-copilot" => {}
         other => {
             return Err(ProviderError::UnsupportedProvider {
                 provider: other.to_string(),
@@ -117,7 +120,7 @@ mod tests {
         BotSecrets {
             anthropic_api_key: Some("sk-ant-test-key".to_string()),
             openai_api_key: Some("sk-openai-test-key".to_string()),
-            github_models_api_key: Some("gh-models-test-key".to_string()),
+            github_copilot_oauth_token: Some("gh-models-test-key".to_string()),
             github_token: Some("ghp_test".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,
@@ -129,7 +132,7 @@ mod tests {
         BotSecrets {
             anthropic_api_key: None,
             openai_api_key: None,
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,
@@ -202,9 +205,9 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_api_key_github_models() {
+    fn test_resolve_api_key_github_copilot() {
         let secrets = secrets_with_all_keys();
-        let key = resolve_api_key("github-models", &secrets).expect("should resolve");
+        let key = resolve_api_key("github-copilot", &secrets).expect("should resolve");
         assert_eq!(key, "gh-models-test-key");
     }
 
@@ -228,7 +231,7 @@ mod tests {
         let secrets = BotSecrets {
             anthropic_api_key: Some(String::new()),
             openai_api_key: None,
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,
@@ -279,10 +282,10 @@ mod tests {
     }
 
     #[test]
-    fn test_create_completion_model_github_models_returns_key() {
+    fn test_create_completion_model_github_copilot_returns_key() {
         let secrets = secrets_with_all_keys();
         let config = LlmRoleConfig {
-            provider: "github-models".to_string(),
+            provider: "github-copilot".to_string(),
             model: "gpt-4o".to_string(),
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");

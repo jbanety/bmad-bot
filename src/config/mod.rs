@@ -145,7 +145,7 @@ pub struct LlmConfig {
 /// Provider + model pair for a single LLM role.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct LlmRoleConfig {
-    /// One of: `"anthropic"`, `"openai"`, `"github-models"`.
+    /// One of: `"anthropic"`, `"openai"`, `"github-copilot"`.
     pub provider: String,
     /// Model identifier, e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`.
     pub model: String,
@@ -209,7 +209,7 @@ pub struct BmadPathsConfig {
 const VALID_GIT_PROVIDERS: &[&str] = &["github", "gitlab"];
 
 /// Recognised LLM provider identifiers.
-const VALID_LLM_PROVIDERS: &[&str] = &["anthropic", "openai", "github-models"];
+const VALID_LLM_PROVIDERS: &[&str] = &["anthropic", "openai", "github-copilot"];
 
 impl BotConfig {
     /// Loads and deserializes a [`BotConfig`] from a YAML file at `path`.
@@ -382,8 +382,8 @@ pub struct BotSecrets {
     pub anthropic_api_key: Option<String>,
     /// OpenAI API key (`OPENAI_API_KEY`).
     pub openai_api_key: Option<String>,
-    /// GitHub Models API key (`GITHUB_MODELS_API_KEY`).
-    pub github_models_api_key: Option<String>,
+    /// GitHub Copilot API key (`GITHUB_COPILOT_OAUTH_TOKEN`).
+    pub github_copilot_oauth_token: Option<String>,
     /// GitHub personal-access token (`GITHUB_TOKEN`).
     pub github_token: Option<String>,
     /// GitLab personal-access token (`GITLAB_TOKEN`).
@@ -406,7 +406,7 @@ impl BotSecrets {
         Ok(Self {
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
-            github_models_api_key: std::env::var("GITHUB_MODELS_API_KEY").ok(),
+            github_copilot_oauth_token: std::env::var("GITHUB_COPILOT_OAUTH_TOKEN").ok(),
             github_token: std::env::var("GITHUB_TOKEN").ok(),
             gitlab_token: std::env::var("GITLAB_TOKEN").ok(),
             telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").ok(),
@@ -443,15 +443,15 @@ impl BotSecrets {
                         });
                     }
                 }
-                "github-models" => {
+                "github-copilot" => {
                     if self
-                        .github_models_api_key
+                        .github_copilot_oauth_token
                         .as_ref()
                         .is_none_or(|k| k.is_empty())
                     {
                         return Err(ConfigError::MissingSecret {
-                            env_var: "GITHUB_MODELS_API_KEY".to_string(),
-                            purpose: format!("GitHub Models LLM provider (llm.{role_name})"),
+                            env_var: "GITHUB_COPILOT_OAUTH_TOKEN".to_string(),
+                            purpose: format!("GitHub Copilot LLM provider (llm.{role_name})"),
                         });
                     }
                 }
@@ -620,7 +620,7 @@ bmad_paths:
         let secrets = BotSecrets {
             anthropic_api_key: None,
             openai_api_key: None,
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: Some("ghp_test".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,
@@ -638,7 +638,7 @@ bmad_paths:
         let secrets = BotSecrets {
             anthropic_api_key: Some("sk-test".to_string()),
             openai_api_key: Some("sk-openai-test".to_string()),
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,
@@ -657,7 +657,7 @@ bmad_paths:
         let secrets = BotSecrets {
             anthropic_api_key: Some("sk-test".to_string()),
             openai_api_key: Some("sk-openai-test".to_string()),
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: Some("ghp_test".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,
@@ -818,7 +818,7 @@ bmad_paths:
         let secrets = BotSecrets {
             anthropic_api_key: Some("sk-test-key-12345".to_string()),
             openai_api_key: None,
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: Some("ghp-token".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,
@@ -838,7 +838,7 @@ bmad_paths:
         let secrets = BotSecrets {
             anthropic_api_key: None,
             openai_api_key: Some("sk-openai".to_string()),
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: Some("ghp-token".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,
@@ -859,7 +859,7 @@ bmad_paths:
         let secrets = BotSecrets {
             anthropic_api_key: Some("sk-ant".to_string()),
             openai_api_key: Some("sk-oai".to_string()),
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: None, // missing!
             gitlab_token: None,
             telegram_bot_token: None,
@@ -880,7 +880,7 @@ bmad_paths:
         let secrets = BotSecrets {
             anthropic_api_key: Some("sk-ant".to_string()),
             openai_api_key: Some("sk-oai".to_string()),
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: Some("ghp-token".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,
@@ -896,7 +896,7 @@ bmad_paths:
         let secrets = BotSecrets {
             anthropic_api_key: Some("sk-ant".to_string()),
             openai_api_key: Some("sk-oai".to_string()),
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: Some("ghp-token".to_string()),
             gitlab_token: None,
             telegram_bot_token: None, // missing!
@@ -1032,8 +1032,8 @@ bmad_paths:
     }
 
     #[test]
-    fn test_config_github_models_provider_accepted() {
-        let yaml = VALID_YAML.replace("provider: openai", "provider: github-models");
+    fn test_config_github_copilot_provider_accepted() {
+        let yaml = VALID_YAML.replace("provider: openai", "provider: github-copilot");
         let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
         assert!(config.validate().is_ok());
     }

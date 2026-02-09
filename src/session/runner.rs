@@ -12,6 +12,7 @@
 //! match arms on the provider name to construct and drive concrete agent types
 //! (following the established pattern from `supervisor/architect.rs`).
 
+use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
 use crate::session::SessionOutcome;
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
@@ -97,7 +98,7 @@ pub fn story_info_from_wal(state: &SessionState, config: &BotConfig) -> StoryInf
 /// Detect context window / token limit errors from LLM provider error strings.
 ///
 /// Each provider returns different error messages. This function checks for
-/// known patterns across Anthropic, OpenAI, and GitHub Models. The check is
+/// known patterns across Anthropic, OpenAI, and GitHub Copilot. The check is
 /// case-insensitive to handle inconsistent casing across provider SDKs.
 fn is_context_limit_error(error: &str) -> bool {
     let lower = error.to_lowercase();
@@ -130,6 +131,8 @@ pub struct SessionRunner {
     state_file_path: PathBuf,
     /// Stateless response analyzer (constructed once, reused).
     analyzer: ResponseAnalyzer,
+    /// In-memory cache for GitHub Copilot session tokens (persists across stories).
+    copilot_cache: std::sync::Mutex<CopilotTokenCache>,
 }
 
 impl SessionRunner {
@@ -145,7 +148,50 @@ impl SessionRunner {
             secrets,
             state_file_path,
             analyzer: ResponseAnalyzer::new(),
+            copilot_cache: std::sync::Mutex::new(CopilotTokenCache::new()),
         }
+    }
+
+    /// Resolve a Copilot session token and base URL from the OAuth token.
+    ///
+    /// Uses the internal [`CopilotTokenCache`] so that repeated calls within
+    /// the same daemon run reuse a valid cached token. Returns
+    /// `(session_token, base_url)` on success, or a formatted error string.
+    ///
+    /// The `std::sync::Mutex` guard is NOT held across the async exchange call
+    /// to satisfy clippy's `await_holding_lock` lint.
+    async fn resolve_copilot_session(&self, oauth_token: &str) -> Result<(String, String), String> {
+        // Phase 1: check cache under lock, return immediately if valid
+        {
+            let cache = self
+                .copilot_cache
+                .lock()
+                .map_err(|e| format!("Copilot cache lock poisoned: {e}"))?;
+            if let Some(pair) = cache.try_get_cached() {
+                return Ok(pair);
+            }
+        } // MutexGuard dropped here
+
+        // Phase 2: exchange token WITHOUT holding the lock
+        let http_client = ReqwestCopilotHttpClient::new();
+        let resp = http_client
+            .exchange_copilot_token(oauth_token)
+            .await
+            .map_err(|e| format!("Copilot token exchange failed: {e}"))?;
+
+        let base_url = crate::auth::github_copilot::derive_base_url_from_token(&resp.token);
+        let token = resp.token.clone();
+
+        // Phase 3: store result under lock
+        {
+            let mut cache = self
+                .copilot_cache
+                .lock()
+                .map_err(|e| format!("Copilot cache lock poisoned: {e}"))?;
+            cache.store(resp.token, base_url.clone(), resp.expires_at);
+        }
+
+        Ok((token, base_url))
     }
 
     /// Check for an interrupted session WAL file and prepare recovery data.
@@ -394,12 +440,25 @@ impl SessionRunner {
                     }
                 }
             }
-            "github-models" => {
+            "github-copilot" => {
+                // Exchange OAuth token for short-lived Copilot session token
+                let (session_token, base_url) = match self.resolve_copilot_session(&api_key).await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::error!(action = "crash_recovery_copilot_failed", error = %e, "Copilot token exchange failed during recovery");
+                        return SessionOutcome::Failed {
+                            story_key: story_info.story_key.clone(),
+                            error: e,
+                            decisions: decision_log.records(),
+                        };
+                    }
+                };
+
                 match self.build_openai_agent(
                     &story_info,
-                    &api_key,
+                    &session_token,
                     &model_name,
-                    Some("https://models.inference.ai.azure.com"),
+                    Some(&base_url),
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {
@@ -626,12 +685,34 @@ impl SessionRunner {
                     },
                 }
             }
-            "github-models" => {
+            "github-copilot" => {
+                // Exchange OAuth token for short-lived Copilot session token
+                let (session_token, base_url) = match self.resolve_copilot_session(&api_key).await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::error!(
+                            action = "session_failed",
+                            error = %e,
+                            "Copilot token exchange failed"
+                        );
+                        return SessionOutcome::Failed {
+                            story_key: story.story_key.clone(),
+                            error: e,
+                            decisions: decision_log.records(),
+                        };
+                    }
+                };
+
+                tracing::info!(
+                    action = "copilot_token_exchanged",
+                    "Copilot session token obtained"
+                );
+
                 match self.build_openai_agent(
                     story,
-                    &api_key,
+                    &session_token,
                     model,
-                    Some("https://models.inference.ai.azure.com"),
+                    Some(&base_url),
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {
@@ -720,7 +801,7 @@ impl SessionRunner {
         Ok(agent)
     }
 
-    /// Build an OpenAI-compatible agent (also used for GitHub Models with base URL override).
+    /// Build an OpenAI-compatible agent (also used for GitHub Copilot with base URL override).
     fn build_openai_agent(
         &self,
         story: &StoryInfo,
@@ -732,7 +813,7 @@ impl SessionRunner {
     ) -> Result<impl Chat, ProviderError> {
         let preamble = self.build_preamble(story)?;
         let provider_name = if base_url.is_some() {
-            "github-models"
+            "github-copilot"
         } else {
             "openai"
         };
@@ -939,6 +1020,7 @@ impl SessionRunner {
         );
 
         // Attempt summarization — provider-specific because Chat is not object-safe
+        let copilot_cache_ref = &self.copilot_cache;
         let summarize_with_prompt = |prompt: &str,
                                      prov: &str,
                                      mdl: &str,
@@ -970,10 +1052,46 @@ impl SessionRunner {
                         let agent = client.agent(&mdl).preamble(preamble).build();
                         agent.chat(&prompt, vec![]).await.map_err(|e| e.to_string())
                     }
-                    "github-models" => {
+                    "github-copilot" => {
+                        // Check cache first (short lock, no await)
+                        let cached = {
+                            let cache = copilot_cache_ref
+                                .lock()
+                                .map_err(|e| format!("Copilot cache lock poisoned: {e}"))?;
+                            cache.try_get_cached()
+                        };
+
+                        let (sess_tok, base) = if let Some(pair) = cached {
+                            pair
+                        } else {
+                            // Exchange without holding lock
+                            let http_client = ReqwestCopilotHttpClient::new();
+                            let resp =
+                                http_client
+                                    .exchange_copilot_token(&key)
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "Copilot token exchange for summarization failed: {e}"
+                                        )
+                                    })?;
+                            let base_url = crate::auth::github_copilot::derive_base_url_from_token(
+                                &resp.token,
+                            );
+                            let token = resp.token.clone();
+                            // Store under lock
+                            {
+                                let mut cache = copilot_cache_ref
+                                    .lock()
+                                    .map_err(|e| format!("Copilot cache lock poisoned: {e}"))?;
+                                cache.store(resp.token, base_url.clone(), resp.expires_at);
+                            }
+                            (token, base_url)
+                        };
+
                         let client: openai::Client = openai::Client::builder()
-                            .api_key(&key)
-                            .base_url("https://models.inference.ai.azure.com")
+                            .api_key(&sess_tok)
+                            .base_url(&base)
                             .build()
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
@@ -1193,12 +1311,25 @@ impl SessionRunner {
                     Err(outcome) => outcome,
                 }
             }
-            "github-models" => {
+            "github-copilot" => {
+                // Exchange OAuth token for short-lived Copilot session token
+                let (session_token, base_url) = match self.resolve_copilot_session(&api_key).await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::error!(action = "context_limit_copilot_failed", error = %e, "Copilot token exchange failed during recovery");
+                        return SessionOutcome::Failed {
+                            story_key: story.story_key.clone(),
+                            error: e,
+                            decisions: decision_log.records(),
+                        };
+                    }
+                };
+
                 let agent = match self.build_openai_agent(
                     story,
-                    &api_key,
+                    &session_token,
                     model,
-                    Some("https://models.inference.ai.azure.com"),
+                    Some(&base_url),
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {
@@ -1808,7 +1939,7 @@ mod tests {
         BotSecrets {
             anthropic_api_key: Some("sk-test".to_string()),
             openai_api_key: Some("sk-test".to_string()),
-            github_models_api_key: Some("gh-test".to_string()),
+            github_copilot_oauth_token: Some("gh-test".to_string()),
             github_token: Some("ghp-test".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,

@@ -10,6 +10,7 @@
 //!
 //! Each `ask()` call creates an entirely fresh session (no persistence).
 
+use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::BotConfig;
 use async_trait::async_trait;
 use rig::client::CompletionClient;
@@ -58,7 +59,7 @@ pub enum ArchitectSessionError {
 
     /// The configured provider string is not recognised.
     #[error(
-        "Unsupported LLM provider: '{provider}' — expected 'anthropic', 'openai', or 'github-models'"
+        "Unsupported LLM provider: '{provider}' — expected 'anthropic', 'openai', or 'github-copilot'"
     )]
     UnsupportedProvider {
         /// The provider string from config.
@@ -110,7 +111,7 @@ pub trait AnswerProvider: Send + Sync + std::fmt::Debug {
 pub struct ArchitectSession {
     /// Full content of `architect.md` — used as the agent preamble.
     agent_file_content: String,
-    /// Provider name (`"anthropic"`, `"openai"`, `"github-models"`).
+    /// Provider name (`"anthropic"`, `"openai"`, `"github-copilot"`).
     provider: String,
     /// Model identifier (e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`).
     model: String,
@@ -125,7 +126,7 @@ fn env_var_for_provider(provider: &str) -> Result<&'static str, ArchitectSession
     match provider {
         "anthropic" => Ok("ANTHROPIC_API_KEY"),
         "openai" => Ok("OPENAI_API_KEY"),
-        "github-models" => Ok("GITHUB_MODELS_API_KEY"),
+        "github-copilot" => Ok("GITHUB_COPILOT_OAUTH_TOKEN"),
         other => Err(ArchitectSessionError::UnsupportedProvider {
             provider: other.to_string(),
         }),
@@ -317,14 +318,24 @@ impl AnswerProvider for ArchitectSession {
 
                 Self::drive_conversation(&agent, question, context).await
             }
-            "github-models" => {
-                // GitHub Models uses an OpenAI-compatible API at the Azure inference endpoint.
+            "github-copilot" => {
+                // Exchange the long-lived OAuth token for a short-lived Copilot session token
+                // and derive the API base URL from the session token's proxy-ep field.
+                let http_client = ReqwestCopilotHttpClient::new();
+                let mut cache = CopilotTokenCache::new();
+                let (session_token, base_url) = cache
+                    .resolve(&http_client, &self.api_key)
+                    .await
+                    .map_err(|e| ArchitectSessionError::ProviderInit {
+                        reason: format!("Copilot token exchange failed: {e}"),
+                    })?;
+
                 let client: openai::Client = openai::Client::builder()
-                    .api_key(&self.api_key)
-                    .base_url("https://models.inference.ai.azure.com")
+                    .api_key(&session_token)
+                    .base_url(&base_url)
                     .build()
                     .map_err(|e| ArchitectSessionError::ProviderInit {
-                        reason: format!("GitHub Models client init failed: {e}"),
+                        reason: format!("GitHub Copilot client init failed: {e}"),
                     })?;
 
                 let agent = client
@@ -515,8 +526,8 @@ mod tests {
         );
         assert_eq!(env_var_for_provider("openai").unwrap(), "OPENAI_API_KEY");
         assert_eq!(
-            env_var_for_provider("github-models").unwrap(),
-            "GITHUB_MODELS_API_KEY"
+            env_var_for_provider("github-copilot").unwrap(),
+            "GITHUB_COPILOT_OAUTH_TOKEN"
         );
     }
 

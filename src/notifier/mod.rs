@@ -700,7 +700,7 @@ mod tests {
         let secrets = BotSecrets {
             anthropic_api_key: None,
             openai_api_key: None,
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,
@@ -731,7 +731,7 @@ mod tests {
         let secrets = BotSecrets {
             anthropic_api_key: None,
             openai_api_key: None,
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: Some("bot123:ABCDEF".to_string()),

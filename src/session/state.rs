@@ -418,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_state_serializable_yaml_roundtrip() {
         let story = make_test_story();
-        let mut state = SessionState::new(&story, "github-models", "gpt-4o");
+        let mut state = SessionState::new(&story, "github-copilot", "gpt-4o");
         state.add_user_message("Hello");
         state.add_assistant_message("Hi there");
 

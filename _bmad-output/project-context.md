@@ -21,7 +21,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **AI Agent Framework:** rig-core (latest stable)
 - **Serialization:** serde + serde_yaml
 - **Git Operations:** git2 (embedded libgit2, no CLI dependency)
-- **HTTP Client:** reqwest (Telegram API, GitHub Models adapter)
+- **HTTP Client:** reqwest (Telegram API, GitHub Copilot adapter)
 - **Logging:** tracing (structured logging for daemon)
 - **All crates:** latest stable versions, no pinned versions
 
@@ -87,8 +87,8 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 #### Multi-Provider LLM Config
 - Three independent LLM roles: **dev** (Amelia session), **review** (code review), **supervisor** (question answering)
-- Supported providers: Anthropic, OpenAI, GitHub Models
-- GitHub Models uses OpenAI-compatible API — likely a thin adapter or base URL swap in rig
+- Supported providers: Anthropic, OpenAI, GitHub Copilot
+- GitHub Copilot uses OpenAI-compatible API — likely a thin adapter or base URL swap in rig
 - API keys stored in environment variables, never in config files
 
 ### Testing Rules

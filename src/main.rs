@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 #![warn(dead_code)] // FIXME: Change to #![deny(dead_code)] once all modules have real implementations
 
+mod auth;
 mod cli;
 mod config;
 mod git_provider;

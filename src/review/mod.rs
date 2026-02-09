@@ -21,6 +21,7 @@ use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
 use rig::providers::{anthropic, openai};
 
+use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::provider::{ProviderError, resolve_api_key};
@@ -271,10 +272,20 @@ impl ReviewRunner {
                 self.drive_review_session(&agent, story, escalation_slot, decision_log)
                     .await
             }
-            "github-models" => {
+            "github-copilot" => {
+                // Exchange OAuth token for short-lived Copilot session token
+                let http_client = ReqwestCopilotHttpClient::new();
+                let mut cache = CopilotTokenCache::new();
+                let (session_token, base_url) = cache
+                    .resolve(&http_client, &api_key)
+                    .await
+                    .map_err(|e| ReviewError::ProviderInit {
+                        reason: format!("Copilot token exchange failed: {e}"),
+                    })?;
+
                 let client: openai::Client = openai::Client::builder()
-                    .api_key(&api_key)
-                    .base_url("https://models.inference.ai.azure.com")
+                    .api_key(&session_token)
+                    .base_url(&base_url)
                     .build()
                     .map_err(|e| ReviewError::ProviderInit {
                         reason: e.to_string(),
@@ -652,7 +663,7 @@ mod tests {
         let secrets = Arc::new(BotSecrets {
             anthropic_api_key: Some("sk-test".to_string()),
             openai_api_key: None,
-            github_models_api_key: None,
+            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,

@@ -20,7 +20,7 @@ git_provider:
   target_branch: main         # Branch that PRs target (default: main)
 
 # LLM provider configuration — one provider+model per role
-# Supported providers: "anthropic", "openai", "github-models"
+# Supported providers: "anthropic", "openai", "github-copilot"
 # API keys are loaded from .env (see .env.example), never from this file.
 llm:
   dev:
