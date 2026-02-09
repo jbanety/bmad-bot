@@ -60,6 +60,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR30: The user can run `bmad-bot logs` to view structured daemon logs
 - FR31: The daemon can load configuration from a YAML file with secrets separated in a gitignored file
 - FR32: The daemon can auto-discover BMAD version and installed modules from the project repo
+- FR39: The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime
 
 **Error Handling & Resilience**
 - FR33: The daemon can handle LLM provider rate limits with retry and exponential backoff
@@ -174,12 +175,13 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR36: Epic 1 — Validate configuration at startup and report issues
 - FR37: Epic 6 — Detect interrupted session at startup (WAL file) and resume
 - FR38: Epic 6 — Detect context window limit error and bootstrap fresh session with compressed context
+- FR39: Epic 1 — Authenticate with GitHub Copilot via OAuth Device Flow and exchange tokens at runtime
 
 ## Epic List
 
 ### Epic 1: Project Foundation & CLI
-The user can install, configure, launch, and monitor the BMAD Bot daemon. This epic delivers the complete CLI interface (init, start, status, logs), configuration loading with secrets separation, BMAD auto-discovery, config validation, graceful shutdown, and smart git auto-detection during setup. After this epic, the daemon runs, stops cleanly, and the user can observe its state.
-**FRs covered:** FR27, FR28, FR29, FR30, FR31, FR32, FR34, FR36
+The user can install, configure, launch, and monitor the BMAD Bot daemon. This epic delivers the complete CLI interface (init, start, status, logs), configuration loading with secrets separation, BMAD auto-discovery, config validation, graceful shutdown, smart git auto-detection during setup, and GitHub Copilot OAuth Device Flow authentication for zero-friction LLM provider onboarding. After this epic, the daemon runs, stops cleanly, and the user can observe its state.
+**FRs covered:** FR27, FR28, FR29, FR30, FR31, FR32, FR34, FR36, FR39
 
 ### Epic 2: Story Watching & Dependency Management
 The daemon automatically detects stories with ready-for-dev status by polling sprint-status.yaml, resolves dependency order, skips blocked stories, and cascades blocked status to dependents. After this epic, the daemon knows WHAT to work on and in what order.
@@ -351,6 +353,155 @@ So that I can complete the setup faster with fewer manual inputs and zero risk o
 **Given** auto-detection successfully identifies git settings
 **When** the final `bmad-bot.yaml` is generated
 **Then** the generated config contains the correct git_provider, repo_owner, repo_name, and target_branch values identical to what was confirmed by the user
+
+### Story 1.6: GitHub Copilot OAuth Device Flow Authentication
+
+As a developer setting up BMAD Bot,
+I want to authenticate with GitHub Copilot via an OAuth Device Flow when I choose `github-copilot` as my LLM provider,
+So that I can get a token automatically without manually creating a Personal Access Token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime.
+
+**References:**
+- OAuth Device Flow: [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)
+- Implementation reference: [openclaw github-copilot-auth.ts](https://github.com/openclaw/openclaw/blob/main/src/providers/github-copilot-auth.ts), [openclaw github-copilot-token.ts](https://github.com/openclaw/openclaw/blob/main/src/providers/github-copilot-token.ts)
+- Covers: **FR39** (GitHub Copilot OAuth Device Flow authentication)
+
+**Acceptance Criteria:**
+
+---
+
+**Part 1 — Rename `github-models` → `github-copilot` (do this first)**
+
+**Given** all existing code references to `github-models` and `GITHUB_MODELS_API_KEY`
+**When** this story is implemented
+**Then** every occurrence of `github-models` is replaced with `github-copilot` across the following files:
+- `src/cli/mod.rs` — `LLM_PROVIDERS`, `default_model_for_provider`, `generate_env_file`, and all tests referencing `github_models`
+- `src/config/mod.rs` — `VALID_LLM_PROVIDERS`, `BotSecrets.github_models_api_key` → `BotSecrets.github_copilot_oauth_token`, `load()`, `validate_for_config`, and all tests
+- `src/session/provider.rs` — `resolve_api_key` match arm and all tests
+- `src/session/runner.rs` — `run()` match arm for `"github-models"`
+- `src/supervisor/architect.rs` — `env_var_for_provider` match arm and tests
+- `bmad-bot.yaml.example` — provider comments
+- `README.md` — all references to `github-models` provider
+- `_bmad-output/project-context.md` — multi-provider LLM config section and external integration points
+**And** `GITHUB_MODELS_API_KEY` is replaced with `GITHUB_COPILOT_OAUTH_TOKEN` everywhere
+**And** `default_model_for_provider("github-copilot")` returns `"gpt-4o"`
+**And** all existing tests compile and pass with the renamed provider
+
+---
+
+**Part 2 — OAuth Device Flow in `bmad-bot init`**
+
+**Given** the LLM provider list in `bmad-bot init`
+**When** I view the available providers
+**Then** the options are `anthropic`, `openai`, and `github-copilot`
+
+**Given** I select `github-copilot` as an LLM provider for one or more roles during `bmad-bot init`
+**When** all three LLM role selections (dev, review, supervisor) are complete
+**Then** the GitHub Copilot OAuth Device Flow is triggered exactly once, regardless of how many roles use `github-copilot`
+**And** a device code is requested from `https://github.com/login/device/code` with client ID `Iv1.b507a08c87ecfe98` and scope `read:user`
+**And** the terminal displays the verification URL and user code for me to authorize in my browser
+**And** the init flow polls `https://github.com/login/oauth/access_token` for the token with the interval specified by GitHub's response
+
+**Given** no role uses `github-copilot` as its provider
+**When** all three LLM role selections are complete
+**Then** the Device Flow is not triggered at all
+
+**Given** I authorize the device in my browser
+**When** the polling receives a valid access token
+**Then** the OAuth token is stored in memory and pre-filled as `GITHUB_COPILOT_OAUTH_TOKEN=<token>` in the generated `.env` file
+**And** the init flow continues normally with remaining configuration steps (notifications, daemon settings)
+
+**Given** the Device Flow is polling for authorization
+**When** GitHub responds with `slow_down`
+**Then** the polling interval is increased by 2 seconds as per the OAuth spec
+
+**Given** the Device Flow is polling for authorization
+**When** the device code expires (GitHub responds with `expired_token`)
+**Then** an error message is displayed explaining the code expired
+**And** `GITHUB_COPILOT_OAUTH_TOKEN=` is written empty in `.env` with a comment instructing the user to re-run init or obtain a token manually
+**And** the init flow continues without aborting
+
+**Given** the Device Flow is polling for authorization
+**When** I cancel the authorization in the browser (GitHub responds with `access_denied`)
+**Then** an error message is displayed explaining the authorization was denied
+**And** `GITHUB_COPILOT_OAUTH_TOKEN=` is written empty in `.env`
+**And** the init flow continues without aborting
+
+**Given** the terminal is not interactive (no TTY)
+**When** `github-copilot` is configured as a provider
+**Then** the Device Flow is skipped with a warning message
+**And** `GITHUB_COPILOT_OAUTH_TOKEN=` is written empty in `.env` with instructions to obtain the token manually
+
+---
+
+**Part 3 — Runtime Copilot Token Exchange and Caching**
+
+**Given** the daemon starts with `bmad-bot start` and `github-copilot` is configured as a provider
+**When** `BotSecrets` loads secrets from the environment
+**Then** `GITHUB_COPILOT_OAUTH_TOKEN` is loaded
+**And** validation fails with a descriptive error if the token is missing or empty
+
+**Given** a session is about to run with the `github-copilot` provider
+**When** the daemon needs an API token for the LLM client
+**Then** it exchanges the long-lived OAuth token for a short-lived Copilot session token by calling `GET https://api.github.com/copilot_internal/v2/token` with `Authorization: Bearer {oauth_token}`
+**And** the response `{ token: string, expires_at: number }` is parsed and cached in memory
+**And** if the exchange fails (HTTP error, missing fields), the session fails with a descriptive `ProviderError`
+
+**Given** a cached Copilot session token exists in memory
+**When** a new session is about to start
+**Then** the daemon checks whether the cached token is still valid (with a 5-minute safety margin before expiry)
+**And** if valid, the cached token is reused without making a new exchange request
+**And** if expired or within the safety margin, a fresh token is obtained via the exchange endpoint
+
+**Given** a valid Copilot session token has been obtained
+**When** the token contains a `proxy-ep=<host>` field (semicolon-delimited key-value pairs)
+**Then** the base URL is derived by extracting the `proxy-ep` value, stripping the protocol, replacing `proxy.` prefix with `api.`, and prepending `https://`
+**And** if no `proxy-ep` is found, the default base URL `https://api.individual.githubcopilot.com` is used
+
+**Given** the Copilot session token and derived base URL are resolved
+**When** the agent is built
+**Then** it uses the OpenAI-compatible client with the dynamically derived base URL and the Copilot session token (not the OAuth token) as the API key
+
+---
+
+**Part 4 — Module Structure and New Files**
+
+**Given** the new `src/auth/` module
+**When** I inspect the project structure
+**Then** the following files exist:
+- `src/auth/mod.rs` — `pub mod github_copilot;`
+- `src/auth/github_copilot.rs` — Device Flow functions (`request_device_code()`, `poll_for_access_token()`, `run_device_flow()`) and Copilot token exchange functions (`exchange_copilot_token()`, `derive_base_url_from_token()`, `CopilotTokenCache` struct with `resolve()` method)
+- `src/main.rs` — `mod auth;` added
+
+**Given** the auth module depends on HTTP calls
+**When** the module is designed
+**Then** HTTP calls are abstracted behind an `async` trait (e.g. `CopilotHttpClient`) to enable deterministic mocking in unit tests, consistent with the project's existing mock patterns (no external mock crate required)
+
+---
+
+**Part 5 — Unit Tests**
+
+**Given** the `src/auth/github_copilot.rs` module
+**When** I inspect the unit tests
+**Then** the following tests exist with trait-based HTTP mocks (no real network calls):
+
+*Device Flow tests:*
+- `test_request_device_code_success` — mock HTTP 200 with valid JSON, verify parsed fields
+- `test_request_device_code_http_error` — mock HTTP 500, verify error
+- `test_request_device_code_missing_fields` — mock HTTP 200 with incomplete JSON, verify error
+- `test_poll_authorization_pending_then_success` — mock sequential responses (`authorization_pending` × N, then `access_token`), verify final token
+- `test_poll_slow_down_increases_interval` — verify interval increases by 2 seconds on `slow_down` response
+- `test_poll_expired_token_returns_error` — mock `expired_token`, verify error
+- `test_poll_access_denied_returns_error` — mock `access_denied`, verify error
+
+*Token exchange tests:*
+- `test_exchange_copilot_token_success` — mock valid exchange response, verify token and expiry parsed
+- `test_exchange_copilot_token_http_error` — mock HTTP 401/403, verify error
+- `test_exchange_copilot_token_missing_fields` — mock incomplete response, verify error
+- `test_copilot_token_cache_returns_cached_when_valid` — verify no HTTP call when cache is fresh
+- `test_copilot_token_cache_refreshes_when_expired` — verify HTTP call when cache is stale
+- `test_derive_base_url_from_proxy_ep` — verify `proxy.example.com` → `https://api.example.com`
+- `test_derive_base_url_fallback_when_no_proxy_ep` — verify default `https://api.individual.githubcopilot.com`
+- `test_derive_base_url_strips_protocol_from_proxy_ep` — verify `https://proxy.foo.bar` → `https://api.foo.bar`
 
 ---
 

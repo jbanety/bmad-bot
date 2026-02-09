@@ -296,6 +296,7 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 - **FR30:** The user can run `bmad-bot logs` to view structured daemon logs
 - **FR31:** The daemon can load configuration from a YAML file with secrets separated in a gitignored file
 - **FR32:** The daemon can auto-discover BMAD version and installed modules from the project repo
+- **FR39:** The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime
 
 ### Error Handling & Resilience
 

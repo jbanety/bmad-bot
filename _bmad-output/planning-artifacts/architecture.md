@@ -674,7 +674,8 @@ bmad-bot/
 
 | Integration | Module | Protocol | Auth |
 |-------------|--------|----------|------|
-| LLM Providers (Anthropic, OpenAI, GitHub Models) | `session/`, `supervisor/`, `review/` | HTTPS via rig-core | API key from `.env` |
+| LLM Providers (Anthropic, OpenAI) | `session/`, `supervisor/`, `review/` | HTTPS via rig-core | API key from `.env` |
+| LLM Provider (GitHub Copilot) | `session/`, `supervisor/`, `review/`, `auth/` | HTTPS via rig-core + reqwest | OAuth token from `.env` → exchanged at runtime for short-lived Copilot session token via `GET https://api.github.com/copilot_internal/v2/token`; base URL derived dynamically from token `proxy-ep` field; default: `https://api.individual.githubcopilot.com` |
 | GitHub API | `git_provider/github.rs` | HTTPS via octocrab | Token from `.env` |
 | GitLab API | `git_provider/gitlab.rs` | HTTPS via reqwest | Token from `.env` |
 | Telegram API | `notifier/mod.rs` | HTTPS via reqwest | Bot token from `.env` |
