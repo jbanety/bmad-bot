@@ -163,8 +163,13 @@ fn default_model_for_provider(provider: &str) -> &str {
 ///
 /// Uses `RUST_LOG` env var as override if set, otherwise `config.log_level`.
 pub fn init_tracing(config: &BotConfig) -> Result<(), CliError> {
-    let env_filter =
+    let base_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+    let env_filter = base_filter
+        .add_directive("hyper_rustls=off".parse().expect("valid directive"))
+        .add_directive("rustls=off".parse().expect("valid directive"))
+        .add_directive("h2=off".parse().expect("valid directive"))
+        .add_directive("hyper_util=off".parse().expect("valid directive"));
 
     // File appender — always JSON.
     // CRITICAL: Raw File does NOT implement MakeWriter. Wrap in Mutex<File>
