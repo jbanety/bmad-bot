@@ -129,7 +129,7 @@ pub fn copilot_headers() -> http::HeaderMap {
     );
     headers.insert(
         "Copilot-Integration-Id",
-        HeaderValue::from_static("bmad-bot"),
+        HeaderValue::from_static("vscode-chat"),
     );
 
     headers
