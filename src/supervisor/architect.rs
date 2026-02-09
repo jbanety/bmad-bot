@@ -12,6 +12,7 @@
 
 use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::BotConfig;
+use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
 use async_trait::async_trait;
 use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
@@ -218,12 +219,15 @@ impl ArchitectSession {
             turn = 1,
             "Architect session turn — entering CH mode"
         );
+        log_llm_request("supervisor", 1, "CH", chat_history.len());
         let response = agent.chat("CH", chat_history.clone()).await.map_err(|e| {
+            log_llm_error("supervisor", 1, &e);
             ArchitectSessionError::ChatFailed {
                 turn: 1,
                 reason: e.to_string(),
             }
         })?;
+        log_llm_response("supervisor", 1, &response);
         chat_history.push(Message::user("CH"));
         chat_history.push(Message::assistant(&response));
 
@@ -233,13 +237,23 @@ impl ArchitectSession {
             turn = 2,
             "Architect session turn — loading project context"
         );
+        log_llm_request(
+            "supervisor",
+            2,
+            "Load the project context",
+            chat_history.len(),
+        );
         let response = agent
             .chat("Load the project context", chat_history.clone())
             .await
-            .map_err(|e| ArchitectSessionError::ChatFailed {
-                turn: 2,
-                reason: e.to_string(),
+            .map_err(|e| {
+                log_llm_error("supervisor", 2, &e);
+                ArchitectSessionError::ChatFailed {
+                    turn: 2,
+                    reason: e.to_string(),
+                }
             })?;
+        log_llm_response("supervisor", 2, &response);
         chat_history.push(Message::user("Load the project context"));
         chat_history.push(Message::assistant(&response));
 
@@ -251,12 +265,15 @@ impl ArchitectSession {
             question = %question,
             "Architect session turn — asking developer question"
         );
+        log_llm_request("supervisor", 3, &question_msg, chat_history.len());
         let answer = agent.chat(&question_msg, chat_history).await.map_err(|e| {
+            log_llm_error("supervisor", 3, &e);
             ArchitectSessionError::ChatFailed {
                 turn: 3,
                 reason: e.to_string(),
             }
         })?;
+        log_llm_response("supervisor", 3, &answer);
 
         if answer.trim().is_empty() {
             return Err(ArchitectSessionError::NoResponse);

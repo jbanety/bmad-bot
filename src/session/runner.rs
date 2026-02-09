@@ -14,6 +14,9 @@
 
 use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
+use crate::llm_logging::{
+    log_llm_error, log_llm_history, log_llm_history_summary, log_llm_request, log_llm_response,
+};
 use crate::session::SessionOutcome;
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
@@ -1042,7 +1045,13 @@ impl SessionRunner {
                             .build()
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
-                        agent.chat(&prompt, vec![]).await.map_err(|e| e.to_string())
+                        log_llm_request("dev-summarize", 0, &prompt, 0);
+                        let result = agent.chat(&prompt, vec![]).await;
+                        match &result {
+                            Ok(r) => log_llm_response("dev-summarize", 0, r),
+                            Err(e) => log_llm_error("dev-summarize", 0, &e),
+                        }
+                        result.map_err(|e| e.to_string())
                     }
                     "openai" => {
                         let client: openai::Client = openai::Client::builder()
@@ -1050,7 +1059,13 @@ impl SessionRunner {
                             .build()
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
-                        agent.chat(&prompt, vec![]).await.map_err(|e| e.to_string())
+                        log_llm_request("dev-summarize", 0, &prompt, 0);
+                        let result = agent.chat(&prompt, vec![]).await;
+                        match &result {
+                            Ok(r) => log_llm_response("dev-summarize", 0, r),
+                            Err(e) => log_llm_error("dev-summarize", 0, &e),
+                        }
+                        result.map_err(|e| e.to_string())
                     }
                     "github-copilot" => {
                         // Check cache first (short lock, no await)
@@ -1095,7 +1110,13 @@ impl SessionRunner {
                             .build()
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
-                        agent.chat(&prompt, vec![]).await.map_err(|e| e.to_string())
+                        log_llm_request("dev-summarize", 0, &prompt, 0);
+                        let result = agent.chat(&prompt, vec![]).await;
+                        match &result {
+                            Ok(r) => log_llm_response("dev-summarize", 0, r),
+                            Err(e) => log_llm_error("dev-summarize", 0, &e),
+                        }
+                        result.map_err(|e| e.to_string())
                     }
                     other => Err(format!("Unsupported provider for summarization: {other}")),
                 }
@@ -1405,10 +1426,12 @@ impl SessionRunner {
         let mut compressed_history: Vec<ChatMessage> = vec![];
 
         // Turn 1 — Enter chat mode
+        log_llm_request("dev-recovery", 0, "CH", activation_history.len());
         let ch_response = agent
             .chat("CH", activation_history.clone())
             .await
             .map_err(|e| {
+                log_llm_error("dev-recovery", 0, &e);
                 tracing::error!(action = "context_limit_activation_ch_failed", error = %e);
                 SessionOutcome::Failed {
                     story_key: story.story_key.clone(),
@@ -1416,6 +1439,7 @@ impl SessionRunner {
                     decisions: decision_log.records(),
                 }
             })?;
+        log_llm_response("dev-recovery", 0, &ch_response);
         activation_history.push(Message::user("CH"));
         activation_history.push(Message::assistant(&ch_response));
         compressed_history.push(ChatMessage {
@@ -1428,10 +1452,17 @@ impl SessionRunner {
         });
 
         // Turn 2 — Load project context
+        log_llm_request(
+            "dev-recovery",
+            1,
+            "Load the project context",
+            activation_history.len(),
+        );
         let ctx_response = agent
             .chat("Load the project context", activation_history.clone())
             .await
             .map_err(|e| {
+                log_llm_error("dev-recovery", 1, &e);
                 tracing::error!(action = "context_limit_activation_ctx_failed", error = %e);
                 SessionOutcome::Failed {
                     story_key: story.story_key.clone(),
@@ -1439,6 +1470,7 @@ impl SessionRunner {
                     decisions: decision_log.records(),
                 }
             })?;
+        log_llm_response("dev-recovery", 1, &ctx_response);
         activation_history.push(Message::user("Load the project context"));
         activation_history.push(Message::assistant(&ctx_response));
         compressed_history.push(ChatMessage {
@@ -1549,9 +1581,14 @@ impl SessionRunner {
                 state.add_user_message(initial_message);
 
                 let history: Vec<Message> = vec![];
+                log_llm_request("dev-session", 0, initial_message, history.len());
                 let response = match agent.chat(initial_message, history).await {
-                    Ok(r) => r,
+                    Ok(r) => {
+                        log_llm_response("dev-session", 0, &r);
+                        r
+                    }
                     Err(e) => {
+                        log_llm_error("dev-session", 0, &e);
                         tracing::error!(action = "chat_failed", turn = 0, error = %e, "Initial chat failed");
                         let _ = self.handle_failure(story).await;
                         return SessionOutcome::Failed {
@@ -1598,9 +1635,14 @@ impl SessionRunner {
                     state.add_user_message(initial_message);
 
                     let history: Vec<Message> = vec![];
+                    log_llm_request("dev-recovery", 0, initial_message, history.len());
                     let response = match agent.chat(initial_message, history).await {
-                        Ok(r) => r,
+                        Ok(r) => {
+                            log_llm_response("dev-recovery", 0, &r);
+                            r
+                        }
                         Err(e) => {
+                            log_llm_error("dev-recovery", 0, &e);
                             tracing::error!(action = "chat_failed", turn = 0, error = %e, "Initial chat failed during recovery");
                             let _ = self.handle_failure(story).await;
                             return SessionOutcome::Failed {
@@ -1647,9 +1689,19 @@ impl SessionRunner {
                             })
                             .collect();
 
+                        log_llm_request("dev-recovery", turn_offset, &last_user_msg, history.len());
+                        log_llm_history(
+                            "dev-recovery",
+                            turn_offset,
+                            &state.chat_history[..state.chat_history.len() - 1],
+                        );
                         let response = match agent.chat(&last_user_msg, history).await {
-                            Ok(r) => r,
+                            Ok(r) => {
+                                log_llm_response("dev-recovery", turn_offset, &r);
+                                r
+                            }
                             Err(e) => {
+                                log_llm_error("dev-recovery", turn_offset, &e);
                                 tracing::error!(
                                     action = "chat_failed",
                                     error = %e,
@@ -1781,14 +1833,18 @@ impl SessionRunner {
                     state.add_user_message(&reply);
                     let history = state.to_rig_messages();
 
+                    log_llm_request("dev-session", turn, &reply, history.len());
+                    log_llm_history_summary("dev-session", turn, &state.chat_history);
                     match agent.chat(&reply, history).await {
                         Ok(r) => {
+                            log_llm_response("dev-session", turn, &r);
                             retries = 0;
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             current_response = r;
                         }
                         Err(e) => {
+                            log_llm_error("dev-session", turn, &e);
                             let error_str = e.to_string();
 
                             // Check for context limit error BEFORE retry logic —

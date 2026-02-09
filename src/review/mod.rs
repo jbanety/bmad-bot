@@ -23,6 +23,7 @@ use rig::providers::{anthropic, openai};
 
 use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
+use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::provider::{ProviderError, resolve_api_key};
 use crate::supervisor::decisions::DecisionLog;
@@ -392,14 +393,15 @@ impl ReviewRunner {
         // Send initial message "CR"
         let initial_message = "CR";
         let history: Vec<Message> = vec![];
-        let response =
-            agent
-                .chat(initial_message, history)
-                .await
-                .map_err(|e| ReviewError::ChatFailed {
-                    turn: 0,
-                    reason: e.to_string(),
-                })?;
+        log_llm_request("code-review", 0, initial_message, history.len());
+        let response = agent.chat(initial_message, history).await.map_err(|e| {
+            log_llm_error("code-review", 0, &e);
+            ReviewError::ChatFailed {
+                turn: 0,
+                reason: e.to_string(),
+            }
+        })?;
+        log_llm_response("code-review", 0, &response);
 
         tracing::debug!(
             action = "review_chat_turn",
@@ -483,13 +485,16 @@ impl ReviewRunner {
                 })
                 .collect();
 
+            log_llm_request("code-review", turn, &reply, history.len());
             match agent.chat(&reply, history).await {
                 Ok(r) => {
+                    log_llm_response("code-review", turn, &r);
                     retries = 0;
                     chat_history.push((reply, r.clone()));
                     current_response = r;
                 }
                 Err(e) => {
+                    log_llm_error("code-review", turn, &e);
                     retries += 1;
                     tracing::warn!(
                         action = "review_chat_error",
