@@ -18,6 +18,11 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls CryptoProvider before any TLS usage (required by rustls 0.23+)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls CryptoProvider");
+
     let cli = cli::Cli::parse();
 
     match cli.command {

@@ -24,9 +24,9 @@ reqwest-middleware = "0.5"
 reqwest-retry = "0.9"
 async-trait = "0.1"
 regex = "1"
+rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]
 http = "1.4.0"
-rustls = { version = "0.23.36", features = ["ring"] }
 snafu = "0.8.9"
 tempfile = "3"
