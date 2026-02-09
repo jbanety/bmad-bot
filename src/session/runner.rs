@@ -37,6 +37,7 @@ use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
 use rig::message::Text;
 use rig::providers::{anthropic, openai};
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
+use rig::tools::think::ThinkTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -888,11 +889,12 @@ impl SessionRunner {
             .tool(fs)
             .tool(terminal)
             .tool(supervisor)
+            .tool(ThinkTool)
             .build();
 
         tracing::info!(
             action = "agent_built",
-            tools = 4,
+            tools = 5,
             model = %model,
             provider = "anthropic",
             "Rig agent built"
@@ -932,11 +934,12 @@ impl SessionRunner {
             .tool(fs)
             .tool(terminal)
             .tool(supervisor)
+            .tool(ThinkTool)
             .build();
 
         tracing::info!(
             action = "agent_built",
-            tools = 4,
+            tools = 5,
             model = %model,
             provider = "openai",
             "Rig agent built"
@@ -983,11 +986,12 @@ impl SessionRunner {
             .tool(fs)
             .tool(terminal)
             .tool(supervisor)
+            .tool(ThinkTool)
             .build();
 
         tracing::info!(
             action = "agent_built",
-            tools = 4,
+            tools = 5,
             model = %model,
             provider = "github-copilot",
             "Rig agent built (Completions API)"
