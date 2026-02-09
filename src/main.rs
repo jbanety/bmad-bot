@@ -5,6 +5,7 @@ mod auth;
 mod cli;
 mod config;
 mod git_provider;
+mod llm_context;
 mod llm_logging;
 mod notifier;
 mod pipeline;

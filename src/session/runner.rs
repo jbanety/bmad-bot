@@ -14,6 +14,7 @@
 
 use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
+use crate::llm_context::ContextBuilder;
 use crate::llm_logging::{
     log_llm_error, log_llm_history, log_llm_history_summary, log_llm_request, log_llm_response,
 };
@@ -959,24 +960,100 @@ impl SessionRunner {
         Ok(agent)
     }
 
-    /// Build the agent preamble from the BMAD dev agent file with language override.
+    /// Build the agent system prompt with operational instructions.
+    ///
+    /// This mirrors Zed's `system_prompt.hbs` pattern: the system prompt contains
+    /// operational instructions (tool usage, formatting rules, communication style)
+    /// while the agent persona (`dev.md`) is sent as a user message wrapped in
+    /// XML context tags via [`activate_agent()`](Self::activate_agent).
+    ///
+    /// The system prompt provides persistent grounding across all turns.
     fn build_preamble(&self, _story: &StoryInfo) -> Result<String, ProviderError> {
+        Ok(r#"You are an AI agent operating autonomously in a BMAD workflow environment.
+
+## Tools
+You have access to these tools: git, filesystem, terminal, ask_supervisor.
+Use them to read files, explore the project, run commands, and ask the supervisor when you need clarification.
+
+## Communication
+OVERRIDE: communication_language = English
+
+## Rules
+- When the user provides an agent file in <context><files> tags, you MUST fully embody that agent's persona and follow ALL activation instructions exactly as specified.
+- NEVER break character until given an exit command.
+- Execute activation steps in order — load configuration files via tools, then greet and display the menu.
+- Wait for user input after displaying the menu."#.to_string())
+    }
+
+    /// Activate the BMAD agent by sending the agent file as the first user message.
+    ///
+    /// Returns `(rig_history, chat_history)` — the rig `Message` vec for subsequent
+    /// `streaming_chat` calls and the `ChatMessage` vec for WAL state persistence.
+    ///
+    /// The LLM receives the full `dev.md` content as a user message, processes the
+    /// activation steps (loads `config.yaml` via tools, reads the story file, shows
+    /// the greeting and menu), and is then ready to accept commands like `"DS"`.
+    ///
+    /// After this method returns, the caller continues with the existing flow
+    /// (e.g. "DS", "CH", recovery message) — those flows are unchanged.
+    async fn activate_agent<A, M>(
+        &self,
+        agent: &A,
+        label: &str,
+    ) -> Result<(Vec<Message>, Vec<ChatMessage>), String>
+    where
+        A: Chat + StreamingChat<M, M::StreamingResponse>,
+        M: CompletionModel + 'static,
+        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    {
         let agent_path =
             Path::new(&self.config.bmad_paths.project_root).join("_bmad/bmm/agents/dev.md");
 
-        let agent_content =
-            std::fs::read_to_string(&agent_path).map_err(|e| ProviderError::ClientCreation {
-                provider: "preamble".to_string(),
-                reason: format!(
-                    "Failed to read BMAD dev agent file '{}': {e}",
-                    agent_path.display()
-                ),
-            })?;
+        // Build Zed-style XML context message via ContextBuilder helper.
+        // This reads the file, resolves to absolute path, and wraps in
+        // <context><files>...</files></context> — same format Zed uses
+        // for @file inclusions (thread.rs:206-409).
+        let activation_msg = ContextBuilder::new()
+            .add_file_from_disk(&agent_path)
+            .map_err(|e| format!("Failed to build agent activation context: {e}"))?
+            .build();
 
-        // Append language override — the daemon forces English for consistency
-        Ok(format!(
-            "{agent_content}\n\nOVERRIDE: communication_language = English"
-        ))
+        let mut rig_history: Vec<Message> = vec![];
+        let mut chat_history: Vec<ChatMessage> = vec![];
+
+        // Send dev.md wrapped in XML context tags — triggers BMAD activation flow
+        log_llm_request(
+            label,
+            0,
+            "[agent activation: dev.md in context tags]",
+            rig_history.len(),
+        );
+        let response = streaming_chat(agent, activation_msg.as_str(), rig_history.clone())
+            .await
+            .map_err(|e| {
+                log_llm_error(label, 0, &e);
+                format!("Agent activation failed: {e}")
+            })?;
+        log_llm_response(label, 0, &response);
+
+        rig_history.push(Message::user(&activation_msg));
+        rig_history.push(Message::assistant(&response));
+        chat_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: activation_msg,
+        });
+        chat_history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: response,
+        });
+
+        tracing::info!(
+            action = "agent_activation_complete",
+            label = %label,
+            "BMAD agent activated via user message"
+        );
+
+        Ok((rig_history, chat_history))
     }
 
     /// Create the 4 tools for the rig agent: git, filesystem, terminal, ask_supervisor.
@@ -1521,13 +1598,22 @@ impl SessionRunner {
         M: CompletionModel + 'static,
         M::StreamingResponse: Clone + Unpin + GetTokenUsage,
     {
-        // Step 4 — Drive BMAD activation flow (same pattern as Story 3.2)
-        // Track as both Vec<Message> (for rig API) and Vec<ChatMessage> (for compressed state)
-        let mut activation_history: Vec<Message> = vec![];
-        let mut compressed_history: Vec<ChatMessage> = vec![];
+        // Step 4a — Activate agent: send dev.md as user message
+        let (mut activation_history, mut compressed_history) = self
+            .activate_agent(agent, "dev-recovery")
+            .await
+            .map_err(|e| {
+                tracing::error!(action = "context_limit_activation_failed", error = %e);
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Recovery activation failed: {e}"),
+                    decisions: decision_log.records(),
+                }
+            })?;
 
-        // Turn 1 — Enter chat mode
-        log_llm_request("dev-recovery", 0, "CH", activation_history.len());
+        // Step 4b — Enter chat mode (existing flow unchanged)
+        let ch_turn = compressed_history.len() / 2;
+        log_llm_request("dev-recovery", ch_turn, "CH", activation_history.len());
         let ch_response = streaming_chat(agent, "CH", activation_history.clone())
             .await
             .map_err(|e| {
@@ -1539,7 +1625,7 @@ impl SessionRunner {
                     decisions: decision_log.records(),
                 }
             })?;
-        log_llm_response("dev-recovery", 0, &ch_response);
+        log_llm_response("dev-recovery", ch_turn, &ch_response);
         activation_history.push(Message::user("CH"));
         activation_history.push(Message::assistant(&ch_response));
         compressed_history.push(ChatMessage {
@@ -1551,10 +1637,11 @@ impl SessionRunner {
             content: ch_response,
         });
 
-        // Turn 2 — Load project context
+        // Step 4c — Load project context (existing flow unchanged)
+        let ctx_turn = compressed_history.len() / 2;
         log_llm_request(
             "dev-recovery",
-            1,
+            ctx_turn,
             "Load the project context",
             activation_history.len(),
         );
@@ -1565,7 +1652,7 @@ impl SessionRunner {
         )
         .await
         .map_err(|e| {
-            log_llm_error("dev-recovery", 1, &e);
+            log_llm_error("dev-recovery", ctx_turn, &e);
             tracing::error!(action = "context_limit_activation_ctx_failed", error = %e);
             SessionOutcome::Failed {
                 story_key: story.story_key.clone(),
@@ -1573,7 +1660,7 @@ impl SessionRunner {
                 decisions: decision_log.records(),
             }
         })?;
-        log_llm_response("dev-recovery", 1, &ctx_response);
+        log_llm_response("dev-recovery", ctx_turn, &ctx_response);
         activation_history.push(Message::user("Load the project context"));
         activation_history.push(Message::assistant(&ctx_response));
         compressed_history.push(ChatMessage {
@@ -1685,12 +1772,48 @@ impl SessionRunner {
                     };
                 }
 
+                // Activate agent: send dev.md as user message so the LLM
+                // processes activation steps (load config via tools, show menu)
+                let (activation_rig_history, activation_chat_history) = match self
+                    .activate_agent(agent, "dev-session")
+                    .await
+                {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::error!(action = "activation_failed", error = %e, "Agent activation failed");
+                        let _ = self.handle_failure(story).await;
+                        return SessionOutcome::Failed {
+                            story_key: story.story_key.clone(),
+                            error: format!("Agent activation failed: {e}"),
+                            decisions: decision_log.records(),
+                        };
+                    }
+                };
+
+                // Persist activation history in WAL
+                for msg in &activation_chat_history {
+                    if msg.role == "user" {
+                        state.add_user_message(&msg.content);
+                    } else {
+                        state.add_assistant_message(&msg.content);
+                    }
+                }
+                let _ = state.save(&self.state_file_path).await;
+
+                // Now send "DS" — the agent is activated and recognizes the menu command
                 let initial_message = "DS";
                 state.add_user_message(initial_message);
 
-                let history: Vec<Message> = vec![];
-                log_llm_request("dev-session", 0, initial_message, history.len());
-                let response = match streaming_chat(agent, initial_message, history).await {
+                let activation_turn = activation_chat_history.len() / 2;
+                log_llm_request(
+                    "dev-session",
+                    activation_turn,
+                    initial_message,
+                    activation_rig_history.len(),
+                );
+                let response = match streaming_chat(agent, initial_message, activation_rig_history)
+                    .await
+                {
                     Ok(r) => {
                         log_llm_response("dev-session", 0, &r);
                         r
@@ -1739,12 +1862,50 @@ impl SessionRunner {
                         "Empty chat history — sending initial DS"
                     );
 
+                    // Activate agent: send dev.md as user message
+                    let (activation_rig_history, activation_chat_history) = match self
+                        .activate_agent(agent, "dev-recovery")
+                        .await
+                    {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            tracing::error!(action = "activation_failed", error = %e, "Agent activation failed during recovery");
+                            let _ = self.handle_failure(story).await;
+                            return SessionOutcome::Failed {
+                                story_key: story.story_key.clone(),
+                                error: format!("Recovery agent activation failed: {e}"),
+                                decisions: decision_log.records(),
+                            };
+                        }
+                    };
+
+                    // Persist activation history in WAL
+                    for msg in &activation_chat_history {
+                        if msg.role == "user" {
+                            state.add_user_message(&msg.content);
+                        } else {
+                            state.add_assistant_message(&msg.content);
+                        }
+                    }
+
+                    // Now send "DS" — the agent is activated
                     let initial_message = "DS";
                     state.add_user_message(initial_message);
 
-                    let history: Vec<Message> = vec![];
-                    log_llm_request("dev-recovery", 0, initial_message, history.len());
-                    let response = match streaming_chat(agent, initial_message, history).await {
+                    let activation_turn = activation_chat_history.len() / 2;
+                    log_llm_request(
+                        "dev-recovery",
+                        activation_turn,
+                        initial_message,
+                        activation_rig_history.len(),
+                    );
+                    let response = match streaming_chat(
+                        agent,
+                        initial_message,
+                        activation_rig_history,
+                    )
+                    .await
+                    {
                         Ok(r) => {
                             log_llm_response("dev-recovery", 0, &r);
                             r
@@ -2829,8 +2990,20 @@ mod tests {
 
     #[test]
     fn test_compressed_state_contains_activation_turns() {
-        // Simulate the compressed history that drive_activation_and_recover would build
+        // Simulate the compressed history that drive_activation_and_recover would build:
+        // 1. dev.md activation (2 msgs)
+        // 2. CH (2 msgs)
+        // 3. Load the project context (2 msgs)
+        // 4. Recovery message (1 msg)
         let mut compressed_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "--- dev.md agent content ---".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Salut JB! Here is the menu...".to_string(),
+            },
             ChatMessage {
                 role: "user".to_string(),
                 content: "CH".to_string(),
@@ -2853,15 +3026,28 @@ mod tests {
             content: "=== SESSION RECOVERY ===".to_string(),
         });
 
+        // dev.md activation is the first turn
         assert_eq!(compressed_history[0].role, "user");
-        assert_eq!(compressed_history[0].content, "CH");
+        assert!(compressed_history[0].content.contains("dev.md"));
+        // CH is the second turn (after activation)
         assert_eq!(compressed_history[2].role, "user");
-        assert_eq!(compressed_history[2].content, "Load the project context");
+        assert_eq!(compressed_history[2].content, "CH");
+        // Load context is the third turn
+        assert_eq!(compressed_history[4].role, "user");
+        assert_eq!(compressed_history[4].content, "Load the project context");
     }
 
     #[test]
     fn test_compressed_state_last_message_is_recovery() {
         let compressed_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "--- dev.md agent content ---".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Salut JB! Here is the menu...".to_string(),
+            },
             ChatMessage {
                 role: "user".to_string(),
                 content: "CH".to_string(),
@@ -2946,8 +3132,16 @@ mod tests {
 
     #[test]
     fn test_compressed_state_total_messages() {
-        // After activation (4 msgs) + recovery message (1 msg) = 5 messages
+        // After dev.md activation (2 msgs) + CH (2 msgs) + Load context (2 msgs) + recovery message (1 msg) = 7 messages
         let compressed_history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "--- dev.md agent content ---".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Salut JB! Here is the menu...".to_string(),
+            },
             ChatMessage {
                 role: "user".to_string(),
                 content: "CH".to_string(),
@@ -2972,8 +3166,8 @@ mod tests {
 
         assert_eq!(
             compressed_history.len(),
-            5,
-            "Compressed state should have exactly 5 messages: 4 activation + 1 recovery"
+            7,
+            "Compressed state should have exactly 7 messages: 2 dev.md activation + 2 CH + 2 Load context + 1 recovery"
         );
     }
 }
