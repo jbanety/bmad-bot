@@ -25,7 +25,7 @@ use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
-use crate::session::provider::{ProviderError, resolve_api_key};
+use crate::session::provider::{ProviderError, copilot_headers, resolve_api_key};
 use crate::supervisor::decisions::DecisionLog;
 use crate::supervisor::{AskSupervisor, EscalationSlot};
 use crate::tools::{FsTool, GitTool, TerminalTool};
@@ -287,6 +287,7 @@ impl ReviewRunner {
                 let client: openai::Client = openai::Client::builder()
                     .api_key(&session_token)
                     .base_url(&base_url)
+                    .http_headers(copilot_headers())
                     .build()
                     .map_err(|e| ReviewError::ProviderInit {
                         reason: e.to_string(),

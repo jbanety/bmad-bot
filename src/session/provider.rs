@@ -110,6 +110,31 @@ pub fn create_completion_model(
     resolve_api_key(&role_config.provider, secrets)
 }
 
+/// Build an [`http::HeaderMap`] with headers required by the GitHub Copilot API.
+///
+/// The Copilot chat-completions endpoint requires an `Editor-Version` header
+/// for IDE-based authentication tokens. Without it the API returns **400**
+/// `"missing Editor-Version header for IDE auth"`.
+///
+/// Pass the returned map via `.http_headers()` on the rig `openai::Client`
+/// builder **only** when the provider is `github-copilot`.
+pub fn copilot_headers() -> http::HeaderMap {
+    use http::{HeaderMap, HeaderValue};
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Editor-Version", HeaderValue::from_static("bmad-bot/0.1.0"));
+    headers.insert(
+        "Editor-Plugin-Version",
+        HeaderValue::from_static("bmad-bot/0.1.0"),
+    );
+    headers.insert(
+        "Copilot-Integration-Id",
+        HeaderValue::from_static("bmad-bot"),
+    );
+
+    headers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

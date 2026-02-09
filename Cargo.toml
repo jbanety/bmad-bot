@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 dialoguer = "0.12"
 chrono = "0.4"
 octocrab = "0.49"
+http = "1.4.0"
 reqwest = { version = "0.13", features = ["json", "form"] }
 reqwest-middleware = "0.5"
 reqwest-retry = "0.9"
@@ -27,6 +28,5 @@ regex = "1"
 rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]
-http = "1.4.0"
 snafu = "0.8.9"
 tempfile = "3"

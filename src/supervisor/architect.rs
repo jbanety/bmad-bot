@@ -13,6 +13,7 @@
 use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::BotConfig;
 use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
+use crate::session::provider::copilot_headers;
 use async_trait::async_trait;
 use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
@@ -350,6 +351,7 @@ impl AnswerProvider for ArchitectSession {
                 let client: openai::Client = openai::Client::builder()
                     .api_key(&session_token)
                     .base_url(&base_url)
+                    .http_headers(copilot_headers())
                     .build()
                     .map_err(|e| ArchitectSessionError::ProviderInit {
                         reason: format!("GitHub Copilot client init failed: {e}"),

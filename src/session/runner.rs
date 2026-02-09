@@ -825,6 +825,7 @@ impl SessionRunner {
             openai::Client::builder()
                 .api_key(api_key)
                 .base_url(url)
+                .http_headers(super::provider::copilot_headers())
                 .build()
                 .map_err(|e| ProviderError::ClientCreation {
                     provider: provider_name.to_string(),
@@ -1107,6 +1108,7 @@ impl SessionRunner {
                         let client: openai::Client = openai::Client::builder()
                             .api_key(&sess_tok)
                             .base_url(&base)
+                            .http_headers(super::provider::copilot_headers())
                             .build()
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
