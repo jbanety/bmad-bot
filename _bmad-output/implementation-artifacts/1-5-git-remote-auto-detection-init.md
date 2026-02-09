@@ -18,7 +18,7 @@ So that I can complete the setup faster with fewer manual inputs and zero risk o
 
 3. **Given** the auto-detected git settings are displayed **When** I decline them **Then** the init command falls back to the standard manual prompts for git provider, repo owner, repo name, and target branch (existing Story 1.3 behavior)
 
-4. **Given** I am in a directory without a `.git` directory or without any remote configured **When** I run `bmad-bot init` **Then** the init command silently skips auto-detection and falls back to manual prompts without any error message
+4. **Given** I am in a directory without a `.git` directory, without any remote configured, or with a remote whose URL is malformed/unparseable **When** I run `bmad-bot init` **Then** the init command silently skips auto-detection and falls back to manual prompts without any error message
 
 5. **Given** the `origin` remote URL uses SSH format (`git@github.com:owner/repo.git`) **When** auto-detection runs **Then** the provider, owner, and repo name are correctly parsed
 
@@ -30,19 +30,22 @@ So that I can complete the setup faster with fewer manual inputs and zero risk o
 
 9. **Given** auto-detection successfully identifies git settings **When** the final `bmad-bot.yaml` is generated **Then** the generated config contains the correct git_provider, repo_owner, repo_name, and target_branch values identical to what was confirmed by the user
 
+10. **Given** the repository has exactly one remote that is NOT named `origin` **When** auto-detection runs **Then** that single remote is used automatically for auto-detection (same flow as if it were `origin`)
+
 ## Tasks / Subtasks
 
-- [ ] Task 0: Implement git remote detection utility (AC: #1, #4, #5, #6, #7, #8)
-  - [ ] 0.1 Create a `GitRemoteInfo` struct with fields: `provider: Option<String>`, `owner: String`, `repo_name: String`, `default_branch: String`, `remote_name: String`
+- [ ] Task 0: Implement git remote detection utility (AC: #1, #4, #5, #6, #7, #8, #10)
+  - [ ] 0.1 Create a `GitRemoteInfo` struct with fields: `provider: Option<String>`, `host: String`, `owner: String`, `repo_name: String`, `default_branch: String`, `remote_name: String` (see Dev Notes for full struct definition with doc comments)
   - [ ] 0.2 Create `fn detect_git_remote(project_path: &Path) -> Option<GitRemoteInfo>` that opens the repo via `git2::Repository::discover(project_path)`
   - [ ] 0.3 If repo open fails → return `None` (no error, silent fallback)
   - [ ] 0.4 Look for `origin` remote first. If not found, collect all remote names.
-  - [ ] 0.5 If no `origin` and multiple remotes exist → return a `GitDetectionResult::MultipleRemotes(Vec<String>)` variant so the caller can prompt the user to choose
-  - [ ] 0.6 If no remotes at all → return `None`
-  - [ ] 0.7 Parse the remote URL (handle both SSH and HTTPS formats) to extract host, owner, and repo name
-  - [ ] 0.8 Map host to provider: `github.com` → `"github"`, `gitlab.com` → `"gitlab"`, anything else → `None`
-  - [ ] 0.9 Strip `.git` suffix from repo name if present
-  - [ ] 0.10 Detect default branch: use `repo.head()` to get current branch name as default, fallback to `"main"` if HEAD is detached or unborn
+  - [ ] 0.5 If no `origin` and exactly one remote exists → use that single remote automatically (AC #10)
+  - [ ] 0.6 If no `origin` and multiple remotes exist → return a `GitDetectionResult::MultipleRemotes(Vec<String>)` variant so the caller can prompt the user to choose
+  - [ ] 0.7 If no remotes at all → return `None`
+  - [ ] 0.8 Parse the remote URL (handle both SSH and HTTPS formats) to extract host, owner, and repo name. If URL is malformed/unparseable → return `None` (silent fallback, AC #4)
+  - [ ] 0.9 Map host to provider: `github.com` → `"github"`, `gitlab.com` → `"gitlab"`, anything else → `None`
+  - [ ] 0.10 Strip `.git` suffix from repo name if present
+  - [ ] 0.11 Detect default branch: use `repo.head()` to get current branch name as default, fallback to `"main"` if HEAD is detached or unborn
 
 - [ ] Task 1: Implement URL parsing for SSH and HTTPS formats (AC: #5, #6)
   - [ ] 1.1 Create `fn parse_git_remote_url(url: &str) -> Option<(String, String, String)>` returning `(host, owner, repo_name)`
@@ -51,7 +54,7 @@ So that I can complete the setup faster with fewer manual inputs and zero risk o
   - [ ] 1.4 Handle SSH with `ssh://` prefix: `ssh://git@<host>/<owner>/<repo>.git`
   - [ ] 1.5 Handle edge cases: trailing slashes, missing `.git` suffix, port numbers in URL
 
-- [ ] Task 2: Integrate auto-detection into `collect_config_interactively()` (AC: #1, #2, #3, #4, #8)
+- [ ] Task 2: Integrate auto-detection into `collect_config_interactively()` (AC: #1, #2, #3, #4, #8, #10)
   - [ ] 2.1 At the start of the "Git Provider" section, call `detect_git_remote(".")`
   - [ ] 2.2 If `GitDetectionResult::MultipleRemotes` → prompt user to select a remote via `dialoguer::Select`, then re-detect with the chosen remote
   - [ ] 2.3 If detection succeeds → display a summary block:
@@ -69,7 +72,7 @@ So that I can complete the setup faster with fewer manual inputs and zero risk o
   - [ ] 2.6 If user declines → fall through to existing manual prompts (unchanged Story 1.3 behavior)
   - [ ] 2.7 If detection returns `None` → skip auto-detection silently, proceed with manual prompts
 
-- [ ] Task 3: Write unit tests (AC: #1–#9)
+- [ ] Task 3: Write unit tests (AC: #1–#10)
   - [ ] 3.1 Test `parse_git_remote_url` with SSH format `git@github.com:owner/repo.git` → `("github.com", "owner", "repo")`
   - [ ] 3.2 Test `parse_git_remote_url` with HTTPS format `https://github.com/owner/repo.git` → `("github.com", "owner", "repo")`
   - [ ] 3.3 Test `parse_git_remote_url` with SSH `ssh://` prefix format → correct parsing
@@ -83,6 +86,8 @@ So that I can complete the setup faster with fewer manual inputs and zero risk o
   - [ ] 3.11 Test provider mapping: `github.com` → `Some("github")`, `gitlab.com` → `Some("gitlab")`, `other.com` → `None`
   - [ ] 3.12 Test `detect_git_remote` returns `None` when no `.git` directory exists (using a temp dir)
   - [ ] 3.13 Test `detect_git_remote` with a real git2 repo initialized in a temp dir with a configured remote → returns correct `GitRemoteInfo`
+  - [ ] 3.14 Test `detect_git_remote` with a single remote named `upstream` (not `origin`) → auto-detects from that remote without prompting (AC #10)
+  - [ ] 3.15 Test `detect_git_remote` returns `NotAvailable` when remote URL is malformed/unparseable (AC #4)
 
 - [ ] Task 4: Final quality checks
   - [ ] 4.1 Run `cargo fmt -- --check` and fix any formatting issues
