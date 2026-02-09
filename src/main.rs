@@ -24,10 +24,14 @@ async fn main() -> Result<()> {
         cli::Commands::Start => {
             cli::run_start(&cli.config).await?;
         }
-        cli::Commands::Init => {
+        cli::Commands::Init { copilot_login } => {
             // Tracing is global — main.rs owns the subscriber for non-start commands
             let _ = tracing_subscriber::fmt::try_init();
-            cli::run_init(&cli.config).await?;
+            if copilot_login {
+                cli::run_copilot_login().await?;
+            } else {
+                cli::run_init(&cli.config).await?;
+            }
         }
         cli::Commands::Status => {
             let _ = tracing_subscriber::fmt::try_init();
