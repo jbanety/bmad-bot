@@ -17,9 +17,63 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::StreamExt;
+
+/// Maximum tool-call rounds allowed per single prompt in the streaming loop.
+const STREAMING_MAX_TURNS: usize = 100;
+
+/// Send a prompt via streaming and collect the complete text response (review variant).
+///
+/// Same pattern as `session::runner::streaming_chat` but returns a `PromptError`
+/// compatible error type for use in the review chat loop.
+async fn streaming_review_chat<A, M>(
+    agent: &A,
+    prompt: impl Into<Message> + Send,
+    history: Vec<Message>,
+) -> Result<String, rig::completion::PromptError>
+where
+    A: StreamingChat<M, M::StreamingResponse>,
+    M: CompletionModel + 'static,
+    M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+{
+    let mut stream = agent
+        .stream_chat(prompt, history)
+        .multi_turn(STREAMING_MAX_TURNS)
+        .await;
+
+    let mut acc = String::new();
+
+    loop {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
+
+        match chunk {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                Text { text },
+            ))) => {
+                acc.push_str(&text);
+            }
+            Ok(MultiTurnStreamItem::FinalResponse(_)) => {
+                break;
+            }
+            Err(e) => {
+                return Err(rig::completion::PromptError::CompletionError(
+                    rig::completion::CompletionError::ResponseError(e.to_string()),
+                ));
+            }
+            _ => continue,
+        }
+    }
+
+    Ok(acc)
+}
+use rig::agent::{Agent, MultiTurnStreamItem};
 use rig::client::CompletionClient;
-use rig::completion::{Chat, Message};
+use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
+use rig::message::Text;
 use rig::providers::{anthropic, openai};
+use rig::streaming::{StreamedAssistantContent, StreamingChat};
 
 use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
@@ -382,13 +436,18 @@ impl ReviewRunner {
     ///
     /// The `story_reply` parameter for the analyzer uses `story.specs_path` (file path),
     /// NOT the story key, because the CR workflow asks for the story file path.
-    async fn drive_review_session<A: Chat>(
+    async fn drive_review_session<A, M>(
         &self,
         agent: &A,
         story: &StoryInfo,
         escalation_slot: EscalationSlot,
         _decision_log: DecisionLog,
-    ) -> Result<ReviewOutcome, ReviewError> {
+    ) -> Result<ReviewOutcome, ReviewError>
+    where
+        A: Chat + StreamingChat<M, M::StreamingResponse>,
+        M: CompletionModel + 'static,
+        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    {
         // The CR workflow asks "which story file to review" — reply with the file path
         let story_reply = story.specs_path.display().to_string();
 
@@ -396,13 +455,15 @@ impl ReviewRunner {
         let initial_message = "CR";
         let history: Vec<Message> = vec![];
         log_llm_request("code-review", 0, initial_message, history.len());
-        let response = agent.chat(initial_message, history).await.map_err(|e| {
-            log_llm_error("code-review", 0, &e);
-            ReviewError::ChatFailed {
-                turn: 0,
-                reason: e.to_string(),
-            }
-        })?;
+        let response = streaming_review_chat(agent, initial_message, history)
+            .await
+            .map_err(|e| {
+                log_llm_error("code-review", 0, &e);
+                ReviewError::ChatFailed {
+                    turn: 0,
+                    reason: e.to_string(),
+                }
+            })?;
         log_llm_response("code-review", 0, &response);
 
         tracing::debug!(
@@ -488,7 +549,7 @@ impl ReviewRunner {
                 .collect();
 
             log_llm_request("code-review", turn, &reply, history.len());
-            match agent.chat(&reply, history).await {
+            match streaming_review_chat(agent, reply.as_str(), history).await {
                 Ok(r) => {
                     log_llm_response("code-review", turn, &r);
                     retries = 0;

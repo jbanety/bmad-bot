@@ -28,10 +28,14 @@ use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
 use crate::supervisor::{AskSupervisor, EscalationSlot};
 use crate::tools::{FsTool, GitTool, TerminalTool};
 use crate::watcher::StoryInfo;
+use futures::StreamExt;
 use git2::{BranchType, Repository};
+use rig::agent::{Agent, MultiTurnStreamItem};
 use rig::client::CompletionClient;
-use rig::completion::{Chat, Message};
+use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
+use rig::message::Text;
 use rig::providers::{anthropic, openai};
+use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -50,6 +54,64 @@ const RECOVERY_KEEP_LAST_EXCHANGES: usize = 10;
 
 /// Maximum recursive recovery depth — prevents infinite context-limit loops.
 const MAX_RECOVERY_DEPTH: usize = 3;
+
+/// Maximum tool-call rounds allowed per single prompt in the streaming loop.
+///
+/// This limits how many consecutive tool calls rig will execute before requiring
+/// a text response. Set high because the dev agent may chain many reads/writes.
+const STREAMING_MAX_TURNS: usize = 100;
+
+/// Send a prompt via streaming and collect the complete text response.
+///
+/// This is a drop-in replacement for `agent.chat(prompt, history)` that uses
+/// rig's streaming API instead. All providers (Anthropic, OpenAI, GitHub Copilot)
+/// support streaming — and Copilot **requires** it (`stream: false` is rejected).
+///
+/// Tool calls are handled automatically by rig within the stream.
+async fn streaming_chat<A, M>(
+    agent: &A,
+    prompt: impl Into<Message> + Send,
+    history: Vec<Message>,
+) -> Result<String, rig::completion::PromptError>
+where
+    A: StreamingChat<M, M::StreamingResponse>,
+    M: CompletionModel + 'static,
+    M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+{
+    let mut stream = agent
+        .stream_chat(prompt, history)
+        .multi_turn(STREAMING_MAX_TURNS)
+        .await;
+
+    let mut acc = String::new();
+
+    loop {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
+
+        match chunk {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                Text { text },
+            ))) => {
+                acc.push_str(&text);
+            }
+            Ok(MultiTurnStreamItem::FinalResponse(_)) => {
+                // FinalResponse signals the end of the stream.
+                // acc already contains the full accumulated text.
+                break;
+            }
+            Err(e) => {
+                return Err(rig::completion::PromptError::CompletionError(
+                    rig::completion::CompletionError::ResponseError(e.to_string()),
+                ));
+            }
+            _ => continue, // tool call deltas, reasoning, etc. — handled by rig
+        }
+    }
+
+    Ok(acc)
+}
 
 /// Data recovered from a WAL file for crash recovery.
 ///
@@ -767,7 +829,7 @@ impl SessionRunner {
         model: &str,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<impl Chat, ProviderError> {
+    ) -> Result<Agent<anthropic::completion::CompletionModel>, ProviderError> {
         let preamble = self.build_preamble(story)?;
 
         let client: anthropic::Client = anthropic::Client::builder()
@@ -810,7 +872,7 @@ impl SessionRunner {
         model: &str,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<impl Chat, ProviderError> {
+    ) -> Result<Agent<openai::responses_api::ResponsesCompletionModel>, ProviderError> {
         let preamble = self.build_preamble(story)?;
 
         let client: openai::Client =
@@ -859,7 +921,7 @@ impl SessionRunner {
         base_url: &str,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<impl Chat, ProviderError> {
+    ) -> Result<Agent<openai::completion::CompletionModel>, ProviderError> {
         let preamble = self.build_preamble(story)?;
 
         let client: openai::CompletionsClient = openai::Client::builder()
@@ -1079,7 +1141,7 @@ impl SessionRunner {
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
                         log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result = agent.chat(&prompt, vec![]).await;
+                        let result = streaming_chat(&agent, prompt.as_str(), vec![]).await;
                         match &result {
                             Ok(r) => log_llm_response("dev-summarize", 0, r),
                             Err(e) => log_llm_error("dev-summarize", 0, &e),
@@ -1093,7 +1155,7 @@ impl SessionRunner {
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
                         log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result = agent.chat(&prompt, vec![]).await;
+                        let result = streaming_chat(&agent, prompt.as_str(), vec![]).await;
                         match &result {
                             Ok(r) => log_llm_response("dev-summarize", 0, r),
                             Err(e) => log_llm_error("dev-summarize", 0, &e),
@@ -1146,7 +1208,7 @@ impl SessionRunner {
                             .completions_api();
                         let agent = client.agent(&mdl).preamble(preamble).build();
                         log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result = agent.chat(&prompt, vec![]).await;
+                        let result = streaming_chat(&agent, prompt.as_str(), vec![]).await;
                         match &result {
                             Ok(r) => log_llm_response("dev-summarize", 0, r),
                             Err(e) => log_llm_error("dev-summarize", 0, &e),
@@ -1441,7 +1503,7 @@ impl SessionRunner {
     ///
     /// Returns `Ok(SessionOutcome)` on success, `Err(SessionOutcome)` on failure.
     #[allow(clippy::too_many_arguments)]
-    async fn drive_activation_and_recover<A: Chat>(
+    async fn drive_activation_and_recover<A, M>(
         &self,
         agent: &A,
         original_state: &SessionState,
@@ -1453,7 +1515,12 @@ impl SessionRunner {
         decision_log: DecisionLog,
         recovery_message: &str,
         recovery_depth: usize,
-    ) -> Result<SessionOutcome, SessionOutcome> {
+    ) -> Result<SessionOutcome, SessionOutcome>
+    where
+        A: Chat + StreamingChat<M, M::StreamingResponse>,
+        M: CompletionModel + 'static,
+        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    {
         // Step 4 — Drive BMAD activation flow (same pattern as Story 3.2)
         // Track as both Vec<Message> (for rig API) and Vec<ChatMessage> (for compressed state)
         let mut activation_history: Vec<Message> = vec![];
@@ -1461,8 +1528,7 @@ impl SessionRunner {
 
         // Turn 1 — Enter chat mode
         log_llm_request("dev-recovery", 0, "CH", activation_history.len());
-        let ch_response = agent
-            .chat("CH", activation_history.clone())
+        let ch_response = streaming_chat(agent, "CH", activation_history.clone())
             .await
             .map_err(|e| {
                 log_llm_error("dev-recovery", 0, &e);
@@ -1492,18 +1558,21 @@ impl SessionRunner {
             "Load the project context",
             activation_history.len(),
         );
-        let ctx_response = agent
-            .chat("Load the project context", activation_history.clone())
-            .await
-            .map_err(|e| {
-                log_llm_error("dev-recovery", 1, &e);
-                tracing::error!(action = "context_limit_activation_ctx_failed", error = %e);
-                SessionOutcome::Failed {
-                    story_key: story.story_key.clone(),
-                    error: format!("Recovery activation load context failed: {e}"),
-                    decisions: decision_log.records(),
-                }
-            })?;
+        let ctx_response = streaming_chat(
+            agent,
+            "Load the project context",
+            activation_history.clone(),
+        )
+        .await
+        .map_err(|e| {
+            log_llm_error("dev-recovery", 1, &e);
+            tracing::error!(action = "context_limit_activation_ctx_failed", error = %e);
+            SessionOutcome::Failed {
+                story_key: story.story_key.clone(),
+                error: format!("Recovery activation load context failed: {e}"),
+                decisions: decision_log.records(),
+            }
+        })?;
         log_llm_response("dev-recovery", 1, &ctx_response);
         activation_history.push(Message::user("Load the project context"));
         activation_history.push(Message::assistant(&ctx_response));
@@ -1581,7 +1650,7 @@ impl SessionRunner {
     /// The turn counter is offset by `chat_history.len() / 2` to account for
     /// pre-crash turns against `MAX_CHAT_TURNS`.
     #[allow(clippy::too_many_arguments)]
-    async fn run_session<A: Chat>(
+    async fn run_session<A, M>(
         &self,
         agent: &A,
         story: &StoryInfo,
@@ -1591,7 +1660,12 @@ impl SessionRunner {
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
         recovered_state: Option<SessionState>,
-    ) -> SessionOutcome {
+    ) -> SessionOutcome
+    where
+        A: Chat + StreamingChat<M, M::StreamingResponse>,
+        M: CompletionModel + 'static,
+        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    {
         let mut retries: usize = 0;
         const MAX_RETRIES: usize = 3;
 
@@ -1616,7 +1690,7 @@ impl SessionRunner {
 
                 let history: Vec<Message> = vec![];
                 log_llm_request("dev-session", 0, initial_message, history.len());
-                let response = match agent.chat(initial_message, history).await {
+                let response = match streaming_chat(agent, initial_message, history).await {
                     Ok(r) => {
                         log_llm_response("dev-session", 0, &r);
                         r
@@ -1670,7 +1744,7 @@ impl SessionRunner {
 
                     let history: Vec<Message> = vec![];
                     log_llm_request("dev-recovery", 0, initial_message, history.len());
-                    let response = match agent.chat(initial_message, history).await {
+                    let response = match streaming_chat(agent, initial_message, history).await {
                         Ok(r) => {
                             log_llm_response("dev-recovery", 0, &r);
                             r
@@ -1729,26 +1803,27 @@ impl SessionRunner {
                             turn_offset,
                             &state.chat_history[..state.chat_history.len() - 1],
                         );
-                        let response = match agent.chat(&last_user_msg, history).await {
-                            Ok(r) => {
-                                log_llm_response("dev-recovery", turn_offset, &r);
-                                r
-                            }
-                            Err(e) => {
-                                log_llm_error("dev-recovery", turn_offset, &e);
-                                tracing::error!(
-                                    action = "chat_failed",
-                                    error = %e,
-                                    "Re-send of last user message failed during recovery"
-                                );
-                                let _ = self.handle_failure(story).await;
-                                return SessionOutcome::Failed {
-                                    story_key: story.story_key.clone(),
-                                    error: format!("Recovery re-send failed: {e}"),
-                                    decisions: decision_log.records(),
-                                };
-                            }
-                        };
+                        let response =
+                            match streaming_chat(agent, last_user_msg.as_str(), history).await {
+                                Ok(r) => {
+                                    log_llm_response("dev-recovery", turn_offset, &r);
+                                    r
+                                }
+                                Err(e) => {
+                                    log_llm_error("dev-recovery", turn_offset, &e);
+                                    tracing::error!(
+                                        action = "chat_failed",
+                                        error = %e,
+                                        "Re-send of last user message failed during recovery"
+                                    );
+                                    let _ = self.handle_failure(story).await;
+                                    return SessionOutcome::Failed {
+                                        story_key: story.story_key.clone(),
+                                        error: format!("Recovery re-send failed: {e}"),
+                                        decisions: decision_log.records(),
+                                    };
+                                }
+                            };
 
                         state.add_assistant_message(&response);
                         let _ = state.save(&self.state_file_path).await;
@@ -1869,7 +1944,7 @@ impl SessionRunner {
 
                     log_llm_request("dev-session", turn, &reply, history.len());
                     log_llm_history_summary("dev-session", turn, &state.chat_history);
-                    match agent.chat(&reply, history).await {
+                    match streaming_chat(agent, reply.as_str(), history).await {
                         Ok(r) => {
                             log_llm_response("dev-session", turn, &r);
                             retries = 0;

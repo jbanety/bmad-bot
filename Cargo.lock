@@ -201,6 +201,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "dotenvy",
+ "futures",
  "git2",
  "http",
  "octocrab",

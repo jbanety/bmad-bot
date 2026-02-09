@@ -15,12 +15,63 @@ use crate::config::BotConfig;
 use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::provider::copilot_headers;
 use async_trait::async_trait;
+use futures::StreamExt;
+use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
-use rig::completion::{Chat, Message};
+use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
+use rig::message::Text;
 use rig::providers::{anthropic, openai};
+use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use std::path::PathBuf;
 
 use super::read_tool::ReadFile;
+
+/// Maximum tool-call rounds allowed per single prompt in the streaming loop.
+const STREAMING_MAX_TURNS: usize = 100;
+
+/// Send a prompt via streaming and collect the complete text response (architect variant).
+async fn streaming_architect_chat<A, M>(
+    agent: &A,
+    prompt: impl Into<Message> + Send,
+    history: Vec<Message>,
+) -> Result<String, rig::completion::PromptError>
+where
+    A: StreamingChat<M, M::StreamingResponse>,
+    M: CompletionModel + 'static,
+    M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+{
+    let mut stream = agent
+        .stream_chat(prompt, history)
+        .multi_turn(STREAMING_MAX_TURNS)
+        .await;
+
+    let mut acc = String::new();
+
+    loop {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
+
+        match chunk {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                Text { text },
+            ))) => {
+                acc.push_str(&text);
+            }
+            Ok(MultiTurnStreamItem::FinalResponse(_)) => {
+                break;
+            }
+            Err(e) => {
+                return Err(rig::completion::PromptError::CompletionError(
+                    rig::completion::CompletionError::ResponseError(e.to_string()),
+                ));
+            }
+            _ => continue,
+        }
+    }
+
+    Ok(acc)
+}
 
 // -----------------------------------------------------------------------
 // Error type
@@ -207,11 +258,16 @@ impl ArchitectSession {
     ///
     /// Sends 3 turns: "CH" → "Load the project context" → question.
     /// Returns the Architect's response from Turn 3.
-    async fn drive_conversation<A: Chat>(
+    async fn drive_conversation<A, M>(
         agent: &A,
         question: &str,
         context: Option<&str>,
-    ) -> Result<String, ArchitectSessionError> {
+    ) -> Result<String, ArchitectSessionError>
+    where
+        A: Chat + StreamingChat<M, M::StreamingResponse>,
+        M: CompletionModel + 'static,
+        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    {
         let mut chat_history: Vec<Message> = vec![];
 
         // Turn 1: Enter free chat mode
@@ -221,13 +277,15 @@ impl ArchitectSession {
             "Architect session turn — entering CH mode"
         );
         log_llm_request("supervisor", 1, "CH", chat_history.len());
-        let response = agent.chat("CH", chat_history.clone()).await.map_err(|e| {
-            log_llm_error("supervisor", 1, &e);
-            ArchitectSessionError::ChatFailed {
-                turn: 1,
-                reason: e.to_string(),
-            }
-        })?;
+        let response = streaming_architect_chat(agent, "CH", chat_history.clone())
+            .await
+            .map_err(|e| {
+                log_llm_error("supervisor", 1, &e);
+                ArchitectSessionError::ChatFailed {
+                    turn: 1,
+                    reason: e.to_string(),
+                }
+            })?;
         log_llm_response("supervisor", 1, &response);
         chat_history.push(Message::user("CH"));
         chat_history.push(Message::assistant(&response));
@@ -244,16 +302,16 @@ impl ArchitectSession {
             "Load the project context",
             chat_history.len(),
         );
-        let response = agent
-            .chat("Load the project context", chat_history.clone())
-            .await
-            .map_err(|e| {
-                log_llm_error("supervisor", 2, &e);
-                ArchitectSessionError::ChatFailed {
-                    turn: 2,
-                    reason: e.to_string(),
-                }
-            })?;
+        let response =
+            streaming_architect_chat(agent, "Load the project context", chat_history.clone())
+                .await
+                .map_err(|e| {
+                    log_llm_error("supervisor", 2, &e);
+                    ArchitectSessionError::ChatFailed {
+                        turn: 2,
+                        reason: e.to_string(),
+                    }
+                })?;
         log_llm_response("supervisor", 2, &response);
         chat_history.push(Message::user("Load the project context"));
         chat_history.push(Message::assistant(&response));
@@ -267,13 +325,15 @@ impl ArchitectSession {
             "Architect session turn — asking developer question"
         );
         log_llm_request("supervisor", 3, &question_msg, chat_history.len());
-        let answer = agent.chat(&question_msg, chat_history).await.map_err(|e| {
-            log_llm_error("supervisor", 3, &e);
-            ArchitectSessionError::ChatFailed {
-                turn: 3,
-                reason: e.to_string(),
-            }
-        })?;
+        let answer = streaming_architect_chat(agent, question_msg.as_str(), chat_history)
+            .await
+            .map_err(|e| {
+                log_llm_error("supervisor", 3, &e);
+                ArchitectSessionError::ChatFailed {
+                    turn: 3,
+                    reason: e.to_string(),
+                }
+            })?;
         log_llm_response("supervisor", 3, &answer);
 
         if answer.trim().is_empty() {
