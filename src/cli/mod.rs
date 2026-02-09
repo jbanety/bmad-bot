@@ -5,11 +5,14 @@
 //! and graceful shutdown via signal handling.
 //! Also provides the interactive `init` wizard for first-time setup.
 
+pub mod git_detect;
 pub mod state;
 
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+use crate::cli::git_detect::{GitDetectionResult, detect_git_remote, detect_git_remote_with_name};
 
 use clap::{Parser, Subcommand};
 use tokio::time::{Duration, sleep};
@@ -282,6 +285,103 @@ pub async fn run_init(config_path: &Path) -> Result<(), CliError> {
 // Interactive prompt collection
 // ---------------------------------------------------------------------------
 
+/// Attempts git remote auto-detection and returns pre-filled values if the user confirms.
+///
+/// Returns `Some((provider, owner, repo_name, branch))` if auto-detection succeeds and the
+/// user confirms the detected values. Returns `None` to fall through to manual prompts.
+fn attempt_git_auto_detection() -> Result<Option<(String, String, String, String)>, CliError> {
+    let current_dir = std::env::current_dir().map_err(|e| CliError::Init {
+        reason: format!("Cannot determine current directory: {e}"),
+    })?;
+
+    let mut detection = detect_git_remote(&current_dir);
+
+    // If multiple remotes and no origin, prompt user to select one
+    if let GitDetectionResult::MultipleRemotes(ref names) = detection {
+        let selected_idx = dialoguer::Select::new()
+            .with_prompt("Multiple git remotes found — select one")
+            .items(names)
+            .default(0)
+            .interact()
+            .map_err(|e| CliError::Init {
+                reason: e.to_string(),
+            })?;
+        detection = detect_git_remote_with_name(&current_dir, &names[selected_idx]);
+    }
+
+    let info = match detection {
+        GitDetectionResult::Detected(info) => info,
+        _ => return Ok(None), // Silent fallback to manual prompts
+    };
+
+    // Display summary and ask for confirmation
+    if let Some(ref provider) = info.provider {
+        println!("\n\u{1f50d} Git repository detected!");
+        println!("   Provider:  {provider}");
+        println!("   Owner:     {}", info.owner);
+        println!("   Repo:      {}", info.repo_name);
+        println!("   Branch:    {}", info.default_branch);
+        println!();
+
+        let confirm = dialoguer::Confirm::new()
+            .with_prompt("Use these settings?")
+            .default(true)
+            .interact()
+            .map_err(|e| CliError::Init {
+                reason: e.to_string(),
+            })?;
+
+        if confirm {
+            return Ok(Some((
+                provider.clone(),
+                info.owner,
+                info.repo_name,
+                info.default_branch,
+            )));
+        }
+        // User declined — fall through to manual prompts
+        return Ok(None);
+    }
+
+    // Provider unknown (unrecognized host) — show partial summary, manual provider select
+    println!("\n\u{1f50d} Git repository detected (host: {})!", info.host);
+    println!(
+        "   \u{26a0}\u{fe0f}  Git host not recognized \u{2014} provider must be selected manually"
+    );
+    println!("   Owner:     {}", info.owner);
+    println!("   Repo:      {}", info.repo_name);
+    println!("   Branch:    {}", info.default_branch);
+    println!();
+
+    let confirm = dialoguer::Confirm::new()
+        .with_prompt("Use detected owner/repo/branch and select provider manually?")
+        .default(true)
+        .interact()
+        .map_err(|e| CliError::Init {
+            reason: e.to_string(),
+        })?;
+
+    if !confirm {
+        return Ok(None);
+    }
+
+    let git_idx = dialoguer::Select::new()
+        .with_prompt("Git hosting provider")
+        .items(GIT_PROVIDERS)
+        .default(0)
+        .interact()
+        .map_err(|e| CliError::Init {
+            reason: e.to_string(),
+        })?;
+
+    Ok(Some((
+        GIT_PROVIDERS[git_idx].to_string(),
+        info.owner,
+        info.repo_name,
+        info.default_branch,
+    )))
+}
+
 /// Collects all configuration values interactively from the user.
 ///
 /// Uses `dialoguer` for Select, Input, and Confirm prompts.
@@ -291,37 +391,49 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
 
     // --- Git Provider ---
     println!("\u{2500}\u{2500} Git Provider \u{2500}\u{2500}");
-    let git_idx = dialoguer::Select::new()
-        .with_prompt("Git hosting provider")
-        .items(GIT_PROVIDERS)
-        .default(0)
-        .interact()
-        .map_err(|e| CliError::Init {
-            reason: e.to_string(),
-        })?;
-    let git_provider_name = GIT_PROVIDERS[git_idx].to_string();
 
-    let repo_owner: String = dialoguer::Input::new()
-        .with_prompt("Repository owner (org or user)")
-        .interact_text()
-        .map_err(|e| CliError::Init {
-            reason: e.to_string(),
-        })?;
+    // Attempt git remote auto-detection before manual prompts
+    let auto_detected = attempt_git_auto_detection()?;
 
-    let repo_name: String = dialoguer::Input::new()
-        .with_prompt("Repository name")
-        .interact_text()
-        .map_err(|e| CliError::Init {
-            reason: e.to_string(),
-        })?;
+    let (git_provider_name, repo_owner, repo_name, target_branch) =
+        if let Some(config) = auto_detected {
+            (config.0, config.1, config.2, config.3)
+        } else {
+            // Manual fallback — original Story 1.3 prompts
+            let git_idx = dialoguer::Select::new()
+                .with_prompt("Git hosting provider")
+                .items(GIT_PROVIDERS)
+                .default(0)
+                .interact()
+                .map_err(|e| CliError::Init {
+                    reason: e.to_string(),
+                })?;
+            let git_provider_name = GIT_PROVIDERS[git_idx].to_string();
 
-    let target_branch: String = dialoguer::Input::new()
-        .with_prompt("Target branch for PRs")
-        .default("main".to_string())
-        .interact_text()
-        .map_err(|e| CliError::Init {
-            reason: e.to_string(),
-        })?;
+            let repo_owner: String = dialoguer::Input::new()
+                .with_prompt("Repository owner (org or user)")
+                .interact_text()
+                .map_err(|e| CliError::Init {
+                    reason: e.to_string(),
+                })?;
+
+            let repo_name: String = dialoguer::Input::new()
+                .with_prompt("Repository name")
+                .interact_text()
+                .map_err(|e| CliError::Init {
+                    reason: e.to_string(),
+                })?;
+
+            let target_branch: String = dialoguer::Input::new()
+                .with_prompt("Target branch for PRs")
+                .default("main".to_string())
+                .interact_text()
+                .map_err(|e| CliError::Init {
+                    reason: e.to_string(),
+                })?;
+
+            (git_provider_name, repo_owner, repo_name, target_branch)
+        };
 
     // --- LLM Providers ---
     println!("\n\u{2500}\u{2500} LLM Configuration \u{2500}\u{2500}");
