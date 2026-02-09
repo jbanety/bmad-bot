@@ -1214,12 +1214,43 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     let config = Arc::new(config);
     let secrets = Arc::new(secrets);
 
+    // Create cooperative shutdown flag — shared with pipeline/session layers.
+    // A dedicated task below listens for Ctrl+C / SIGTERM and flips this flag
+    // so that streaming chat loops and tool-calling rounds can exit cleanly.
+    let shutdown: crate::session::runner::ShutdownFlag =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Spawn signal handler task that sets the shutdown flag
+    {
+        let flag = std::sync::Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received SIGINT (Ctrl-C) — setting shutdown flag");
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM — setting shutdown flag");
+                }
+            }
+
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
     // Create watcher (Story 2.1)
     let watcher = crate::watcher::Watcher::new(Arc::clone(&config));
 
     // Create story pipeline (Story 6.2)
-    let pipeline = crate::pipeline::StoryPipeline::new(Arc::clone(&config), Arc::clone(&secrets))
-        .map_err(|e| CliError::Init {
+    let pipeline = crate::pipeline::StoryPipeline::new(
+        Arc::clone(&config),
+        Arc::clone(&secrets),
+        std::sync::Arc::clone(&shutdown),
+    )
+    .map_err(|e| CliError::Init {
         reason: format!("Failed to create story pipeline: {e}"),
     })?;
 
@@ -1244,7 +1275,15 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     }
 
     // Polling loop with graceful shutdown — pass state for touch updates
-    run_polling_loop(&config, &watcher, &pipeline, &mut daemon_state, state_path).await?;
+    run_polling_loop(
+        &config,
+        &watcher,
+        &pipeline,
+        &mut daemon_state,
+        state_path,
+        &shutdown,
+    )
+    .await?;
 
     // Clean shutdown — update state and remove file
     daemon_state.mark_stopped();
@@ -1263,21 +1302,27 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
 ///
 /// Updates the daemon state file's `last_activity` timestamp each cycle.
 /// Polls sprint-status.yaml via the watcher to detect eligible stories.
+/// The `shutdown` flag is checked between poll cycles and also during pipeline
+/// execution (streaming chat loops check it between chunks/turns).
 async fn run_polling_loop(
     config: &Arc<BotConfig>,
     watcher: &crate::watcher::Watcher,
     pipeline: &crate::pipeline::StoryPipeline,
     daemon_state: &mut state::DaemonState,
     state_path: &Path,
+    shutdown: &crate::session::runner::ShutdownFlag,
 ) -> Result<(), CliError> {
     let mut interval_timer =
         tokio::time::interval(Duration::from_secs(config.polling_interval_secs));
 
-    // Set up SIGTERM handler (Unix only — acceptable for MVP targeting macOS/Linux)
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(CliError::Signal)?;
-
     loop {
+        // Check shutdown flag at top of loop (covers case where flag was set
+        // during a pipeline run that just finished)
+        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!("Shutdown flag detected — exiting polling loop");
+            break;
+        }
+
         tokio::select! {
             _ = interval_timer.tick() => {
                 // Update last activity timestamp
@@ -1328,13 +1373,10 @@ async fn run_polling_loop(
                     }
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Received SIGINT (Ctrl-C), initiating graceful shutdown");
-                break;
-            }
-            _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM, initiating graceful shutdown");
-                break;
+            // Sleep a short interval and re-check the shutdown flag.
+            // The signal handler task sets the flag; we detect it at loop top.
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                // Just wake up to re-check the shutdown flag at the top of the loop.
             }
         }
     }

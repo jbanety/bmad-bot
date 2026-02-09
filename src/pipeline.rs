@@ -19,6 +19,7 @@ use crate::review::ReviewOutcome;
 use crate::review::ReviewRunner;
 use crate::session::SessionOutcome;
 use crate::session::runner::SessionRunner;
+use crate::session::runner::ShutdownFlag;
 use crate::supervisor::decisions::format_pr_decisions_section;
 use crate::watcher::StoryInfo;
 
@@ -131,7 +132,11 @@ impl StoryPipeline {
     /// # Errors
     /// Returns [`PipelineError::InitFailed`] if the git provider cannot be created
     /// (e.g., unsupported provider type or missing token).
-    pub fn new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>) -> Result<Self, PipelineError> {
+    pub fn new(
+        config: Arc<BotConfig>,
+        secrets: Arc<BotSecrets>,
+        shutdown: ShutdownFlag,
+    ) -> Result<Self, PipelineError> {
         // Extract the correct token for the configured git provider
         let token = match config.git_provider.provider.as_str() {
             "github" => secrets.github_token.as_deref().unwrap_or(""),
@@ -151,7 +156,8 @@ impl StoryPipeline {
         // Factory never fails — returns NoopNotifier as fallback
         let notifier = create_notifier(&config.notifications, &secrets);
 
-        let session_runner = SessionRunner::new(Arc::clone(&config), Arc::clone(&secrets));
+        let session_runner =
+            SessionRunner::new(Arc::clone(&config), Arc::clone(&secrets), shutdown);
         let review_runner = ReviewRunner::new(Arc::clone(&config), Arc::clone(&secrets));
 
         Ok(Self {

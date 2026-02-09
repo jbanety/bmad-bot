@@ -39,6 +39,15 @@ use rig::providers::{anthropic, openai};
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Shared shutdown flag — set to `true` when Ctrl+C or SIGTERM is received.
+///
+/// Checked cooperatively between streaming chunks and chat turns so that
+/// long-running tool-calling loops can be interrupted cleanly. The daemon
+/// spawns a signal handler task that flips this flag, and the session runner
+/// checks it at strategic points to break out and save partial work.
+pub type ShutdownFlag = Arc<AtomicBool>;
 
 /// Maximum number of chat turns before the safety net kicks in.
 ///
@@ -69,10 +78,15 @@ const STREAMING_MAX_TURNS: usize = 100;
 /// support streaming — and Copilot **requires** it (`stream: false` is rejected).
 ///
 /// Tool calls are handled automatically by rig within the stream.
+///
+/// When `shutdown` is `Some` and the flag is set to `true`, the stream is
+/// abandoned and a `ShutdownRequested` error is returned. This allows Ctrl+C
+/// to interrupt even deep multi-turn tool-calling loops.
 async fn streaming_chat<A, M>(
     agent: &A,
     prompt: impl Into<Message> + Send,
     history: Vec<Message>,
+    shutdown: Option<&ShutdownFlag>,
 ) -> Result<String, rig::completion::PromptError>
 where
     A: StreamingChat<M, M::StreamingResponse>,
@@ -87,6 +101,21 @@ where
     let mut acc = String::new();
 
     loop {
+        // Cooperative shutdown check — between every chunk/tool-call round
+        if let Some(flag) = shutdown {
+            if flag.load(Ordering::Relaxed) {
+                tracing::info!(
+                    action = "shutdown_requested",
+                    "Shutdown flag detected in streaming loop"
+                );
+                return Err(rig::completion::PromptError::CompletionError(
+                    rig::completion::CompletionError::ResponseError(
+                        "Shutdown requested (Ctrl+C)".to_string(),
+                    ),
+                ));
+            }
+        }
+
         let Some(chunk) = stream.next().await else {
             break;
         };
@@ -199,6 +228,8 @@ pub struct SessionRunner {
     analyzer: ResponseAnalyzer,
     /// In-memory cache for GitHub Copilot session tokens (persists across stories).
     copilot_cache: std::sync::Mutex<CopilotTokenCache>,
+    /// Cooperative shutdown flag — checked between streaming chunks and chat turns.
+    shutdown: ShutdownFlag,
 }
 
 impl SessionRunner {
@@ -206,7 +237,11 @@ impl SessionRunner {
     ///
     /// The `state_file_path` is derived from
     /// `config.bmad_paths.implementation_artifacts` + `/.bmad-bot-session.yaml`.
-    pub fn new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>) -> Self {
+    ///
+    /// The `shutdown` flag is shared with the signal handler task spawned by the
+    /// daemon. When set to `true`, the session exits cleanly after the current
+    /// streaming chunk, saving partial work via the WAL.
+    pub fn new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>, shutdown: ShutdownFlag) -> Self {
         let state_file_path =
             Path::new(&config.bmad_paths.implementation_artifacts).join(".bmad-bot-session.yaml");
         Self {
@@ -215,6 +250,7 @@ impl SessionRunner {
             state_file_path,
             analyzer: ResponseAnalyzer::new(),
             copilot_cache: std::sync::Mutex::new(CopilotTokenCache::new()),
+            shutdown,
         }
     }
 
@@ -1028,12 +1064,17 @@ OVERRIDE: communication_language = English
             "[agent activation: dev.md in context tags]",
             rig_history.len(),
         );
-        let response = streaming_chat(agent, activation_msg.as_str(), rig_history.clone())
-            .await
-            .map_err(|e| {
-                log_llm_error(label, 0, &e);
-                format!("Agent activation failed: {e}")
-            })?;
+        let response = streaming_chat(
+            agent,
+            activation_msg.as_str(),
+            rig_history.clone(),
+            Some(&self.shutdown),
+        )
+        .await
+        .map_err(|e| {
+            log_llm_error(label, 0, &e);
+            format!("Agent activation failed: {e}")
+        })?;
         log_llm_response(label, 0, &response);
 
         rig_history.push(Message::user(&activation_msg));
@@ -1206,6 +1247,7 @@ OVERRIDE: communication_language = English
             let prompt = prompt.to_string();
             let prov = prov.to_string();
             let mdl = mdl.to_string();
+            let flag = Arc::clone(&self.shutdown);
             let key = key.to_string();
             Box::pin(async move {
                 let preamble =
@@ -1218,7 +1260,8 @@ OVERRIDE: communication_language = English
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
                         log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result = streaming_chat(&agent, prompt.as_str(), vec![]).await;
+                        let result =
+                            streaming_chat(&agent, prompt.as_str(), vec![], Some(&flag)).await;
                         match &result {
                             Ok(r) => log_llm_response("dev-summarize", 0, r),
                             Err(e) => log_llm_error("dev-summarize", 0, &e),
@@ -1232,7 +1275,8 @@ OVERRIDE: communication_language = English
                             .map_err(|e| format!("Summarization client failed: {e}"))?;
                         let agent = client.agent(&mdl).preamble(preamble).build();
                         log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result = streaming_chat(&agent, prompt.as_str(), vec![]).await;
+                        let result =
+                            streaming_chat(&agent, prompt.as_str(), vec![], Some(&flag)).await;
                         match &result {
                             Ok(r) => log_llm_response("dev-summarize", 0, r),
                             Err(e) => log_llm_error("dev-summarize", 0, &e),
@@ -1285,7 +1329,8 @@ OVERRIDE: communication_language = English
                             .completions_api();
                         let agent = client.agent(&mdl).preamble(preamble).build();
                         log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result = streaming_chat(&agent, prompt.as_str(), vec![]).await;
+                        let result =
+                            streaming_chat(&agent, prompt.as_str(), vec![], Some(&flag)).await;
                         match &result {
                             Ok(r) => log_llm_response("dev-summarize", 0, r),
                             Err(e) => log_llm_error("dev-summarize", 0, &e),
@@ -1614,17 +1659,22 @@ OVERRIDE: communication_language = English
         // Step 4b — Enter chat mode (existing flow unchanged)
         let ch_turn = compressed_history.len() / 2;
         log_llm_request("dev-recovery", ch_turn, "CH", activation_history.len());
-        let ch_response = streaming_chat(agent, "CH", activation_history.clone())
-            .await
-            .map_err(|e| {
-                log_llm_error("dev-recovery", 0, &e);
-                tracing::error!(action = "context_limit_activation_ch_failed", error = %e);
-                SessionOutcome::Failed {
-                    story_key: story.story_key.clone(),
-                    error: format!("Recovery activation CH failed: {e}"),
-                    decisions: decision_log.records(),
-                }
-            })?;
+        let ch_response = streaming_chat(
+            agent,
+            "CH",
+            activation_history.clone(),
+            Some(&self.shutdown),
+        )
+        .await
+        .map_err(|e| {
+            log_llm_error("dev-recovery", 0, &e);
+            tracing::error!(action = "context_limit_activation_ch_failed", error = %e);
+            SessionOutcome::Failed {
+                story_key: story.story_key.clone(),
+                error: format!("Recovery activation CH failed: {e}"),
+                decisions: decision_log.records(),
+            }
+        })?;
         log_llm_response("dev-recovery", ch_turn, &ch_response);
         activation_history.push(Message::user("CH"));
         activation_history.push(Message::assistant(&ch_response));
@@ -1649,6 +1699,7 @@ OVERRIDE: communication_language = English
             agent,
             "Load the project context",
             activation_history.clone(),
+            Some(&self.shutdown),
         )
         .await
         .map_err(|e| {
@@ -1811,8 +1862,13 @@ OVERRIDE: communication_language = English
                     initial_message,
                     activation_rig_history.len(),
                 );
-                let response = match streaming_chat(agent, initial_message, activation_rig_history)
-                    .await
+                let response = match streaming_chat(
+                    agent,
+                    initial_message,
+                    activation_rig_history,
+                    Some(&self.shutdown),
+                )
+                .await
                 {
                     Ok(r) => {
                         log_llm_response("dev-session", 0, &r);
@@ -1903,6 +1959,7 @@ OVERRIDE: communication_language = English
                         agent,
                         initial_message,
                         activation_rig_history,
+                        Some(&self.shutdown),
                     )
                     .await
                     {
@@ -1964,27 +2021,33 @@ OVERRIDE: communication_language = English
                             turn_offset,
                             &state.chat_history[..state.chat_history.len() - 1],
                         );
-                        let response =
-                            match streaming_chat(agent, last_user_msg.as_str(), history).await {
-                                Ok(r) => {
-                                    log_llm_response("dev-recovery", turn_offset, &r);
-                                    r
-                                }
-                                Err(e) => {
-                                    log_llm_error("dev-recovery", turn_offset, &e);
-                                    tracing::error!(
-                                        action = "chat_failed",
-                                        error = %e,
-                                        "Re-send of last user message failed during recovery"
-                                    );
-                                    let _ = self.handle_failure(story).await;
-                                    return SessionOutcome::Failed {
-                                        story_key: story.story_key.clone(),
-                                        error: format!("Recovery re-send failed: {e}"),
-                                        decisions: decision_log.records(),
-                                    };
-                                }
-                            };
+                        let response = match streaming_chat(
+                            agent,
+                            last_user_msg.as_str(),
+                            history,
+                            Some(&self.shutdown),
+                        )
+                        .await
+                        {
+                            Ok(r) => {
+                                log_llm_response("dev-recovery", turn_offset, &r);
+                                r
+                            }
+                            Err(e) => {
+                                log_llm_error("dev-recovery", turn_offset, &e);
+                                tracing::error!(
+                                    action = "chat_failed",
+                                    error = %e,
+                                    "Re-send of last user message failed during recovery"
+                                );
+                                let _ = self.handle_failure(story).await;
+                                return SessionOutcome::Failed {
+                                    story_key: story.story_key.clone(),
+                                    error: format!("Recovery re-send failed: {e}"),
+                                    decisions: decision_log.records(),
+                                };
+                            }
+                        };
 
                         state.add_assistant_message(&response);
                         let _ = state.save(&self.state_file_path).await;
@@ -1996,6 +2059,22 @@ OVERRIDE: communication_language = English
         };
 
         loop {
+            // Cooperative shutdown check — between chat turns
+            if self.shutdown.load(Ordering::Relaxed) {
+                tracing::info!(
+                    action = "shutdown_requested",
+                    turn = %turn,
+                    story_key = %story.story_key,
+                    "Shutdown requested — saving WAL and exiting session"
+                );
+                let _ = state.save(&self.state_file_path).await;
+                return SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: "Shutdown requested (Ctrl+C)".to_string(),
+                    decisions: decision_log.records(),
+                };
+            }
+
             // Safety net — prevent infinite loops
             if turn >= MAX_CHAT_TURNS {
                 tracing::warn!(
@@ -2105,7 +2184,8 @@ OVERRIDE: communication_language = English
 
                     log_llm_request("dev-session", turn, &reply, history.len());
                     log_llm_history_summary("dev-session", turn, &state.chat_history);
-                    match streaming_chat(agent, reply.as_str(), history).await {
+                    match streaming_chat(agent, reply.as_str(), history, Some(&self.shutdown)).await
+                    {
                         Ok(r) => {
                             log_llm_response("dev-session", turn, &r);
                             retries = 0;
@@ -2277,8 +2357,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
         let secrets = Arc::new(make_test_secrets());
+        let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, secrets);
+        let runner = SessionRunner::new(config, secrets, shutdown);
 
         assert!(
             runner
@@ -2296,8 +2377,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
         let secrets = Arc::new(make_test_secrets());
+        let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, secrets);
+        let runner = SessionRunner::new(config, secrets, shutdown);
 
         let expected = dir.path().join(".bmad-bot-session.yaml");
         assert_eq!(runner.state_file_path, expected);
@@ -2310,8 +2392,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
         let secrets = Arc::new(make_test_secrets());
+        let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, secrets);
+        let runner = SessionRunner::new(config, secrets, shutdown);
 
         // Must still be {implementation_artifacts}/.bmad-bot-session.yaml
         let expected = dir.path().join(".bmad-bot-session.yaml");
@@ -2466,8 +2549,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
         let secrets = Arc::new(make_test_secrets());
+        let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, secrets);
+        let runner = SessionRunner::new(config, secrets, shutdown);
 
         let result = runner.check_and_recover_wal().await;
         assert!(
@@ -2487,7 +2571,8 @@ mod tests {
         let wal_path = dir.path().join(".bmad-bot-session.yaml");
         state.save(&wal_path).await.expect("save WAL");
 
-        let runner = SessionRunner::new(config, secrets);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runner = SessionRunner::new(config, secrets, shutdown);
 
         let result = runner.check_and_recover_wal().await;
         assert!(result.is_some(), "Should return Some when WAL file exists");
@@ -2514,7 +2599,8 @@ mod tests {
             .expect("write corrupt WAL");
         assert!(wal_path.exists(), "Corrupt WAL should exist before check");
 
-        let runner = SessionRunner::new(config, secrets);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runner = SessionRunner::new(config, secrets, shutdown);
 
         let result = runner.check_and_recover_wal().await;
         assert!(result.is_none(), "Should return None for corrupt WAL");
@@ -2620,7 +2706,8 @@ mod tests {
         let wal_path = dir.path().join(".bmad-bot-session.yaml");
         state.save(&wal_path).await.expect("save WAL");
 
-        let runner = SessionRunner::new(config, secrets);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runner = SessionRunner::new(config, secrets, shutdown);
         let recovery = runner
             .check_and_recover_wal()
             .await
@@ -2651,7 +2738,8 @@ mod tests {
         let wal_path = dir.path().join(".bmad-bot-session.yaml");
         state.save(&wal_path).await.expect("save WAL");
 
-        let runner = SessionRunner::new(config, secrets);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runner = SessionRunner::new(config, secrets, shutdown);
         let recovery = runner
             .check_and_recover_wal()
             .await
@@ -2903,9 +2991,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
         let secrets = Arc::new(make_test_secrets());
+        let shutdown = Arc::new(AtomicBool::new(false));
         // Leak the tempdir so it isn't dropped (this is fine in tests)
         std::mem::forget(dir);
-        SessionRunner::new(config, secrets)
+        SessionRunner::new(config, secrets, shutdown)
     }
 
     fn make_test_story_info() -> StoryInfo {
