@@ -187,10 +187,15 @@ pub struct ReqwestCopilotHttpClient {
 
 impl ReqwestCopilotHttpClient {
     /// Create a new HTTP client for Copilot auth endpoints.
+    ///
+    /// Sets a `User-Agent` header on every request — GitHub API returns 403
+    /// without one ("Request forbidden by administrative rules").
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        let client = reqwest::Client::builder()
+            .user_agent(format!("bmad-bot/{}", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("failed to build reqwest client");
+        Self { client }
     }
 }
 
@@ -273,6 +278,12 @@ impl CopilotHttpClient for ReqwestCopilotHttpClient {
 
         let status = resp.status();
         if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::error!(
+                http_status = status.as_u16(),
+                response_body = %body,
+                "Copilot token exchange returned non-success status"
+            );
             return Err(CopilotAuthError::TokenExchangeFailed {
                 status: status.as_u16(),
             });
