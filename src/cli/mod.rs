@@ -163,8 +163,12 @@ fn default_model_for_provider(provider: &str) -> &str {
 ///
 /// Uses `RUST_LOG` env var as override if set, otherwise `config.log_level`.
 pub fn init_tracing(config: &BotConfig) -> Result<(), CliError> {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "{},rustls=off,h2=off,hyper_util=off,reqwest::connect=off",
+            config.log_level
+        ))
+    });
 
     // File appender — always JSON.
     // CRITICAL: Raw File does NOT implement MakeWriter. Wrap in Mutex<File>
