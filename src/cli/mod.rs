@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use crate::cli::git_detect::{GitDetectionResult, detect_git_remote, detect_git_remote_with_name};
 
 use clap::{Parser, Subcommand};
-use tokio::time::{Duration, sleep};
+use tokio::time::Duration;
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::{
@@ -1266,7 +1266,8 @@ async fn run_polling_loop(
     daemon_state: &mut state::DaemonState,
     state_path: &Path,
 ) -> Result<(), CliError> {
-    let interval = Duration::from_secs(config.polling_interval_secs);
+    let mut interval_timer =
+        tokio::time::interval(Duration::from_secs(config.polling_interval_secs));
 
     // Set up SIGTERM handler (Unix only — acceptable for MVP targeting macOS/Linux)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -1274,7 +1275,7 @@ async fn run_polling_loop(
 
     loop {
         tokio::select! {
-            _ = sleep(interval) => {
+            _ = interval_timer.tick() => {
                 // Update last activity timestamp
                 daemon_state.touch();
                 if let Err(e) = daemon_state.write(state_path) {
