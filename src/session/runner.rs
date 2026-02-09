@@ -416,7 +416,6 @@ impl SessionRunner {
                     &story_info,
                     &api_key,
                     &model_name,
-                    None,
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {
@@ -457,11 +456,11 @@ impl SessionRunner {
                     }
                 };
 
-                match self.build_openai_agent(
+                match self.build_copilot_agent(
                     &story_info,
                     &session_token,
                     &model_name,
-                    Some(&base_url),
+                    &base_url,
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {
@@ -664,7 +663,6 @@ impl SessionRunner {
                     story,
                     &api_key,
                     model,
-                    None,
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {
@@ -711,11 +709,11 @@ impl SessionRunner {
                     "Copilot session token obtained"
                 );
 
-                match self.build_openai_agent(
+                match self.build_copilot_agent(
                     story,
                     &session_token,
                     model,
-                    Some(&base_url),
+                    &base_url,
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {
@@ -804,42 +802,25 @@ impl SessionRunner {
         Ok(agent)
     }
 
-    /// Build an OpenAI-compatible agent (also used for GitHub Copilot with base URL override).
+    /// Build an OpenAI agent (Responses API — default for native OpenAI models).
     fn build_openai_agent(
         &self,
         story: &StoryInfo,
         api_key: &str,
         model: &str,
-        base_url: Option<&str>,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
     ) -> Result<impl Chat, ProviderError> {
         let preamble = self.build_preamble(story)?;
-        let provider_name = if base_url.is_some() {
-            "github-copilot"
-        } else {
-            "openai"
-        };
 
-        let client: openai::Client = if let Some(url) = base_url {
-            openai::Client::builder()
-                .api_key(api_key)
-                .base_url(url)
-                .http_headers(super::provider::copilot_headers())
-                .build()
-                .map_err(|e| ProviderError::ClientCreation {
-                    provider: provider_name.to_string(),
-                    reason: e.to_string(),
-                })?
-        } else {
+        let client: openai::Client =
             openai::Client::builder()
                 .api_key(api_key)
                 .build()
                 .map_err(|e| ProviderError::ClientCreation {
-                    provider: provider_name.to_string(),
+                    provider: "openai".to_string(),
                     reason: e.to_string(),
-                })?
-        };
+                })?;
 
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
         let (git, fs, terminal, supervisor) =
@@ -858,8 +839,59 @@ impl SessionRunner {
             action = "agent_built",
             tools = 4,
             model = %model,
-            provider = %provider_name,
+            provider = "openai",
             "Rig agent built"
+        );
+
+        Ok(agent)
+    }
+
+    /// Build a GitHub Copilot agent (Completions API — required for proxied models like Claude).
+    ///
+    /// Copilot proxies requests to various model backends (Anthropic, OpenAI, etc.).
+    /// Many of these do not support the newer Responses API, so we use the
+    /// Chat Completions API via [`openai::CompletionsClient`].
+    fn build_copilot_agent(
+        &self,
+        story: &StoryInfo,
+        api_key: &str,
+        model: &str,
+        base_url: &str,
+        escalation_slot: EscalationSlot,
+        decision_log: DecisionLog,
+    ) -> Result<impl Chat, ProviderError> {
+        let preamble = self.build_preamble(story)?;
+
+        let client: openai::CompletionsClient = openai::Client::builder()
+            .api_key(api_key)
+            .base_url(base_url)
+            .http_headers(super::provider::copilot_headers())
+            .build()
+            .map_err(|e| ProviderError::ClientCreation {
+                provider: "github-copilot".to_string(),
+                reason: e.to_string(),
+            })?
+            .completions_api();
+
+        let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
+        let (git, fs, terminal, supervisor) =
+            self.create_tools(&project_root, escalation_slot, decision_log)?;
+
+        let agent = client
+            .agent(model)
+            .preamble(&preamble)
+            .tool(git)
+            .tool(fs)
+            .tool(terminal)
+            .tool(supervisor)
+            .build();
+
+        tracing::info!(
+            action = "agent_built",
+            tools = 4,
+            model = %model,
+            provider = "github-copilot",
+            "Rig agent built (Completions API)"
         );
 
         Ok(agent)
@@ -1105,12 +1137,13 @@ impl SessionRunner {
                             (token, base_url)
                         };
 
-                        let client: openai::Client = openai::Client::builder()
+                        let client: openai::CompletionsClient = openai::Client::builder()
                             .api_key(&sess_tok)
                             .base_url(&base)
                             .http_headers(super::provider::copilot_headers())
                             .build()
-                            .map_err(|e| format!("Summarization client failed: {e}"))?;
+                            .map_err(|e| format!("Summarization client failed: {e}"))?
+                            .completions_api();
                         let agent = client.agent(&mdl).preamble(preamble).build();
                         log_llm_request("dev-summarize", 0, &prompt, 0);
                         let result = agent.chat(&prompt, vec![]).await;
@@ -1300,7 +1333,6 @@ impl SessionRunner {
                     story,
                     &api_key,
                     model,
-                    None,
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {
@@ -1348,11 +1380,11 @@ impl SessionRunner {
                     }
                 };
 
-                let agent = match self.build_openai_agent(
+                let agent = match self.build_copilot_agent(
                     story,
                     &session_token,
                     model,
-                    Some(&base_url),
+                    &base_url,
                     escalation_slot.clone(),
                     decision_log.clone(),
                 ) {

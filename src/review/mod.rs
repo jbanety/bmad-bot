@@ -284,14 +284,15 @@ impl ReviewRunner {
                         reason: format!("Copilot token exchange failed: {e}"),
                     })?;
 
-                let client: openai::Client = openai::Client::builder()
+                let client: openai::CompletionsClient = openai::Client::builder()
                     .api_key(&session_token)
                     .base_url(&base_url)
                     .http_headers(copilot_headers())
                     .build()
                     .map_err(|e| ReviewError::ProviderInit {
                         reason: e.to_string(),
-                    })?;
+                    })?
+                    .completions_api();
 
                 let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
                 let (git, fs, terminal, supervisor) = self.create_tools(

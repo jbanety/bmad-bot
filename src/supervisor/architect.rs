@@ -348,14 +348,15 @@ impl AnswerProvider for ArchitectSession {
                         reason: format!("Copilot token exchange failed: {e}"),
                     })?;
 
-                let client: openai::Client = openai::Client::builder()
+                let client: openai::CompletionsClient = openai::Client::builder()
                     .api_key(&session_token)
                     .base_url(&base_url)
                     .http_headers(copilot_headers())
                     .build()
                     .map_err(|e| ArchitectSessionError::ProviderInit {
                         reason: format!("GitHub Copilot client init failed: {e}"),
-                    })?;
+                    })?
+                    .completions_api();
 
                 let agent = client
                     .agent(&self.model)
