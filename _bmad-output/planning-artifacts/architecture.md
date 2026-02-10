@@ -4,10 +4,12 @@ inputDocuments: ['_bmad-output/planning-artifacts/prd.md', '_bmad-output/project
 workflowType: 'architecture'
 project_name: 'bmad-bot'
 user_name: 'JB'
-date: '2026-02-07'
+date: '2026-02-10'
 lastStep: 8
 status: 'complete'
 completedAt: '2026-02-07'
+revisedAt: '2026-02-10'
+revisionNote: 'Sync with implementation reality — 10 deltas from commits 69d1ff0..e24d39b applied per architect-brief-architecture-sync.md'
 ---
 
 # Architecture Decision Document
@@ -19,34 +21,35 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 ### Requirements Overview
 
 **Functional Requirements:**
-36 FRs across 9 domains. The system is a pipeline daemon: watcher → pre-gate → session → supervision → review → PR → notification. Each domain maps cleanly to an architectural module. The supervisor (FR12-17) is the most complex component, combining a deterministic rule engine, LLM fallback, and full decision traceability.
+38 FRs across 9 domains. The system is a pipeline daemon: watcher → pre-gate → session → supervision → review → PR → notification. Each domain maps cleanly to an architectural module. The supervisor (FR12-17) is the most complex component, combining a deterministic rule engine, LLM fallback, and full decision traceability.
 
 **Non-Functional Requirements:**
 - Security: Secrets never in committed config or logs. Environment-variable-only secrets management.
-- Reliability: Exponential backoff (max 3 retries) for transient LLM errors. Graceful shutdown with partial commit on SIGTERM/SIGINT. Crash recovery produces clean state.
+- Reliability: Exponential backoff (max 3 retries) for transient LLM errors. Cooperative shutdown with partial commit on SIGTERM/SIGINT via shared ShutdownFlag. Crash recovery produces clean state.
 - Integration: GitHub API with rate limit handling, Telegram notifications (non-blocking), multi-provider LLM support.
 - Scalability: MVP is single-daemon sequential execution. Architecture must not preclude future parallelization (multi-worker, story-level concurrency).
 
 **Scale & Complexity:**
 - Primary domain: Backend CLI daemon / Developer tool
 - Complexity level: Medium
-- Estimated architectural components: 8 core modules (cli, config, watcher, session, supervisor, review, tools, notifier)
+- Estimated architectural components: 8 core modules (cli, config, watcher, session, supervisor, review, tools, notifier) + 4 support modules (auth, pipeline, llm_context, llm_logging)
 
 ### Technical Constraints & Dependencies
 
 - **rig-core maturity:** Core dependency for agent orchestration. Evaluate early — fallback is direct LLM provider API calls.
 - **git2 (libgit2):** Embedded, no external git CLI dependency. All git operations through library bindings.
-- **LLM provider variability:** Three providers may behave differently (rate limits, response formats, error codes). Abstraction layer required.
+- **LLM provider variability:** Three providers may behave differently (rate limits, response formats, error codes). Abstraction layer required. GitHub Copilot requires streaming (`stream: true`) and IDE-specific headers.
 - **BMAD files are read-only:** The daemon never modifies anything under `_bmad/`. All output goes to `_bmad-output/`.
 - **Sequential execution in MVP:** Simplifies architecture significantly — no concurrency primitives needed for story processing.
 
 ### Cross-Cutting Concerns Identified
 
 1. **Error handling & resilience** — Every component must handle failures gracefully, log with full context, and propagate to notification when blocking.
-2. **Structured logging with story context** — `tracing` spans with `story_id` across the entire pipeline for debuggability.
-3. **LLM provider abstraction** — Three independent roles (dev, review, supervisor) each configurable with different providers. Shared retry/backoff logic.
+2. **Structured logging with story context** — `tracing` spans with `story_id` across the entire pipeline for debuggability. Dedicated `llm_logging` module for LLM request/response payloads.
+3. **LLM provider abstraction** — Three independent roles (dev, review, supervisor) each configurable with different providers. Shared retry/backoff logic. Provider-specific API differences (Responses API vs Completions API) handled in `session/provider.rs`.
 4. **Decision traceability** — Supervisor decisions flow from rule engine/LLM through to decisions file and PR description. End-to-end audit trail.
 5. **Secret management** — Filtering in logs, separation in config, environment-variable-only loading. Applies to all components that touch credentials.
+6. **Cooperative shutdown** — Shared `ShutdownFlag` (`Arc<AtomicBool>`) propagated across pipeline → session → streaming chat layers for clean interruption at any depth.
 
 ## Starter Template Evaluation
 
@@ -65,7 +68,7 @@ Rust ecosystem does not have opinionated starter templates like web frameworks. 
 
 **Initialization Command:**
 
-```bash
+```
 cargo init bmad-bot
 ```
 
@@ -85,8 +88,14 @@ cargo init bmad-bot
 - dotenvy for `.env` secrets loading
 - Custom validation with thiserror error types
 
-**Signal Handling:**
-- tokio::signal for SIGTERM/SIGINT graceful shutdown
+**Signal Handling — Cooperative Shutdown:**
+- Cooperative shutdown via a shared `ShutdownFlag` (`Arc<AtomicBool>`) created in `run_start()`
+- A dedicated signal handler task (spawned via `tokio::spawn`) listens for Ctrl+C (`SIGINT`) and `SIGTERM`, then flips the flag
+- The flag is propagated across **pipeline → session → streaming_chat** layers
+- `streaming_chat()` checks the flag between every stream chunk and tool-call round — enabling interruption **mid-streaming and mid-tool-call loops**
+- `run_session()` checks between chat turns and saves WAL before returning
+- `run_polling_loop()` checks at the top of each poll cycle
+- This replaces the earlier inline `tokio::select!` signal branches with a more composable, testable pattern
 
 **Git Provider Abstraction:**
 - Trait `GitProvider` with async methods: `create_pr()`, `add_pr_comment()`, `get_pr_url()`
@@ -104,18 +113,32 @@ bmad-bot/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs
+│   ├── auth/
+│   │   ├── mod.rs
+│   │   └── github_copilot.rs         # Device flow + token exchange + cache
 │   ├── cli/
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   ├── git_detect.rs              # Git remote auto-detection for init
+│   │   └── state.rs                   # Daemon state file (.bmad-bot-state.json)
 │   ├── config/
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── discovery.rs               # BMAD version/module auto-discovery
 │   ├── watcher/
 │   │   ├── mod.rs
 │   │   └── deps.rs
 │   ├── session/
 │   │   ├── mod.rs
-│   │   └── parser.rs
+│   │   ├── analyzer.rs                # Response analysis (workflow interactions)
+│   │   ├── branch.rs                  # Branch management (create/checkout)
+│   │   ├── cleanup.rs                 # Session cleanup (partial work, needs-clarification)
+│   │   ├── escalation.rs              # Escalation report handling
+│   │   ├── provider.rs                # LLM provider construction + Copilot headers
+│   │   ├── runner.rs                  # Main session runner (chat loop, activation, recovery)
+│   │   └── state.rs                   # Session WAL file persistence
 │   ├── supervisor/
 │   │   ├── mod.rs
+│   │   ├── architect.rs               # Architect LLM fallback session
+│   │   ├── read_tool.rs               # Read-only file tool for Architect
 │   │   ├── rules.rs
 │   │   └── decisions.rs
 │   ├── review/
@@ -129,8 +152,11 @@ bmad-bot/
 │   │   ├── mod.rs
 │   │   ├── github.rs
 │   │   └── gitlab.rs
-│   └── notifier/
-│       └── mod.rs
+│   ├── notifier/
+│   │   └── mod.rs
+│   ├── llm_context.rs                 # Zed-style XML ContextBuilder
+│   ├── llm_logging.rs                 # LLM request/response debug logging
+│   └── pipeline.rs                    # Pipeline orchestration (watcher → session → review → PR → notify)
 └── tests/
     └── e2e/
 ```
@@ -148,7 +174,7 @@ bmad-bot/
 
 **Important Decisions (Shape Architecture):**
 4. Error propagation strategy — Layered error handling with bubble-up
-5. Agent prompt composition — How the BMAD agent is loaded and configured
+5. Agent prompt composition — How the BMAD agent is loaded and activated
 6. Deployment model — How the daemon runs as a process
 
 **Deferred Decisions (Post-MVP):**
@@ -162,13 +188,13 @@ bmad-bot/
 **Decision:** Combine an external chat loop with an internal `ask_supervisor` rig tool.
 
 **Rationale:**
-rig v0.29.0 exposes two main APIs: `agent.prompt()` and `agent.chat()`. Both handle tool-calling internally in an opaque loop — there is no hook or callback to intercept individual turns. This rules out proxy-based or hook-based interception.
+rig exposes streaming and non-streaming APIs. Both handle tool-calling internally — there is no hook or callback to intercept individual turns. This rules out proxy-based or hook-based interception.
 
 The hybrid approach uses both rig interaction patterns for their natural strengths:
 
-**Chat loop (external)** — The daemon controls the session via `agent.chat(message, history)` in a loop. This replaces the human sitting at the terminal. When the agent returns text (end of a turn), the daemon analyzes it for workflow interaction points (confirmations, "should I proceed?", step transitions) and responds automatically. This handles the BMAD workflow's natural conversation flow.
+**Chat loop (external)** — The daemon controls the session via `streaming_chat(agent, prompt, history)` in a loop. This replaces the human sitting at the terminal. When the agent returns text (end of a turn), the daemon analyzes it for workflow interaction points (confirmations, "should I proceed?", step transitions) and responds automatically. This handles the BMAD workflow's natural conversation flow.
 
-**`ask_supervisor` tool (internal)** — Registered as a standard rig tool alongside git/fs/terminal. When the agent has a substantive question or doubt *during* tool-calling work, it calls `ask_supervisor`. Inside the tool's `call()` method:
+**`ask_supervisor` tool (internal)** — Registered as a standard rig tool alongside git/fs/terminal/think. When the agent has a substantive question or doubt *during* tool-calling work, it calls `ask_supervisor`. Inside the tool's `call()` method:
 1. Rule engine (deterministic, free) — matches known patterns
 2. LLM fallback (context-aware) — loads project docs to answer
 3. Human escalation — returns error, which stops the rig loop and gives the daemon control back
@@ -228,7 +254,7 @@ The hybrid approach uses both rig interaction patterns for their natural strengt
 3. Check git state (branch `story/xxx`, dirty files confirm crash)
 4. Reload chat history from state file
 5. Reconstruct agent with same provider/model config
-6. Resume `chat()` with loaded history — agent has full context and continues
+6. Resume `streaming_chat()` with loaded history — agent has full context and continues
 7. If not found → clean start, begin polling
 
 **Recovery Case B — Context limit recovery (mid-session):**
@@ -248,7 +274,7 @@ Recovery flow:
    - The generated session summary — compressed history of everything that happened
    - The last N verbatim exchanges — immediate context for continuity
    - Current story file reference — checkboxes and Dev Agent Record are already up to date on disk
-8. Resume `chat()` — the agent picks up the current task with full awareness of prior work
+8. Resume `streaming_chat()` — the agent picks up the current task with full awareness of prior work
 
 **Key design points:**
 - The summarization call uses a **fresh context** (not the exhausted one), so it can process the full WAL history
@@ -276,38 +302,79 @@ Recovery flow:
 
 **Layer 3 — Session & Daemon (chat loop, main loop):**
 - Session errors (agent escalation, tool crash, unrecoverable git state) → commit partial work, create PR with failure description, notify human, move to next story
-- Fatal errors (config invalid, all providers down after retries, SIGTERM) → graceful shutdown: commit if possible, notify, exit
+- Fatal errors (config invalid, all providers down after retries, SIGTERM) → cooperative shutdown: save WAL, commit if possible, notify, exit
 - Notification failures are non-blocking at all layers — logged but never stop story processing
 
 **Affects:** all modules (cross-cutting)
 
-### Decision 5: Agent Prompt Composition — Load BMAD Agent File Directly
+### Decision 5: Agent Prompt Composition — XML Context Activation
 
-**Decision:** The BMAD dev agent file is loaded as-is and used as the rig agent preamble. The only addition is a language override appended at the end.
+**Decision:** The BMAD dev agent file is **not** used as the system preamble. Instead, a minimal system preamble provides operational instructions, and the agent file is sent as the **first user message** wrapped in Zed-style XML context tags. The agent then executes its own activation steps via tools before receiving commands.
 
 **Rationale:**
-The BMAD agent file (`dev.md` or equivalent) already contains the complete agent definition: persona, activation instructions, workflow references, menu system. The agent's workflows instruct it to read whatever context it needs (story specs, project docs, prior implementations) via filesystem tools. No pre-loading or context injection by the daemon is necessary.
+The Zed-style XML context format (`<context><files>...</files></context>`) is the standard way LLMs trained on Zed-context (Claude, GPT, etc.) interpret attached files as actionable context. This approach:
+
+1. Keeps the system preamble lean and stable (operational rules only) — it persists across all turns as grounding
+2. Lets the full BMAD agent definition flow through the normal conversation, where the LLM naturally processes activation instructions
+3. Leverages the `llm_context` module's `ContextBuilder` for adaptive backtick fencing, absolute path resolution, and multi-file support
+4. Creates a clean separation: **system prompt = how to behave as a tool-using agent** vs **user message = which persona to embody and what workflow to follow**
 
 **Implementation:**
-```
-let agent_prompt = fs::read_to_string(&bmad_dev_agent_path).await?;
-let preamble = format!("{agent_prompt}\n\nOVERRIDE: communication_language = English");
 
-let agent = provider
+```
+// 1. System preamble — minimal operational instructions
+fn build_preamble() -> String {
+    r#"You are an AI agent operating autonomously in a BMAD workflow environment.
+## Tools
+You have access to these tools: git, filesystem, terminal, ask_supervisor.
+## Communication
+OVERRIDE: communication_language = English
+## Rules
+- When the user provides an agent file in <context><files> tags, you MUST fully
+  embody that agent's persona and follow ALL activation instructions.
+- Execute activation steps in order — load configuration files via tools, then
+  greet and display the menu.
+- Wait for user input after displaying the menu."#
+}
+
+// 2. Agent activation — send dev.md as first user message in XML context
+async fn activate_agent(agent: &Agent, label: &str) -> (Vec<Message>, Vec<ChatMessage>) {
+    let activation_msg = ContextBuilder::new()
+        .add_file_from_disk(&agent_path)?  // resolves to absolute path
+        .build();                           // wraps in <context><files>...</files></context>
+
+    let response = streaming_chat(agent, &activation_msg, vec![], Some(&shutdown)).await?;
+
+    // Agent processes activation: loads config.yaml via tools, shows greeting/menu
+    // Returns (rig_history, chat_history) for subsequent turns
+}
+
+// 3. Build agent with 5 tools (4 custom + 1 built-in)
+let agent = client
     .agent(model)
     .preamble(&preamble)
     .tool(git_tool)
     .tool(fs_tool)
     .tool(terminal_tool)
     .tool(ask_supervisor)
+    .tool(ThinkTool)        // rig's built-in think tool
     .build();
+
+// 4. After activation, send "DS" to trigger dev-story workflow
+let response = streaming_chat(agent, "DS", rig_history, Some(&shutdown)).await?;
 ```
 
-**First message:** `"DS"` (triggers the dev-story workflow as defined in the BMAD agent's menu system).
+**Activation phase:** After `activate_agent()` returns, the agent has:
+- Read `config.yaml` via filesystem tool
+- Stored session variables ({user_name}, {communication_language}, etc.)
+- Displayed its greeting and menu
+- Is ready to accept commands
 
-**Key principle:** The daemon knows nothing about BMAD workflow internals. It loads the agent file, registers tools, and sends the start command. Everything else is the agent's responsibility.
+**First command:** `"DS"` (triggers the dev-story workflow as defined in the BMAD agent's menu system).
 
-**Affects:** session module
+**Key principle:** The daemon has an explicit activation phase before sending commands. The system preamble provides persistent behavioral grounding, while the agent persona flows through user-message context — keeping the two concerns cleanly separated.
+
+**Affects:** session module, llm_context module
 
 ### Decision 6: Deployment Model — Foreground Process
 
@@ -318,7 +385,7 @@ This is a developer tool, not infrastructure software. Users can background it w
 
 **Behavior:**
 - Logs to stdout/stderr via `tracing` (structured JSON or pretty-print based on config)
-- SIGTERM/SIGINT triggers graceful shutdown
+- SIGTERM/SIGINT triggers cooperative shutdown via ShutdownFlag
 - No PID file, no log file management, no auto-restart
 - Future (v2): could add `--daemon` flag or provide example systemd/launchd service files
 
@@ -327,28 +394,29 @@ This is a developer tool, not infrastructure software. Users can background it w
 ### Decision Impact Analysis
 
 **Implementation Sequence:**
-1. Foundation: cargo init, CLI (clap), config loading, signal handling
+1. Foundation: cargo init, CLI (clap), config loading, cooperative shutdown (ShutdownFlag in `run_start()`, signal handler task, propagation to pipeline/session)
 2. Tools: git (git2), filesystem, terminal as rig Tool traits
 3. Watcher: sprint-status.yaml parser, dependency graph, pre-gate logic
-4. Session: rig agent setup, chat loop, state file persistence
-5. Supervisor: ask_supervisor tool, rule engine, LLM fallback, decision logging
+4. Session: rig agent setup with XML context activation, streaming chat loop, state file persistence, `llm_context` module for ContextBuilder
+5. Supervisor: ask_supervisor tool, rule engine, LLM fallback (architect session), decision logging
 6. Git Provider: GitHub + GitLab PR creation trait + implementations
 7. Review: separate LLM session for code review (optional, configurable)
 8. Notifier: Telegram integration
 
 **Cross-Component Dependencies:**
-- Session depends on: tools, supervisor, config, git_provider
+- Session depends on: tools, supervisor, config, git_provider, llm_context, llm_logging, auth (for Copilot)
+- Pipeline depends on: session, review, git_provider, notifier, config
 - Supervisor depends on: config (LLM provider for fallback), decisions logging
 - Watcher depends on: config (paths, polling interval)
 - Git Provider depends on: config (provider selection, credentials)
-- All components depend on: error handling strategy (Layer 1-3), tracing setup
+- All components depend on: error handling strategy (Layer 1-3), tracing setup, ShutdownFlag (pipeline/session/streaming layers)
 
 ## Implementation Patterns & Consistency Rules
 
 ### Pattern Categories Defined
 
 **Critical Conflict Points Identified:**
-6 areas where AI agents could make different implementation choices. The Project Context already covers Rust conventions (snake_case, rustfmt, clippy, doc comments, module structure, testing placement). The patterns below address bmad-bot-specific concerns not covered there.
+7 areas where AI agents could make different implementation choices. The Project Context already covers Rust conventions (snake_case, rustfmt, clippy, doc comments, module structure, testing placement). The patterns below address bmad-bot-specific concerns not covered there.
 
 ### Error Type Pattern — Per-Module thiserror Enums
 
@@ -418,6 +486,8 @@ impl Tool for MyTool {
 }
 ```
 
+**Note on ThinkTool:** The 5th agent tool is rig's built-in `ThinkTool` (derived from Anthropic's Claude Think Tool pattern). It gives the agent a dedicated space for structured reasoning without consuming real tool calls. No custom implementation needed — it is imported from the `rig` crate and added via `.tool(ThinkTool)` on the agent builder. It does **not** live in the `tools/` directory.
+
 **Mandatory rules:**
 - Tool NAME is always snake_case and descriptive
 - Tool definition description must be detailed enough for the LLM to use correctly
@@ -440,11 +510,64 @@ tracing::error!(action = "git_push", error = %e, "Push failed");
 // NEVER use println! or eprintln! — tracing only
 ```
 
+**LLM Payload Logging (`llm_logging` module):**
+All LLM requests and responses are logged via a dedicated `llm_logging` module (`src/llm_logging.rs`) using the `bmad_bot::llm` tracing target. This allows independent filtering:
+
+```
+# Enable LLM payload logging
+RUST_LOG=bmad_bot::llm=debug cargo run -- start
+
+# Enable full history tracing
+RUST_LOG=bmad_bot::llm=trace cargo run -- start
+```
+
+Functions: `log_llm_request()`, `log_llm_response()`, `log_llm_error()`, `log_llm_history()`, `log_llm_history_summary()`. Each has an early `tracing::enabled!` guard — zero cost when disabled (~1ns atomic load). Used across session runner, review, and supervisor architect modules.
+
 **Mandatory rules:**
 - Every session wrapped in a `story_session` span with `story_id`
 - Every tool action logged with `action` field
 - Errors always include `error` field with the error value
 - Sensitive fields filtered — never log API keys, tokens, or credentials
+- All LLM interactions logged via `llm_logging` module, not ad-hoc tracing calls
+
+### Cooperative Shutdown Pattern — ShutdownFlag Propagation
+
+```
+// Type alias — shared across modules
+pub type ShutdownFlag = Arc<AtomicBool>;
+
+// Created once in run_start()
+let shutdown: ShutdownFlag = Arc::new(AtomicBool::new(false));
+
+// Signal handler task flips the flag
+{
+    let flag = Arc::clone(&shutdown);
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+        flag.store(true, Ordering::Relaxed);
+    });
+}
+
+// Propagation chain:
+// run_start() → StoryPipeline::new(shutdown) → SessionRunner::new(shutdown)
+//                                             → streaming_chat(agent, prompt, history, Some(&shutdown))
+
+// Check points:
+// 1. run_polling_loop() — top of each poll cycle
+// 2. run_session() — between chat turns, saves WAL before returning
+// 3. streaming_chat() — between every stream chunk AND between tool-call rounds
+```
+
+**Why this matters:** The daemon runs long-lived streaming LLM calls with multi-turn tool-calling loops. A simple `tokio::select!` on the top-level loop would only catch shutdown between stories, not mid-stream. The ShutdownFlag pattern enables interruption at the **finest granularity** — between individual SSE chunks — so Ctrl+C always responds within milliseconds, not minutes.
+
+**Mandatory rules:**
+- `ShutdownFlag` is always `Arc<AtomicBool>` — never a channel, never a mutex
+- Use `Ordering::Relaxed` for loads and stores — no cross-thread ordering needed, just visibility
+- Every function that runs an LLM call must accept `Option<&ShutdownFlag>` and check between chunks
+- On shutdown detection: save WAL state, commit partial work if possible, then return cleanly
 
 ### Config Pattern — Validate Once, Share via Arc
 
@@ -545,7 +668,9 @@ mod tests {
 - Follow the error type pattern: thiserror per module, anyhow only in binary
 - Implement rig tools using the standard structure above
 - Use tracing with structured fields — never println/eprintln
+- Log all LLM interactions via the `llm_logging` module
 - Pass config as `Arc<BotConfig>` — never clone, never mutate
+- Propagate `ShutdownFlag` to any function that runs LLM calls
 - Use dedicated structs for trait method params and returns
 - Write unit tests with mocked dependencies for every new module
 - Check the Project Context file for additional rules before implementing any code
@@ -557,6 +682,7 @@ mod tests {
 - Logging sensitive data (API keys, tokens, passwords)
 - Calling real LLM APIs in unit tests
 - Skipping doc comments on public items
+- Using `agent.chat()` (non-streaming) — always use `streaming_chat()` / `stream_chat()`
 
 ## Project Structure & Boundaries
 
@@ -571,34 +697,51 @@ bmad-bot/
 ├── .env.example                      # Template secrets (API keys)
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
-│   ├── main.rs                       # Entry point, CLI dispatch, signal handling
+│   ├── main.rs                       # Entry point, CLI dispatch, rustls init
+│   ├── auth/
+│   │   ├── mod.rs                    # Auth module root
+│   │   └── github_copilot.rs         # OAuth Device Flow, token exchange, CopilotTokenCache
 │   ├── cli/
-│   │   └── mod.rs                    # clap: init, start, status, logs
+│   │   ├── mod.rs                    # clap: init, start, status, logs + run_start/run_polling_loop
+│   │   ├── git_detect.rs             # Git remote auto-detection for interactive init
+│   │   └── state.rs                  # DaemonState file (.bmad-bot-state.json) for `status` command
 │   ├── config/
-│   │   └── mod.rs                    # BotConfig, YAML + .env loading, validation
+│   │   ├── mod.rs                    # BotConfig, BotSecrets, YAML + .env loading, validation
+│   │   └── discovery.rs              # BMAD version/module auto-discovery from _bmad/ directory
 │   ├── watcher/
 │   │   ├── mod.rs                    # Polling loop, sprint-status.yaml reader
-│   │   └── deps.rs                   # Dependency graph, pre-gate logic
+│   │   └── deps.rs                   # Dependency graph, topological sort, pre-gate logic
 │   ├── session/
-│   │   ├── mod.rs                    # rig agent setup, chat loop, lifecycle
-│   │   └── state.rs                  # Session WAL file persistence
+│   │   ├── mod.rs                    # Session module root, SessionOutcome enum
+│   │   ├── analyzer.rs               # ResponseAnalyzer — workflow interaction detection (confirmations, step transitions, completion)
+│   │   ├── branch.rs                 # Branch management — create/checkout story branches, determine base branch
+│   │   ├── cleanup.rs                # Session cleanup — partial work preservation, needs-clarification marking
+│   │   ├── escalation.rs             # EscalationReport — structured escalation handling
+│   │   ├── provider.rs               # LLM provider construction, resolve_api_key(), copilot_headers()
+│   │   ├── runner.rs                 # SessionRunner — agent build, XML context activation, streaming chat loop, crash/context-limit recovery
+│   │   └── state.rs                  # Session WAL file persistence (ChatMessage, SessionState)
 │   ├── supervisor/
-│   │   ├── mod.rs                    # ask_supervisor Tool implementation
-│   │   ├── rules.rs                  # Rule engine (deterministic patterns)
-│   │   └── decisions.rs              # Decision logging (file + PR section)
+│   │   ├── mod.rs                    # ask_supervisor Tool implementation, EscalationSlot
+│   │   ├── architect.rs              # Architect LLM fallback session (separate agent for substantive questions)
+│   │   ├── read_tool.rs              # Read-only filesystem tool for the Architect agent
+│   │   ├── rules.rs                  # Rule engine (deterministic pattern matching)
+│   │   └── decisions.rs              # Decision logging (DecisionLog, write_decisions_file)
 │   ├── review/
-│   │   └── mod.rs                    # Code review session (separate LLM, optional)
+│   │   └── mod.rs                    # Code review session (separate LLM, optional, configurable)
 │   ├── tools/
 │   │   ├── mod.rs                    # Tool registration helpers
 │   │   ├── git.rs                    # Git Tool (git2 operations)
-│   │   ├── fs.rs                     # Filesystem Tool (read/write)
-│   │   └── terminal.rs              # Terminal Tool (run commands)
+│   │   ├── fs.rs                     # Filesystem Tool (read/write/list)
+│   │   └── terminal.rs              # Terminal Tool (run commands with timeout)
 │   ├── git_provider/
 │   │   ├── mod.rs                    # GitProvider trait + factory
 │   │   ├── github.rs                # GitHub impl (octocrab)
 │   │   └── gitlab.rs                # GitLab impl (reqwest)
-│   └── notifier/
-│       └── mod.rs                    # Notifier trait + Telegram impl
+│   ├── notifier/
+│   │   └── mod.rs                    # Notifier trait + Telegram impl + NoopNotifier
+│   ├── llm_context.rs                # Zed-style XML ContextBuilder — adaptive backtick fencing, absolute path resolution, multi-file support
+│   ├── llm_logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
+│   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
     └── e2e/
         └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
@@ -608,15 +751,20 @@ bmad-bot/
 
 | FRs | Domain | Module | Key Files |
 |-----|--------|--------|-----------|
-| FR1-4 | Story Management | `watcher/` | `mod.rs` (polling), `deps.rs` (pre-gate) |
+| FR1-4 | Story Management | `watcher/` | `mod.rs` (polling), `deps.rs` (pre-gate, topological sort) |
 | FR5-7 | Pre-Dev Preparation | *BMAD Agent* | Handled by agent via tools — no daemon code |
-| FR8-11 | Development Session | `session/` | `mod.rs` (chat loop), `state.rs` (WAL) |
-| FR12-17 | Supervision | `supervisor/` | `mod.rs` (tool), `rules.rs`, `decisions.rs` |
+| FR8-11 | Development Session | `session/`, `llm_context` | `runner.rs` (streaming chat loop, XML context activation, context-limit recovery), `analyzer.rs` (response analysis), `provider.rs` (LLM construction), `branch.rs` (branch management), `cleanup.rs` (partial work), `escalation.rs` (escalation handling), `state.rs` (WAL persistence) |
+| FR12-17 | Supervision | `supervisor/` | `mod.rs` (ask_supervisor tool), `rules.rs` (rule engine), `architect.rs` (LLM fallback), `read_tool.rs` (read-only fs for architect), `decisions.rs` (decision logging) |
 | FR18-20 | Code Review | `review/` | `mod.rs` |
 | FR21-24 | PR Management | `git_provider/` | `mod.rs` (trait), `github.rs`, `gitlab.rs` |
 | FR25-26 | Notifications | `notifier/` | `mod.rs` |
-| FR27-32 | CLI & Config | `cli/`, `config/` | `mod.rs` each |
-| FR33-36 | Resilience | *Cross-cutting* | reqwest-middleware + per-module error handling |
+| FR27-32 | CLI & Config | `cli/`, `config/` | `cli/mod.rs` (clap subcommands, run_start, run_polling_loop), `cli/git_detect.rs` (remote auto-detection), `cli/state.rs` (daemon state), `config/mod.rs` (BotConfig, BotSecrets), `config/discovery.rs` (BMAD discovery) |
+| FR33-34 | Resilience & Shutdown | `cli/`, `session/`, `pipeline.rs` | ShutdownFlag created in `run_start()`, propagated through `pipeline.rs` → `session/runner.rs` → `streaming_chat()`. WAL save on interrupt |
+| FR35-36 | Error Alerts & Validation | *Cross-cutting* | reqwest-middleware + per-module error handling + notifier |
+| FR39 | Copilot Auth | `auth/` | `github_copilot.rs` (OAuth Device Flow, token exchange, CopilotTokenCache) |
+| FR40 | LLM Logging | `llm_logging.rs` | Request/response payload logging, `bmad_bot::llm` tracing target |
+| — | Pipeline Orchestration | `pipeline.rs` | `StoryPipeline` — orchestrates full story pipeline (session → review → PR → notify) |
+| — | XML Context | `llm_context.rs` | `ContextBuilder` for agent activation (Zed-style XML formatting) |
 
 ### Architectural Boundaries
 
@@ -624,66 +772,101 @@ bmad-bot/
 
 ```
                 ┌──────────┐
-                │  config/  │ Arc<BotConfig> shared to all modules
+                │  config/  │ Arc<BotConfig> + Arc<BotSecrets> shared to all
                 └────┬─────┘
                      │
-┌────────┐    ┌──────┴──────┐    ┌────────────┐
-│  cli/  │───▶│   watcher/  │───▶│  session/   │
-└────────┘    │  deps.rs    │    │  state.rs   │
-              └─────────────┘    └──┬───┬───┬──┘
-                                    │   │   │
-                    ┌───────────────┘   │   └──────────────┐
-                    ▼                   ▼                   ▼
-             ┌────────────┐    ┌──────────────┐    ┌──────────────┐
-             │   tools/    │    │  supervisor/  │    │   review/    │
-             │ git/fs/term │    │ rules/decisions│   │ (optional)   │
-             └────────────┘    └──────────────┘    └──────┬───────┘
-                                                          │
-                                    ┌─────────────────────┤
-                                    ▼                     ▼
-                             ┌──────────────┐    ┌──────────────┐
-                             │ git_provider/ │    │  notifier/   │
-                             │ github/gitlab │    │  telegram    │
-                             └──────────────┘    └──────────────┘
+┌────────┐    ┌──────┴──────┐    ┌───────────────┐
+│  cli/  │───▶│ pipeline.rs │───▶│   watcher/    │
+│        │    │ (orchestr.) │    │   deps.rs     │
+└────────┘    └──────┬──────┘    └───────────────┘
+  │ creates          │
+  │ ShutdownFlag     │ propagates ShutdownFlag
+  │                  │
+  │           ┌──────┴──────┐
+  └──────────▶│  session/   │
+              │  runner.rs  │◀─── llm_context.rs (XML context for activation)
+              │  analyzer.rs│◀─── llm_logging.rs (request/response logging)
+              │  provider.rs│◀─── auth/github_copilot.rs (Copilot token)
+              │  branch.rs  │
+              │  cleanup.rs │
+              │  state.rs   │
+              └──┬───┬───┬──┘
+                 │   │   │
+  ┌──────────────┘   │   └──────────────┐
+  ▼                  ▼                  ▼
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│   tools/     │  │  supervisor/ │  │   review/    │
+│ git/fs/term  │  │ rules/arch/  │  │ (optional)   │
+│ + ThinkTool  │  │ decisions    │  │              │
+│ (rig builtin)│  └──────────────┘  └──────┬───────┘
+└──────────────┘                           │
+                          ┌────────────────┤
+                          ▼                ▼
+                   ┌──────────────┐ ┌──────────────┐
+                   │ git_provider/ │ │  notifier/   │
+                   │ github/gitlab │ │  telegram    │
+                   └──────────────┘ └──────────────┘
+```
+
+**ShutdownFlag propagation path:**
+```
+cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
+       │
+       ├──▶ signal handler task (sets flag on SIGINT/SIGTERM)
+       │
+       ├──▶ run_polling_loop() ── checks at top of each cycle
+       │
+       └──▶ StoryPipeline::new(shutdown)
+                   │
+                   └──▶ SessionRunner::new(shutdown)
+                               │
+                               ├──▶ run_session() ── checks between chat turns
+                               │
+                               └──▶ streaming_chat() ── checks between every chunk/tool-call
 ```
 
 **Interface contracts between modules:**
 
-- **watcher → session:** Passes `StoryInfo` struct (eligible story with metadata: id, label, branch name, specs path, dependencies)
+- **pipeline → watcher:** Pipeline delegates story discovery to watcher. Watcher returns `Vec<StoryInfo>` (eligible stories sorted by dependency order).
+- **pipeline → session:** Passes `StoryInfo` struct (eligible story with metadata: id, label, branch name, specs path, dependencies). SessionRunner returns `SessionOutcome`.
 - **session → tools:** Tools registered at agent build time via `.tool()` — no direct calls from session to tools
 - **session → supervisor:** Supervisor is a rig tool called by the agent autonomously, not by the daemon
-- **session → review:** Passes `StoryInfo` (story_key, branch_name, specs_path). `ReviewRunner` loads the same BMAD dev persona (`dev.md`), sends `"CR"` as initial command, `ResponseAnalyzer` handles interaction patterns (story selection, fix decisions, completion detection), post-review phase captures agent commit + markdown report in `ReviewOutcome::Completed { report }`, orchestrator posts report as PR comment via `GitProvider::add_comment()`
-- **session → git_provider:** Passes `CreatePrParams` after session/review complete
-- **session → notifier:** Passes `NotificationData` (status, story info, PR link if available, error details if any)
-- **config → all:** `Arc<BotConfig>` injected at startup — read-only, never mutated
+- **session → llm_context:** SessionRunner uses `ContextBuilder` to format `dev.md` as Zed-style XML for agent activation
+- **session → auth:** SessionRunner uses `CopilotTokenCache` to resolve short-lived Copilot session tokens at runtime (via `session/provider.rs`)
+- **pipeline → review:** Passes `StoryInfo` (story_key, branch_name, specs_path). `ReviewRunner` loads the same BMAD dev persona (`dev.md`), sends `"CR"` as initial command, `ResponseAnalyzer` handles interaction patterns (story selection, fix decisions, completion detection), post-review phase captures agent commit + markdown report in `ReviewOutcome::Completed { report }`, orchestrator posts report as PR comment via `GitProvider::add_comment()`
+- **pipeline → git_provider:** Passes `CreatePrParams` after session/review complete
+- **pipeline → notifier:** Passes `NotificationData` (status, story info, PR link if available, error details if any)
+- **config → all:** `Arc<BotConfig>` + `Arc<BotSecrets>` injected at startup — read-only, never mutated
 
 ### Data Flow
 
-1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>`
-2. **Crash check:** `session/state.rs` checks for existing WAL file → if found, resume interrupted session (skip to step 4)
-3. **Poll:** `watcher/` reads `sprint-status.yaml` from configured output path → `deps.rs` computes pre-gate → eligible story or sleep until next cycle
-4. **Session init:** `session/` loads BMAD dev agent file, appends language override, builds rig agent with 4 tools (git, fs, terminal, ask_supervisor)
-5. **Chat loop:** Sends `"DS"` → agent works autonomously via tools → `state.rs` persists chat history after each turn
-6. **During session:** Agent calls `ask_supervisor` tool as needed → rule engine → LLM fallback → or escalation (stops session)
-7. **Session end:** If `code_review_enabled`, `review/ReviewRunner` launches a new rig agent session with the review LLM config, loads the same BMAD dev persona (`dev.md`), and sends `"CR"` as the initial command. The agent drives the full CR workflow autonomously (diff analysis, adversarial review, fix application). `ResponseAnalyzer` handles all interaction patterns (story selection replies, fix decisions, completion detection). On CR completion, the daemon sends a post-review message asking the agent to commit fixes with descriptive messages and produce a markdown review report. The report is captured in `ReviewOutcome::Completed { report }` and later posted as a PR comment by the orchestrator via `GitProvider::add_comment()`. Review failures are non-blocking — `ReviewOutcome::Failed` proceeds to PR creation with a note in the description
-8. **PR creation:** `git_provider/` creates PR (GitHub or GitLab) with agent-written description + Supervisor Decisions section
-9. **Notification:** `notifier/` sends Telegram message with story status + PR link
-10. **Cleanup:** `session/state.rs` deletes WAL file → return to step 3
+1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>` + `Arc<BotSecrets>`. `cli/run_start()` creates the `ShutdownFlag` and spawns the signal handler task.
+2. **Crash check:** `SessionRunner::check_and_recover_wal()` checks for existing WAL file → if found, `pipeline.recover_and_process()` resumes the interrupted session (skip to step 5 with loaded history)
+3. **Poll:** `watcher/` reads `sprint-status.yaml` from configured output path → `deps.rs` computes topological sort and pre-gate → eligible stories or sleep until next cycle. Uses `tokio::time::interval` which **ticks immediately on first call** — daemon polls at launch, not after `polling_interval_secs`.
+4. **Session init:** `session/runner.rs` builds a minimal system preamble (operational instructions + language override), then constructs the rig agent with **5 tools** (git, fs, terminal, ask_supervisor, ThinkTool). Build methods return concrete `Agent<M>` types to satisfy `StreamingChat` trait bounds. Provider-specific builders: `build_anthropic_agent()` (Anthropic API), `build_openai_agent()` (OpenAI Responses API), `build_copilot_agent()` (Completions API + IDE headers).
+5. **Agent activation:** `activate_agent()` sends the BMAD dev agent file (`dev.md`) as the first user message wrapped in Zed-style XML context tags (via `ContextBuilder`). The agent processes activation steps via tools (loads `config.yaml`, displays greeting/menu). Returns `(rig_history, chat_history)` for subsequent turns.
+6. **Chat loop:** Sends `"DS"` via `streaming_chat()` → agent works autonomously via tools → `state.rs` persists chat history (WAL) after each turn. **All LLM calls use streaming** — `streaming_chat()` consumes SSE stream, collects text, handles tool calls via rig's multi-turn stream. ShutdownFlag checked between every chunk. `llm_logging` records request/response payloads.
+7. **During session:** Agent calls `ask_supervisor` tool as needed → rule engine → LLM fallback (architect session) → or escalation (stops session)
+8. **Session end:** If `code_review_enabled`, `review/ReviewRunner` launches a new rig agent session with the review LLM config, loads the same BMAD dev persona (`dev.md`), and sends `"CR"` as the initial command. The agent drives the full CR workflow autonomously (diff analysis, adversarial review, fix application). `ResponseAnalyzer` handles all interaction patterns (story selection replies, fix decisions, completion detection). On CR completion, the daemon sends a post-review message asking the agent to commit fixes with descriptive messages and produce a markdown review report. The report is captured in `ReviewOutcome::Completed { report }` and later posted as a PR comment by the orchestrator via `GitProvider::add_comment()`. Review failures are non-blocking — `ReviewOutcome::Failed` proceeds to PR creation with a note in the description
+9. **PR creation:** `git_provider/` creates PR (GitHub or GitLab) with agent-written description + Supervisor Decisions section
+10. **Notification:** `notifier/` sends Telegram message with story status + PR link (run summary for batch)
+11. **Cleanup:** `session/state.rs` deletes WAL file → return to step 3
 
 ### External Integration Points
 
-| Integration | Module | Protocol | Auth |
-|-------------|--------|----------|------|
-| LLM Providers (Anthropic, OpenAI) | `session/`, `supervisor/`, `review/` | HTTPS via rig-core | API key from `.env` |
-| LLM Provider (GitHub Copilot) | `session/`, `supervisor/`, `review/`, `auth/` | HTTPS via rig-core + reqwest | OAuth token from `.env` → exchanged at runtime for short-lived Copilot session token via `GET https://api.github.com/copilot_internal/v2/token`; base URL derived dynamically from token `proxy-ep` field; default: `https://api.individual.githubcopilot.com` |
-| GitHub API | `git_provider/github.rs` | HTTPS via octocrab | Token from `.env` |
-| GitLab API | `git_provider/gitlab.rs` | HTTPS via reqwest | Token from `.env` |
-| Telegram API | `notifier/mod.rs` | HTTPS via reqwest | Bot token from `.env` |
-| Local git repo | `tools/git.rs` | libgit2 via git2 | SSH key or credential helper |
-| Local filesystem | `tools/fs.rs` | std::fs / tokio::fs | OS permissions |
-| Local terminal | `tools/terminal.rs` | tokio::process | OS permissions |
-| BMAD config | `config/mod.rs` | File read (YAML) | Filesystem access |
-| sprint-status.yaml | `watcher/mod.rs` | File read (YAML) | Filesystem access |
+| Integration | Module | Protocol | Auth | Notes |
+|-------------|--------|----------|------|-------|
+| LLM Provider (Anthropic) | `session/`, `supervisor/`, `review/` | HTTPS via rig-core | API key from `.env` | Standard Anthropic API |
+| LLM Provider (OpenAI) | `session/`, `supervisor/`, `review/` | HTTPS via rig-core | API key from `.env` | Uses **Responses API** (`build_openai_agent`) |
+| LLM Provider (GitHub Copilot) | `session/`, `supervisor/`, `review/`, `auth/` | HTTPS via rig-core + reqwest | OAuth token from `.env` → exchanged at runtime for short-lived Copilot session token via `GET https://api.github.com/copilot_internal/v2/token` | Uses **Completions API** (`build_copilot_agent`). Requires IDE headers: `Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id` ("vscode-chat"). Base URL derived from token `proxy-ep` field; default: `https://api.individual.githubcopilot.com`. Headers injected via rig's `.http_headers()` builder. Provider construction in `session/provider.rs` with `copilot_headers()` helper |
+| GitHub API | `git_provider/github.rs` | HTTPS via octocrab | Token from `.env` | |
+| GitLab API | `git_provider/gitlab.rs` | HTTPS via reqwest | Token from `.env` | |
+| Telegram API | `notifier/mod.rs` | HTTPS via reqwest | Bot token from `.env` | |
+| Local git repo | `tools/git.rs` | libgit2 via git2 | SSH key or credential helper | |
+| Local filesystem | `tools/fs.rs` | std::fs / tokio::fs | OS permissions | |
+| Local terminal | `tools/terminal.rs` | tokio::process | OS permissions | Configurable timeout |
+| BMAD config | `config/mod.rs` | File read (YAML) | Filesystem access | |
+| sprint-status.yaml | `watcher/mod.rs` | File read (YAML) | Filesystem access | |
 
 ### Configuration Files
 
@@ -694,6 +877,7 @@ bmad-bot/
 | `bmad-bot.yaml.example` | ✅ Yes | Template for new users |
 | `.env.example` | ✅ Yes | Template listing required env vars (no values) |
 | `_bmad-output/implementation-artifacts/.bmad-bot-session.yaml` | ❌ No (transient) | Session WAL file — exists only during active session |
+| `.bmad-bot-state.json` | ❌ No (transient) | Daemon state file — exists only while daemon is running, used by `bmad-bot status` |
 
 ## Architecture Validation Results
 
@@ -701,67 +885,76 @@ bmad-bot/
 
 **Decision Compatibility:**
 All architectural decisions work together without conflicts:
-- rig-core v0.29.0 + tokio + git2 + reqwest + tracing — no dependency conflicts, all async-compatible
-- Hybrid supervisor model (chat loop + ask_supervisor tool) aligns naturally with rig's `chat()` API and `Tool` trait
+- rig-core + tokio + git2 + reqwest + tracing — no dependency conflicts, all async-compatible
+- Hybrid supervisor model (streaming chat loop + ask_supervisor tool) aligns naturally with rig's `StreamingChat` trait and `Tool` trait
 - Daemon-reads/agent-writes model is consistent with "BMAD files are sacred" principle and "daemon as minimal orchestrator"
-- Session WAL file + crash recovery is consistent with graceful shutdown requirements
+- Session WAL file + crash recovery is consistent with cooperative shutdown requirements
 - Three-tier error propagation (middleware → tool → session) aligns with module boundaries
-- Agent prompt composition (load file as-is + append override) is consistent with "daemon knows nothing about BMAD internals"
+- Agent prompt composition (minimal preamble + XML context activation) is consistent with "daemon has an explicit activation phase" and clean separation of concerns
+- Cooperative ShutdownFlag propagation is consistent with streaming-first architecture — every LLM call can be interrupted
+- Pipeline module (`pipeline.rs`) cleanly separates orchestration from execution (session/review)
 
 **Pattern Consistency:**
 - All patterns use thiserror per module, anyhow only in binary — consistent error handling across all modules
 - All rig tools follow the same structural template (struct + args + error + Tool impl)
 - Tracing patterns use story_id spans consistently across the pipeline
 - Config shared as Arc<BotConfig> everywhere — single pattern, no exceptions
+- All LLM calls use streaming (`streaming_chat()`) — no exceptions, Copilot requires it
+- ShutdownFlag propagated to every layer that runs LLM calls
 
 **Structure Alignment:**
-- Project structure directly maps to architectural decisions: one module per FR domain
+- Project structure directly maps to architectural decisions: one module per FR domain plus support modules
 - Module boundaries match the communication diagram — no circular dependencies
 - Integration points are clearly defined at module interfaces with dedicated structs
 
 ### Requirements Coverage Validation ✅
 
-**Functional Requirements: 36/36 covered**
+**Functional Requirements: 38/38 covered**
 
 | FR Range | Domain | Architectural Support |
 |----------|--------|----------------------|
-| FR1-4 | Story Management | `watcher/` (polling + pre-gate dependency check). Agent handles status mutations via tools. |
+| FR1-4 | Story Management | `watcher/` (polling + pre-gate dependency check with topological sort). Agent handles status mutations via tools. |
 | FR5-7 | Pre-Dev Preparation | BMAD agent autonomously reads prior stories and updates specs via filesystem tool. No daemon code needed. |
-| FR8-11 | Development Session | `session/` builds rig agent from BMAD agent file, registers 4 tools, manages chat loop. Language override appended to preamble. |
-| FR12-17 | Supervision | `supervisor/` implements ask_supervisor as rig Tool. Rule engine in `rules.rs`, LLM fallback in `mod.rs`, decision logging in `decisions.rs`. Escalation returns tool error → stops rig loop. |
+| FR8-11 | Development Session | `session/runner.rs` builds rig agent with minimal preamble, activates BMAD agent via XML context (`llm_context.rs`), registers 5 tools (git, fs, terminal, ask_supervisor, ThinkTool), manages streaming chat loop. Language override in system preamble. Agent file sent as user message, not system prompt. |
+| FR12-17 | Supervision | `supervisor/` implements ask_supervisor as rig Tool. Rule engine in `rules.rs`, LLM fallback via architect session in `architect.rs` (with read-only `read_tool.rs`), decision logging in `decisions.rs`. Escalation returns tool error → stops rig loop. |
 | FR18-20 | Code Review | `review/` launches separate LLM session. Configurable (enabled/disabled). Fixes in separate commits, review posted as PR comment. |
 | FR21-24 | PR Management | `git_provider/` trait with GitHub (octocrab) and GitLab (reqwest) implementations. PR created even for failed/blocked stories with failure description. |
-| FR25-26 | Notifications | `notifier/` sends Telegram messages with story ID, status, and PR link. Non-blocking — failures logged but don't stop pipeline. |
-| FR27-32 | CLI & Config | `cli/` implements 4 clap subcommands. `config/` loads YAML + .env, validates at startup, auto-discovers BMAD version. |
-| FR33-36 | Resilience | reqwest-middleware for HTTP retry/backoff (max 3). tokio::signal for graceful shutdown. Session WAL for crash recovery. Notifier for blocking error alerts. |
+| FR25-26 | Notifications | `notifier/` sends Telegram messages with story ID, status, and PR link. Non-blocking — failures logged but don't stop pipeline. Run summaries for batch processing. |
+| FR27-32 | CLI & Config | `cli/` implements 4 clap subcommands. `config/` loads YAML + .env, validates at startup, auto-discovers BMAD version (`config/discovery.rs`). `cli/git_detect.rs` for interactive init. `cli/state.rs` for daemon state tracking. |
+| FR33-34 | Resilience & Shutdown | Cooperative shutdown via `ShutdownFlag` (Arc<AtomicBool>) created in `cli/run_start()`, propagated through `pipeline.rs` → `session/runner.rs` → `streaming_chat()`. Interrupts mid-streaming and mid-tool-call. Saves WAL, commits partial work, notifies on shutdown. |
+| FR35-36 | Error Alerts & Validation | reqwest-middleware for HTTP retry/backoff (max 3). Notifier for blocking error alerts. Config validation at startup with descriptive errors. |
+| FR39 | Copilot Auth | `auth/github_copilot.rs` — OAuth Device Flow for user authentication during `init`, `CopilotTokenCache` for transparent runtime token exchange. Short-lived session tokens refreshed automatically. |
+| FR40 | LLM Logging | `llm_logging.rs` — dedicated `bmad_bot::llm` tracing target. Logs requests, responses, errors, and full history. Zero-cost when disabled. Used across session, review, and supervisor. |
 
 **Non-Functional Requirements: All covered**
 
 | NFR | Coverage |
 |-----|----------|
-| Security | Secrets in `.env` only (dotenvy), never in committed config, never logged. Tracing filters sensitive fields. Git credentials from environment. |
-| Integration | LLM providers via rig-core (20+ providers supported). GitHub via octocrab. GitLab via reqwest. Telegram via reqwest. All with retry middleware. |
-| Reliability | Exponential backoff (max 3 retries) via reqwest-middleware. Graceful shutdown via tokio::signal. Crash recovery via session WAL file. All errors logged with full context. |
-| Scalability | MVP: single daemon, sequential execution. Architecture does not preclude future parallelization — modules are independent, config is Arc-shared, no global mutable state. |
+| Security | Secrets in `.env` only (dotenvy), never in committed config, never logged. Tracing filters sensitive fields. Git credentials from environment. Copilot OAuth tokens exchanged for short-lived session tokens. |
+| Integration | LLM providers via rig-core (Anthropic, OpenAI Responses API, Copilot Completions API). GitHub via octocrab. GitLab via reqwest. Telegram via reqwest. All with retry middleware. |
+| Reliability | Exponential backoff (max 3 retries) via reqwest-middleware. Cooperative shutdown via ShutdownFlag (mid-stream interruption). Crash recovery via session WAL file. Context-limit recovery with history summarization. All errors logged with full context. |
+| Scalability | MVP: single daemon, sequential execution. Architecture does not preclude future parallelization — modules are independent, config is Arc-shared, no global mutable state. Pipeline processes stories sequentially but structure supports future parallelization. |
 
 ### Implementation Readiness Validation ✅
 
 **Decision Completeness:**
 - All 6 critical/important decisions documented with rationale and implementation guidance
-- Technology versions verified (rig-core 0.29.0, Rust edition 2024)
-- Implementation patterns include code examples for all 6 pattern categories
+- Technology versions verified (rig-core, Rust edition 2024)
+- Implementation patterns include code examples for all 7 pattern categories
 - Anti-patterns explicitly listed to prevent common mistakes
 
 **Structure Completeness:**
-- Complete directory tree with every file and its purpose
-- All 36 FRs mapped to specific modules and files
+- Complete directory tree with every file and its purpose (35 source files)
+- All 38 FRs mapped to specific modules and files
 - Module communication diagram with interface contracts
-- Full data flow documented (10 steps from startup to cleanup)
+- Full data flow documented (11 steps from startup to cleanup)
+- ShutdownFlag propagation path documented
 
 **Pattern Completeness:**
 - Error handling: per-module thiserror + anyhow in binary only
-- Tool implementation: standard struct/args/error/trait template
-- Tracing: structured spans with story_id context
+- Tool implementation: standard struct/args/error/trait template + ThinkTool note
+- Tracing: structured spans with story_id context + LLM payload logging
+- Cooperative shutdown: ShutdownFlag propagation pattern
 - Config: validate once, share via Arc
 - Git provider: trait with dedicated param/return structs
 - Testing: mocked LLM responses, Arrange-Act-Assert, naming convention
@@ -779,30 +972,33 @@ All architectural decisions work together without conflicts:
 ### Architecture Completeness Checklist
 
 **✅ Requirements Analysis**
-- [x] Project context thoroughly analyzed (36 FRs, 4 NFR categories)
+- [x] Project context thoroughly analyzed (38 FRs, 4 NFR categories)
 - [x] Scale and complexity assessed (medium, CLI daemon)
-- [x] Technical constraints identified (rig maturity, git2, BMAD read-only)
-- [x] Cross-cutting concerns mapped (errors, logging, secrets, LLM abstraction, traceability)
+- [x] Technical constraints identified (rig maturity, git2, BMAD read-only, Copilot streaming requirement)
+- [x] Cross-cutting concerns mapped (errors, logging, secrets, LLM abstraction, traceability, cooperative shutdown)
 
 **✅ Architectural Decisions**
 - [x] 6 critical/important decisions documented with rationale
 - [x] Technology stack fully specified with versions
-- [x] Integration patterns defined (chat loop + supervisor tool)
+- [x] Integration patterns defined (streaming chat loop + supervisor tool + XML context activation)
 - [x] Crash recovery and resilience addressed
+- [x] Cooperative shutdown pattern documented with propagation chain
 
 **✅ Implementation Patterns**
 - [x] Error type pattern established (thiserror per module)
-- [x] Rig tool pattern standardized
-- [x] Tracing pattern with structured spans
+- [x] Rig tool pattern standardized (including ThinkTool note)
+- [x] Tracing pattern with structured spans + LLM payload logging
+- [x] Cooperative shutdown pattern with ShutdownFlag propagation
 - [x] Config, Git provider, and test mock patterns defined
-- [x] Anti-patterns explicitly documented
+- [x] Anti-patterns explicitly documented (including non-streaming anti-pattern)
 
 **✅ Project Structure**
-- [x] Complete directory structure with all files
-- [x] Module boundaries and communication map
-- [x] FR-to-module mapping (36/36)
-- [x] Data flow documented (10 steps)
-- [x] External integration points catalogued
+- [x] Complete directory structure with all 35 source files
+- [x] Module boundaries and communication map (including pipeline, auth, llm_context, llm_logging)
+- [x] FR-to-module mapping (38/38)
+- [x] Data flow documented (11 steps)
+- [x] External integration points catalogued (with Copilot API split documented)
+- [x] ShutdownFlag propagation path documented
 
 ### Architecture Readiness Assessment
 
@@ -817,6 +1013,9 @@ All architectural decisions work together without conflicts:
 - Full decision traceability (supervisor decisions → file + PR)
 - Two-layer dependency model (daemon pre-gate + agent verification) saves tokens
 - GitProvider trait enables GitHub + GitLab from MVP
+- Cooperative shutdown interrupts at finest granularity (mid-stream)
+- Clean agent activation pattern (system preamble vs XML context persona)
+- Universal streaming ensures consistency across all providers
 
 **Areas for Future Enhancement:**
 - Multi-worker orchestration with story parallelization (v2)
@@ -830,9 +1029,12 @@ All architectural decisions work together without conflicts:
 **AI Agent Guidelines:**
 - Read the Project Context file (`_bmad-output/project-context.md`) before implementing any code
 - Follow all architectural decisions exactly as documented in this file
-- Use implementation patterns consistently — especially error types, tool structure, and tracing
+- Use implementation patterns consistently — especially error types, tool structure, tracing, cooperative shutdown, and streaming
 - Respect module boundaries — each module owns its error types and exposes clean interfaces
 - Check the anti-patterns list before submitting any code
+- Always use `streaming_chat()` — never `agent.chat()`
+- Always propagate ShutdownFlag to functions that make LLM calls
+- Agent activation uses XML context (first user message), not system preamble
 
 **First Implementation Priority:**
 `cargo init bmad-bot` + dependency setup + module scaffolding. This should be the first implementation story, establishing the project skeleton that all subsequent stories build on.
