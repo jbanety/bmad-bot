@@ -21,6 +21,7 @@
 #   - in-progress: Developer actively working on implementation
 #   - review: Ready for code review (via Dev's code-review workflow)
 #   - done: Story completed
+#   - blocked: Story is blocked by an external dependency (e.g., another epic must complete first)
 #   - needs-clarification: Supervisor escalated — awaiting human input before retry
 #
 # Story Status Transitions:
@@ -29,6 +30,7 @@
 #   - in-progress → review: When developer completes implementation (via dev-story)
 #   - in-progress → needs-clarification: Automatically when supervisor escalates to human
 #   - needs-clarification → ready-for-dev: Manually after human provides clarification
+#   - blocked → ready-for-dev: Manually when blocking dependency is resolved
 #   - review → done: When code review passes
 #
 # Retrospective Status:
@@ -90,15 +92,23 @@ development_status:
   6-4-context-window-limit-recovery: review
   epic-6-retrospective: optional
 
-  epic-7: in-progress
-  7-1-integration-test-infrastructure-fixtures: ready-for-dev
-  7-2-config-startup-validation-integration-tests: ready-for-dev # depends-on: 7-1
-  7-3-watcher-dependency-resolution-story-selection-integration-tests: ready-for-dev # depends-on: 7-1
-  7-4-pipeline-orchestration-integration-tests: ready-for-dev # depends-on: 7-1
-  7-5-session-wal-crash-recovery-integration-tests: ready-for-dev # depends-on: 7-1
-  7-6-git-provider-pr-creation-integration-tests: ready-for-dev # depends-on: 7-1
-  7-7-notification-flow-integration-tests: ready-for-dev # depends-on: 7-1
-  7-8-branch-management-git-tools-integration-tests: ready-for-dev # depends-on: 7-1
-  7-9-cli-lifecycle-integration-tests: ready-for-dev # depends-on: 7-1
-  7-10-response-analyzer-supervisor-rules-integration-tests: ready-for-dev # depends-on: 7-1
+  epic-7: blocked # BLOCKED by epic-8 — all integration tests must target post-refactoring tool surface
+  7-1-integration-test-infrastructure-fixtures: blocked # depends-on: epic-8
+  7-2-config-startup-validation-integration-tests: blocked # depends-on: 7-1
+  7-3-watcher-dependency-resolution-story-selection-integration-tests: blocked # depends-on: 7-1
+  7-4-pipeline-orchestration-integration-tests: blocked # depends-on: 7-1
+  7-5-session-wal-crash-recovery-integration-tests: blocked # depends-on: 7-1
+  7-6-git-provider-pr-creation-integration-tests: blocked # depends-on: 7-1
+  7-7-notification-flow-integration-tests: blocked # depends-on: 7-1
+  7-8-branch-management-git-surgical-development-tools-integration-tests: blocked # depends-on: 7-1
+  7-9-cli-lifecycle-integration-tests: blocked # depends-on: 7-1
+  7-10-response-analyzer-supervisor-rules-integration-tests: blocked # depends-on: 7-1
   epic-7-retrospective: optional
+
+  epic-8: backlog # depends-on: epic-4 (Story 4.1 as baseline)
+  8-1-read-file-tool-partial-reading-outline-mode: backlog
+  8-2-edit-file-tool-surgical-search-replace-editing: backlog # depends-on: 8-1
+  8-3-grep-tool-find-path-tool-codebase-search-navigation: backlog # depends-on: 8-1
+  8-4-list-directory-tool-fstool-removal-complete-migration: backlog # depends-on: 8-3
+  8-5-agent-integration-preamble-registration-session-update: backlog # depends-on: 8-4
+  epic-8-retrospective: optional

@@ -26,7 +26,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 
 **Development Session**
 - FR8: The daemon can instantiate a streaming rig agent session with the BMAD dev agent persona, activated via Zed-style XML context (agent file sent as first user message, not as system preamble)
-- FR9: The daemon can expose git, filesystem, terminal, and think tools to the agent via rig tool calling. The think tool (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern) gives the agent a dedicated space for structured reasoning during complex tasks without consuming real tool calls
+- FR9: The daemon can expose surgical development tools to the agent via rig tool calling: `read_file` (partial reading & outline mode), `edit_file` (search-replace surgical editing), `grep` (regex codebase search), `find_path` (glob-based file discovery), `list_directory` (directory listing), `git` (version control operations), `terminal` (shell command execution), `ask_supervisor` (supervision escalation), and `think` (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern, for structured reasoning without consuming real tool calls). Tools follow the Claude Code / Zed agent-mode pattern for optimal token efficiency and code safety
 - FR10: The agent can execute the full BMAD `dev-story` workflow autonomously
 - FR11: The daemon can inject a session language override (English) via a minimal system preamble without modifying repo files
 
@@ -146,7 +146,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR6: Epic 4 — Update current story specs based on prior implementations
 - FR7: Epic 4 — Create and checkout git branch (story/{epic}-{story})
 - FR8: Epic 4 — Instantiate streaming rig agent session with BMAD dev agent persona, activated via Zed-style XML context
-- FR9: Epic 4 — Expose git, filesystem, terminal, and think tools via rig tool calling
+- FR9: Epic 4 (baseline) + Epic 8 (refactoring) — Expose surgical development tools via rig tool calling (read_file, edit_file, grep, find_path, list_directory, git, terminal, ask_supervisor, think)
 - FR10: Epic 4 — Execute full BMAD dev-story workflow autonomously
 - FR11: Epic 4 — Inject session language override (English) via minimal system preamble
 - FR12: Epic 3 — Intercept agent questions during development session
@@ -194,7 +194,7 @@ The supervisor can intercept agent questions and answer them via a deterministic
 **FRs covered:** FR12, FR13, FR14, FR15, FR16, FR17
 
 ### Epic 4: Autonomous Development Session
-The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After this epic, stories are developed end-to-end by the agent.
+The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After this epic, stories are developed end-to-end by the agent. *(Note: Story 4.1's monolithic FsTool is refactored into surgical tools in Epic 8.)*
 **FRs covered:** FR5, FR6, FR7, FR8, FR9, FR10, FR11
 
 ### Epic 5: Code Review & Pull Request Delivery
@@ -205,8 +205,14 @@ The daemon optionally launches a code review via a separate LLM after the dev se
 The daemon sends Telegram notifications with story status, ID, and PR links. It handles LLM rate limits with retry/backoff, notifies the human of blocking errors, detects interrupted sessions via WAL file for crash recovery, and recovers from context window limit errors by summarizing history and bootstrapping a fresh session. After this epic, the user can trust the daemon to run overnight without supervision.
 **FRs covered:** FR25, FR26, FR33, FR35, FR37, FR38, FR40
 
-### Epic 7: Integration Tests
+### Epic 7: Integration Tests ⚠️ BLOCKED by Epic 8
 All 6 functional epics have been implemented and pass 573 unit tests. This epic introduces integration tests that validate the interactions between modules at their boundaries — ensuring the daemon works as a cohesive system, not just as isolated pieces. These tests are deterministic (no real LLM calls), run in CI, and use mocked external dependencies.
+**Depends on:** Epic 8 (complete — all integration tests must target the post-refactoring tool surface)
+
+### Epic 8: Surgical Development Tooling
+Replace the monolithic FsTool with focused, Claude Code-style tools to dramatically improve agent token efficiency, code safety, and codebase navigation. After this epic, the dev agent edits files surgically instead of rewriting them, searches code with grep, and navigates with outlines — matching the capability level of modern AI coding assistants. This is a refactoring of Epic 4 Story 4.1's FsTool implementation, not greenfield work.
+**FRs covered:** FR9
+**Depends on:** Epic 4 (Story 4.1 as baseline)
 
 ---
 
@@ -1023,6 +1029,8 @@ All 6 functional epics have been implemented and pass 573 unit tests. This epic 
 
 **Why now:** Unit tests verify each module in isolation. Integration tests verify that the contracts between modules hold — that `watcher` feeds the right data to `pipeline`, that `pipeline` orchestrates `session → review → git_provider → notifier` correctly, that crash recovery actually reconstructs a valid session from a WAL file, and that the CLI lifecycle works end-to-end.
 
+**⚠️ BLOCKED: Epic 7 is blocked until Epic 8 (Surgical Development Tooling) is fully complete.** Epic 8 replaces the monolithic `FsTool` with 5 focused tools (`ReadFileTool`, `EditFileTool`, `GrepTool`, `FindPathTool`, `ListDirectoryTool`). Writing integration tests against the old tool surface would be throwaway work. All Epic 7 stories must be written and executed against the post-Epic 8 codebase.
+
 **Scope boundary:** This epic covers **deterministic integration tests only**. True E2E tests involving live LLM calls remain gated behind `BMAD_E2E=1` and are out of scope.
 
 ### Integration Test Strategy
@@ -1340,11 +1348,13 @@ So that I'm confident the daemon sends correct, well-formatted notifications.
 
 ---
 
-### Story 7.8: Branch Management & Git Tools Integration Tests
+### Story 7.8: Branch Management, Git & Surgical Development Tools Integration Tests
 
 As a developer,
-I want integration tests that verify branch creation, base branch resolution, and git tool operations on real (temp) repositories,
-So that I'm confident the daemon manages git state correctly.
+I want integration tests that verify branch creation, base branch resolution, git tool operations, and the surgical development tools (read_file, edit_file, grep, find_path, list_directory) on real (temp) repositories and file trees,
+So that I'm confident the daemon manages git state correctly and the agent's surgical tools work end-to-end.
+
+**Note:** This story assumes Epic 8 (Surgical Development Tooling) is complete. Tests target the new tools (`ReadFileTool`, `EditFileTool`, `GrepTool`, `FindPathTool`, `ListDirectoryTool`), not the legacy `FsTool`.
 
 **Acceptance Criteria:**
 
@@ -1372,8 +1382,34 @@ So that I'm confident the daemon manages git state correctly.
 **Then** all changes are staged and committed with a descriptive message containing the story key
 **And** the commit exists in the repo's log
 
-**Dependencies:** Story 7.1
-**Story Points:** 3
+**Given** a temp project directory with multiple files (including a file > 300 lines)
+**When** `ReadFileTool` is called with a line range on a small file
+**Then** it returns only the specified lines with line numbers
+**And** when called on the large file without a line range, it returns an outline with symbol names and line numbers
+
+**Given** a temp project directory with a known file
+**When** `EditFileTool` is called in `edit` mode with an `old_text` → `new_text` operation
+**Then** only the targeted text is replaced in the file
+**And** the rest of the file content is unchanged
+**And** when called with a non-existent `old_text`, a clear error is returned without modifying the file
+
+**Given** a temp project directory with multiple `.rs` and `.md` files containing known patterns
+**When** `GrepTool` is called with a regex pattern and an `include_pattern` of `"**/*.rs"`
+**Then** only matches from `.rs` files are returned with file paths and line numbers
+**And** `.md` files are excluded from results
+
+**Given** a temp project directory with a nested file structure
+**When** `FindPathTool` is called with a glob pattern (e.g., `"**/*.rs"`)
+**Then** matching file paths are returned sorted alphabetically
+**And** files matching `.gitignore` patterns are excluded
+
+**Given** a temp project directory
+**When** `ListDirectoryTool` is called on a directory
+**Then** it returns entries with types (file/directory) and sizes
+**And** when called on a path outside the project root, a security error is returned
+
+**Dependencies:** Story 7.1, Epic 8 (all stories complete)
+**Story Points:** 5
 
 ---
 
@@ -1452,25 +1488,321 @@ So that I'm confident the chat loop handles all agent response patterns.
 
 | Story | Title | Points | Dependencies |
 |-------|-------|--------|--------------|
-| 7.1 | Integration Test Infrastructure & Fixtures | 3 | — |
+| 7.1 | Integration Test Infrastructure & Fixtures | 3 | Epic 8 |
 | 7.2 | Config → Startup Validation | 2 | 7.1 |
 | 7.3 | Watcher → Deps → Story Selection | 3 | 7.1 |
 | 7.4 | Pipeline Orchestration | 5 | 7.1 |
 | 7.5 | Session WAL Crash Recovery | 3 | 7.1 |
 | 7.6 | Git Provider & PR Creation | 2 | 7.1 |
 | 7.7 | Notification Flow | 2 | 7.1 |
-| 7.8 | Branch Management & Git Tools | 3 | 7.1 |
+| 7.8 | Branch Management, Git & Surgical Development Tools | 5 | 7.1 |
 | 7.9 | CLI Lifecycle | 2 | 7.1 |
 | 7.10 | Response Analyzer & Supervisor Rules | 3 | 7.1 |
 
-**Total Story Points:** 28
+**Total Story Points:** 30
 
 **Execution Strategy:**
+- ⚠️ **Entire Epic 7 is blocked until Epic 8 is complete** — integration tests must target the final tool surface
 - Story 7.1 must be completed first (all others depend on the test infrastructure)
-- Stories 7.2–7.10 can be parallelized (independent module boundaries)
-- Recommended priority order: 7.4 (pipeline — highest risk) → 7.5 (crash recovery — critical path) → 7.3 (watcher — core loop) → 7.8 (git — data integrity) → 7.10 (analyzer — chat correctness) → 7.6, 7.7, 7.9, 7.2
+- Stories 7.2–7.10 can then be parallelized (independent module boundaries)
+- Recommended priority order: 7.4 (pipeline — highest risk) → 7.5 (crash recovery — critical path) → 7.3 (watcher — core loop) → 7.8 (git + surgical tools) → 7.10 (analyzer — chat correctness) → 7.6, 7.7, 7.9, 7.2
 
 **CI Integration:**
 - All integration tests run via `cargo test --test integration` (no special env vars needed)
 - Tests must complete in < 30 seconds total (no network calls, no LLM, only temp filesystem + git2)
 - E2E tests (with real LLM) remain separate, gated behind `BMAD_E2E=1`
+
+---
+
+## Epic 8: Surgical Development Tooling
+
+Replace the monolithic FsTool (from Epic 4, Story 4.1) with focused, Claude Code-style tools to dramatically improve agent token efficiency, code safety, and codebase navigation. After this epic, the dev agent edits files surgically instead of rewriting them, searches code with grep, and navigates with outlines — matching the capability level of modern AI coding assistants.
+
+**Why this epic exists:** The current `FsTool` rewrites entire files on every edit, burning ~8x more tokens than necessary, risking code loss via LLM truncation, and forcing blind navigation of the codebase. Architecture Decision 7 specifies replacing it with 5 focused tools modeled on the proven Claude Code / Zed agent-mode pattern.
+
+**Dependency order:** Stories must be implemented sequentially — each builds on the previous.
+
+```
+8.1 ReadFileTool ──► 8.2 EditFileTool ──► 8.3 Grep + FindPath ──► 8.4 ListDir + FsTool Removal ──► 8.5 Integration
+```
+
+**Impact:**
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Tokens per file edit (500-line file) | ~8,000 | ~900 |
+| Risk of code loss (LLM truncation) | High | Near zero |
+| Tool calls to find code | 5-10 (list/read loops) | 1-2 (grep → read range) |
+| Agent tools registered | 5 | 9 |
+
+**Reference documents:**
+- `_bmad-output/planning-artifacts/architecture.md` — Decision 7 (full design specs)
+- `_bmad-output/planning-artifacts/architect-brief-surgical-tooling.md` — Architect brief with rationale
+- `src/tools/fs.rs` — Current FsTool implementation (to be replaced)
+- `src/session/runner.rs` — Current preamble and agent builder (to be updated)
+
+---
+
+### Story 8.1: ReadFileTool — Partial Reading & Outline Mode
+
+As a dev agent,
+I want to read files with optional line ranges and get automatic outlines for large files,
+So that I can navigate the codebase efficiently without wasting tokens on irrelevant content.
+
+**Why first:** Every other tool depends on the agent being able to read files intelligently. This is the foundation.
+
+**Replaces:** `FsTool` `read` action
+
+**Acceptance Criteria:**
+
+**Given** a file exists within the project root
+**When** `read_file` is called with no line range parameters
+**And** the file is ≤ 300 lines
+**Then** the complete file content is returned with line numbers prepended to each line (1-indexed)
+
+**Given** a file exists within the project root
+**When** `read_file` is called with `start_line` and/or `end_line` parameters (1-indexed, inclusive)
+**Then** only the specified line range is returned with line numbers prepended
+**And** out-of-range values are clamped to file boundaries without error
+
+**Given** a file exists within the project root
+**When** `read_file` is called with no line range parameters
+**And** the file is > 300 lines
+**Then** an automatic outline is returned instead of full content
+**And** the outline contains symbol names (functions, structs, impls, mods, classes, etc.) with their line numbers
+**And** the outline is generated via regex-based symbol extraction (not AST parsing)
+
+**Given** a path that resolves outside the project root
+**When** `read_file` is called
+**Then** the tool returns a clear security error
+**And** no file content is read
+
+**Given** the tool is implemented
+**When** inspecting the code structure
+**Then** it follows the standard rig Tool pattern (serializable struct + `ReadFileToolArgs` + `ReadFileToolError` thiserror enum + Tool trait impl)
+**And** the tool NAME and definition description are detailed enough for the LLM to use correctly
+**And** `tools/mod.rs` exports `ReadFileTool`
+**And** a full unit test suite covers: normal read, line range read, outline mode, security boundary, edge cases (empty file, binary file, non-existent file)
+
+**Dependencies:** None (first story in epic)
+**Story Points:** 3
+
+---
+
+### Story 8.2: EditFileTool — Surgical Search-Replace Editing
+
+As a dev agent,
+I want to edit files surgically via search-replace operations instead of rewriting entire files,
+So that I minimize token usage, eliminate truncation risk, and make precise targeted changes.
+
+**Why second:** This is the biggest value unlock — surgical edits instead of full rewrites.
+
+**Replaces:** `FsTool` `write` action
+
+**Acceptance Criteria:**
+
+**Given** an existing file within the project root
+**When** `edit_file` is called with mode `edit` and a list of `EditOperation` pairs (`old_text` → `new_text`)
+**And** each `old_text` exists exactly once in the file
+**Then** all replacements are applied sequentially with offset recalculation
+**And** the tool returns the affected line ranges for verification
+
+**Given** an existing file within the project root
+**When** `edit_file` is called with mode `edit`
+**And** an `old_text` value does not exist in the file
+**Then** the tool returns a clear error message indicating the text was not found
+**And** no changes are made to the file
+
+**Given** an existing file within the project root
+**When** `edit_file` is called with mode `edit`
+**And** an `old_text` value matches multiple locations in the file
+**Then** the tool returns a clear error message with the line numbers of all matches
+**And** no changes are made to the file (ambiguity must be resolved by the caller)
+
+**Given** a path that does not exist
+**When** `edit_file` is called with mode `create` and file content
+**Then** a new file is created with the provided content
+**And** parent directories are automatically created if they don't exist
+
+**Given** a path that already exists
+**When** `edit_file` is called with mode `create`
+**Then** the tool returns a clear error (create mode must not overwrite existing files)
+
+**Given** an existing file within the project root
+**When** `edit_file` is called with mode `overwrite` and full content
+**Then** the entire file content is replaced with the provided content
+
+**Given** a path that does not exist
+**When** `edit_file` is called with mode `overwrite`
+**Then** the tool returns a clear error (overwrite mode requires the file to exist)
+
+**Given** the tool is implemented
+**When** inspecting the code structure
+**Then** it follows the standard rig Tool pattern (serializable struct + `EditFileToolArgs` + `EditFileToolError` thiserror enum + Tool trait impl)
+**And** `tools/mod.rs` exports `EditFileTool`
+**And** a full unit test suite covers: single edit, multiple sequential edits, create mode, overwrite mode, not-found error, ambiguity error, security boundary, parent directory creation
+
+**Dependencies:** Story 8.1 (EditFileTool may use ReadFileTool internally for validation)
+**Story Points:** 5
+
+---
+
+### Story 8.3: GrepTool & FindPathTool — Codebase Search & Navigation
+
+As a dev agent,
+I want to search file contents with regex and find files by glob pattern,
+So that I can locate code and files efficiently instead of blindly listing and reading directories.
+
+**Why third:** The agent needs to find code before it can edit it. These two tools are independent of each other but small enough to combine into one story.
+
+**New tools** (no replacement — these capabilities didn't exist before)
+
+**Acceptance Criteria:**
+
+**Given** a project codebase
+**When** `grep` is called with a regex pattern
+**Then** it returns matching lines with file paths, line numbers, and the matched content
+**And** results are paginated with a default of 20 matches per page
+
+**Given** a project codebase
+**When** `grep` is called with a regex pattern and an `include_pattern` glob filter (e.g., `"**/*.rs"`)
+**Then** only files matching the glob are searched
+
+**Given** a project codebase with a `.gitignore` file
+**When** `grep` is called
+**Then** files matching `.gitignore` patterns are excluded from search results
+
+**Given** a project codebase
+**When** `grep` is called with a `context_lines` parameter
+**Then** the specified number of lines above and below each match are included in the output
+
+**Given** a project codebase
+**When** `find_path` is called with a glob pattern (e.g., `"**/*.rs"`, `"src/**/mod.rs"`)
+**Then** it returns matching file paths sorted alphabetically
+**And** results are paginated with a default of 50 matches per page
+
+**Given** a project codebase with a `.gitignore` file
+**When** `find_path` is called
+**Then** files matching `.gitignore` patterns are excluded from results
+
+**Given** the tools are implemented
+**When** inspecting the code structure
+**Then** `tools/grep.rs` follows the standard rig Tool pattern (serializable struct + args + error enum + Tool trait impl)
+**And** `tools/find_path.rs` follows the standard rig Tool pattern
+**And** both use the `regex` crate (already a dependency) for pattern matching
+**And** file traversal uses `walkdir` or `glob` crate (add to `Cargo.toml` if needed)
+**And** `tools/mod.rs` exports both `GrepTool` and `FindPathTool`
+**And** full unit test suites cover: basic search, glob filtering, gitignore respect, pagination, no-match cases, invalid regex handling
+
+**Dependencies:** Story 8.1 (sequential ordering for sprint coherence)
+**Story Points:** 5
+
+---
+
+### Story 8.4: ListDirectoryTool & FsTool Removal — Complete Migration
+
+As a dev agent,
+I want a dedicated directory listing tool and the legacy FsTool fully removed,
+So that the tool set is clean, focused, and each tool has a single responsibility.
+
+**Why fourth:** Extract the last useful action from FsTool, then remove the monolith entirely.
+
+**Replaces:** `FsTool` `list` action. Removes `FsTool` `mkdir`, `delete`, `exists` (these operations are pushed to `TerminalTool`).
+
+**Acceptance Criteria:**
+
+**Given** a directory within the project root
+**When** `list_directory` is called with a directory path
+**Then** it returns the directory contents with entry types (file/directory) and file sizes
+**And** results are sorted alphabetically (directories first, then files)
+
+**Given** a path that resolves outside the project root
+**When** `list_directory` is called
+**Then** the tool returns a clear security error
+
+**Given** a non-existent directory path
+**When** `list_directory` is called
+**Then** the tool returns a clear error indicating the directory was not found
+
+**Given** the `ListDirectoryTool` is implemented
+**When** `tools/fs.rs` (the old FsTool) is inspected
+**Then** it has been completely removed from the codebase
+**And** `tools/mod.rs` no longer exports `FsTool`
+**And** `tools/mod.rs` exports `ListDirectoryTool`
+
+**Given** `supervisor/read_tool.rs` previously used `FsTool` for file reading
+**When** the migration is complete
+**Then** `supervisor/read_tool.rs` uses `ReadFileTool` instead of `FsTool`
+
+**Given** all changes are complete
+**When** `cargo test` is run
+**Then** all tests pass with zero references to `FsTool` in the codebase
+**And** all prior `FsTool` unit tests have been migrated to the new tools or deleted (each new tool already has its own test suite from prior stories)
+
+**Dependencies:** Story 8.3
+**Story Points:** 3
+
+---
+
+### Story 8.5: Agent Integration — Preamble, Registration & Session Update
+
+As a dev agent,
+I want all 9 surgical tools registered and properly described in my session,
+So that I can use the full tool set for efficient autonomous development.
+
+**Why last:** This wires everything together — the agent session now uses the new tools.
+
+**Acceptance Criteria:**
+
+**Given** `session/runner.rs` contains `build_preamble()`
+**When** Story 8.5 is complete
+**Then** the preamble's tool list section is updated to describe all 9 tools: `read_file`, `edit_file`, `grep`, `find_path`, `list_directory`, `git`, `terminal`, `ask_supervisor`, `think`
+**And** a "Tool Usage Rules" section is added per Architecture Decision 7 (e.g., "use grep to find code before editing", "use read_file with line ranges after outline", "prefer edit mode over overwrite")
+
+**Given** the agent builders (`build_anthropic_agent`, `build_openai_agent`, `build_copilot_agent`)
+**When** Story 8.5 is complete
+**Then** all 3 builders register 9 tools: `edit_file`, `read_file`, `grep`, `find_path`, `list_directory`, `git`, `terminal`, `ask_supervisor`, `think` (ThinkTool)
+**And** the previous 5-tool registration (git, fs, terminal, ask_supervisor, think) is replaced
+
+**Given** `review/mod.rs` registers tools separately for the review agent
+**When** Story 8.5 is complete
+**Then** the review module's tool registration is updated if it references the old `FsTool`
+
+**Given** an agent session is started
+**When** the session initializes
+**Then** all 9 tools are visible in the tool definitions sent to the LLM
+**And** each tool's description is optimized for maximum LLM clarity (clear parameter descriptions, usage examples in description text)
+
+**Given** all integration is complete
+**When** a smoke test is run (agent session start)
+**Then** the agent can successfully call each of the 9 tools
+**And** no references to the old FsTool remain in session setup code
+
+**Dependencies:** Story 8.4
+**Story Points:** 3
+
+---
+
+### Epic 8 Summary
+
+| Story | Title | Points | Dependencies |
+|-------|-------|--------|--------------|
+| 8.1 | ReadFileTool — Partial Reading & Outline Mode | 3 | — |
+| 8.2 | EditFileTool — Surgical Search-Replace Editing | 5 | 8.1 |
+| 8.3 | GrepTool & FindPathTool — Codebase Search & Navigation | 5 | 8.1 |
+| 8.4 | ListDirectoryTool & FsTool Removal — Complete Migration | 3 | 8.3 |
+| 8.5 | Agent Integration — Preamble, Registration & Session Update | 3 | 8.4 |
+
+**Total Story Points:** 19
+
+**Execution Strategy:**
+- Stories must be executed sequentially: 8.1 → 8.2 → 8.3 → 8.4 → 8.5
+- Stories 8.1 and 8.2 are tightly coupled (EditFileTool may use ReadFileTool internally for validation)
+- Story 8.3 is independent of 8.2 in code but ordered after it for sprint coherence
+- Story 8.4 is the cleanup and migration gate
+- Story 8.5 is the integration point — nothing works end-to-end until this is done
+
+**Existing Epics Impacted:**
+- **Epic 4, Story 4.1** ("Rig Tools Implementation") — already implemented. Epic 8 is a refactoring follow-up. Story 4.1 is the baseline.
+- **Epic 4, Story 4.2** ("Agent Session Setup & Chat Loop") — preamble changes in Story 8.5. Already implemented, needs update.
+- **Epic 7** (Integration Tests) — not yet implemented. Tool integration test stories (especially 7.8) should be written against the new surgical tools, not the old FsTool.

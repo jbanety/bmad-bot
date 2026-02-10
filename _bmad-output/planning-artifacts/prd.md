@@ -258,7 +258,7 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 ### Development Session
 
 - **FR8:** The daemon can instantiate a streaming rig agent session with the BMAD dev agent persona, activated via Zed-style XML context (agent file sent as first user message, not as system preamble)
-- **FR9:** The daemon can expose git, filesystem, terminal, and think tools to the agent via rig tool calling. The think tool (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern) gives the agent a dedicated space for structured reasoning during complex tasks without consuming real tool calls
+- **FR9:** The daemon can expose surgical development tools to the agent via rig tool calling: `read_file` (partial reading & outline mode), `edit_file` (search-replace surgical editing), `grep` (regex codebase search), `find_path` (glob-based file discovery), `list_directory` (directory listing), `git` (version control operations), `terminal` (shell command execution), `ask_supervisor` (supervision escalation), and `think` (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern, for structured reasoning without consuming real tool calls). Tools follow the Claude Code / Zed agent-mode pattern for optimal token efficiency and code safety
 - **FR10:** The agent can execute the full BMAD `dev-story` workflow autonomously
 - **FR11:** The daemon can inject a session language override (English) via a minimal system preamble without modifying repo files
 
