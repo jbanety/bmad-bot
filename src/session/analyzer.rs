@@ -2,14 +2,17 @@
 //!
 //! The [`ResponseAnalyzer`] examines each agent response and determines the
 //! appropriate [`ResponseAction`] for the session chat loop. It uses simple
-//! case-insensitive substring matching with a strict priority order to handle
-//! workflow-level interactions (confirmations, completion signals, escalations).
+//! case-insensitive substring matching (and a few regex patterns) with a strict
+//! priority order to handle workflow-level interactions (confirmations,
+//! completion signals, escalations).
 //!
 //! **Design principle:** The analyzer is deliberately simple — the rule engine
 //! in the supervisor handles complex pattern matching. The analyzer only needs
 //! to handle workflow-level interactions between the daemon and the BMAD agent.
 
 use crate::supervisor::EscalationSlot;
+use regex::Regex;
+use std::sync::LazyLock;
 
 /// Action the chat loop should take after analyzing an agent response.
 ///
@@ -90,6 +93,20 @@ const COMPLETION_SIGNALS: &[&str] = &[
     "move on to the next story",
     "next story or a code review",
 ];
+
+/// Regex-based completion patterns (case-insensitive).
+///
+/// These catch completion signals that substring matching can't handle,
+/// e.g. "Story 7.1: ... — COMPLETE" where there's variable text in between.
+static COMPLETION_REGEX_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r"(?i)story\s+.{1,80}complete",
+        r"(?i)run\s+.*code[_-]?review",
+    ]
+    .iter()
+    .filter_map(|p| Regex::new(p).ok())
+    .collect()
+});
 
 /// Confirmation/proceed patterns (case-insensitive).
 const PROCEED_PATTERNS: &[&str] = &[
@@ -217,7 +234,7 @@ impl ResponseAnalyzer {
             return ResponseAction::Completed;
         }
 
-        // Priority 2: Completion detection
+        // Priority 2: Completion detection (substring)
         if COMPLETION_SIGNALS
             .iter()
             .any(|signal| lower.contains(signal))
@@ -227,6 +244,20 @@ impl ResponseAnalyzer {
                 priority = 2,
                 result = "completed",
                 "Completion signal detected"
+            );
+            return ResponseAction::Completed;
+        }
+
+        // Priority 2b: Completion detection (regex)
+        if COMPLETION_REGEX_PATTERNS
+            .iter()
+            .any(|re| re.is_match(response))
+        {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 2.5,
+                result = "completed_regex",
+                "Completion regex pattern detected"
             );
             return ResponseAction::Completed;
         }
@@ -708,6 +739,79 @@ mod tests {
                 "Should NOT trigger completion for: {response}"
             );
         }
+    }
+
+    #[test]
+    fn test_analyzer_detects_story_complete_regex() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // Exact pattern from real agent output
+        let response = "✅ **Story 7.1: Integration Test Infrastructure & Fixtures — COMPLETE**\n\nSummary: ...";
+        let action = analyzer.analyze(response, &slot, "7-1-test");
+        assert_eq!(
+            action,
+            ResponseAction::Completed,
+            "Should detect 'Story 7.1: ... COMPLETE' via regex"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_detects_story_complete_regex_various() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let completions = vec![
+            "Story 7.2 — COMPLETE",
+            "**Story 1-1: Scaffolding — Complete**",
+            "Story 8.5: Agent Integration — complete!",
+            "✅ Story 3.4 is now complete.",
+        ];
+
+        for response in completions {
+            let action = analyzer.analyze(response, &slot, "key");
+            assert_eq!(
+                action,
+                ResponseAction::Completed,
+                "Should detect completion for: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyzer_detects_run_code_review_regex() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let responses = vec![
+            "💡 **Tip:** For best results, run `code-review` using a different LLM.",
+            "You should run code-review now.",
+            "Run code_review with a fresh context.",
+        ];
+
+        for response in responses {
+            let action = analyzer.analyze(response, &slot, "key");
+            assert_eq!(
+                action,
+                ResponseAction::Completed,
+                "Should detect run code-review for: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyzer_story_regex_no_false_positive() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // "story" without "complete" nearby should NOT trigger
+        let response = "Working on Story 7.1 task 3 now. Building test infrastructure.";
+        let action = analyzer.analyze(response, &slot, "key");
+        assert_ne!(
+            action,
+            ResponseAction::Completed,
+            "Should NOT trigger completion for story mention without complete"
+        );
     }
 
     #[test]
