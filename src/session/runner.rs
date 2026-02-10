@@ -14,7 +14,6 @@
 
 use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
-use crate::llm_context::ContextBuilder;
 use crate::llm_logging::{
     log_llm_error, log_llm_history, log_llm_history_summary, log_llm_request, log_llm_response,
 };
@@ -22,6 +21,9 @@ use crate::session::SessionOutcome;
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
 use crate::session::cleanup::{mark_story_needs_clarification, preserve_partial_work};
+/// Re-export [`ShutdownFlag`] so existing callers (`pipeline.rs`, `cli/mod.rs`) keep working.
+pub use crate::session::dev_agent::ShutdownFlag;
+use crate::session::dev_agent::{self, activate_agent, streaming_chat};
 use crate::session::escalation::EscalationReport;
 use crate::session::provider::{ProviderError, resolve_api_key};
 use crate::session::state::{ChatMessage, SessionState};
@@ -31,32 +33,22 @@ use crate::tools::{
     EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
 };
 use crate::watcher::StoryInfo;
-use futures::StreamExt;
 use git2::{BranchType, Repository};
-use rig::agent::{Agent, MultiTurnStreamItem};
+use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
-use rig::message::Text;
 use rig::providers::{anthropic, openai};
-use rig::streaming::{StreamedAssistantContent, StreamingChat};
+use rig::streaming::StreamingChat;
 use rig::tools::think::ThinkTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Shared shutdown flag — set to `true` when Ctrl+C or SIGTERM is received.
-///
-/// Checked cooperatively between streaming chunks and chat turns so that
-/// long-running tool-calling loops can be interrupted cleanly. The daemon
-/// spawns a signal handler task that flips this flag, and the session runner
-/// checks it at strategic points to break out and save partial work.
-pub type ShutdownFlag = Arc<AtomicBool>;
-
 /// Maximum number of chat turns before the safety net kicks in.
 ///
 /// Prevents infinite loops if the agent never signals completion. A future
 /// improvement could make this configurable via `BotConfig`.
-const MAX_CHAT_TURNS: usize = 200;
+const MAX_CHAT_TURNS: usize = 300;
 
 /// Terminal tool timeout in seconds for commands executed by the agent.
 const TERMINAL_TIMEOUT_SECS: u64 = 30;
@@ -67,84 +59,6 @@ const RECOVERY_KEEP_LAST_EXCHANGES: usize = 10;
 
 /// Maximum recursive recovery depth — prevents infinite context-limit loops.
 const MAX_RECOVERY_DEPTH: usize = 3;
-
-/// Maximum tool-call rounds allowed per single prompt in the streaming loop.
-///
-/// This limits how many consecutive tool calls rig will execute before requiring
-/// a text response. Set high because the dev agent may chain many reads/writes.
-const STREAMING_MAX_TURNS: usize = 100;
-
-/// Send a prompt via streaming and collect the complete text response.
-///
-/// This is a drop-in replacement for `agent.chat(prompt, history)` that uses
-/// rig's streaming API instead. All providers (Anthropic, OpenAI, GitHub Copilot)
-/// support streaming — and Copilot **requires** it (`stream: false` is rejected).
-///
-/// Tool calls are handled automatically by rig within the stream.
-///
-/// When `shutdown` is `Some` and the flag is set to `true`, the stream is
-/// abandoned and a `ShutdownRequested` error is returned. This allows Ctrl+C
-/// to interrupt even deep multi-turn tool-calling loops.
-async fn streaming_chat<A, M>(
-    agent: &A,
-    prompt: impl Into<Message> + Send,
-    history: Vec<Message>,
-    shutdown: Option<&ShutdownFlag>,
-) -> Result<String, rig::completion::PromptError>
-where
-    A: StreamingChat<M, M::StreamingResponse>,
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Clone + Unpin + GetTokenUsage,
-{
-    let mut stream = agent
-        .stream_chat(prompt, history)
-        .multi_turn(STREAMING_MAX_TURNS)
-        .await;
-
-    let mut acc = String::new();
-
-    loop {
-        // Cooperative shutdown check — between every chunk/tool-call round
-        if let Some(flag) = shutdown {
-            if flag.load(Ordering::Relaxed) {
-                tracing::info!(
-                    action = "shutdown_requested",
-                    "Shutdown flag detected in streaming loop"
-                );
-                return Err(rig::completion::PromptError::CompletionError(
-                    rig::completion::CompletionError::ResponseError(
-                        "Shutdown requested (Ctrl+C)".to_string(),
-                    ),
-                ));
-            }
-        }
-
-        let Some(chunk) = stream.next().await else {
-            break;
-        };
-
-        match chunk {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                Text { text },
-            ))) => {
-                acc.push_str(&text);
-            }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => {
-                // FinalResponse signals the end of the stream.
-                // acc already contains the full accumulated text.
-                break;
-            }
-            Err(e) => {
-                return Err(rig::completion::PromptError::CompletionError(
-                    rig::completion::CompletionError::ResponseError(e.to_string()),
-                ));
-            }
-            _ => continue, // tool call deltas, reasoning, etc. — handled by rig
-        }
-    }
-
-    Ok(acc)
-}
 
 /// Data recovered from a WAL file for crash recovery.
 ///
@@ -1019,110 +933,11 @@ impl SessionRunner {
     /// This mirrors Zed's `system_prompt.hbs` pattern: the system prompt contains
     /// operational instructions (tool usage, formatting rules, communication style)
     /// while the agent persona (`dev.md`) is sent as a user message wrapped in
-    /// XML context tags via [`activate_agent()`](Self::activate_agent).
+    /// XML context tags via [`dev_agent::activate_agent()`].
     ///
     /// The system prompt provides persistent grounding across all turns.
     fn build_preamble(&self, _story: &StoryInfo) -> Result<String, ProviderError> {
-        Ok(r#"You are an AI agent operating autonomously in a BMAD workflow environment.
-
-## Tools
-You have access to these tools: edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, plus a built-in think tool for reasoning.
-
-## Tool Usage Rules
-- **ALWAYS use `edit_file` with mode="edit"** to modify existing files. NEVER rewrite entire files unless creating a new file (mode="create") or a complete rewrite is truly necessary (mode="overwrite").
-- **Use `read_file` with line ranges** for large files. Read the outline first, then target specific sections with start_line/end_line.
-- **Use `grep` to find symbols** before editing — never assume file paths or line numbers.
-- **Use `find_path`** to discover files by name pattern when you don't know the full path.
-- **Use `list_directory`** to explore directory structure.
-- **Use `terminal`** for build commands, tests, mkdir, rm, and other shell operations.
-- **Use `ask_supervisor`** when you need clarification on requirements, architecture decisions, or are uncertain about the correct approach.
-- When `edit_file` fails (ambiguous match), use `read_file` with a line range to get more context, then retry with a larger `old_text` fragment.
-- When making multiple related changes in one file, batch them in a single `edit_file` call with multiple edit operations.
-
-## Communication
-OVERRIDE: communication_language = English
-
-## Rules
-- When the user provides an agent file in <context><files> tags, you MUST fully embody that agent's persona and follow ALL activation instructions exactly as specified.
-- NEVER break character until given an exit command.
-- Execute activation steps in order — load configuration files via tools, then greet and display the menu.
-- Wait for user input after displaying the menu."#.to_string())
-    }
-
-    /// Activate the BMAD agent by sending the agent file as the first user message.
-    ///
-    /// Returns `(rig_history, chat_history)` — the rig `Message` vec for subsequent
-    /// `streaming_chat` calls and the `ChatMessage` vec for WAL state persistence.
-    ///
-    /// The LLM receives the full `dev.md` content as a user message, processes the
-    /// activation steps (loads `config.yaml` via tools, reads the story file, shows
-    /// the greeting and menu), and is then ready to accept commands like `"DS"`.
-    ///
-    /// After this method returns, the caller continues with the existing flow
-    /// (e.g. "DS", "CH", recovery message) — those flows are unchanged.
-    async fn activate_agent<A, M>(
-        &self,
-        agent: &A,
-        label: &str,
-    ) -> Result<(Vec<Message>, Vec<ChatMessage>), String>
-    where
-        A: Chat + StreamingChat<M, M::StreamingResponse>,
-        M: CompletionModel + 'static,
-        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
-    {
-        let agent_path =
-            Path::new(&self.config.bmad_paths.project_root).join("_bmad/bmm/agents/dev.md");
-
-        // Build Zed-style XML context message via ContextBuilder helper.
-        // This reads the file, resolves to absolute path, and wraps in
-        // <context><files>...</files></context> — same format Zed uses
-        // for @file inclusions (thread.rs:206-409).
-        let activation_msg = ContextBuilder::new()
-            .add_file_from_disk(&agent_path)
-            .map_err(|e| format!("Failed to build agent activation context: {e}"))?
-            .build();
-
-        let mut rig_history: Vec<Message> = vec![];
-        let mut chat_history: Vec<ChatMessage> = vec![];
-
-        // Send dev.md wrapped in XML context tags — triggers BMAD activation flow
-        log_llm_request(
-            label,
-            0,
-            "[agent activation: dev.md in context tags]",
-            rig_history.len(),
-        );
-        let response = streaming_chat(
-            agent,
-            activation_msg.as_str(),
-            rig_history.clone(),
-            Some(&self.shutdown),
-        )
-        .await
-        .map_err(|e| {
-            log_llm_error(label, 0, &e);
-            format!("Agent activation failed: {e}")
-        })?;
-        log_llm_response(label, 0, &response);
-
-        rig_history.push(Message::user(&activation_msg));
-        rig_history.push(Message::assistant(&response));
-        chat_history.push(ChatMessage {
-            role: "user".to_string(),
-            content: activation_msg,
-        });
-        chat_history.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: response,
-        });
-
-        tracing::info!(
-            action = "agent_activation_complete",
-            label = %label,
-            "BMAD agent activated via user message"
-        );
-
-        Ok((rig_history, chat_history))
+        Ok(dev_agent::build_preamble())
     }
 
     /// Create the 8 tools for the rig agent: 7 custom tools + ask_supervisor.
@@ -1692,17 +1507,21 @@ OVERRIDE: communication_language = English
         M::StreamingResponse: Clone + Unpin + GetTokenUsage,
     {
         // Step 4a — Activate agent: send dev.md as user message
-        let (mut activation_history, mut compressed_history) = self
-            .activate_agent(agent, "dev-recovery")
-            .await
-            .map_err(|e| {
-                tracing::error!(action = "context_limit_activation_failed", error = %e);
-                SessionOutcome::Failed {
-                    story_key: story.story_key.clone(),
-                    error: format!("Recovery activation failed: {e}"),
-                    decisions: decision_log.records(),
-                }
-            })?;
+        let (mut activation_history, mut compressed_history) = activate_agent(
+            agent,
+            &self.config.bmad_paths.project_root,
+            "dev-recovery",
+            Some(&self.shutdown),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(action = "context_limit_activation_failed", error = %e);
+            SessionOutcome::Failed {
+                story_key: story.story_key.clone(),
+                error: format!("Recovery activation failed: {e}"),
+                decisions: decision_log.records(),
+            }
+        })?;
 
         // Step 4b — Enter chat mode with English language override.
         // The BMAD activation loads config.yaml which may set communication_language
@@ -1876,9 +1695,13 @@ OVERRIDE: communication_language = English
 
                 // Activate agent: send dev.md as user message so the LLM
                 // processes activation steps (load config via tools, show menu)
-                let (activation_rig_history, activation_chat_history) = match self
-                    .activate_agent(agent, "dev-session")
-                    .await
+                let (activation_rig_history, activation_chat_history) = match activate_agent(
+                    agent,
+                    &self.config.bmad_paths.project_root,
+                    "dev-session",
+                    Some(&self.shutdown),
+                )
+                .await
                 {
                     Ok(pair) => pair,
                     Err(e) => {
@@ -1974,9 +1797,13 @@ OVERRIDE: communication_language = English
                     );
 
                     // Activate agent: send dev.md as user message
-                    let (activation_rig_history, activation_chat_history) = match self
-                        .activate_agent(agent, "dev-recovery")
-                        .await
+                    let (activation_rig_history, activation_chat_history) = match activate_agent(
+                        agent,
+                        &self.config.bmad_paths.project_root,
+                        "dev-recovery",
+                        Some(&self.shutdown),
+                    )
+                    .await
                     {
                         Ok(pair) => pair,
                         Err(e) => {

@@ -17,69 +17,17 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use futures::StreamExt;
-
-/// Maximum tool-call rounds allowed per single prompt in the streaming loop.
-const STREAMING_MAX_TURNS: usize = 100;
-
-/// Send a prompt via streaming and collect the complete text response (review variant).
-///
-/// Same pattern as `session::runner::streaming_chat` but returns a `PromptError`
-/// compatible error type for use in the review chat loop.
-async fn streaming_review_chat<A, M>(
-    agent: &A,
-    prompt: impl Into<Message> + Send,
-    history: Vec<Message>,
-) -> Result<String, rig::completion::PromptError>
-where
-    A: StreamingChat<M, M::StreamingResponse>,
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Clone + Unpin + GetTokenUsage,
-{
-    let mut stream = agent
-        .stream_chat(prompt, history)
-        .multi_turn(STREAMING_MAX_TURNS)
-        .await;
-
-    let mut acc = String::new();
-
-    loop {
-        let Some(chunk) = stream.next().await else {
-            break;
-        };
-
-        match chunk {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                Text { text },
-            ))) => {
-                acc.push_str(&text);
-            }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => {
-                break;
-            }
-            Err(e) => {
-                return Err(rig::completion::PromptError::CompletionError(
-                    rig::completion::CompletionError::ResponseError(e.to_string()),
-                ));
-            }
-            _ => continue,
-        }
-    }
-
-    Ok(acc)
-}
-use rig::agent::{Agent, MultiTurnStreamItem};
 use rig::client::CompletionClient;
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
-use rig::message::Text;
 use rig::providers::{anthropic, openai};
-use rig::streaming::{StreamedAssistantContent, StreamingChat};
+use rig::streaming::StreamingChat;
 use rig::tools::think::ThinkTool;
 
 use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
+use crate::session::dev_agent::{self, activate_agent, streaming_chat};
 use crate::session::provider::{ProviderError, copilot_headers, resolve_api_key};
 use crate::supervisor::decisions::DecisionLog;
 use crate::supervisor::{AskSupervisor, EscalationSlot};
@@ -144,15 +92,6 @@ pub enum ReviewError {
     #[error("Agent build failed: {reason}")]
     AgentBuildFailed {
         /// Why the agent could not be built.
-        reason: String,
-    },
-
-    /// Failed to read the BMAD dev agent persona file.
-    #[error("Preamble load failed for '{path}': {reason}")]
-    PreambleLoadFailed {
-        /// Path to the file that could not be read.
-        path: String,
-        /// Why reading failed.
         reason: String,
     },
 }
@@ -264,8 +203,8 @@ impl ReviewRunner {
             },
         )?;
 
-        // 2. Load BMAD dev agent preamble (same as SessionRunner)
-        let preamble = self.build_preamble()?;
+        // 2. Build generic preamble (same as SessionRunner)
+        let preamble = dev_agent::build_preamble();
 
         // 3. Create shared resources
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
@@ -408,25 +347,6 @@ impl ReviewRunner {
         Ok(outcome)
     }
 
-    /// Build the agent preamble from the BMAD dev agent file with language override.
-    ///
-    /// Identical to `SessionRunner::build_preamble` — loads `dev.md` and appends
-    /// English override for consistency.
-    fn build_preamble(&self) -> Result<String, ReviewError> {
-        let agent_path =
-            Path::new(&self.config.bmad_paths.project_root).join("_bmad/bmm/agents/dev.md");
-
-        let agent_content =
-            std::fs::read_to_string(&agent_path).map_err(|e| ReviewError::PreambleLoadFailed {
-                path: agent_path.display().to_string(),
-                reason: e.to_string(),
-            })?;
-
-        Ok(format!(
-            "{agent_content}\n\nOVERRIDE: communication_language = English"
-        ))
-    }
-
     /// Create the 8 tools for the rig agent: 7 custom tools + ask_supervisor.
     fn create_tools(
         &self,
@@ -490,32 +410,49 @@ impl ReviewRunner {
         // The CR workflow asks "which story file to review" — reply with the file path
         let story_reply = story.specs_path.display().to_string();
 
-        // Send initial message "CR" with English language override.
-        // The BMAD activation loads config.yaml which may set communication_language
-        // to a non-English language. The response analyzer only matches English patterns.
+        // Activate agent: send dev.md as user message (same flow as dev session)
+        let (activation_rig_history, _activation_chat_history) = activate_agent(
+            agent,
+            &self.config.bmad_paths.project_root,
+            "code-review",
+            None, // no shutdown flag for review sessions
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(action = "review_activation_failed", error = %e);
+            ReviewError::AgentBuildFailed {
+                reason: format!("Agent activation failed: {e}"),
+            }
+        })?;
+
+        // Send "CR" with English language override (same pattern as DS in dev session)
         let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CR";
-        let history: Vec<Message> = vec![];
-        log_llm_request("code-review", 0, initial_message, history.len());
-        let response = streaming_review_chat(agent, initial_message, history)
+        log_llm_request(
+            "code-review",
+            1,
+            initial_message,
+            activation_rig_history.len(),
+        );
+        let response = streaming_chat(agent, initial_message, activation_rig_history, None)
             .await
             .map_err(|e| {
-                log_llm_error("code-review", 0, &e);
+                log_llm_error("code-review", 1, &e);
                 ReviewError::ChatFailed {
-                    turn: 0,
+                    turn: 1,
                     reason: e.to_string(),
                 }
             })?;
-        log_llm_response("code-review", 0, &response);
+        log_llm_response("code-review", 1, &response);
 
         tracing::debug!(
             action = "review_chat_turn",
-            turn = 0,
+            turn = 1,
             response_len = %response.len(),
-            "Initial review chat turn completed"
+            "Initial review chat turn completed (post-activation)"
         );
 
         let mut current_response = response;
-        let mut turn: usize = 1;
+        let mut turn: usize = 2;
         let mut retries: usize = 0;
         let mut post_review_phase = false;
         let mut chat_history: Vec<(String, String)> =
@@ -590,7 +527,7 @@ impl ReviewRunner {
                 .collect();
 
             log_llm_request("code-review", turn, &reply, history.len());
-            match streaming_review_chat(agent, reply.as_str(), history).await {
+            match streaming_chat(agent, reply.as_str(), history, None).await {
                 Ok(r) => {
                     log_llm_response("code-review", turn, &r);
                     retries = 0;
@@ -671,13 +608,6 @@ mod tests {
                     reason: "missing tool".into(),
                 },
                 "Agent build failed: missing tool",
-            ),
-            (
-                ReviewError::PreambleLoadFailed {
-                    path: "/path/to/dev.md".into(),
-                    reason: "file not found".into(),
-                },
-                "Preamble load failed for '/path/to/dev.md': file not found",
             ),
         ];
 

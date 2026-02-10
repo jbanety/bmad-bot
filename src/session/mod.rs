@@ -23,6 +23,8 @@ pub mod analyzer;
 pub mod branch;
 /// Session cleanup: partial work preservation and sprint-status updates.
 pub mod cleanup;
+/// Shared BMAD dev agent activation — preamble, streaming chat, agent activation.
+pub mod dev_agent;
 /// Escalation types for supervisor-to-session communication.
 pub mod escalation;
 /// LLM provider factory — multi-provider support.
