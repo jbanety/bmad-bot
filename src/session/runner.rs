@@ -1897,8 +1897,12 @@ OVERRIDE: communication_language = English
                 }
                 let _ = state.save(&self.state_file_path).await;
 
-                // Now send "DS" — the agent is activated and recognizes the menu command
-                let initial_message = "DS";
+                // Now send "DS" — the agent is activated and recognizes the menu command.
+                // IMPORTANT: Override language to English. The BMAD activation loads
+                // config.yaml which may set communication_language to a non-English
+                // language, causing the agent to respond in that language. The response
+                // analyzer only matches English patterns, so we must enforce English here.
+                let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. DS";
                 state.add_user_message(initial_message);
 
                 let activation_turn = activation_chat_history.len() / 2;
@@ -1990,8 +1994,9 @@ OVERRIDE: communication_language = English
                         }
                     }
 
-                    // Now send "DS" — the agent is activated
-                    let initial_message = "DS";
+                    // Now send "DS" — the agent is activated.
+                    // Override language to English (see normal path comment for rationale).
+                    let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. DS";
                     state.add_user_message(initial_message);
 
                     let activation_turn = activation_chat_history.len() / 2;
