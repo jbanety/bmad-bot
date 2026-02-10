@@ -46,9 +46,19 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 #### rig Agent + Tool Calling
 - The LLM agent is instantiated via `rig-core` with the BMAD dev agent persona (Amelia)
-- **Tools exposed to the agent via rig:** git (branch, checkout, commit, push via `git2`), filesystem (read, write), terminal (run commands)
+- **9 tools exposed to the agent via rig:**
+  - `edit_file` — surgical search_replace edits, create new files, overwrite when justified
+  - `read_file` — partial reading (line ranges) + automatic outline mode for large files (>300 lines)
+  - `grep` — regex search across project file contents with glob filtering
+  - `find_path` — glob-based file path discovery
+  - `list_directory` — list directory contents with types and sizes
+  - `git` — branch, checkout, commit, push, diff, status, log via `git2`
+  - `terminal` — shell command execution with timeout (also used for mkdir, rm, build, test)
+  - `ask_supervisor` — supervisor question tool (rule engine → LLM fallback → escalation)
+  - `ThinkTool` — rig built-in reasoning tool (no custom implementation)
 - The agent uses tools autonomously — the daemon does not perform operations on behalf of the agent
-- All tools must be implemented as rig-compatible tool traits
+- All custom tools must be implemented as rig-compatible tool traits
+- **Tool design principle — focused tools over action multiplexing:** Each tool owns a single concern with a compact JSON schema. Do NOT add an `action: String` field that multiplexes multiple operations into one tool. The LLM reasons better with many small, clearly-described tools than with one mega-tool with a large branching schema.
 
 #### Daemon Lifecycle
 1. **Watcher** — Polls `sprint-status.yaml` every 5 minutes for `ready-for-dev` stories
@@ -125,8 +135,12 @@ _This file contains critical rules and patterns that AI agents must follow when 
   │   └── mod.rs
   ├── tools/
   │   ├── mod.rs
+  │   ├── edit_file.rs     # Surgical search_replace edits, create, overwrite
+  │   ├── read_file.rs     # Partial reading (line ranges) + outline mode
+  │   ├── grep.rs          # Regex search across project file contents
+  │   ├── find_path.rs     # Glob-based file path discovery
+  │   ├── list_directory.rs # List directory contents
   │   ├── git.rs
-  │   ├── fs.rs
   │   └── terminal.rs
   └── notifier/
       └── mod.rs
@@ -149,6 +163,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 ### Development Workflow Rules
 
+- **Tool usage in system preamble:** The daemon's `build_preamble()` includes explicit tool usage rules that instruct the agent to always use `edit_file` with search_replace for existing files, use `read_file` with line ranges for large files, use `grep` before editing to find code, and never rewrite entire files
 - **Branch naming:** Follow sprint-status.yaml key convention → `story/{epic}-{story}` (e.g., `story/1-2-account-management`). The BMAD dev agent creates and manages branches via exposed git tools
 - **Commit messages:** Conventional Commits enforced — `feat:`, `fix:`, `refactor:`, `test:`, `chore:`, `docs:`. Scope optional but encouraged (e.g., `feat(supervisor): add rule engine pattern matching`)
 - **PR creation:** After code review passes (or directly after dev session if review disabled), the daemon opens a Pull Request automatically. GitHub supported in MVP. Provider configured in `bmad-bot.yaml`
@@ -157,6 +172,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 ### Critical Don't-Miss Rules
 
+- **Never rewrite entire files:** The agent MUST use `edit_file` with search_replace mode for existing files. Full file rewrites waste tokens, risk truncation, and can silently lose code. The only exceptions are `create` mode (new files) and `overwrite` mode (rare, justified complete rewrites)
 - **BMAD files are sacred:** Never modify anything under `_bmad/` — the daemon is a read-only consumer of BMAD config, agents, and workflows
 - **Never merge on `main`:** Even if code review passes, only a human merges. No exceptions
 - **Never call real LLM APIs in unit tests:** Mock responses only. E2E tests with real APIs are manual-launch-only
@@ -164,6 +180,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Supervisor must never invent answers:** If the rule engine doesn't match AND the LLM supervisor can't answer confidently from project docs → mark story `needs-clarification`, notify human, move to next story. Hallucinated answers lead to hallucinated code
 - **No silent failures:** Every error must be logged via `tracing::error!()`. Blocking errors (session crash, git failure, LLM provider down) must also trigger a notification to the human
 - **One session at a time:** Never run multiple story sessions in parallel. Sequential execution only — avoids git conflicts, codebase race conditions, and context confusion
+- **One tool = one concern:** Each rig tool has a single responsibility with a focused JSON schema. Never add an `action` multiplexer field to a tool — split into separate tools instead
 
 ---
 

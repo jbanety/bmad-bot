@@ -9,7 +9,7 @@ lastStep: 8
 status: 'complete'
 completedAt: '2026-02-07'
 revisedAt: '2026-02-10'
-revisionNote: 'Sync with implementation reality — 10 deltas from commits 69d1ff0..e24d39b applied per architect-brief-architecture-sync.md'
+revisionNote: 'Decision 7 added — Surgical Development Tooling. FsTool split into focused tools (EditFile, ReadFile, Grep, FindPath, ListDirectory) modeled on Claude Code/Zed patterns. Preamble expanded with tool usage rules. Project structure and module map updated.'
 ---
 
 # Architecture Decision Document
@@ -391,11 +391,140 @@ This is a developer tool, not infrastructure software. Users can background it w
 
 **Affects:** cli module, main
 
+### Decision 7: Surgical Development Tooling — Focused Tools Modeled on Claude Code/Zed
+
+**Decision:** Replace the monolithic `FsTool` (read/write/list/mkdir/delete/exists) with **5 focused tools** — `EditFileTool`, `ReadFileTool`, `GrepTool`, `FindPathTool`, `ListDirectoryTool` — bringing the total agent toolset from 5 to 9 tools. The system preamble is expanded with detailed tool usage rules.
+
+**Problem Statement:**
+The current `FsTool` with its `write` action requires the agent to regenerate the **entire file content** for every edit. On a 500-line file, this burns ~8000 tokens per edit (read + full rewrite), risks truncation/code loss by the LLM, and is fundamentally incompatible with surgical development. Claude Code, Zed agent mode, and Cursor all use targeted edit primitives — search-and-replace on exact text fragments — which is the proven pattern for LLM-driven code editing.
+
+**Rationale:**
+- **Token efficiency:** A search_replace edit on a 500-line file costs ~900 tokens (outline + targeted read + delta) vs ~8000 tokens for full rewrite — **~8x reduction**
+- **Code safety:** Only the changed fragment is touched; the rest of the file is never at risk of truncation or accidental modification
+- **Navigation efficiency:** `GrepTool` and `FindPathTool` eliminate blind `list` → `read` loops; the agent finds code in 1-2 calls instead of 5-10
+- **Proven pattern:** This is exactly how Claude Code, Zed, Aider, and Cursor implement file editing — it's the industry-standard approach for LLM agents
+- **Separate tools > action multiplexing:** Each tool gets a focused JSON schema and description. LLMs reason better with small, clear tool interfaces than with one mega-tool that has 10+ actions
+
+**New Tool Inventory (9 tools total):**
+
+| # | Tool | Replaces | Purpose |
+|---|------|----------|---------|
+| 1 | **EditFileTool** | FsTool `write` | Surgical edits via search_replace, create new files, overwrite when justified |
+| 2 | **ReadFileTool** | FsTool `read` | Read with optional line range (`start_line`/`end_line`) + automatic outline mode for large files |
+| 3 | **GrepTool** | _(new)_ | Regex search across project file contents with glob filtering and pagination |
+| 4 | **FindPathTool** | _(new)_ | Glob-based file path discovery with pagination |
+| 5 | **ListDirectoryTool** | FsTool `list` | List directory contents with types and sizes |
+| 6 | **GitTool** | _(unchanged)_ | Git operations via git2 |
+| 7 | **TerminalTool** | _(unchanged)_ | Shell command execution with timeout |
+| 8 | **AskSupervisor** | _(unchanged)_ | Supervisor question tool |
+| 9 | **ThinkTool** | _(unchanged)_ | rig built-in reasoning tool |
+
+**Removed actions:** FsTool `mkdir`, `delete`, `exists` — the agent uses `TerminalTool` for these infrequent operations (`mkdir -p`, `rm`, test with `ls`). `EditFileTool` in `create` mode auto-creates parent directories.
+
+**EditFileTool Design:**
+
+```
+EditFileArgs {
+    path: String,           // Relative path from project root
+    mode: String,           // "edit", "create", "overwrite"
+    // For mode="edit": list of search-replace operations
+    edits: Option<Vec<EditOperation>>,
+    // For mode="create" or "overwrite": full file content
+    content: Option<String>,
+}
+
+EditOperation {
+    old_text: String,       // Exact text fragment to find in the file
+    new_text: String,       // Replacement text
+}
+```
+
+Validation rules:
+- `old_text` must exist in the file and be **unique** (exactly one match). If zero matches → error with "not found" + nearby candidates. If multiple matches → error with line numbers of all occurrences so the agent can provide more context.
+- `create` mode fails if the file already exists (forces the agent to use `edit` for existing files)
+- `overwrite` mode requires the file to already exist
+- Multiple `EditOperation` items are applied sequentially within a single call — offsets are recalculated after each edit
+- Return value includes the line range affected by each edit for verification
+
+**ReadFileTool Design:**
+
+```
+ReadFileArgs {
+    path: String,                  // Relative path from project root
+    start_line: Option<u32>,       // 1-indexed, inclusive
+    end_line: Option<u32>,         // 1-indexed, inclusive
+}
+```
+
+Behavior:
+- If file is **≤ 300 lines** and no line range specified → return full content with line numbers
+- If file is **> 300 lines** and no line range specified → return **outline mode**: extract structural symbols (Rust: `fn`, `struct`, `enum`, `impl`, `mod`, `trait`, `pub`, `///` doc comments) with their line numbers. The agent then uses line ranges to read specific sections.
+- Outline extraction uses language-aware regex heuristics, not a full AST parser. For Rust, patterns like `^\s*(pub\s+)?(async\s+)?fn\s+`, `^\s*(pub\s+)?struct\s+`, `^\s*(pub\s+)?enum\s+`, `^\s*impl\s+`, `^\s*mod\s+`, `^\s*#\[cfg\(test\)\]` are sufficient to capture 90%+ of navigable symbols.
+- Line numbers are always included in output (both full content and outline mode) to enable precise `EditFileTool` usage.
+
+**GrepTool Design:**
+
+```
+GrepToolArgs {
+    regex: String,                    // Regex pattern (Rust `regex` crate syntax)
+    include_pattern: Option<String>,  // Glob filter (e.g., "src/**/*.rs")
+    context_lines: Option<u32>,       // Lines of context before/after each match (default: 2)
+    max_results: Option<u32>,         // Pagination limit (default: 20)
+}
+```
+
+Implementation: Uses `grep -rn --include` via `TerminalTool` internally (or the `grep` crate for pure Rust), with structured output parsing. Returns matches as `{path, line_number, content, context_before, context_after}`.
+
+**FindPathTool Design:**
+
+```
+FindPathToolArgs {
+    glob: String,                     // Glob pattern (e.g., "**/*.rs", "src/**/mod.rs")
+    max_results: Option<u32>,         // Pagination limit (default: 50)
+}
+```
+
+Implementation: Uses the `glob` crate or `walkdir` + pattern matching. Respects `.gitignore` patterns. Returns sorted list of matching paths relative to project root.
+
+**Expanded System Preamble — Tool Usage Rules:**
+
+The `build_preamble()` method in `session/runner.rs` is updated to include explicit tool usage guidance. This is critical — the tools alone are not enough; the agent must be **instructed** on when and how to use each one.
+
+```
+## Tools
+You have access to these tools: edit_file, read_file, grep, find_path, list_directory,
+git, terminal, ask_supervisor, plus a built-in think tool for reasoning.
+
+## Tool Usage Rules
+- **ALWAYS use `edit_file` with mode="edit"** to modify existing files. NEVER rewrite
+  entire files unless creating a new file (mode="create") or a complete rewrite is
+  truly necessary (mode="overwrite").
+- **Use `read_file` with line ranges** for large files. Read the outline first, then
+  target specific sections with start_line/end_line.
+- **Use `grep` to find symbols** before editing — never assume file paths or line numbers.
+- **Use `find_path`** to discover files by name pattern when you don't know the full path.
+- **Use `list_directory`** to explore directory structure.
+- **Use `terminal`** for build commands, tests, mkdir, rm, and other shell operations.
+- When `edit_file` fails (ambiguous match), use `read_file` with a line range to get
+  more context, then retry with a larger `old_text` fragment.
+- When making multiple related changes in one file, batch them in a single `edit_file`
+  call with multiple edit operations.
+```
+
+**Migration Path:**
+- The existing `FsTool` is removed entirely
+- All 5 new tools follow the established Rig Tool Implementation Pattern (struct + args + error + Tool impl)
+- The `supervisor/read_tool.rs` (read-only fs tool for the Architect agent) is updated to use `ReadFileTool` instead of `FsTool`
+- Session builder (`runner.rs`) registers the 5 new tools instead of `FsTool`
+- Unit tests for `FsTool` are replaced with per-tool test suites
+
+**Affects:** tools module (major restructure), session/runner.rs (preamble + tool registration), supervisor/read_tool.rs, review/mod.rs, project-context.md
+
 ### Decision Impact Analysis
 
 **Implementation Sequence:**
 1. Foundation: cargo init, CLI (clap), config loading, cooperative shutdown (ShutdownFlag in `run_start()`, signal handler task, propagation to pipeline/session)
-2. Tools: git (git2), filesystem, terminal as rig Tool traits
+2. Tools: git (git2), edit_file, read_file, grep, find_path, list_directory, terminal as rig Tool traits
 3. Watcher: sprint-status.yaml parser, dependency graph, pre-gate logic
 4. Session: rig agent setup with XML context activation, streaming chat loop, state file persistence, `llm_context` module for ContextBuilder
 5. Supervisor: ask_supervisor tool, rule engine, LLM fallback (architect session), decision logging
@@ -404,7 +533,7 @@ This is a developer tool, not infrastructure software. Users can background it w
 8. Notifier: Telegram integration
 
 **Cross-Component Dependencies:**
-- Session depends on: tools, supervisor, config, git_provider, llm_context, llm_logging, auth (for Copilot)
+- Session depends on: tools (edit_file, read_file, grep, find_path, list_directory, git, terminal), supervisor, config, git_provider, llm_context, llm_logging, auth (for Copilot)
 - Pipeline depends on: session, review, git_provider, notifier, config
 - Supervisor depends on: config (LLM provider for fallback), decisions logging
 - Watcher depends on: config (paths, polling interval)
@@ -443,20 +572,19 @@ pub enum WatcherError {
 
 ### Rig Tool Implementation Pattern — Standard Structure
 
-Every rig tool (git, fs, terminal, ask_supervisor) follows the same structural pattern:
+Every rig tool (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor) follows the same structural pattern:
 
 ```
 // 1. Serializable struct with shared state
 #[derive(Deserialize, Serialize)]
 pub struct MyTool {
-    // Shared config/state needed by the tool
+    // Shared config/state needed by the tool (e.g., project_root: PathBuf)
 }
 
-// 2. Dedicated args struct
+// 2. Dedicated args struct — focused on ONE concern
 #[derive(Deserialize)]
 pub struct MyToolArgs {
-    pub action: String,
-    // Action-specific parameters
+    // Tool-specific parameters only — no "action" multiplexer
 }
 
 // 3. Dedicated error enum (thiserror)
@@ -475,6 +603,7 @@ impl Tool for MyTool {
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         // Detailed description so the LLM knows when/how to use the tool
+        // CRITICAL: description quality directly impacts agent behavior
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -486,13 +615,17 @@ impl Tool for MyTool {
 }
 ```
 
-**Note on ThinkTool:** The 5th agent tool is rig's built-in `ThinkTool` (derived from Anthropic's Claude Think Tool pattern). It gives the agent a dedicated space for structured reasoning without consuming real tool calls. No custom implementation needed — it is imported from the `rig` crate and added via `.tool(ThinkTool)` on the agent builder. It does **not** live in the `tools/` directory.
+**Tool design principle — Focused tools over action multiplexing:**
+Each tool owns a single concern with a compact JSON schema. Do NOT add an `action: String` field that multiplexes multiple operations into one tool (this was the anti-pattern of the original `FsTool`). The LLM reasons better with many small, clearly-described tools than with one mega-tool that has a large branching schema.
+
+**Note on ThinkTool:** The 9th agent tool is rig's built-in `ThinkTool` (derived from Anthropic's Claude Think Tool pattern). It gives the agent a dedicated space for structured reasoning without consuming real tool calls. No custom implementation needed — it is imported from the `rig` crate and added via `.tool(ThinkTool)` on the agent builder. It does **not** live in the `tools/` directory.
 
 **Mandatory rules:**
 - Tool NAME is always snake_case and descriptive
 - Tool definition description must be detailed enough for the LLM to use correctly
 - Every `call()` logs the action and result via `tracing`
 - Never panic in a tool — always return `Result`
+- One tool = one concern — no action multiplexing
 
 ### Tracing Pattern — Structured Spans with Story Context
 
@@ -723,16 +856,20 @@ bmad-bot/
 │   ├── supervisor/
 │   │   ├── mod.rs                    # ask_supervisor Tool implementation, EscalationSlot
 │   │   ├── architect.rs              # Architect LLM fallback session (separate agent for substantive questions)
-│   │   ├── read_tool.rs              # Read-only filesystem tool for the Architect agent
+│   │   ├── read_tool.rs              # Read-only filesystem tool for the Architect agent (uses ReadFileTool)
 │   │   ├── rules.rs                  # Rule engine (deterministic pattern matching)
 │   │   └── decisions.rs              # Decision logging (DecisionLog, write_decisions_file)
 │   ├── review/
 │   │   └── mod.rs                    # Code review session (separate LLM, optional, configurable)
 │   ├── tools/
-│   │   ├── mod.rs                    # Tool registration helpers
-│   │   ├── git.rs                    # Git Tool (git2 operations)
-│   │   ├── fs.rs                     # Filesystem Tool (read/write/list)
-│   │   └── terminal.rs              # Terminal Tool (run commands with timeout)
+│   │   ├── mod.rs                    # Tool re-exports
+│   │   ├── edit_file.rs              # EditFileTool — surgical search_replace edits, create, overwrite
+│   │   ├── read_file.rs              # ReadFileTool — partial reading (line ranges) + outline mode for large files
+│   │   ├── grep.rs                   # GrepTool — regex search across project file contents
+│   │   ├── find_path.rs             # FindPathTool — glob-based file path discovery
+│   │   ├── list_directory.rs        # ListDirectoryTool — list directory contents with types/sizes
+│   │   ├── git.rs                    # GitTool — git operations via git2 (unchanged)
+│   │   └── terminal.rs              # TerminalTool — shell command execution with timeout (unchanged)
 │   ├── git_provider/
 │   │   ├── mod.rs                    # GitProvider trait + factory
 │   │   ├── github.rs                # GitHub impl (octocrab)
@@ -754,7 +891,7 @@ bmad-bot/
 | FR1-4 | Story Management | `watcher/` | `mod.rs` (polling), `deps.rs` (pre-gate, topological sort) |
 | FR5-7 | Pre-Dev Preparation | *BMAD Agent* | Handled by agent via tools — no daemon code |
 | FR8-11 | Development Session | `session/`, `llm_context` | `runner.rs` (streaming chat loop, XML context activation, context-limit recovery), `analyzer.rs` (response analysis), `provider.rs` (LLM construction), `branch.rs` (branch management), `cleanup.rs` (partial work), `escalation.rs` (escalation handling), `state.rs` (WAL persistence) |
-| FR12-17 | Supervision | `supervisor/` | `mod.rs` (ask_supervisor tool), `rules.rs` (rule engine), `architect.rs` (LLM fallback), `read_tool.rs` (read-only fs for architect), `decisions.rs` (decision logging) |
+| FR12-17 | Supervision | `supervisor/` | `mod.rs` (ask_supervisor tool), `rules.rs` (rule engine), `architect.rs` (LLM fallback), `read_tool.rs` (read-only fs for architect — uses ReadFileTool), `decisions.rs` (decision logging) |
 | FR18-20 | Code Review | `review/` | `mod.rs` |
 | FR21-24 | PR Management | `git_provider/` | `mod.rs` (trait), `github.rs`, `gitlab.rs` |
 | FR25-26 | Notifications | `notifier/` | `mod.rs` |
@@ -765,6 +902,7 @@ bmad-bot/
 | FR40 | LLM Logging | `llm_logging.rs` | Request/response payload logging, `bmad_bot::llm` tracing target |
 | — | Pipeline Orchestration | `pipeline.rs` | `StoryPipeline` — orchestrates full story pipeline (session → review → PR → notify) |
 | — | XML Context | `llm_context.rs` | `ContextBuilder` for agent activation (Zed-style XML formatting) |
+| — | Agent Dev Tools | `tools/` | `edit_file.rs`, `read_file.rs`, `grep.rs`, `find_path.rs`, `list_directory.rs`, `git.rs`, `terminal.rs` — 7 custom tools + ThinkTool (rig built-in) + ask_supervisor |
 
 ### Architectural Boundaries
 
@@ -829,7 +967,7 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 
 - **pipeline → watcher:** Pipeline delegates story discovery to watcher. Watcher returns `Vec<StoryInfo>` (eligible stories sorted by dependency order).
 - **pipeline → session:** Passes `StoryInfo` struct (eligible story with metadata: id, label, branch name, specs path, dependencies). SessionRunner returns `SessionOutcome`.
-- **session → tools:** Tools registered at agent build time via `.tool()` — no direct calls from session to tools
+- **session → tools:** 8 tools registered at agent build time via `.tool()` (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor) + ThinkTool — no direct calls from session to tools
 - **session → supervisor:** Supervisor is a rig tool called by the agent autonomously, not by the daemon
 - **session → llm_context:** SessionRunner uses `ContextBuilder` to format `dev.md` as Zed-style XML for agent activation
 - **session → auth:** SessionRunner uses `CopilotTokenCache` to resolve short-lived Copilot session tokens at runtime (via `session/provider.rs`)
@@ -843,7 +981,7 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>` + `Arc<BotSecrets>`. `cli/run_start()` creates the `ShutdownFlag` and spawns the signal handler task.
 2. **Crash check:** `SessionRunner::check_and_recover_wal()` checks for existing WAL file → if found, `pipeline.recover_and_process()` resumes the interrupted session (skip to step 5 with loaded history)
 3. **Poll:** `watcher/` reads `sprint-status.yaml` from configured output path → `deps.rs` computes topological sort and pre-gate → eligible stories or sleep until next cycle. Uses `tokio::time::interval` which **ticks immediately on first call** — daemon polls at launch, not after `polling_interval_secs`.
-4. **Session init:** `session/runner.rs` builds a minimal system preamble (operational instructions + language override), then constructs the rig agent with **5 tools** (git, fs, terminal, ask_supervisor, ThinkTool). Build methods return concrete `Agent<M>` types to satisfy `StreamingChat` trait bounds. Provider-specific builders: `build_anthropic_agent()` (Anthropic API), `build_openai_agent()` (OpenAI Responses API), `build_copilot_agent()` (Completions API + IDE headers).
+4. **Session init:** `session/runner.rs` builds the system preamble (operational instructions + tool usage rules + language override), then constructs the rig agent with **9 tools** (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool). Build methods return concrete `Agent<M>` types to satisfy `StreamingChat` trait bounds. Provider-specific builders: `build_anthropic_agent()` (Anthropic API), `build_openai_agent()` (OpenAI Responses API), `build_copilot_agent()` (Completions API + IDE headers).
 5. **Agent activation:** `activate_agent()` sends the BMAD dev agent file (`dev.md`) as the first user message wrapped in Zed-style XML context tags (via `ContextBuilder`). The agent processes activation steps via tools (loads `config.yaml`, displays greeting/menu). Returns `(rig_history, chat_history)` for subsequent turns.
 6. **Chat loop:** Sends `"DS"` via `streaming_chat()` → agent works autonomously via tools → `state.rs` persists chat history (WAL) after each turn. **All LLM calls use streaming** — `streaming_chat()` consumes SSE stream, collects text, handles tool calls via rig's multi-turn stream. ShutdownFlag checked between every chunk. `llm_logging` records request/response payloads.
 7. **During session:** Agent calls `ask_supervisor` tool as needed → rule engine → LLM fallback (architect session) → or escalation (stops session)
@@ -863,7 +1001,7 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 | GitLab API | `git_provider/gitlab.rs` | HTTPS via reqwest | Token from `.env` | |
 | Telegram API | `notifier/mod.rs` | HTTPS via reqwest | Bot token from `.env` | |
 | Local git repo | `tools/git.rs` | libgit2 via git2 | SSH key or credential helper | |
-| Local filesystem | `tools/fs.rs` | std::fs / tokio::fs | OS permissions | |
+| Local filesystem | `tools/edit_file.rs`, `read_file.rs`, `grep.rs`, `find_path.rs`, `list_directory.rs` | std::fs / tokio::fs | OS permissions | 5 focused tools replacing former monolithic FsTool |
 | Local terminal | `tools/terminal.rs` | tokio::process | OS permissions | Configurable timeout |
 | BMAD config | `config/mod.rs` | File read (YAML) | Filesystem access | |
 | sprint-status.yaml | `watcher/mod.rs` | File read (YAML) | Filesystem access | |
@@ -915,7 +1053,7 @@ All architectural decisions work together without conflicts:
 |----------|--------|----------------------|
 | FR1-4 | Story Management | `watcher/` (polling + pre-gate dependency check with topological sort). Agent handles status mutations via tools. |
 | FR5-7 | Pre-Dev Preparation | BMAD agent autonomously reads prior stories and updates specs via filesystem tool. No daemon code needed. |
-| FR8-11 | Development Session | `session/runner.rs` builds rig agent with minimal preamble, activates BMAD agent via XML context (`llm_context.rs`), registers 5 tools (git, fs, terminal, ask_supervisor, ThinkTool), manages streaming chat loop. Language override in system preamble. Agent file sent as user message, not system prompt. |
+| FR8-11 | Development Session | `session/runner.rs` builds rig agent with expanded preamble (tool usage rules + language override), activates BMAD agent via XML context (`llm_context.rs`), registers 9 tools (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool), manages streaming chat loop. Agent file sent as user message, not system prompt. |
 | FR12-17 | Supervision | `supervisor/` implements ask_supervisor as rig Tool. Rule engine in `rules.rs`, LLM fallback via architect session in `architect.rs` (with read-only `read_tool.rs`), decision logging in `decisions.rs`. Escalation returns tool error → stops rig loop. |
 | FR18-20 | Code Review | `review/` launches separate LLM session. Configurable (enabled/disabled). Fixes in separate commits, review posted as PR comment. |
 | FR21-24 | PR Management | `git_provider/` trait with GitHub (octocrab) and GitLab (reqwest) implementations. PR created even for failed/blocked stories with failure description. |
@@ -966,6 +1104,8 @@ All architectural decisions work together without conflicts:
 | 1 | Minor | `review/` module needs diff access — `ReviewContext` struct should include branch name for git2 diff computation | Implementation detail — resolved when coding `review/mod.rs` |
 | 2 | Minor | Supervisor LLM fallback needs project docs as context — source paths come from `BotConfig` (planning_artifacts, project_knowledge) | Implementation detail — supervisor reads paths from config |
 | 3 | Minor | Exact `bmad-bot.yaml` field schema not specified | Normal for architecture stage — defined during `config/` implementation |
+| 4 | Minor | ReadFileTool outline mode uses regex heuristics, not AST parsing — may miss some symbols in complex Rust code | Acceptable trade-off: 90%+ coverage with zero dependencies. Can be enhanced incrementally with tree-sitter if needed |
+| 5 | Minor | GrepTool may need the `glob` or `walkdir` crate as new dependencies | Lightweight, well-maintained crates — add to Cargo.toml during implementation |
 
 **No critical or blocking gaps found.**
 
@@ -986,14 +1126,14 @@ All architectural decisions work together without conflicts:
 
 **✅ Implementation Patterns**
 - [x] Error type pattern established (thiserror per module)
-- [x] Rig tool pattern standardized (including ThinkTool note)
+- [x] Rig tool pattern standardized — focused tools, no action multiplexing (including ThinkTool note)
 - [x] Tracing pattern with structured spans + LLM payload logging
 - [x] Cooperative shutdown pattern with ShutdownFlag propagation
 - [x] Config, Git provider, and test mock patterns defined
-- [x] Anti-patterns explicitly documented (including non-streaming anti-pattern)
+- [x] Anti-patterns explicitly documented (including non-streaming anti-pattern, full-file-rewrite anti-pattern)
 
 **✅ Project Structure**
-- [x] Complete directory structure with all 35 source files
+- [x] Complete directory structure with all source files (tools/ expanded: edit_file, read_file, grep, find_path, list_directory, git, terminal)
 - [x] Module boundaries and communication map (including pipeline, auth, llm_context, llm_logging)
 - [x] FR-to-module mapping (38/38)
 - [x] Data flow documented (11 steps)
@@ -1009,12 +1149,13 @@ All architectural decisions work together without conflicts:
 **Key Strengths:**
 - Simple, modular architecture that aligns with rig's design philosophy
 - Daemon stays minimal — the BMAD agent does the heavy lifting
+- **Surgical development tooling** — focused tools (edit_file, read_file, grep, find_path) modeled on Claude Code/Zed patterns for token-efficient, safe code editing
 - Crash recovery built-in from day one (session WAL)
 - Full decision traceability (supervisor decisions → file + PR)
 - Two-layer dependency model (daemon pre-gate + agent verification) saves tokens
 - GitProvider trait enables GitHub + GitLab from MVP
 - Cooperative shutdown interrupts at finest granularity (mid-stream)
-- Clean agent activation pattern (system preamble vs XML context persona)
+- Clean agent activation pattern (system preamble with tool usage rules vs XML context persona)
 - Universal streaming ensures consistency across all providers
 
 **Areas for Future Enhancement:**
@@ -1029,12 +1170,13 @@ All architectural decisions work together without conflicts:
 **AI Agent Guidelines:**
 - Read the Project Context file (`_bmad-output/project-context.md`) before implementing any code
 - Follow all architectural decisions exactly as documented in this file
-- Use implementation patterns consistently — especially error types, tool structure, tracing, cooperative shutdown, and streaming
+- Use implementation patterns consistently — especially error types, tool structure (focused tools, no action multiplexing), tracing, cooperative shutdown, and streaming
 - Respect module boundaries — each module owns its error types and exposes clean interfaces
 - Check the anti-patterns list before submitting any code
 - Always use `streaming_chat()` — never `agent.chat()`
 - Always propagate ShutdownFlag to functions that make LLM calls
 - Agent activation uses XML context (first user message), not system preamble
+- Tools follow the "one tool = one concern" principle — never add an `action` multiplexer field
 
 **First Implementation Priority:**
 `cargo init bmad-bot` + dependency setup + module scaffolding. This should be the first implementation story, establishing the project skeleton that all subsequent stories build on.
