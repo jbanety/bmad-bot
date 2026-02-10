@@ -490,8 +490,10 @@ impl ReviewRunner {
         // The CR workflow asks "which story file to review" — reply with the file path
         let story_reply = story.specs_path.display().to_string();
 
-        // Send initial message "CR"
-        let initial_message = "CR";
+        // Send initial message "CR" with English language override.
+        // The BMAD activation loads config.yaml which may set communication_language
+        // to a non-English language. The response analyzer only matches English patterns.
+        let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CR";
         let history: Vec<Message> = vec![];
         log_llm_request("code-review", 0, initial_message, history.len());
         let response = streaming_review_chat(agent, initial_message, history)

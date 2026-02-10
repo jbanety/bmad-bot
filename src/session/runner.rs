@@ -1220,7 +1220,9 @@ OVERRIDE: communication_language = English
         formatted_exchanges: &str,
     ) -> String {
         format!(
-            "=== SESSION RECOVERY — Context Window Limit Reached ===\n\
+            "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+             \n\
+             === SESSION RECOVERY — Context Window Limit Reached ===\n\
              Your previous session hit the context window limit. Below is your recovery context:\n\
              \n\
              === Session Summary ===\n\
@@ -1702,12 +1704,15 @@ OVERRIDE: communication_language = English
                 }
             })?;
 
-        // Step 4b — Enter chat mode (existing flow unchanged)
+        // Step 4b — Enter chat mode with English language override.
+        // The BMAD activation loads config.yaml which may set communication_language
+        // to a non-English language. The response analyzer only matches English patterns.
+        let ch_msg = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CH";
         let ch_turn = compressed_history.len() / 2;
-        log_llm_request("dev-recovery", ch_turn, "CH", activation_history.len());
+        log_llm_request("dev-recovery", ch_turn, ch_msg, activation_history.len());
         let ch_response = streaming_chat(
             agent,
-            "CH",
+            ch_msg,
             activation_history.clone(),
             Some(&self.shutdown),
         )
@@ -1722,11 +1727,11 @@ OVERRIDE: communication_language = English
             }
         })?;
         log_llm_response("dev-recovery", ch_turn, &ch_response);
-        activation_history.push(Message::user("CH"));
+        activation_history.push(Message::user(ch_msg));
         activation_history.push(Message::assistant(&ch_response));
         compressed_history.push(ChatMessage {
             role: "user".to_string(),
-            content: "CH".to_string(),
+            content: ch_msg.to_string(),
         });
         compressed_history.push(ChatMessage {
             role: "assistant".to_string(),
