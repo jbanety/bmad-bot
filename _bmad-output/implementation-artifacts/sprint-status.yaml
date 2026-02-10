@@ -107,7 +107,7 @@ development_status:
 
   epic-8: in-progress # depends-on: epic-4 (Story 4.1 as baseline)
   8-1-read-file-tool-partial-reading-outline-mode: ready-for-dev
-  8-2-edit-file-tool-surgical-search-replace-editing: backlog # depends-on: 8-1
+  8-2-edit-file-tool-surgical-search-replace-editing: ready-for-dev # depends-on: 8-1
   8-3-grep-tool-find-path-tool-codebase-search-navigation: backlog # depends-on: 8-1
   8-4-list-directory-tool-fstool-removal-complete-migration: backlog # depends-on: 8-3
   8-5-agent-integration-preamble-registration-session-update: backlog # depends-on: 8-4
