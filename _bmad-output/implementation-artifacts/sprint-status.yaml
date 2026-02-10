@@ -109,6 +109,6 @@ development_status:
   8-1-read-file-tool-partial-reading-outline-mode: review
   8-2-edit-file-tool-surgical-search-replace-editing: review # depends-on: 8-1
   8-3-grep-tool-find-path-tool-codebase-search-navigation: review # depends-on: 8-1
-  8-4-list-directory-tool-fstool-removal-complete-migration: ready-for-dev # depends-on: 8-3
+  8-4-list-directory-tool-fstool-removal-complete-migration: review # depends-on: 8-3
   8-5-agent-integration-preamble-registration-session-update: ready-for-dev # depends-on: 8-4
   epic-8-retrospective: optional

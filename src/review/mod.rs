@@ -82,7 +82,7 @@ use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::provider::{ProviderError, copilot_headers, resolve_api_key};
 use crate::supervisor::decisions::DecisionLog;
 use crate::supervisor::{AskSupervisor, EscalationSlot};
-use crate::tools::{FsTool, GitTool, TerminalTool};
+use crate::tools::{GitTool, ListDirectoryTool, TerminalTool};
 use crate::watcher::StoryInfo;
 
 /// Maximum chat turns for a review session (safety net).
@@ -282,7 +282,7 @@ impl ReviewRunner {
                     })?;
 
                 let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, fs, terminal, supervisor) = self.create_tools(
+                let (git, list_dir, terminal, supervisor) = self.create_tools(
                     &project_root,
                     escalation_slot.clone(),
                     decision_log.clone(),
@@ -292,7 +292,7 @@ impl ReviewRunner {
                     .agent(model)
                     .preamble(&preamble)
                     .tool(git)
-                    .tool(fs)
+                    .tool(list_dir)
                     .tool(terminal)
                     .tool(supervisor)
                     .build();
@@ -309,7 +309,7 @@ impl ReviewRunner {
                     })?;
 
                 let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, fs, terminal, supervisor) = self.create_tools(
+                let (git, list_dir, terminal, supervisor) = self.create_tools(
                     &project_root,
                     escalation_slot.clone(),
                     decision_log.clone(),
@@ -319,7 +319,7 @@ impl ReviewRunner {
                     .agent(model)
                     .preamble(&preamble)
                     .tool(git)
-                    .tool(fs)
+                    .tool(list_dir)
                     .tool(terminal)
                     .tool(supervisor)
                     .build();
@@ -349,7 +349,7 @@ impl ReviewRunner {
                     .completions_api();
 
                 let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, fs, terminal, supervisor) = self.create_tools(
+                let (git, list_dir, terminal, supervisor) = self.create_tools(
                     &project_root,
                     escalation_slot.clone(),
                     decision_log.clone(),
@@ -359,7 +359,7 @@ impl ReviewRunner {
                     .agent(model)
                     .preamble(&preamble)
                     .tool(git)
-                    .tool(fs)
+                    .tool(list_dir)
                     .tool(terminal)
                     .tool(supervisor)
                     .build();
@@ -406,15 +406,15 @@ impl ReviewRunner {
         ))
     }
 
-    /// Create the 4 tools for the rig agent: git, filesystem, terminal, ask_supervisor.
+    /// Create the 4 tools for the rig agent: git, list_directory, terminal, ask_supervisor.
     fn create_tools(
         &self,
         project_root: &Path,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<(GitTool, FsTool, TerminalTool, AskSupervisor), ReviewError> {
+    ) -> Result<(GitTool, ListDirectoryTool, TerminalTool, AskSupervisor), ReviewError> {
         let git = GitTool::new(project_root.to_path_buf());
-        let fs = FsTool::new(project_root.to_path_buf());
+        let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
         let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
 
         let supervisor =
@@ -423,7 +423,7 @@ impl ReviewRunner {
                     reason: format!("Failed to create AskSupervisor: {e}"),
                 })?;
 
-        Ok((git, fs, terminal, supervisor))
+        Ok((git, list_dir, terminal, supervisor))
     }
 
     /// Drive the review session chat loop.

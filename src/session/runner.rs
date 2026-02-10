@@ -27,7 +27,7 @@ use crate::session::provider::{ProviderError, resolve_api_key};
 use crate::session::state::{ChatMessage, SessionState};
 use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
 use crate::supervisor::{AskSupervisor, EscalationSlot};
-use crate::tools::{FsTool, GitTool, TerminalTool};
+use crate::tools::{GitTool, ListDirectoryTool, TerminalTool};
 use crate::watcher::StoryInfo;
 use futures::StreamExt;
 use git2::{BranchType, Repository};
@@ -879,14 +879,14 @@ impl SessionRunner {
             })?;
 
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-        let (git, fs, terminal, supervisor) =
+        let (git, list_dir, terminal, supervisor) =
             self.create_tools(&project_root, escalation_slot, decision_log)?;
 
         let agent = client
             .agent(model)
             .preamble(&preamble)
             .tool(git)
-            .tool(fs)
+            .tool(list_dir)
             .tool(terminal)
             .tool(supervisor)
             .tool(ThinkTool)
@@ -924,14 +924,14 @@ impl SessionRunner {
                 })?;
 
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-        let (git, fs, terminal, supervisor) =
+        let (git, list_dir, terminal, supervisor) =
             self.create_tools(&project_root, escalation_slot, decision_log)?;
 
         let agent = client
             .agent(model)
             .preamble(&preamble)
             .tool(git)
-            .tool(fs)
+            .tool(list_dir)
             .tool(terminal)
             .tool(supervisor)
             .tool(ThinkTool)
@@ -976,14 +976,14 @@ impl SessionRunner {
             .completions_api();
 
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-        let (git, fs, terminal, supervisor) =
+        let (git, list_dir, terminal, supervisor) =
             self.create_tools(&project_root, escalation_slot, decision_log)?;
 
         let agent = client
             .agent(model)
             .preamble(&preamble)
             .tool(git)
-            .tool(fs)
+            .tool(list_dir)
             .tool(terminal)
             .tool(supervisor)
             .tool(ThinkTool)
@@ -1101,15 +1101,15 @@ OVERRIDE: communication_language = English
         Ok((rig_history, chat_history))
     }
 
-    /// Create the 4 tools for the rig agent: git, filesystem, terminal, ask_supervisor.
+    /// Create the 4 tools for the rig agent: git, list_directory, terminal, ask_supervisor.
     fn create_tools(
         &self,
         project_root: &Path,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<(GitTool, FsTool, TerminalTool, AskSupervisor), ProviderError> {
+    ) -> Result<(GitTool, ListDirectoryTool, TerminalTool, AskSupervisor), ProviderError> {
         let git = GitTool::new(project_root.to_path_buf());
-        let fs = FsTool::new(project_root.to_path_buf());
+        let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
         let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
 
         let supervisor =
@@ -1119,7 +1119,7 @@ OVERRIDE: communication_language = English
                     reason: format!("Failed to create AskSupervisor: {e}"),
                 })?;
 
-        Ok((git, fs, terminal, supervisor))
+        Ok((git, list_dir, terminal, supervisor))
     }
 
     /// Extract the last `n` exchanges (user+assistant pairs) from chat history.

@@ -8,8 +8,10 @@
 //! - **Project-root bounded** — rejects paths outside `{project_root}`
 //! - **Supervisor-only** — located in `src/supervisor/`, not `src/tools/`
 //!
-//! The full filesystem tool (read + write + directory ops) is in
-//! Epic 4, Story 4.1 (`src/tools/fs.rs`). This tool is separate.
+//! Internally delegates to [`ReadFileTool`](crate::tools::ReadFileTool)
+//! from `src/tools/read_file.rs` for all file reading logic. This avoids
+//! duplicating the `validate_path` + `canonicalize` security boundary
+//! and gains outline mode for large files automatically.
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -17,14 +19,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 
+use crate::tools::ReadFileTool;
+use crate::tools::read_file::{ReadFileToolArgs, ReadFileToolError};
+
 /// Minimal read-only file tool for the supervisor Architect session.
 ///
-/// Reads files relative to the project root. Rejects paths that
-/// resolve outside the project root boundary (security).
+/// Wraps [`ReadFileTool`] with a simplified argument surface (no
+/// `start_line`/`end_line`) suitable for the Architect agent.
+/// All path validation and file reading is delegated to the inner tool.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadFile {
-    /// Absolute path to the project root — all reads are bounded to this directory.
-    project_root: PathBuf,
+    /// Inner `ReadFileTool` that performs all actual file reading.
+    inner: ReadFileTool,
 }
 
 /// Arguments passed by the Architect agent when calling the `read_file` tool.
@@ -63,45 +69,30 @@ pub enum ReadFileError {
     },
 }
 
+impl From<ReadFileToolError> for ReadFileError {
+    fn from(err: ReadFileToolError) -> Self {
+        match err {
+            ReadFileToolError::NotFound { path } => ReadFileError::NotFound { path },
+            ReadFileToolError::PathDenied { path, reason } => {
+                ReadFileError::PathDenied { path, reason }
+            }
+            ReadFileToolError::ReadFailed { path, reason } => {
+                ReadFileError::ReadFailed { path, reason }
+            }
+            ReadFileToolError::IsDirectory { path } => ReadFileError::ReadFailed {
+                path,
+                reason: "Path is a directory, not a file".to_string(),
+            },
+        }
+    }
+}
+
 impl ReadFile {
     /// Create a new `ReadFile` tool bounded to the given project root.
     pub fn new(project_root: PathBuf) -> Self {
-        Self { project_root }
-    }
-
-    /// Validate the requested path is within the project root.
-    ///
-    /// Resolves the path via `canonicalize()` and checks that it
-    /// starts with `self.project_root`. This prevents directory
-    /// traversal attacks (e.g. `../../etc/passwd`).
-    fn validate_path(&self, requested: &str) -> Result<PathBuf, ReadFileError> {
-        let full_path = self.project_root.join(requested);
-
-        // Canonicalize resolves symlinks and `..` components.
-        // If the file doesn't exist, canonicalize fails — treat as NotFound.
-        let canonical = full_path
-            .canonicalize()
-            .map_err(|_| ReadFileError::NotFound {
-                path: requested.to_string(),
-            })?;
-
-        // Canonicalize the project root too (in case it contains symlinks).
-        let canonical_root =
-            self.project_root
-                .canonicalize()
-                .map_err(|_| ReadFileError::PathDenied {
-                    path: requested.to_string(),
-                    reason: "Cannot resolve project root".to_string(),
-                })?;
-
-        if !canonical.starts_with(&canonical_root) {
-            return Err(ReadFileError::PathDenied {
-                path: requested.to_string(),
-                reason: "Path is outside project root".to_string(),
-            });
+        Self {
+            inner: ReadFileTool::new(project_root),
         }
-
-        Ok(canonical)
     }
 }
 
@@ -140,14 +131,17 @@ impl Tool for ReadFile {
             "Architect reading file"
         );
 
-        let validated_path = self.validate_path(&args.path)?;
+        // Delegate to ReadFileTool with no line range — full read or outline mode
+        let inner_args = ReadFileToolArgs {
+            path: args.path,
+            start_line: None,
+            end_line: None,
+        };
 
-        tokio::fs::read_to_string(&validated_path)
+        self.inner
+            .call(inner_args)
             .await
-            .map_err(|e| ReadFileError::ReadFailed {
-                path: args.path,
-                reason: e.to_string(),
-            })
+            .map_err(ReadFileError::from)
     }
 }
 
@@ -169,7 +163,15 @@ mod tests {
         };
         let result = tool.call(args).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "# Test Content\nHello");
+        let output = result.unwrap();
+        assert!(
+            output.contains("# Test Content"),
+            "Expected content in output, got: {output}"
+        );
+        assert!(
+            output.contains("Hello"),
+            "Expected content in output, got: {output}"
+        );
     }
 
     #[tokio::test]
@@ -216,7 +218,11 @@ mod tests {
         };
         let result = tool.call(args).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "# Architect");
+        let output = result.unwrap();
+        assert!(
+            output.contains("# Architect"),
+            "Expected content in output, got: {output}"
+        );
     }
 
     #[tokio::test]
@@ -284,5 +290,15 @@ mod tests {
         let tool = ReadFile::new(dir.path().to_path_buf());
         let json = serde_json::to_string(&tool).expect("Should serialize");
         let _deserialized: ReadFile = serde_json::from_str(&json).expect("Should deserialize");
+    }
+
+    #[test]
+    fn test_read_file_error_from_is_directory() {
+        let tool_err = ReadFileToolError::IsDirectory {
+            path: "some/dir".to_string(),
+        };
+        let err: ReadFileError = tool_err.into();
+        assert!(matches!(err, ReadFileError::ReadFailed { .. }));
+        assert!(err.to_string().contains("directory"));
     }
 }
