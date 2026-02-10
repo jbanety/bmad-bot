@@ -1,12 +1,13 @@
 //! Story pipeline orchestrator — daemon Layer 3 error handling and story lifecycle.
 //!
 //! The [`StoryPipeline`] struct encapsulates the full story processing pipeline:
-//! session → optional review → PR creation → notification. It implements the
+//! session → optional review → push → PR creation → notification. It implements the
 //! "never stop the run" principle: no single story failure halts the daemon.
 //!
 //! Use [`StoryPipeline::new`] to construct, then [`process_eligible_stories`] to
 //! run a batch of stories from the watcher.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::{BotConfig, BotSecrets};
@@ -224,6 +225,25 @@ impl StoryPipeline {
                     None
                 };
 
+                // Phase 3 — Push branch to remote before PR creation
+                if let Err(e) = self.push_branch(&branch).await {
+                    tracing::error!(
+                        action = "push_failed",
+                        story_key = %story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Git push failed — cannot create PR without remote branch"
+                    );
+                    let result = PipelineResult {
+                        story_key: story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!("Git push failed: {e}. Branch: {branch}")),
+                    };
+                    self.notify_story_result(&result).await;
+                    return result;
+                }
+
                 // Phase 4 — Success PR
                 let decisions_section = format_pr_decisions_section(&decisions);
                 let pr_title = build_pr_title(&story_key, &story_title, false);
@@ -322,8 +342,19 @@ impl StoryPipeline {
                     "Dev session failed — creating failure PR"
                 );
 
-                // Phase 3 — Failure PR
+                // Phase 3 — Failure PR (push partial work first)
                 let branch = format!("story/{story_key}");
+
+                if let Err(e) = self.push_branch(&branch).await {
+                    tracing::warn!(
+                        action = "failure_push_failed",
+                        story_key = %story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Git push failed for failure branch — attempting PR anyway"
+                    );
+                }
+
                 let decisions_section = format_pr_decisions_section(&decisions);
                 let pr_title = build_pr_title(&story_key, &story_title, true);
                 let pr_body = build_pr_description(&PrDescriptionParams {
@@ -403,6 +434,64 @@ impl StoryPipeline {
     }
 
     /// Send a notification for a single story result (non-blocking).
+    /// Push a local branch to the remote using git2.
+    ///
+    /// Uses the same credential strategy as [`GitTool::handle_push`]: SSH agent first,
+    /// then credential helper fallback. Runs in `spawn_blocking` to avoid blocking tokio.
+    async fn push_branch(&self, branch: &str) -> Result<(), PipelineError> {
+        let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
+        let branch = branch.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let repo = git2::Repository::open(&repo_path).map_err(|e| PipelineError::Init {
+                reason: format!("Cannot open repo at {}: {e}", repo_path.display()),
+            })?;
+
+            let mut remote = repo
+                .find_remote("origin")
+                .map_err(|e| PipelineError::Init {
+                    reason: format!("Cannot find remote 'origin': {e}"),
+                })?;
+
+            let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+
+            let mut callbacks = git2::RemoteCallbacks::new();
+            callbacks.credentials(|_url, username, allowed_types| {
+                if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+                    return git2::Cred::ssh_key_from_agent(username.unwrap_or("git"));
+                }
+                if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+                    let config = git2::Config::open_default()?;
+                    return git2::Cred::credential_helper(&config, _url, username);
+                }
+                Err(git2::Error::from_str("no suitable credentials found"))
+            });
+
+            let mut push_options = git2::PushOptions::new();
+            push_options.remote_callbacks(callbacks);
+
+            remote
+                .push(&[&refspec], Some(&mut push_options))
+                .map_err(|e| PipelineError::PrCreation {
+                    story_key: String::new(),
+                    branch: branch.clone(),
+                    reason: format!("Git push failed: {e}"),
+                })?;
+
+            tracing::info!(
+                action = "branch_pushed",
+                branch = %branch,
+                "Branch pushed to origin"
+            );
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| PipelineError::Init {
+            reason: format!("Push task join error: {e}"),
+        })?
+    }
+
     async fn notify_story_result(&self, result: &PipelineResult) {
         let notification = StoryNotification {
             story_id: result
@@ -504,6 +593,25 @@ impl StoryPipeline {
                     None
                 };
 
+                // Push branch before PR creation
+                if let Err(e) = self.push_branch(&branch).await {
+                    tracing::error!(
+                        action = "recovery_push_failed",
+                        story_key = %story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Git push failed after recovery — cannot create PR"
+                    );
+                    return PipelineResult {
+                        story_key: story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!(
+                            "Git push failed after recovery: {e}. Branch: {branch}"
+                        )),
+                    };
+                }
+
                 // Success PR
                 let decisions_section = format_pr_decisions_section(&decisions);
                 let pr_title = build_pr_title(&story_key, &story_title, false);
@@ -592,8 +700,19 @@ impl StoryPipeline {
                     "Recovered session failed — creating failure PR"
                 );
 
-                // Failure PR
+                // Failure PR (push partial work first)
                 let branch = format!("story/{story_key}");
+
+                if let Err(e) = self.push_branch(&branch).await {
+                    tracing::warn!(
+                        action = "recovery_failure_push_failed",
+                        story_key = %story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Git push failed for recovery failure branch — attempting PR anyway"
+                    );
+                }
+
                 let decisions_section = format_pr_decisions_section(&decisions);
                 let pr_title = build_pr_title(&story_key, &story_title, true);
                 let pr_body = build_pr_description(&PrDescriptionParams {
