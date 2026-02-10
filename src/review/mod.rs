@@ -182,8 +182,7 @@ impl ReviewRunner {
                 Ok(outcome) => return outcome,
                 Err(e) => {
                     let error_str = e.to_string();
-                    let is_retryable = error_str.contains("invalid_tool_call_format")
-                        || error_str.contains("not in a valid JSON format");
+                    let is_retryable = is_retryable_review_error(&error_str);
 
                     if is_retryable && attempt < MAX_SESSION_RETRIES {
                         tracing::warn!(
@@ -192,7 +191,7 @@ impl ReviewRunner {
                             max_retries = MAX_SESSION_RETRIES,
                             error = %error_str,
                             story_key = %story.story_key,
-                            "Malformed tool call poisoned history — retrying with fresh session"
+                            "Transient error — retrying with fresh session"
                         );
                         continue;
                     }
@@ -216,7 +215,38 @@ impl ReviewRunner {
             reason: "Review exhausted all retries".to_string(),
         }
     }
+}
 
+/// Check if a review error is transient and worth retrying with a fresh session.
+///
+/// Covers two categories:
+/// 1. **Poisoned history** — malformed tool call args that make the entire
+///    conversation history invalid (rig/API bug workaround)
+/// 2. **Network errors** — transient HTTP failures (connection reset, timeout,
+///    incomplete message) that are likely to succeed on retry
+fn is_retryable_review_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    // Poisoned history (rig sends malformed tool call args in conversation history)
+    lower.contains("invalid_tool_call_format")
+        || lower.contains("not in a valid json format")
+        // Transient network errors
+        || lower.contains("incompletemessage")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("broken pipe")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("error sending request")
+        || lower.contains("eof while parsing")
+        // Transient API errors
+        || lower.contains("status code 429")
+        || lower.contains("status code 500")
+        || lower.contains("status code 502")
+        || lower.contains("status code 503")
+        || lower.contains("status code 504")
+}
+
+impl ReviewRunner {
     /// Inner implementation that can fail with [`ReviewError`].
     async fn run_inner(&self, story: &StoryInfo) -> Result<ReviewOutcome, ReviewError> {
         let span = tracing::info_span!(

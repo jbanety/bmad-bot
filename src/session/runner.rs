@@ -1984,8 +1984,41 @@ impl SessionRunner {
                         action = "session_completed",
                         turn = %turn,
                         story_key = %story.story_key,
-                        "Agent signaled workflow completion"
+                        "Agent signaled workflow completion — sending final commit request"
                     );
+
+                    // Ask the agent to commit all pending changes before we close the session.
+                    // The agent may have uncommitted edits from the last task.
+                    let commit_msg = "Commit ALL uncommitted changes now. \
+                        Use conventional commits with descriptive messages. Do NOT push.";
+                    state.add_user_message(commit_msg);
+                    let history = state.to_rig_messages();
+
+                    log_llm_request("dev-session", turn, commit_msg, history.len());
+                    match streaming_chat(agent, commit_msg, history, Some(&self.shutdown)).await {
+                        Ok(r) => {
+                            log_llm_response("dev-session", turn, &r);
+                            state.add_assistant_message(&r);
+                            let _ = state.save(&self.state_file_path).await;
+                            tracing::info!(
+                                action = "final_commit_done",
+                                turn = %turn,
+                                story_key = %story.story_key,
+                                "Final commit request completed"
+                            );
+                        }
+                        Err(e) => {
+                            // Non-fatal: log and continue to completion.
+                            // The code review or human can commit later.
+                            log_llm_error("dev-session", turn, &e);
+                            tracing::warn!(
+                                action = "final_commit_failed",
+                                error = %e,
+                                story_key = %story.story_key,
+                                "Final commit request failed — proceeding anyway"
+                            );
+                        }
+                    }
 
                     // Write decisions file (best-effort)
                     self.write_decisions(story, &decision_log).await;
