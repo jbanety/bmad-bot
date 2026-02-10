@@ -24,7 +24,7 @@ classification:
 
 ## Executive Summary
 
-**BMAD Bot** is an autonomous Rust daemon that replaces the human developer in BMAD methodology workflows overnight. It watches a project's sprint backlog, picks up ready stories, launches an LLM agent session (via the `rig` crate) with the BMAD dev agent persona and exposed tools (git, filesystem, terminal), supervises the session with a hybrid rule engine + LLM fallback, runs an optional code review with a separate LLM, creates a Pull Request with full decision traceability, and notifies the developer.
+**BMAD Bot** is an autonomous Rust daemon that replaces the human developer in BMAD methodology workflows overnight. It watches a project's sprint backlog, picks up ready stories, launches a streaming LLM agent session (via the `rig` crate) with the BMAD dev agent persona activated via Zed-style XML context and exposed tools (git, filesystem, terminal, think), supervises the session with a hybrid rule engine + LLM fallback, runs an optional code review with a separate LLM, creates a Pull Request with full decision traceability, and notifies the developer.
 
 **Vision:** Developers work with BMAD agents during the day to refine specs. At night, BMAD Bot executes the stories autonomously. In the morning, PRs are ready for human review and merge.
 
@@ -70,14 +70,15 @@ classification:
 - Daemon polls `sprint-status.yaml` for `ready-for-dev` stories (configurable interval, default 5 min)
 - Dependency resolution: respects execution order, skips blocked stories, cascades `blocked` status to dependents
 - Pre-dev spec update: agent reviews completed stories and refreshes current story specs/AC based on actual implementation
-- rig agent session with BMAD dev agent persona + tools (git, filesystem, terminal)
+- Streaming rig agent session with BMAD dev agent persona activated via Zed-style XML context + tools (git, filesystem, terminal, think)
 - Supervisor hybrid: deterministic rule engine → LLM fallback (project docs context) → human escalation (`needs-clarification` + notification)
 - Supervisor decision logging: decisions file committed at `_bmad-output/implementation-artifacts/{epic}-{story}-{label}-DECISIONS.md` + dedicated section in PR description with reasoning and alternatives
 - Optional code review via separate LLM (configurable: enabled/disabled) — review fixes in separate commits, review posted as PR comment
 - PR creation on GitHub with agent-written description
 - Telegram notifications (success, blocked, error) with story ID, status, PR link
 - Sequential execution: one story at a time
-- Session language override via prompt injection (English for agent sessions, no repo file modification)
+- Session language override via minimal system preamble (English for agent sessions, no repo file modification)
+- LLM request/response logging for debugging and operations visibility
 
 **CLI & Configuration:**
 - `bmad-bot init` — interactive setup, generates `bmad-bot.yaml` + `.env`
@@ -86,7 +87,7 @@ classification:
 - `bmad-bot logs` — structured tracing logs
 - YAML config (committed) with secrets separation (`.env`, gitignored)
 - Auto-discovery of BMAD version and installed modules from the project repo
-- Graceful shutdown on SIGTERM/SIGINT
+- Cooperative shutdown on SIGTERM/SIGINT via shared AtomicBool flag — can interrupt mid-streaming and mid-tool-call loops
 
 **Distribution:**
 - Build from source via `cargo install`. Targets Linux and macOS.
@@ -153,7 +154,7 @@ classification:
 
 **Persona:** JB — daemon running for 3 days, checking on things.
 
-**Rising Action:** `bmad-bot status` — stories processed, in progress, blocked, last activity. `bmad-bot logs` — structured tracing with story_id, timestamps, actions. He notices the supervisor LLM is called too often for a pattern the rule engine should handle.
+**Rising Action:** `bmad-bot status` — stories processed, in progress, blocked, last activity. `bmad-bot logs` — structured tracing with story_id, timestamps, actions. He checks the LLM request/response logs to debug a strange agent behavior. He notices the supervisor LLM is called too often for a pattern the rule engine should handle.
 
 **Resolution:** JB adds a rule to the rule engine for that pattern. Reviews decisions files to spot trends. Next run is more efficient and cheaper.
 
@@ -164,7 +165,7 @@ classification:
 | Happy Path | Watcher, rig session, supervisor with decision logging, optional code review with separate commits, PR with agent description + Supervisor Decisions section, review as PR comment, decisions file, Telegram notifications |
 | Pipeline Fail | Supervisor escalation, cascade dependency blocking, PR with partial code and failure description, decisions file traceability |
 | Setup | CLI `bmad-bot init` with prompts, YAML + `.env` generation, `bmad-bot start`, GitHub/GitLab selection |
-| Operations | `bmad-bot status`, `bmad-bot logs`, structured tracing, decision file pattern analysis |
+| Operations | `bmad-bot status`, `bmad-bot logs`, structured tracing, LLM request/response logging, decision file pattern analysis |
 
 ## Decision Tracking
 
@@ -256,10 +257,10 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 
 ### Development Session
 
-- **FR8:** The daemon can instantiate a rig agent session with the BMAD dev agent persona
-- **FR9:** The daemon can expose git, filesystem, and terminal tools to the agent via rig tool calling
+- **FR8:** The daemon can instantiate a streaming rig agent session with the BMAD dev agent persona, activated via Zed-style XML context (agent file sent as first user message, not as system preamble)
+- **FR9:** The daemon can expose git, filesystem, terminal, and think tools to the agent via rig tool calling. The think tool (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern) gives the agent a dedicated space for structured reasoning during complex tasks without consuming real tool calls
 - **FR10:** The agent can execute the full BMAD `dev-story` workflow autonomously
-- **FR11:** The daemon can inject a session language override (English) via the system prompt without modifying repo files
+- **FR11:** The daemon can inject a session language override (English) via a minimal system preamble without modifying repo files
 
 ### Supervision
 
@@ -296,12 +297,13 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 - **FR30:** The user can run `bmad-bot logs` to view structured daemon logs
 - **FR31:** The daemon can load configuration from a YAML file with secrets separated in a gitignored file
 - **FR32:** The daemon can auto-discover BMAD version and installed modules from the project repo
-- **FR39:** The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime
+- **FR39:** The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime. The Copilot provider uses the Completions API (distinct from OpenAI's Responses API) with required IDE-specific headers
+- **FR40:** The daemon logs all LLM requests and responses via a dedicated `llm_logging` module for debugging and operational visibility
 
 ### Error Handling & Resilience
 
 - **FR33:** The daemon can handle LLM provider rate limits with retry and exponential backoff
-- **FR34:** The daemon can handle graceful shutdown on SIGTERM/SIGINT (complete current step, commit partial work, notify)
+- **FR34:** The daemon can handle cooperative shutdown on SIGTERM/SIGINT via a shared `ShutdownFlag` (Arc<AtomicBool>) propagated across pipeline → session → streaming chat layers. The flag can interrupt mid-streaming chunks and mid-tool-call loops, not just between steps. On shutdown: saves WAL state, commits partial work, notifies
 - **FR35:** The daemon can notify the human of any blocking error (session crash, git failure, LLM provider down)
 - **FR36:** The daemon can validate configuration at startup and report missing or invalid settings
 

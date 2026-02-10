@@ -25,10 +25,10 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR7: The agent can create and checkout a git branch following the `story/{epic}-{story}` naming convention
 
 **Development Session**
-- FR8: The daemon can instantiate a rig agent session with the BMAD dev agent persona
-- FR9: The daemon can expose git, filesystem, and terminal tools to the agent via rig tool calling
+- FR8: The daemon can instantiate a streaming rig agent session with the BMAD dev agent persona, activated via Zed-style XML context (agent file sent as first user message, not as system preamble)
+- FR9: The daemon can expose git, filesystem, terminal, and think tools to the agent via rig tool calling. The think tool (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern) gives the agent a dedicated space for structured reasoning during complex tasks without consuming real tool calls
 - FR10: The agent can execute the full BMAD `dev-story` workflow autonomously
-- FR11: The daemon can inject a session language override (English) via the system prompt without modifying repo files
+- FR11: The daemon can inject a session language override (English) via a minimal system preamble without modifying repo files
 
 **Supervision**
 - FR12: The supervisor can intercept agent questions during a development session
@@ -60,11 +60,12 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR30: The user can run `bmad-bot logs` to view structured daemon logs
 - FR31: The daemon can load configuration from a YAML file with secrets separated in a gitignored file
 - FR32: The daemon can auto-discover BMAD version and installed modules from the project repo
-- FR39: The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime
+- FR39: The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime. The Copilot provider uses the Completions API (distinct from OpenAI's Responses API) with required IDE-specific headers
+- FR40: The daemon logs all LLM requests and responses via a dedicated `llm_logging` module for debugging and operational visibility
 
 **Error Handling & Resilience**
 - FR33: The daemon can handle LLM provider rate limits with retry and exponential backoff
-- FR34: The daemon can handle graceful shutdown on SIGTERM/SIGINT (complete current step, commit partial work, notify)
+- FR34: The daemon can handle cooperative shutdown on SIGTERM/SIGINT via a shared `ShutdownFlag` (Arc<AtomicBool>) propagated across pipeline → session → streaming chat layers. The flag can interrupt mid-streaming chunks and mid-tool-call loops, not just between steps. On shutdown: saves WAL state, commits partial work, notifies
 - FR35: The daemon can notify the human of any blocking error (session crash, git failure, LLM provider down)
 - FR36: The daemon can validate configuration at startup and report missing or invalid settings
 - FR37: The daemon can detect an interrupted session at startup (presence of WAL file) and resume the session by reloading chat history and reconstructing the agent
@@ -84,7 +85,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 
 **Reliability**
 - NFR-REL1: Transient LLM errors (timeouts, 500s, rate limits) recovered with exponential backoff, max 3 retries per call
-- NFR-REL2: No work lost on unexpected shutdown — SIGTERM triggers graceful completion, commit, notification
+- NFR-REL2: No work lost on unexpected shutdown — SIGTERM/SIGINT triggers cooperative shutdown via shared AtomicBool flag, saves WAL state, commits partial work, notifies
 - NFR-REL3: Crash recovery produces clean state — no corrupted branches, no half-committed files. Watcher re-reads `sprint-status.yaml` and resumes
 - NFR-REL4: All errors logged via `tracing::error!()` with full context (story_id, step, error details)
 
@@ -100,26 +101,26 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - Single crate with modular directory structure (not a Cargo workspace for MVP)
 - CLI framework: clap with derive API (init, start, status, logs subcommands)
 - Config loading: serde + serde_yaml for YAML, dotenvy for `.env` secrets
-- Signal handling: tokio::signal for SIGTERM/SIGINT graceful shutdown
+- Signal handling: cooperative shutdown via shared `ShutdownFlag` (Arc<AtomicBool>) propagated across pipeline → session → streaming chat layers, can interrupt mid-streaming and mid-tool-call loops
 
 **From Architecture — Core Decisions:**
 - Decision 1 — Supervisor Interception: Hybrid Chat Loop + `ask_supervisor` rig Tool. Chat loop handles workflow-level interaction; supervisor tool handles technical/business questions. Rule engine → LLM fallback → human escalation.
 - Decision 2 — Sprint-Status Mutation: Daemon is pure reader. All mutations performed by the BMAD agent via tools.
 - Decision 3 — Session State Persistence: WAL file (`_bmad-output/implementation-artifacts/.bmad-bot-session.yaml`) persisted after each chat turn. Crash recovery reloads history. Context limit recovery summarizes history and bootstraps fresh session.
 - Decision 4 — Error Propagation: Three-tier layered. Layer 1 (HTTP transport): reqwest-middleware auto-retry. Layer 2 (Tools): domain-specific handling + bubble-up. Layer 3 (Session/Daemon): commit partial work, create PR with failure, notify.
-- Decision 5 — Agent Prompt Composition: Load BMAD dev agent file as-is as rig preamble. Append language override. First message: `"DS"`.
+- Decision 5 — Agent Prompt Composition: Minimal system preamble with operational instructions and language override. BMAD dev agent file sent as first user message wrapped in Zed-style XML context tags (`<context><files>`) via `activate_agent()`. Agent executes activation steps via tools before receiving commands. First command message: `"DS"`. New `llm_context` module with `ContextBuilder` handles XML formatting (adaptive backtick fencing, absolute path resolution, multi-file support, line ranges).
 - Decision 6 — Deployment Model: Foreground process via `bmad-bot start`. No self-daemonization. Logs to stdout/stderr.
 
 **From Architecture — Implementation Patterns (mandatory for all stories):**
 - Error Type Pattern: Per-module `thiserror` enums. `anyhow` only in `main.rs` / CLI layer.
 - Rig Tool Pattern: Standard structure (serializable struct + dedicated args struct + dedicated error enum + Tool trait impl).
-- Tracing Pattern: Structured spans with `story_id` context. Never `println!`/`eprintln!`.
+- Tracing Pattern: Structured spans with `story_id` context. Never `println!`/`eprintln!`. Dedicated `llm_logging` module logs all LLM requests and responses for debugging and operations visibility.
 - Config Pattern: Validate once at startup, share via `Arc<BotConfig>`. Secrets loaded separately from `.env`.
 - Git Provider Trait Pattern: Params and returns as dedicated structs. Async trait methods.
 - Test Mock Pattern: Deterministic LLM responses. Arrange-Act-Assert. Naming: `test_{module}_{behavior}_{scenario}`.
 
 **From Architecture — External Integration Points:**
-- LLM Providers (Anthropic, OpenAI, GitHub Models) via rig-core — API key from `.env`
+- LLM Providers (Anthropic, OpenAI, GitHub Copilot) via rig-core with streaming API (`stream_chat()`) — API key from `.env`. OpenAI uses Responses API; Copilot uses Completions API with required IDE-specific headers (Editor-Version, Copilot-Integration-Id, User-Agent)
 - GitHub API via octocrab — Token from `.env`
 - GitLab API via reqwest — Token from `.env`
 - Telegram API via reqwest — Bot token from `.env`
@@ -144,10 +145,10 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR5: Epic 4 — Review previously completed stories before starting new one
 - FR6: Epic 4 — Update current story specs based on prior implementations
 - FR7: Epic 4 — Create and checkout git branch (story/{epic}-{story})
-- FR8: Epic 4 — Instantiate rig agent session with BMAD dev agent persona
-- FR9: Epic 4 — Expose git, filesystem, terminal tools via rig tool calling
+- FR8: Epic 4 — Instantiate streaming rig agent session with BMAD dev agent persona, activated via Zed-style XML context
+- FR9: Epic 4 — Expose git, filesystem, terminal, and think tools via rig tool calling
 - FR10: Epic 4 — Execute full BMAD dev-story workflow autonomously
-- FR11: Epic 4 — Inject session language override (English) via system prompt
+- FR11: Epic 4 — Inject session language override (English) via minimal system preamble
 - FR12: Epic 3 — Intercept agent questions during development session
 - FR13: Epic 3 — Answer predictable questions via deterministic rule engine
 - FR14: Epic 3 — Answer substantive questions via LLM fallback with project docs context
@@ -170,18 +171,19 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR31: Epic 1 — Load config from YAML with secrets separated in gitignored file
 - FR32: Epic 1 — Auto-discover BMAD version and installed modules
 - FR33: Epic 6 — Handle LLM provider rate limits with retry and exponential backoff
-- FR34: Epic 1 — Handle graceful shutdown on SIGTERM/SIGINT
+- FR34: Epic 1 — Handle cooperative shutdown on SIGTERM/SIGINT via shared AtomicBool flag (can interrupt mid-streaming and mid-tool-call loops)
 - FR35: Epic 6 — Notify human of any blocking error
 - FR36: Epic 1 — Validate configuration at startup and report issues
 - FR37: Epic 6 — Detect interrupted session at startup (WAL file) and resume
 - FR38: Epic 6 — Detect context window limit error and bootstrap fresh session with compressed context
-- FR39: Epic 1 — Authenticate with GitHub Copilot via OAuth Device Flow and exchange tokens at runtime
+- FR39: Epic 1 — Authenticate with GitHub Copilot via OAuth Device Flow and exchange tokens at runtime (Completions API with IDE-specific headers)
+- FR40: Epic 1/6 — Log all LLM requests and responses via dedicated llm_logging module for debugging and operations visibility
 
 ## Epic List
 
 ### Epic 1: Project Foundation & CLI
-The user can install, configure, launch, and monitor the BMAD Bot daemon. This epic delivers the complete CLI interface (init, start, status, logs), configuration loading with secrets separation, BMAD auto-discovery, config validation, graceful shutdown, smart git auto-detection during setup, and GitHub Copilot OAuth Device Flow authentication for zero-friction LLM provider onboarding. After this epic, the daemon runs, stops cleanly, and the user can observe its state.
-**FRs covered:** FR27, FR28, FR29, FR30, FR31, FR32, FR34, FR36, FR39
+The user can install, configure, launch, and monitor the BMAD Bot daemon. This epic delivers the complete CLI interface (init, start, status, logs), configuration loading with secrets separation, BMAD auto-discovery, config validation, cooperative shutdown via shared AtomicBool flag (can interrupt mid-streaming and mid-tool-call loops), smart git auto-detection during setup, and GitHub Copilot OAuth Device Flow authentication (using the Completions API with IDE-specific headers) for zero-friction LLM provider onboarding. After this epic, the daemon runs, stops cleanly, and the user can observe its state.
+**FRs covered:** FR27, FR28, FR29, FR30, FR31, FR32, FR34, FR36, FR39, FR40
 
 ### Epic 2: Story Watching & Dependency Management
 The daemon automatically detects stories with ready-for-dev status by polling sprint-status.yaml, resolves dependency order, skips blocked stories, and cascades blocked status to dependents. After this epic, the daemon knows WHAT to work on and in what order.
@@ -192,7 +194,7 @@ The supervisor can intercept agent questions and answer them via a deterministic
 **FRs covered:** FR12, FR13, FR14, FR15, FR16, FR17
 
 ### Epic 4: Autonomous Development Session
-The daemon launches a rig agent session with the BMAD dev agent persona and registered tools (git, filesystem, terminal, ask_supervisor). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override. After this epic, stories are developed end-to-end by the agent.
+The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After this epic, stories are developed end-to-end by the agent.
 **FRs covered:** FR5, FR6, FR7, FR8, FR9, FR10, FR11
 
 ### Epic 5: Code Review & Pull Request Delivery
@@ -201,7 +203,7 @@ The daemon optionally launches a code review via a separate LLM after the dev se
 
 ### Epic 6: Notifications & Error Resilience
 The daemon sends Telegram notifications with story status, ID, and PR links. It handles LLM rate limits with retry/backoff, notifies the human of blocking errors, detects interrupted sessions via WAL file for crash recovery, and recovers from context window limit errors by summarizing history and bootstrapping a fresh session. After this epic, the user can trust the daemon to run overnight without supervision.
-**FRs covered:** FR25, FR26, FR33, FR35, FR37, FR38
+**FRs covered:** FR25, FR26, FR33, FR35, FR37, FR38, FR40
 
 ### Epic 7: Integration Tests
 All 6 functional epics have been implemented and pass 573 unit tests. This epic introduces integration tests that validate the interactions between modules at their boundaries — ensuring the daemon works as a cohesive system, not just as isolated pieces. These tests are deterministic (no real LLM calls), run in CI, and use mocked external dependencies.
@@ -518,7 +520,7 @@ So that stories are picked up for processing without manual intervention.
 **Acceptance Criteria:**
 
 **Given** a valid `sprint-status.yaml` exists at the configured output path
-**When** the watcher module polls the file at the configured interval (default 5 min)
+**When** the watcher module polls the file at the configured interval (default 5 min), polling immediately on startup (no initial wait)
 **Then** all stories with status `ready-for-dev` are identified and returned as `StoryInfo` structs (id, label, branch name, specs path, dependencies, status)
 **And** the polling interval is configurable via `bmad-bot.yaml`
 
@@ -691,12 +693,12 @@ So that I can audit, understand, and improve the supervisor's behavior over time
 
 ## Epic 4: Autonomous Development Session
 
-The daemon launches a rig agent session with the BMAD dev agent persona and registered tools (git, filesystem, terminal, ask_supervisor). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override. After this epic, stories are developed end-to-end by the agent.
+The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After this epic, stories are developed end-to-end by the agent.
 
-### Story 4.1: Rig Tools Implementation (Git, Filesystem, Terminal)
+### Story 4.1: Rig Tools Implementation (Git, Filesystem, Terminal, Think)
 
 As a daemon operator,
-I want the agent to have access to git, filesystem, and terminal tools during development sessions,
+I want the agent to have access to git, filesystem, terminal, and think tools during development sessions,
 So that the agent can perform all operations needed to develop a story autonomously.
 
 **Acceptance Criteria:**
@@ -720,6 +722,12 @@ So that the agent can perform all operations needed to develop a story autonomou
 **And** it exposes command execution via tokio::process: run command, capture stdout/stderr, return exit code
 **And** every `call()` logs the command and result via `tracing`
 
+**Given** the tools module is initialized
+**When** the think tool is registered
+**Then** rig's built-in `ThinkTool` (derived from Anthropic's Claude Think Tool pattern) is added to all agent builders
+**And** it gives the agent a dedicated space for structured reasoning during complex tasks without consuming real tool calls
+**And** no custom implementation is needed — it is provided by the `rig` crate
+
 **Given** any tool encounters an error
 **When** the error is handled
 **Then** it never panics — always returns `Result` with a descriptive error
@@ -735,15 +743,20 @@ So that stories are developed without human intervention.
 
 **Given** the session module is initialized with a `StoryInfo` from the watcher
 **When** an agent session is created
-**Then** the BMAD dev agent file is loaded from the project's `_bmad/` directory and used as-is as the rig agent preamble
-**And** a language override (`communication_language = English`) is appended to the preamble
-**And** four tools are registered: git, filesystem, terminal, and ask_supervisor
+**Then** the agent is built with a minimal system preamble containing operational instructions (tool usage, communication rules, language override to English)
+**And** five tools are registered: git, filesystem, terminal, ask_supervisor, and think
 **And** the agent is built using the dev LLM provider/model from `BotConfig`
+
+**Given** an agent is built
+**When** the activation flow starts
+**Then** the BMAD dev agent file is loaded from the project's `_bmad/` directory and sent as the first user message wrapped in Zed-style XML context tags (`<context><files>`) with adaptive backtick fencing and absolute path resolution — NOT injected as the system preamble
+**And** the `activate_agent()` method waits for the activation response (agent executes activation steps via tools: loads config.yaml, shows greeting/menu) before proceeding
+**And** a new `llm_context` module with `ContextBuilder` helper handles the Zed-style XML formatting (multi-file support, line ranges, adaptive fencing)
 
 **Given** an agent session is ready
 **When** the chat loop starts
 **Then** the first message sent is `"DS"` (triggers the dev-story workflow in the BMAD agent's menu system)
-**And** the daemon manages the chat loop via `agent.chat(message, history)`, analyzing each agent response for workflow interaction points (confirmations, "should I proceed?", step transitions)
+**And** the daemon manages the chat loop via streaming API (`stream_chat()`), analyzing each agent response for workflow interaction points (confirmations, "should I proceed?", step transitions)
 **And** the daemon responds automatically to workflow-level interactions
 
 **Given** the agent is working in a chat loop
@@ -989,8 +1002,8 @@ So that long or complex stories can still be completed autonomously.
 
 **Given** the summary has been generated
 **When** the new session is bootstrapped
-**Then** a fresh agent is constructed with the same provider/model config and the standard dev preamble + tools
-**And** the daemon drives the BMAD activation flow as a simulated human: sends "CH" to enter chat mode, then sends "Load the project context" so the agent loads what it needs via its tools (same pattern as Story 3.2 Architect session)
+**Then** a fresh agent is constructed with the same provider/model config, minimal system preamble, and all five tools (git, filesystem, terminal, ask_supervisor, think)
+**And** the daemon drives the BMAD activation flow via `activate_agent()`: the agent file is sent as a Zed-style XML context user message, the agent executes activation steps via tools, then the daemon sends "CH" to enter chat mode and "Load the project context" so the agent loads what it needs (same pattern as Story 3.2 Architect session)
 **And** the daemon then sends a recovery message containing the session summary, last N verbatim exchanges, and instruction to continue on the current story
 **And** the session enters direct chat mode (not re-entering the full dev-story workflow pipeline, since checkboxes and Dev Agent Record are already up to date on disk)
 
