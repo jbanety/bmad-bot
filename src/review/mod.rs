@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use rig::client::CompletionClient;
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
@@ -27,7 +28,7 @@ use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
-use crate::session::dev_agent::{self, activate_agent, streaming_chat};
+use crate::session::dev_agent::{self, ShutdownFlag, activate_agent, streaming_chat};
 use crate::session::provider::{ProviderError, copilot_headers, resolve_api_key};
 use crate::supervisor::decisions::DecisionLog;
 use crate::supervisor::{AskSupervisor, EscalationSlot};
@@ -135,22 +136,27 @@ pub enum ReviewOutcome {
 /// **Critical design rule:** [`run()`](Self::run) NEVER panics or returns an
 /// unhandled error. All failures are caught and returned as
 /// [`ReviewOutcome::Skipped`] or [`ReviewOutcome::Failed`].
+/// Manages code review lifecycle: build agent, run CR workflow, capture report.
+#[derive(Debug)]
 pub struct ReviewRunner {
-    /// Shared daemon configuration.
+    /// Shared bot configuration.
     config: Arc<BotConfig>,
     /// Shared secrets (API keys loaded from `.env`).
     secrets: Arc<BotSecrets>,
     /// Stateless response analyzer (constructed once, reused).
     analyzer: ResponseAnalyzer,
+    /// Cooperative shutdown flag — checked between streaming chunks and chat turns.
+    shutdown: ShutdownFlag,
 }
 
 impl ReviewRunner {
     /// Create a new review runner.
-    pub fn new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>) -> Self {
+    pub fn new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>, shutdown: ShutdownFlag) -> Self {
         Self {
             config,
             secrets,
             analyzer: ResponseAnalyzer::new(),
+            shutdown,
         }
     }
 
@@ -415,7 +421,7 @@ impl ReviewRunner {
             agent,
             &self.config.bmad_paths.project_root,
             "code-review",
-            None, // no shutdown flag for review sessions
+            Some(&self.shutdown),
         )
         .await
         .map_err(|e| {
@@ -426,22 +432,27 @@ impl ReviewRunner {
         })?;
 
         // Send "CR" with English language override (same pattern as DS in dev session)
-        let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CR";
+        let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [CR]";
         log_llm_request(
             "code-review",
             1,
             initial_message,
             activation_rig_history.len(),
         );
-        let response = streaming_chat(agent, initial_message, activation_rig_history, None)
-            .await
-            .map_err(|e| {
-                log_llm_error("code-review", 1, &e);
-                ReviewError::ChatFailed {
-                    turn: 1,
-                    reason: e.to_string(),
-                }
-            })?;
+        let response = streaming_chat(
+            agent,
+            initial_message,
+            activation_rig_history,
+            Some(&self.shutdown),
+        )
+        .await
+        .map_err(|e| {
+            log_llm_error("code-review", 1, &e);
+            ReviewError::ChatFailed {
+                turn: 1,
+                reason: e.to_string(),
+            }
+        })?;
         log_llm_response("code-review", 1, &response);
 
         tracing::debug!(
@@ -455,11 +466,33 @@ impl ReviewRunner {
         let mut turn: usize = 2;
         let mut retries: usize = 0;
         let mut post_review_phase = false;
+
+        // Safety: check shutdown before entering the loop
+        if self.shutdown.load(Ordering::Relaxed) {
+            return Ok(ReviewOutcome::Failed {
+                story_key: story.story_key.clone(),
+                error: "Shutdown requested (Ctrl+C)".to_string(),
+            });
+        }
         let mut chat_history: Vec<(String, String)> =
             vec![(initial_message.to_string(), current_response.clone())];
         const MAX_RETRIES: usize = 3;
 
         loop {
+            // Cooperative shutdown check — between chat turns
+            if self.shutdown.load(Ordering::Relaxed) {
+                tracing::info!(
+                    action = "shutdown_requested",
+                    turn = %turn,
+                    story_key = %story.story_key,
+                    "Shutdown requested — exiting review session"
+                );
+                return Ok(ReviewOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: "Shutdown requested (Ctrl+C)".to_string(),
+                });
+            }
+
             // Safety net
             if turn >= MAX_REVIEW_TURNS {
                 tracing::warn!(
@@ -527,7 +560,7 @@ impl ReviewRunner {
                 .collect();
 
             log_llm_request("code-review", turn, &reply, history.len());
-            match streaming_chat(agent, reply.as_str(), history, None).await {
+            match streaming_chat(agent, reply.as_str(), history, Some(&self.shutdown)).await {
                 Ok(r) => {
                     log_llm_response("code-review", turn, &r);
                     retries = 0;
@@ -708,7 +741,8 @@ mod tests {
             telegram_bot_token: None,
         });
 
-        let runner = ReviewRunner::new(config.clone(), secrets);
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = ReviewRunner::new(config.clone(), secrets, shutdown);
         // Verify config is stored by checking a known field
         assert_eq!(runner.config.llm.review.provider, "anthropic");
     }

@@ -156,9 +156,12 @@ impl StoryPipeline {
         // Factory never fails — returns NoopNotifier as fallback
         let notifier = create_notifier(&config.notifications, &secrets);
 
-        let session_runner =
-            SessionRunner::new(Arc::clone(&config), Arc::clone(&secrets), shutdown);
-        let review_runner = ReviewRunner::new(Arc::clone(&config), Arc::clone(&secrets));
+        let session_runner = SessionRunner::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+            Arc::clone(&shutdown),
+        );
+        let review_runner = ReviewRunner::new(Arc::clone(&config), Arc::clone(&secrets), shutdown);
 
         Ok(Self {
             config,
