@@ -86,6 +86,9 @@ const COMPLETION_SIGNALS: &[&str] = &[
     "story is ready for review",
     "all tasks and subtasks are marked",
     "ready for review",
+    "proceed with the next story",
+    "move on to the next story",
+    "next story or a code review",
 ];
 
 /// Confirmation/proceed patterns (case-insensitive).
