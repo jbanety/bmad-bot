@@ -1,6 +1,6 @@
 # Story 8.2: EditFileTool — Surgical Search-Replace Editing
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -32,162 +32,162 @@ so that I minimize token usage, eliminate truncation risk, and make precise targ
 
 ### Task 0: Prerequisite Verification
 
-- [ ] Verify `Cargo.toml` has all needed dependencies: `rig-core = "0.30"`, `serde`, `serde_json`, `thiserror = "2"`, `tracing`, `tokio` (full) — **all already present, no changes needed**
-- [ ] Verify `tempfile = "3"` exists in `[dev-dependencies]` for tests — **already present**
-- [ ] Read and understand `src/tools/fs.rs` for the existing `FsTool` write patterns (`handle_write`, `validate_path`, `validate_path_for_new`)
-- [ ] Read and understand `src/tools/read_file.rs` (Story 8.1) for the established patterns in this epic (struct layout, error enum style, test conventions)
+- [x] Verify `Cargo.toml` has all needed dependencies: `rig-core = "0.30"`, `serde`, `serde_json`, `thiserror = "2"`, `tracing`, `tokio` (full) — **all already present, no changes needed**
+- [x] Verify `tempfile = "3"` exists in `[dev-dependencies]` for tests — **already present**
+- [x] Read and understand `src/tools/fs.rs` for the existing `FsTool` write patterns (`handle_write`, `validate_path`, `validate_path_for_new`)
+- [x] Read and understand `src/tools/read_file.rs` (Story 8.1) for the established patterns in this epic (struct layout, error enum style, test conventions)
 
 ### Task 1: Create `src/tools/edit_file.rs` — Struct, Args, Error Enum, Supporting Types
 
-- [ ] Create `src/tools/edit_file.rs` with module doc comment explaining purpose
-- [ ] Define `EditFileTool` struct (AC: #7)
-  - [ ] `#[derive(Debug, Serialize, Deserialize)]`
-  - [ ] Single field: `project_root: PathBuf`
-  - [ ] Doc comment: `/// EditFileTool — surgical search-replace edits, create new files, overwrite when justified.`
-- [ ] Define `EditOperation` struct (AC: #1)
-  - [ ] `#[derive(Debug, Deserialize)]`
-  - [ ] `old_text: String` — exact text fragment to find in the file
-  - [ ] `new_text: String` — replacement text
-  - [ ] Doc comments on each field
-- [ ] Define `EditFileToolArgs` struct (AC: #1, #4, #5)
-  - [ ] `#[derive(Debug, Deserialize)]`
-  - [ ] `path: String` — relative path from project root
-  - [ ] `mode: String` — one of: `"edit"`, `"create"`, `"overwrite"`
-  - [ ] `edits: Option<Vec<EditOperation>>` — for mode `"edit"`: list of search-replace operations
-  - [ ] `content: Option<String>` — for mode `"create"` or `"overwrite"`: full file content
-  - [ ] Doc comments on each field explaining which modes use which fields
-- [ ] Define `EditFileToolError` enum (AC: #2, #3, #4, #5, #6, #7)
-  - [ ] `#[derive(Debug, thiserror::Error)]`
-  - [ ] `NotFound { path: String }` — file does not exist (for edit/overwrite modes)
-  - [ ] `PathDenied { path: String, reason: String }` — path outside project root
-  - [ ] `AlreadyExists { path: String }` — file exists (for create mode)
-  - [ ] `TextNotFound { path: String, old_text_preview: String }` — old_text not found in file during edit. Display message MUST include hint: `"Use read_file to check the actual content."` (per architecture Decision 7)
-  - [ ] `AmbiguousMatch { path: String, old_text_preview: String, match_lines: String }` — old_text found at multiple locations. Store `match_lines` as a **pre-formatted `String`** (e.g., `"12, 45, 78"`) instead of `Vec<usize>` — this avoids `Vec` Display formatting issues with `thiserror`. Display message MUST include guidance: `"Provide more surrounding context in old_text to uniquely identify the target."`
-  - [ ] `InvalidMode { mode: String }` — unrecognized mode string
-  - [ ] `MissingArgument { mode: String, argument: String }` — required field not provided for the mode
-  - [ ] `WriteFailed { path: String, reason: String }` — I/O error during write
-  - [ ] `ReadFailed { path: String, reason: String }` — I/O error during read (for edit mode)
+- [x] Create `src/tools/edit_file.rs` with module doc comment explaining purpose
+- [x] Define `EditFileTool` struct (AC: #7)
+  - [x] `#[derive(Debug, Serialize, Deserialize)]`
+  - [x] Single field: `project_root: PathBuf`
+  - [x] Doc comment: `/// EditFileTool — surgical search-replace edits, create new files, overwrite when justified.`
+- [x] Define `EditOperation` struct (AC: #1)
+  - [x] `#[derive(Debug, Deserialize)]`
+  - [x] `old_text: String` — exact text fragment to find in the file
+  - [x] `new_text: String` — replacement text
+  - [x] Doc comments on each field
+- [x] Define `EditFileToolArgs` struct (AC: #1, #4, #5)
+  - [x] `#[derive(Debug, Deserialize)]`
+  - [x] `path: String` — relative path from project root
+  - [x] `mode: String` — one of: `"edit"`, `"create"`, `"overwrite"`
+  - [x] `edits: Option<Vec<EditOperation>>` — for mode `"edit"`: list of search-replace operations
+  - [x] `content: Option<String>` — for mode `"create"` or `"overwrite"`: full file content
+  - [x] Doc comments on each field explaining which modes use which fields
+- [x] Define `EditFileToolError` enum (AC: #2, #3, #4, #5, #6, #7)
+  - [x] `#[derive(Debug, thiserror::Error)]`
+  - [x] `NotFound { path: String }` — file does not exist (for edit/overwrite modes)
+  - [x] `PathDenied { path: String, reason: String }` — path outside project root
+  - [x] `AlreadyExists { path: String }` — file exists (for create mode)
+  - [x] `TextNotFound { path: String, old_text_preview: String }` — old_text not found in file during edit. Display message MUST include hint: `"Use read_file to check the actual content."` (per architecture Decision 7)
+  - [x] `AmbiguousMatch { path: String, old_text_preview: String, match_lines: String }` — old_text found at multiple locations. Store `match_lines` as a **pre-formatted `String`** (e.g., `"12, 45, 78"`) instead of `Vec<usize>` — this avoids `Vec` Display formatting issues with `thiserror`. Display message MUST include guidance: `"Provide more surrounding context in old_text to uniquely identify the target."`
+  - [x] `InvalidMode { mode: String }` — unrecognized mode string
+  - [x] `MissingArgument { mode: String, argument: String }` — required field not provided for the mode
+  - [x] `WriteFailed { path: String, reason: String }` — I/O error during write
+  - [x] `ReadFailed { path: String, reason: String }` — I/O error during read (for edit mode)
 
 ### Task 2: Implement `EditFileTool` Core Methods
 
-- [ ] Implement `EditFileTool::new(project_root: PathBuf) -> Self`
-- [ ] Implement `fn validate_path_existing(&self, requested: &str) -> Result<PathBuf, EditFileToolError>` (AC: #6)
-  - [ ] Same pattern as `FsTool::validate_path` / `ReadFileTool::validate_path`: canonicalize requested path, canonicalize project_root, check `starts_with`
-  - [ ] Return `NotFound` if canonicalize fails (file doesn't exist)
-  - [ ] Return `PathDenied` if path resolves outside project root
-- [ ] Implement `fn validate_path_for_new(&self, requested: &str) -> Result<PathBuf, EditFileToolError>` (AC: #4, #6)
-  - [ ] Same pattern as `FsTool::validate_path_for_new`: canonicalize **parent** directory (which must exist), verify within project root, join filename
-  - [ ] Return `PathDenied` if parent resolves outside project root
-  - [ ] Verify the path has a valid `file_name()` component — reject paths ending in `/` or with no filename
-  - [ ] Used by create mode after parent directories are created
-- [ ] Implement `fn line_number_at_offset(content: &str, byte_offset: usize) -> usize`
-  - [ ] Count the number of `\n` characters in `content[..byte_offset]` and add 1 (1-indexed)
-  - [ ] Used by both `AmbiguousMatch` error construction and affected line range calculation — shared helper avoids duplication
-- [ ] Implement `fn truncate_preview(text: &str, max_len: usize) -> String`
-  - [ ] If `text.len() <= max_len` → return text as-is
-  - [ ] Otherwise → return `text[..max_len]` + `"..."` (truncate at char boundary via `text.char_indices()`)
-  - [ ] Used for `old_text_preview` in `TextNotFound` errors (max 80 chars)
-- [ ] Implement `async fn handle_edit(&self, path: &Path, requested: &str, edits: &[EditOperation]) -> Result<String, EditFileToolError>` (AC: #1, #2, #3)
-  - [ ] Read current file content via `tokio::fs::read_to_string`
-  - [ ] For each `EditOperation` in order:
-    - [ ] If `old_text` is empty → return `TextNotFound` error immediately with message `"old_text is empty — provide the exact text fragment to replace"`
-    - [ ] Use **`content.match_indices(&old_text)`** to find ALL occurrence byte offsets — this returns `Iterator<Item = (usize, &str)>`. Collect into a `Vec`.
-    - [ ] If zero matches → return `TextNotFound` error with a preview of old_text (first 80 chars, append `"..."` if truncated). **No changes written to disk** — the file remains unmodified.
-    - [ ] If multiple matches → convert each byte offset to a 1-indexed line number via `fn line_number_at_offset(content: &str, byte_offset: usize) -> usize` helper. Return `AmbiguousMatch` error with line numbers. **No changes written to disk.**
-    - [ ] If exactly one match → replace `old_text` with `new_text` in the in-memory content using the byte offset. Record the affected line range (start_line..end_line after replacement) using the same `line_number_at_offset` helper.
-  - [ ] **Binary/non-UTF-8 detection:** If `tokio::fs::read_to_string` fails with an invalid UTF-8 error, return `ReadFailed` with message `"File appears to be binary or non-UTF-8 encoded"` — same pattern as Story 8.1.
-  - [ ] **Atomic write strategy:** All edits are validated and applied in memory first. Only after ALL edits succeed is the result written to disk via `tokio::fs::write`. If any edit fails, the file on disk is untouched.
-  - [ ] Return a summary of affected line ranges, e.g., `"Applied 3 edit(s) to {path}:\n  Edit 1: lines 5-8\n  Edit 2: lines 22-22\n  Edit 3: lines 45-50"`
-- [ ] Implement `async fn handle_create(&self, requested: &str, content: &str) -> Result<String, EditFileToolError>` (AC: #4)
-  - [ ] Verify `requested` has a valid filename component (not ending in `/`, not empty) — return `MissingArgument` if invalid
-  - [ ] Check if file already exists → return `AlreadyExists` error
-  - [ ] Create parent directories via `tokio::fs::create_dir_all` if needed (with ancestor validation within project root — same pattern as `FsTool::handle_write` at L178-244)
-  - [ ] Validate path for new file via `validate_path_for_new`
-  - [ ] Write content via `tokio::fs::write`
-  - [ ] Return `"Created {path} ({N} bytes)"`
-- [ ] Implement `async fn handle_overwrite(&self, path: &Path, requested: &str, content: &str) -> Result<String, EditFileToolError>` (AC: #5)
-  - [ ] File must already exist (validated by caller via `validate_path_existing`)
-  - [ ] Write full content via `tokio::fs::write`
-  - [ ] Return `"Overwritten {path} ({N} bytes)"`
+- [x] Implement `EditFileTool::new(project_root: PathBuf) -> Self`
+- [x] Implement `fn validate_path_existing(&self, requested: &str) -> Result<PathBuf, EditFileToolError>` (AC: #6)
+  - [x] Same pattern as `FsTool::validate_path` / `ReadFileTool::validate_path`: canonicalize requested path, canonicalize project_root, check `starts_with`
+  - [x] Return `NotFound` if canonicalize fails (file doesn't exist)
+  - [x] Return `PathDenied` if path resolves outside project root
+- [x] Implement `fn validate_path_for_new(&self, requested: &str) -> Result<PathBuf, EditFileToolError>` (AC: #4, #6)
+  - [x] Same pattern as `FsTool::validate_path_for_new`: canonicalize **parent** directory (which must exist), verify within project root, join filename
+  - [x] Return `PathDenied` if parent resolves outside project root
+  - [x] Verify the path has a valid `file_name()` component — reject paths ending in `/` or with no filename
+  - [x] Used by create mode after parent directories are created
+- [x] Implement `fn line_number_at_offset(content: &str, byte_offset: usize) -> usize`
+  - [x] Count the number of `\n` characters in `content[..byte_offset]` and add 1 (1-indexed)
+  - [x] Used by both `AmbiguousMatch` error construction and affected line range calculation — shared helper avoids duplication
+- [x] Implement `fn truncate_preview(text: &str, max_len: usize) -> String`
+  - [x] If `text.len() <= max_len` → return text as-is
+  - [x] Otherwise → return `text[..max_len]` + `"..."` (truncate at char boundary via `text.char_indices()`)
+  - [x] Used for `old_text_preview` in `TextNotFound` errors (max 80 chars)
+- [x] Implement `async fn handle_edit(&self, path: &Path, requested: &str, edits: &[EditOperation]) -> Result<String, EditFileToolError>` (AC: #1, #2, #3)
+  - [x] Read current file content via `tokio::fs::read_to_string`
+  - [x] For each `EditOperation` in order:
+    - [x] If `old_text` is empty → return `TextNotFound` error immediately with message `"old_text is empty — provide the exact text fragment to replace"`
+    - [x] Use **`content.match_indices(&old_text)`** to find ALL occurrence byte offsets — this returns `Iterator<Item = (usize, &str)>`. Collect into a `Vec`.
+    - [x] If zero matches → return `TextNotFound` error with a preview of old_text (first 80 chars, append `"..."` if truncated). **No changes written to disk** — the file remains unmodified.
+    - [x] If multiple matches → convert each byte offset to a 1-indexed line number via `fn line_number_at_offset(content: &str, byte_offset: usize) -> usize` helper. Return `AmbiguousMatch` error with line numbers. **No changes written to disk.**
+    - [x] If exactly one match → replace `old_text` with `new_text` in the in-memory content using the byte offset. Record the affected line range (start_line..end_line after replacement) using the same `line_number_at_offset` helper.
+  - [x] **Binary/non-UTF-8 detection:** If `tokio::fs::read_to_string` fails with an invalid UTF-8 error, return `ReadFailed` with message `"File appears to be binary or non-UTF-8 encoded"` — same pattern as Story 8.1.
+  - [x] **Atomic write strategy:** All edits are validated and applied in memory first. Only after ALL edits succeed is the result written to disk via `tokio::fs::write`. If any edit fails, the file on disk is untouched.
+  - [x] Return a summary of affected line ranges, e.g., `"Applied 3 edit(s) to {path}:\n  Edit 1: lines 5-8\n  Edit 2: lines 22-22\n  Edit 3: lines 45-50"`
+- [x] Implement `async fn handle_create(&self, requested: &str, content: &str) -> Result<String, EditFileToolError>` (AC: #4)
+  - [x] Verify `requested` has a valid filename component (not ending in `/`, not empty) — return `MissingArgument` if invalid
+  - [x] Check if file already exists → return `AlreadyExists` error
+  - [x] Create parent directories via `tokio::fs::create_dir_all` if needed (with ancestor validation within project root — same pattern as `FsTool::handle_write` at L178-244)
+  - [x] Validate path for new file via `validate_path_for_new`
+  - [x] Write content via `tokio::fs::write`
+  - [x] Return `"Created {path} ({N} bytes)"`
+- [x] Implement `async fn handle_overwrite(&self, path: &Path, requested: &str, content: &str) -> Result<String, EditFileToolError>` (AC: #5)
+  - [x] File must already exist (validated by caller via `validate_path_existing`)
+  - [x] Write full content via `tokio::fs::write`
+  - [x] Return `"Overwritten {path} ({N} bytes)"`
 
 ### Task 3: Implement `Tool` Trait for `EditFileTool`
 
-- [ ] `const NAME: &'static str = "edit_file";` (AC: #7)
-- [ ] `type Error = EditFileToolError;`
-- [ ] `type Args = EditFileToolArgs;`
-- [ ] `type Output = String;`
-- [ ] Implement `async fn definition(&self, _prompt: String) -> ToolDefinition` (AC: #7)
-  - [ ] Name: `"edit_file"`
-  - [ ] Description must be **detailed and LLM-optimized**: explain the three modes, when to use each, how edit operations work, error recovery workflow (ambiguity → read_file with line range → retry with more context)
-  - [ ] JSON schema with:
+- [x] `const NAME: &'static str = "edit_file";` (AC: #7)
+- [x] `type Error = EditFileToolError;`
+- [x] `type Args = EditFileToolArgs;`
+- [x] `type Output = String;`
+- [x] Implement `async fn definition(&self, _prompt: String) -> ToolDefinition` (AC: #7)
+  - [x] Name: `"edit_file"`
+  - [x] Description must be **detailed and LLM-optimized**: explain the three modes, when to use each, how edit operations work, error recovery workflow (ambiguity → read_file with line range → retry with more context)
+  - [x] JSON schema with:
     - `path` (required string)
     - `mode` (required string, enum: `["edit", "create", "overwrite"]`)
     - `edits` (optional array of objects with `old_text` and `new_text` strings) — for edit mode
     - `content` (optional string) — for create/overwrite modes
-  - [ ] Include clear descriptions for each parameter and when each is required
-- [ ] Implement `async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error>` (AC: #1-#6)
-  - [ ] Log with `tracing::info!(action = "edit_file", path = %args.path, mode = %args.mode, ...)` before action
-  - [ ] Match on `args.mode`:
+  - [x] Include clear descriptions for each parameter and when each is required
+- [x] Implement `async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error>` (AC: #1-#6)
+  - [x] Log with `tracing::info!(action = "edit_file", path = %args.path, mode = %args.mode, ...)` before action
+  - [x] Match on `args.mode`:
     - `"edit"` → validate edits present (`MissingArgument` if None/empty), validate path existing, call `handle_edit`
     - `"create"` → validate content present (`MissingArgument` if None), call `handle_create`
     - `"overwrite"` → validate content present (`MissingArgument` if None), validate path existing, call `handle_overwrite`
     - other → return `InvalidMode` error
-  - [ ] Log result summary via tracing
+  - [x] Log result summary via tracing
 
 ### Task 4: Update Module Registry (`src/tools/mod.rs`)
 
-- [ ] Add `pub mod edit_file;` to `src/tools/mod.rs`
-- [ ] Add `pub use edit_file::EditFileTool;` re-export
-- [ ] Update module doc comment to mention EditFileTool
-- [ ] **Do NOT remove FsTool yet** — that happens in Story 8.4
+- [x] Add `pub mod edit_file;` to `src/tools/mod.rs`
+- [x] Add `pub use edit_file::EditFileTool;` re-export
+- [x] Update module doc comment to mention EditFileTool
+- [x] **Do NOT remove FsTool yet** — that happens in Story 8.4
 
 ### Task 5: Unit Tests (`#[cfg(test)] mod tests` in `edit_file.rs`)
 
-- [ ] `test_edit_file_tool_definition_name` — verify `NAME == "edit_file"` and definition name matches
-- [ ] `test_edit_file_tool_definition_has_detailed_description` — verify description is non-empty and contains key usage instructions for all three modes
-- [ ] `test_edit_file_tool_definition_parameters` — verify JSON schema has `path` and `mode` as required, `edits` and `content` as optional, mode has `"enum": ["edit", "create", "overwrite"]` constraint
-- [ ] `test_edit_file_tool_args_deserialize_edit_mode` — deserialize with `edits` field
-- [ ] `test_edit_file_tool_args_deserialize_create_mode` — deserialize with `content` field
-- [ ] `test_edit_file_tool_error_is_send_sync` — verify `EditFileToolError: Send + Sync`
-- [ ] `test_edit_file_tool_error_display` — verify all error variant display strings
-- [ ] `test_edit_file_tool_serializable` — serialize/deserialize `EditFileTool` struct
-- [ ] `test_edit_file_single_edit` (AC: #1) — one old_text→new_text replacement, verify file changed on disk, verify returned line range
-- [ ] `test_edit_file_multiple_sequential_edits` (AC: #1) — 3 edits in one call, verify all applied in order with offset recalculation, verify returned line ranges for each
-- [ ] `test_edit_file_offset_recalculation` (AC: #1) — first edit changes line count (insert/delete lines), second edit targets text after the change, verify correct application
-- [ ] `test_edit_file_text_not_found` (AC: #2) — old_text doesn't exist → `TextNotFound` error, file unchanged on disk
-- [ ] `test_edit_file_ambiguous_match` (AC: #3) — old_text appears 3 times → `AmbiguousMatch` error with 3 line numbers, file unchanged on disk
-- [ ] `test_edit_file_ambiguous_match_line_numbers_correct` (AC: #3) — verify the reported line numbers actually correspond to the match positions
-- [ ] `test_edit_file_partial_failure_no_disk_write` (AC: #1, #2) — first edit succeeds, second edit fails (not found) → file on disk is completely unchanged (atomic: all-or-nothing)
-- [ ] `test_edit_file_create_new_file` (AC: #4) — create mode with non-existent path → file created with correct content
-- [ ] `test_edit_file_create_with_parent_dirs` (AC: #4) — create mode with nested path `a/b/c/new.rs` → parent dirs created, file created
-- [ ] `test_edit_file_create_already_exists` (AC: #4) — create mode on existing file → `AlreadyExists` error, original file unchanged
-- [ ] `test_edit_file_overwrite_existing` (AC: #5) — overwrite mode on existing file → content fully replaced
-- [ ] `test_edit_file_overwrite_not_found` (AC: #5) — overwrite mode on non-existent file → `NotFound` error
-- [ ] `test_edit_file_path_denied_outside_root` (AC: #6) — `../../etc/passwd` → `PathDenied` error for all three modes
-- [ ] `test_edit_file_invalid_mode` (AC: #7) — mode `"delete"` → `InvalidMode` error
-- [ ] `test_edit_file_edit_missing_edits` — edit mode with no `edits` field → `MissingArgument` error
-- [ ] `test_edit_file_create_missing_content` — create mode with no `content` field → `MissingArgument` error
-- [ ] `test_edit_file_overwrite_missing_content` — overwrite mode with no `content` field → `MissingArgument` error
-- [ ] `test_edit_file_empty_old_text` — edit with `old_text: ""` → should match at position 0 (or return error — specify behavior: treat as error since empty match is ambiguous everywhere)
-- [ ] `test_edit_file_empty_new_text_deletes` — edit with `new_text: ""` → effectively deletes the old_text fragment from the file
-- [ ] `test_edit_file_edit_at_file_start` — old_text is the very first characters of the file → correctly replaced
-- [ ] `test_edit_file_edit_at_file_end` — old_text is the very last characters of the file → correctly replaced
-- [ ] `test_edit_file_edit_entire_line` — old_text is a complete line including newline → replaced correctly
-- [ ] `test_edit_file_multiline_old_text` — old_text spans multiple lines → correctly found and replaced
-- [ ] `test_edit_file_create_path_denied` (AC: #6) — create mode with path outside root → `PathDenied` error
-- [ ] `test_edit_file_nested_path_edit` — editing a file in a subdirectory within project root
-- [ ] `test_edit_file_binary_file_read_fails_clearly` — edit mode on a file with non-UTF-8 bytes → `ReadFailed` error with "binary or non-UTF-8" in message
-- [ ] `test_edit_file_overwrite_with_empty_content` — overwrite with `content: ""` → file becomes 0 bytes (valid, not an error)
-- [ ] `test_edit_file_create_empty_content` — create with `content: ""` → empty file created (valid)
-- [ ] `test_edit_file_edit_empty_edits_vec` — `edits: Some(vec![])` → `MissingArgument` error (empty vec treated same as None)
-- [ ] `test_edit_file_create_trailing_slash_path` — create with `path: "src/tools/"` (trailing slash) → error (no valid filename)
+- [x] `test_edit_file_tool_definition_name` — verify `NAME == "edit_file"` and definition name matches
+- [x] `test_edit_file_tool_definition_has_detailed_description` — verify description is non-empty and contains key usage instructions for all three modes
+- [x] `test_edit_file_tool_definition_parameters` — verify JSON schema has `path` and `mode` as required, `edits` and `content` as optional, mode has `"enum": ["edit", "create", "overwrite"]` constraint
+- [x] `test_edit_file_tool_args_deserialize_edit_mode` — deserialize with `edits` field
+- [x] `test_edit_file_tool_args_deserialize_create_mode` — deserialize with `content` field
+- [x] `test_edit_file_tool_error_is_send_sync` — verify `EditFileToolError: Send + Sync`
+- [x] `test_edit_file_tool_error_display` — verify all error variant display strings
+- [x] `test_edit_file_tool_serializable` — serialize/deserialize `EditFileTool` struct
+- [x] `test_edit_file_single_edit` (AC: #1) — one old_text→new_text replacement, verify file changed on disk, verify returned line range
+- [x] `test_edit_file_multiple_sequential_edits` (AC: #1) — 3 edits in one call, verify all applied in order with offset recalculation, verify returned line ranges for each
+- [x] `test_edit_file_offset_recalculation` (AC: #1) — first edit changes line count (insert/delete lines), second edit targets text after the change, verify correct application
+- [x] `test_edit_file_text_not_found` (AC: #2) — old_text doesn't exist → `TextNotFound` error, file unchanged on disk
+- [x] `test_edit_file_ambiguous_match` (AC: #3) — old_text appears 3 times → `AmbiguousMatch` error with 3 line numbers, file unchanged on disk
+- [x] `test_edit_file_ambiguous_match_line_numbers_correct` (AC: #3) — verify the reported line numbers actually correspond to the match positions
+- [x] `test_edit_file_partial_failure_no_disk_write` (AC: #1, #2) — first edit succeeds, second edit fails (not found) → file on disk is completely unchanged (atomic: all-or-nothing)
+- [x] `test_edit_file_create_new_file` (AC: #4) — create mode with non-existent path → file created with correct content
+- [x] `test_edit_file_create_with_parent_dirs` (AC: #4) — create mode with nested path `a/b/c/new.rs` → parent dirs created, file created
+- [x] `test_edit_file_create_already_exists` (AC: #4) — create mode on existing file → `AlreadyExists` error, original file unchanged
+- [x] `test_edit_file_overwrite_existing` (AC: #5) — overwrite mode on existing file → content fully replaced
+- [x] `test_edit_file_overwrite_not_found` (AC: #5) — overwrite mode on non-existent file → `NotFound` error
+- [x] `test_edit_file_path_denied_outside_root` (AC: #6) — `../../etc/passwd` → `PathDenied` error for all three modes
+- [x] `test_edit_file_invalid_mode` (AC: #7) — mode `"delete"` → `InvalidMode` error
+- [x] `test_edit_file_edit_missing_edits` — edit mode with no `edits` field → `MissingArgument` error
+- [x] `test_edit_file_create_missing_content` — create mode with no `content` field → `MissingArgument` error
+- [x] `test_edit_file_overwrite_missing_content` — overwrite mode with no `content` field → `MissingArgument` error
+- [x] `test_edit_file_empty_old_text` — edit with `old_text: ""` → should match at position 0 (or return error — specify behavior: treat as error since empty match is ambiguous everywhere)
+- [x] `test_edit_file_empty_new_text_deletes` — edit with `new_text: ""` → effectively deletes the old_text fragment from the file
+- [x] `test_edit_file_edit_at_file_start` — old_text is the very first characters of the file → correctly replaced
+- [x] `test_edit_file_edit_at_file_end` — old_text is the very last characters of the file → correctly replaced
+- [x] `test_edit_file_edit_entire_line` — old_text is a complete line including newline → replaced correctly
+- [x] `test_edit_file_multiline_old_text` — old_text spans multiple lines → correctly found and replaced
+- [x] `test_edit_file_create_path_denied` (AC: #6) — create mode with path outside root → `PathDenied` error
+- [x] `test_edit_file_nested_path_edit` — editing a file in a subdirectory within project root
+- [x] `test_edit_file_binary_file_read_fails_clearly` — edit mode on a file with non-UTF-8 bytes → `ReadFailed` error with "binary or non-UTF-8" in message
+- [x] `test_edit_file_overwrite_with_empty_content` — overwrite with `content: ""` → file becomes 0 bytes (valid, not an error)
+- [x] `test_edit_file_create_empty_content` — create with `content: ""` → empty file created (valid)
+- [x] `test_edit_file_edit_empty_edits_vec` — `edits: Some(vec![])` → `MissingArgument` error (empty vec treated same as None)
+- [x] `test_edit_file_create_trailing_slash_path` — create with `path: "src/tools/"` (trailing slash) → error (no valid filename)
 
 ### Task 6: Integration Verification
 
-- [ ] Run `cargo test` — all new tests pass, zero regressions on existing tests
-- [ ] Run `cargo clippy` — zero warnings
-- [ ] Run `cargo fmt --check` — no formatting issues
-- [ ] Verify `EditFileTool` is accessible from `crate::tools::EditFileTool`
+- [x] Run `cargo test` — all 38 new tests pass, zero regressions (751 total pass)
+- [x] Run `cargo clippy` — only pre-existing warnings; one expected `unused import` for `EditFileTool` re-export (consumed in Story 8.5)
+- [x] Run `cargo fmt --check` — no formatting issues
+- [x] Verify `EditFileTool` is accessible from `crate::tools::EditFileTool`
 
 ## Dev Notes
 
@@ -445,8 +445,41 @@ src/tools/
 
 ### Agent Model Used
 
+Claude Opus 4.6 (via Windsurf)
+
 ### Debug Log References
+
+- `cargo test --bin bmad-bot tools::edit_file` → 38 passed, 0 failed
+- `cargo test` → 751 passed, 0 failed, 0 regressions
+- `cargo clippy` → no new warnings (pre-existing warnings unchanged; expected `unused import: edit_file::EditFileTool` until Story 8.5 consumes the re-export)
+- `cargo fmt --check` → clean
 
 ### Completion Notes List
 
+- ✅ Created `src/tools/edit_file.rs` (1516 lines) — full `EditFileTool` implementation with 38 unit tests inline
+- ✅ Three editing modes: edit (surgical search-replace), create (new files with auto parent dirs), overwrite (full replacement)
+- ✅ Atomic write strategy: all edits validated and applied in memory before any disk write; partial failure leaves file untouched
+- ✅ Security boundary: `canonicalize()` + `starts_with()` for both existing and new file paths — identical pattern to `FsTool`/`ReadFileTool`
+- ✅ Binary/non-UTF-8 detection: reads raw bytes via `tokio::fs::read`, then `String::from_utf8` with clear error message
+- ✅ `match_indices()` for exact string matching — finds all occurrences with byte offsets
+- ✅ `line_number_at_offset()` shared helper for both `AmbiguousMatch` error line numbers and successful edit line range reporting
+- ✅ `truncate_preview()` helper for old_text error previews (max 80 chars)
+- ✅ Empty `old_text` check before `match_indices` — returns `TextNotFound` immediately
+- ✅ `AmbiguousMatch` stores `match_lines` as pre-formatted `String` (avoids `Vec` Display issues with thiserror)
+- ✅ `TextNotFound` display includes hint: "Use read_file to check the actual content."
+- ✅ `AmbiguousMatch` display includes guidance: "Provide more surrounding context in old_text to uniquely identify the target."
+- ✅ Parent directory creation with ancestor validation within project root (replicates `FsTool::handle_write` pattern)
+- ✅ Tool definition description is LLM-optimized with full mode explanations and error recovery workflow
+- ✅ `src/tools/mod.rs` updated: added `pub mod edit_file;` + `pub use edit_file::EditFileTool;` + updated doc comment
+- ✅ FsTool untouched (removal in Story 8.4), ReadFileTool untouched, supervisor `read_tool.rs` untouched, `session/runner.rs` untouched
+
+### Change Log
+
+- 2026-02-10: Story 8.2 implementation complete — EditFileTool created with full test suite (38 tests), module registry updated
+
 ### File List
+
+| File | Change |
+|------|--------|
+| `src/tools/edit_file.rs` | **CREATED** — Full EditFileTool implementation + 38 unit tests |
+| `src/tools/mod.rs` | **MODIFIED** — Added `pub mod edit_file;`, `pub use edit_file::EditFileTool;`, updated doc comment |
