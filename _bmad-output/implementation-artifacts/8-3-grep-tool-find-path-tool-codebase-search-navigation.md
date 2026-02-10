@@ -1,6 +1,6 @@
 # Story 8.3: GrepTool & FindPathTool — Codebase Search & Navigation
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -51,30 +51,30 @@ So that I can locate code and files efficiently instead of blindly listing and r
 
 ### Task 0: Prerequisite Verification
 
-- [ ] Verify `src/tools/read_file.rs` exists and compiles (Story 8.1 delivered) (AC: all)
-- [ ] Verify `src/tools/edit_file.rs` exists and compiles (Story 8.2 delivered) (AC: all)
-- [ ] Verify `cargo test` passes on current `main` (AC: all)
-- [ ] Verify `src/tools/mod.rs` currently exports `FsTool`, `GitTool`, `TerminalTool`, `ReadFileTool`, `EditFileTool` (AC: 7)
-- [ ] Read `src/tools/read_file.rs` to confirm established patterns for this epic (struct shape, error enum style, validate_path, test patterns) (AC: 7)
+- [x] Verify `src/tools/read_file.rs` exists and compiles (Story 8.1 delivered) (AC: all)
+- [x] Verify `src/tools/edit_file.rs` exists and compiles (Story 8.2 delivered) (AC: all)
+- [x] Verify `cargo test` passes on current `main` (AC: all)
+- [x] Verify `src/tools/mod.rs` currently exports `FsTool`, `GitTool`, `TerminalTool`, `ReadFileTool`, `EditFileTool` (AC: 7)
+- [x] Read `src/tools/read_file.rs` to confirm established patterns for this epic (struct shape, error enum style, validate_path, test patterns) (AC: 7)
 
 ### Task 1: Add New Dependencies to `Cargo.toml`
 
-- [ ] Add `ignore = "0.4"` to `[dependencies]` — .gitignore-aware directory walker (used by ripgrep) (AC: 3, 6)
-- [ ] Add `globset = "0.4"` to `[dependencies]` — glob pattern matching for `include_pattern` and `find_path` (AC: 2, 5)
-  - [ ] Note: `globset` is from the BurntSushi ecosystem (same author as `regex` and `ignore`), well-maintained, and may already be a transitive dependency of `ignore`
-- [ ] Run `cargo check` to verify new dependencies resolve correctly (AC: all)
+- [x] Add `ignore = "0.4"` to `[dependencies]` — .gitignore-aware directory walker (used by ripgrep) (AC: 3, 6)
+- [x] Add `globset = "0.4"` to `[dependencies]` — glob pattern matching for `include_pattern` and `find_path` (AC: 2, 5)
+  - [x] Note: `globset` is from the BurntSushi ecosystem (same author as `regex` and `ignore`), well-maintained, and may already be a transitive dependency of `ignore`
+- [x] Run `cargo check` to verify new dependencies resolve correctly (AC: all)
 
 ### Task 2: Create `src/tools/grep.rs` — Struct, Args, Error Enum
 
-- [ ] Create file `src/tools/grep.rs` (AC: 7)
-- [ ] Define `GrepTool` struct: `#[derive(Debug, Serialize, Deserialize)]` with `project_root: PathBuf` field (AC: 7)
-- [ ] Define `GrepToolArgs` struct: `#[derive(Debug, Deserialize)]` with fields (AC: 1, 2, 4):
+- [x] Create file `src/tools/grep.rs` (AC: 7)
+- [x] Define `GrepTool` struct: `#[derive(Debug, Serialize, Deserialize)]` with `project_root: PathBuf` field (AC: 7)
+- [x] Define `GrepToolArgs` struct: `#[derive(Debug, Deserialize)]` with fields (AC: 1, 2, 4):
   - `regex: String` — regex pattern (required)
   - `include_pattern: Option<String>` — glob filter (e.g., `"**/*.rs"`)
   - `context_lines: Option<u32>` — lines of context before/after each match (default: 2)
   - `offset: Option<u32>` — pagination offset for paginated results (default: 0)
   - Doc comments on each field explaining purpose and defaults
-- [ ] Define `GrepToolError` enum: `#[derive(Debug, thiserror::Error)]` with variants (AC: 7):
+- [x] Define `GrepToolError` enum: `#[derive(Debug, thiserror::Error)]` with variants (AC: 7):
   - `InvalidRegex { pattern: String, reason: String }` — invalid regex pattern
   - `PathDenied { path: String, reason: String }` — path outside project root
   - `WalkError { reason: String }` — directory traversal error
@@ -83,160 +83,160 @@ So that I can locate code and files efficiently instead of blindly listing and r
 
 ### Task 3: Implement `GrepTool` Core Methods
 
-- [ ] Implement `GrepTool::new(project_root: PathBuf) -> Self` (AC: 7)
-- [ ] Implement `GrepTool::validate_project_root(&self) -> Result<PathBuf, GrepToolError>` — canonicalize and verify project root exists (AC: 3)
-- [ ] Implement core search logic in `call()` (AC: 1, 2, 3, 4):
-  - [ ] Compile the user's regex pattern via `regex::Regex::new()` — return `InvalidRegex` error on failure
-  - [ ] Build a directory walker using `ignore::WalkBuilder::new(&project_root)`:
+- [x] Implement `GrepTool::new(project_root: PathBuf) -> Self` (AC: 7)
+- [x] Implement `GrepTool::validate_project_root(&self) -> Result<PathBuf, GrepToolError>` — canonicalize and verify project root exists (AC: 3)
+- [x] Implement core search logic in `call()` (AC: 1, 2, 3, 4):
+  - [x] Compile the user's regex pattern via `regex::Regex::new()` — return `InvalidRegex` error on failure
+  - [x] Build a directory walker using `ignore::WalkBuilder::new(&project_root)`:
     - `.hidden(true)` to skip hidden files/dirs (consistent with ripgrep default behavior)
     - `.git_ignore(true)` to respect `.gitignore`
     - `.git_global(true)` to respect global gitignore
     - `.git_exclude(true)` to respect `.git/info/exclude`
     - `.filter_entry(|e| ...)` to skip `.git` directory itself
-  - [ ] If `include_pattern` is provided, compile it as a `globset::Glob` and filter entries against it
-  - [ ] For each file entry from the walker:
+  - [x] If `include_pattern` is provided, compile it as a `globset::Glob` and filter entries against it
+  - [x] For each file entry from the walker:
     - Read file content as UTF-8 (skip non-UTF-8/binary files silently — they can't contain text matches)
     - Search each line for regex matches
     - For each match, collect: file path (relative to project root), line number (1-indexed), line content (trimmed trailing newline)
     - If `context_lines` > 0, include the specified number of lines before and after each match
-  - [ ] Apply pagination: skip first `offset` matches, return at most 20 matches
-  - [ ] Format output as a structured text response with clear separators between matches
+  - [x] Apply pagination: skip first `offset` matches, return at most 20 matches
+  - [x] Format output as a structured text response with clear separators between matches
 
 ### Task 4: Implement `Tool` Trait for `GrepTool`
 
-- [ ] Implement `Tool for GrepTool` with (AC: 1, 7):
+- [x] Implement `Tool for GrepTool` with (AC: 1, 7):
   - `const NAME: &'static str = "grep"`
   - `type Error = GrepToolError`
   - `type Args = GrepToolArgs`
   - `type Output = String`
-- [ ] Implement `definition()` with comprehensive description and JSON schema (AC: 7):
+- [x] Implement `definition()` with comprehensive description and JSON schema (AC: 7):
   - Description must teach the LLM: when to use grep, how regex works, how include_pattern filters, pagination behavior
   - JSON schema with `regex` (required), `include_pattern`, `context_lines`, `offset` (all optional)
   - JSON schema should include `"default": 2` for `context_lines` and `"default": 0` for `offset` so LLM knows defaults without reading description
   - `include_pattern` description must warn: `"Use **/*.rs to match all Rust files recursively, not *.rs (which only matches root)"`
-- [ ] Implement `call()` with tracing: `tracing::info!(action = "grep", pattern = %args.regex, ...)` before and after (AC: 7)
-- [ ] Return meaningful output even for zero matches: `"No matches found for pattern '...' [searched N files]"` (AC: 1)
+- [x] Implement `call()` with tracing: `tracing::info!(action = "grep", pattern = %args.regex, ...)` before and after (AC: 7)
+- [x] Return meaningful output even for zero matches: `"No matches found for pattern '...' [searched N files]"` (AC: 1)
 
 ### Task 5: Create `src/tools/find_path.rs` — Struct, Args, Error Enum
 
-- [ ] Create file `src/tools/find_path.rs` (AC: 7)
-- [ ] Define `FindPathTool` struct: `#[derive(Debug, Serialize, Deserialize)]` with `project_root: PathBuf` field (AC: 7)
-- [ ] Define `FindPathToolArgs` struct: `#[derive(Debug, Deserialize)]` with fields (AC: 5):
+- [x] Create file `src/tools/find_path.rs` (AC: 7)
+- [x] Define `FindPathTool` struct: `#[derive(Debug, Serialize, Deserialize)]` with `project_root: PathBuf` field (AC: 7)
+- [x] Define `FindPathToolArgs` struct: `#[derive(Debug, Deserialize)]` with fields (AC: 5):
   - `glob: String` — glob pattern (required)
   - `offset: Option<u32>` — pagination offset (default: 0)
   - Doc comments on each field
-- [ ] Define `FindPathToolError` enum: `#[derive(Debug, thiserror::Error)]` with variants (AC: 7):
+- [x] Define `FindPathToolError` enum: `#[derive(Debug, thiserror::Error)]` with variants (AC: 7):
   - `InvalidGlob { pattern: String, reason: String }` — invalid glob pattern
   - `PathDenied { path: String, reason: String }` — path outside project root
   - `WalkError { reason: String }` — directory traversal error
 
 ### Task 6: Implement `FindPathTool` Core Methods
 
-- [ ] Implement `FindPathTool::new(project_root: PathBuf) -> Self` (AC: 7)
-- [ ] Implement `FindPathTool::validate_project_root(&self) -> Result<PathBuf, FindPathToolError>` (AC: 6)
-- [ ] Implement core path discovery logic in `call()` (AC: 5, 6):
-  - [ ] Compile the user's glob pattern via `globset::Glob::new()` — return `InvalidGlob` error on failure
-  - [ ] Build a directory walker using `ignore::WalkBuilder::new(&project_root)`:
+- [x] Implement `FindPathTool::new(project_root: PathBuf) -> Self` (AC: 7)
+- [x] Implement `FindPathTool::validate_project_root(&self) -> Result<PathBuf, FindPathToolError>` (AC: 6)
+- [x] Implement core path discovery logic in `call()` (AC: 5, 6):
+  - [x] Compile the user's glob pattern via `globset::Glob::new()` — return `InvalidGlob` error on failure
+  - [x] Build a directory walker using `ignore::WalkBuilder::new(&project_root)`:
     - `.hidden(true)` to skip hidden files/dirs (consistent with ripgrep default behavior)
     - `.git_ignore(true)` to respect `.gitignore`
     - `.git_global(true)` to respect global gitignore
     - `.git_exclude(true)` to respect `.git/info/exclude`
     - `.filter_entry(|e| ...)` to skip `.git` directory itself
     - Only collect entries where `entry.file_type().map_or(false, |ft| ft.is_file())` — return files only, not directories
-  - [ ] For each file entry from the walker:
+  - [x] For each file entry from the walker:
     - Compute path relative to project root
     - Test against the compiled glob pattern
     - Collect matching paths
-  - [ ] Sort results alphabetically
-  - [ ] Apply pagination: skip first `offset` results, return at most 50 results
-  - [ ] Format output: one path per line, with total match count header
+  - [x] Sort results alphabetically
+  - [x] Apply pagination: skip first `offset` results, return at most 50 results
+  - [x] Format output: one path per line, with total match count header
 
 ### Task 7: Implement `Tool` Trait for `FindPathTool`
 
-- [ ] Implement `Tool for FindPathTool` with (AC: 5, 7):
+- [x] Implement `Tool for FindPathTool` with (AC: 5, 7):
   - `const NAME: &'static str = "find_path"`
   - `type Error = FindPathToolError`
   - `type Args = FindPathToolArgs`
   - `type Output = String`
-- [ ] Implement `definition()` with comprehensive description and JSON schema (AC: 7):
+- [x] Implement `definition()` with comprehensive description and JSON schema (AC: 7):
   - Description must teach the LLM: when to use find_path vs grep, glob syntax examples, pagination
   - JSON schema with `glob` (required), `offset` (optional)
   - JSON schema should include `"default": 0` for `offset`
   - `glob` description must include examples: `"**/*.rs"` (recursive), `"src/**/mod.rs"` (scoped), `"Cargo.*"` (root only)
-- [ ] Implement `call()` with tracing: `tracing::info!(action = "find_path", glob = %args.glob, ...)` before and after (AC: 7)
-- [ ] Return meaningful output for zero matches: `"No files found matching pattern '...'"` (AC: 5)
+- [x] Implement `call()` with tracing: `tracing::info!(action = "find_path", glob = %args.glob, ...)` before and after (AC: 7)
+- [x] Return meaningful output for zero matches: `"No files found matching pattern '...'"` (AC: 5)
   - If the pattern does NOT contain `**/` or `/`, append a hint: `"Hint: use **/{pattern} to search recursively."`
 
 ### Task 8: Update Module Registry (`src/tools/mod.rs`)
 
-- [ ] Add `pub mod grep;` declaration (AC: 7)
-- [ ] Add `pub mod find_path;` declaration (AC: 7)
-- [ ] Add `pub use grep::GrepTool;` re-export (AC: 7)
-- [ ] Add `pub use find_path::FindPathTool;` re-export (AC: 7)
-- [ ] Update module doc comment to include GrepTool and FindPathTool descriptions (AC: 7)
+- [x] Add `pub mod grep;` declaration (AC: 7)
+- [x] Add `pub mod find_path;` declaration (AC: 7)
+- [x] Add `pub use grep::GrepTool;` re-export (AC: 7)
+- [x] Add `pub use find_path::FindPathTool;` re-export (AC: 7)
+- [x] Update module doc comment to include GrepTool and FindPathTool descriptions (AC: 7)
 
 ### Task 9: Unit Tests — GrepTool (`#[cfg(test)] mod tests` in `grep.rs`)
 
-- [ ] `test_grep_basic_match` — search for a simple pattern in a known file (AC: 1)
-- [ ] `test_grep_regex_match` — search with regex special characters (e.g., `fn\s+\w+`) (AC: 1)
-- [ ] `test_grep_case_sensitive_default` — verify search IS case-sensitive without `(?i)` flag (AC: 1)
-- [ ] `test_grep_case_insensitive_regex` — verify `(?i)` regex flag works (AC: 1)
-- [ ] `test_grep_multiple_matches_same_file` — multiple lines match in one file (AC: 1)
-- [ ] `test_grep_matches_across_files` — matches found in multiple files (AC: 1)
-- [ ] `test_grep_no_matches` — returns zero-match message with file count (AC: 1)
-- [ ] `test_grep_include_pattern_filters_files` — only `.rs` files searched when `include_pattern = "**/*.rs"` (AC: 2)
-- [ ] `test_grep_include_pattern_no_matches` — include_pattern excludes all files with matches (AC: 2)
-- [ ] `test_grep_invalid_include_pattern` — malformed glob returns `InvalidGlob` error (AC: 2)
-- [ ] `test_grep_respects_gitignore` — file listed in `.gitignore` is excluded from search (AC: 3)
-- [ ] `test_grep_respects_nested_gitignore` — nested `.gitignore` in subdirectory is respected (AC: 3)
-- [ ] `test_grep_context_lines_default` — default context (2 lines before/after) is included (AC: 4)
-- [ ] `test_grep_context_lines_custom` — custom `context_lines` value works (AC: 4)
-- [ ] `test_grep_context_lines_zero` — `context_lines = 0` returns only matching lines (AC: 4)
-- [ ] `test_grep_context_lines_at_file_boundary` — context near start/end of file is clamped (AC: 4)
-- [ ] `test_grep_pagination_default_limit` — only 20 results returned when more exist (AC: 1)
-- [ ] `test_grep_pagination_with_offset` — offset skips first N matches (AC: 1)
-- [ ] `test_grep_pagination_offset_beyond_results` — offset past end returns empty (AC: 1)
-- [ ] `test_grep_invalid_regex` — invalid regex returns `InvalidRegex` error (AC: 7)
-- [ ] `test_grep_skips_binary_files` — binary file content not searched (AC: 1)
-- [ ] `test_grep_empty_project` — empty directory returns zero matches (AC: 1)
-- [ ] `test_grep_skips_git_directory` — `.git/` contents are never searched (AC: 3)
-- [ ] `test_grep_line_numbers_are_one_indexed` — verify line numbers start at 1 (AC: 1)
-- [ ] `test_grep_output_format` — verify output includes file path, line number, content (AC: 1)
-- [ ] `test_grep_definition_name` — verify `NAME == "grep"` (AC: 7)
-- [ ] `test_grep_definition_has_detailed_description` — verify description is comprehensive (AC: 7)
-- [ ] `test_grep_serializable` — verify struct is serializable/deserializable (AC: 7)
-- [ ] `test_grep_error_is_send_sync` — verify error type implements Send + Sync (AC: 7)
+- [x] `test_grep_basic_match` — search for a simple pattern in a known file (AC: 1)
+- [x] `test_grep_regex_match` — search with regex special characters (e.g., `fn\s+\w+`) (AC: 1)
+- [x] `test_grep_case_sensitive_default` — verify search IS case-sensitive without `(?i)` flag (AC: 1)
+- [x] `test_grep_case_insensitive_regex` — verify `(?i)` regex flag works (AC: 1)
+- [x] `test_grep_multiple_matches_same_file` — multiple lines match in one file (AC: 1)
+- [x] `test_grep_matches_across_files` — matches found in multiple files (AC: 1)
+- [x] `test_grep_no_matches` — returns zero-match message with file count (AC: 1)
+- [x] `test_grep_include_pattern_filters_files` — only `.rs` files searched when `include_pattern = "**/*.rs"` (AC: 2)
+- [x] `test_grep_include_pattern_no_matches` — include_pattern excludes all files with matches (AC: 2)
+- [x] `test_grep_invalid_include_pattern` — malformed glob returns `InvalidGlob` error (AC: 2)
+- [x] `test_grep_respects_gitignore` — file listed in `.gitignore` is excluded from search (AC: 3)
+- [x] `test_grep_respects_nested_gitignore` — nested `.gitignore` in subdirectory is respected (AC: 3)
+- [x] `test_grep_context_lines_default` — default context (2 lines before/after) is included (AC: 4)
+- [x] `test_grep_context_lines_custom` — custom `context_lines` value works (AC: 4)
+- [x] `test_grep_context_lines_zero` — `context_lines = 0` returns only matching lines (AC: 4)
+- [x] `test_grep_context_lines_at_file_boundary` — context near start/end of file is clamped (AC: 4)
+- [x] `test_grep_pagination_default_limit` — only 20 results returned when more exist (AC: 1)
+- [x] `test_grep_pagination_with_offset` — offset skips first N matches (AC: 1)
+- [x] `test_grep_pagination_offset_beyond_results` — offset past end returns empty (AC: 1)
+- [x] `test_grep_invalid_regex` — invalid regex returns `InvalidRegex` error (AC: 7)
+- [x] `test_grep_skips_binary_files` — binary file content not searched (AC: 1)
+- [x] `test_grep_empty_project` — empty directory returns zero matches (AC: 1)
+- [x] `test_grep_skips_git_directory` — `.git/` contents are never searched (AC: 3)
+- [x] `test_grep_line_numbers_are_one_indexed` — verify line numbers start at 1 (AC: 1)
+- [x] `test_grep_output_format` — verify output includes file path, line number, content (AC: 1)
+- [x] `test_grep_definition_name` — verify `NAME == "grep"` (AC: 7)
+- [x] `test_grep_definition_has_detailed_description` — verify description is comprehensive (AC: 7)
+- [x] `test_grep_serializable` — verify struct is serializable/deserializable (AC: 7)
+- [x] `test_grep_error_is_send_sync` — verify error type implements Send + Sync (AC: 7)
 
 ### Task 10: Unit Tests — FindPathTool (`#[cfg(test)] mod tests` in `find_path.rs`)
 
-- [ ] `test_find_path_basic_glob` — find all `.rs` files with `"**/*.rs"` (AC: 5)
-- [ ] `test_find_path_specific_pattern` — find `"src/**/mod.rs"` (AC: 5)
-- [ ] `test_find_path_exact_filename` — find `"Cargo.toml"` (AC: 5)
-- [ ] `test_find_path_wildcard_extension` — find `"**/*.md"` (AC: 5)
-- [ ] `test_find_path_no_matches` — returns zero-match message (AC: 5)
-- [ ] `test_find_path_results_sorted_alphabetically` — verify alphabetical order (AC: 5)
-- [ ] `test_find_path_respects_gitignore` — file listed in `.gitignore` excluded (AC: 6)
-- [ ] `test_find_path_respects_nested_gitignore` — nested `.gitignore` respected (AC: 6)
-- [ ] `test_find_path_pagination_default_limit` — only 50 results returned when more exist (AC: 5)
-- [ ] `test_find_path_pagination_with_offset` — offset skips first N results (AC: 5)
-- [ ] `test_find_path_pagination_offset_beyond_results` — offset past end returns empty (AC: 5)
-- [ ] `test_find_path_invalid_glob` — malformed glob returns `InvalidGlob` error (AC: 7)
-- [ ] `test_find_path_skips_git_directory` — `.git/` paths never returned (AC: 6)
-- [ ] `test_find_path_empty_project` — empty directory returns zero matches (AC: 5)
-- [ ] `test_find_path_relative_paths` — all returned paths are relative to project root (AC: 5)
-- [ ] `test_find_path_includes_total_count` — output header shows total match count (AC: 5)
-- [ ] `test_find_path_definition_name` — verify `NAME == "find_path"` (AC: 7)
-- [ ] `test_find_path_definition_has_detailed_description` — verify description is comprehensive (AC: 7)
-- [ ] `test_find_path_serializable` — verify struct is serializable/deserializable (AC: 7)
-- [ ] `test_find_path_error_is_send_sync` — verify error type implements Send + Sync (AC: 7)
+- [x] `test_find_path_basic_glob` — find all `.rs` files with `"**/*.rs"` (AC: 5)
+- [x] `test_find_path_specific_pattern` — find `"src/**/mod.rs"` (AC: 5)
+- [x] `test_find_path_exact_filename` — find `"Cargo.toml"` (AC: 5)
+- [x] `test_find_path_wildcard_extension` — find `"**/*.md"` (AC: 5)
+- [x] `test_find_path_no_matches` — returns zero-match message (AC: 5)
+- [x] `test_find_path_results_sorted_alphabetically` — verify alphabetical order (AC: 5)
+- [x] `test_find_path_respects_gitignore` — file listed in `.gitignore` excluded (AC: 6)
+- [x] `test_find_path_respects_nested_gitignore` — nested `.gitignore` respected (AC: 6)
+- [x] `test_find_path_pagination_default_limit` — only 50 results returned when more exist (AC: 5)
+- [x] `test_find_path_pagination_with_offset` — offset skips first N results (AC: 5)
+- [x] `test_find_path_pagination_offset_beyond_results` — offset past end returns empty (AC: 5)
+- [x] `test_find_path_invalid_glob` — malformed glob returns `InvalidGlob` error (AC: 7)
+- [x] `test_find_path_skips_git_directory` — `.git/` paths never returned (AC: 6)
+- [x] `test_find_path_empty_project` — empty directory returns zero matches (AC: 5)
+- [x] `test_find_path_relative_paths` — all returned paths are relative to project root (AC: 5)
+- [x] `test_find_path_includes_total_count` — output header shows total match count (AC: 5)
+- [x] `test_find_path_definition_name` — verify `NAME == "find_path"` (AC: 7)
+- [x] `test_find_path_definition_has_detailed_description` — verify description is comprehensive (AC: 7)
+- [x] `test_find_path_serializable` — verify struct is serializable/deserializable (AC: 7)
+- [x] `test_find_path_error_is_send_sync` — verify error type implements Send + Sync (AC: 7)
 
 ### Task 11: Integration Verification
 
-- [ ] Run `cargo fmt` (AC: 7)
-- [ ] Run `cargo clippy` with zero warnings (AC: 7)
-- [ ] Run `cargo test` — all existing tests + new tests pass (AC: 7)
-- [ ] Verify `tools/mod.rs` exports: `FsTool`, `GitTool`, `TerminalTool`, `ReadFileTool`, `EditFileTool`, `GrepTool`, `FindPathTool` (AC: 7)
-- [ ] Verify no changes to `fs.rs`, `read_file.rs`, `edit_file.rs`, `git.rs`, `terminal.rs`, `runner.rs`, `read_tool.rs` (AC: 7)
+- [x] Run `cargo fmt` — no formatting issues (AC: 7)
+- [x] Run `cargo clippy` — zero new warnings in tools modules (AC: 7)
+- [x] Run `cargo test` — 802 total pass (51 new: 29 grep + 22 find_path), 0 regressions (AC: 7)
+- [x] Verify `tools/mod.rs` exports: `FsTool`, `GitTool`, `TerminalTool`, `ReadFileTool`, `EditFileTool`, `GrepTool`, `FindPathTool` (AC: 7)
+- [x] Verify no changes to `fs.rs`, `read_file.rs`, `edit_file.rs`, `git.rs`, `terminal.rs`, `runner.rs`, `read_tool.rs` (AC: 7)
 
 ## Dev Notes
 
@@ -718,8 +718,42 @@ src/tools/
 
 ### Agent Model Used
 
+Claude Opus 4.6 (via Windsurf)
+
 ### Debug Log References
+
+- `cargo test --bin bmad-bot tools::grep::tests` → 29 passed, 0 failed
+- `cargo test --bin bmad-bot tools::find_path::tests` → 22 passed, 0 failed
+- `cargo test` → 802 passed, 0 failed, 0 regressions
+- `cargo clippy` → 0 new warnings in tools modules
+- `cargo fmt --check` → clean
 
 ### Completion Notes List
 
+- ✅ Created `src/tools/grep.rs` (1090 lines) — full `GrepTool` implementation with 29 unit tests inline
+- ✅ Created `src/tools/find_path.rs` (674 lines) — full `FindPathTool` implementation with 22 unit tests inline
+- ✅ Added `ignore = "0.4"` and `globset = "0.4"` to `Cargo.toml` dependencies
+- ✅ GrepTool: regex search via `regex` crate, .gitignore-aware walking via `ignore` crate, glob filtering via `globset`
+- ✅ GrepTool: context lines with merging of overlapping ranges, pagination (20 per page, offset-based)
+- ✅ GrepTool: binary files skipped silently (`std::fs::read_to_string` failure), `.git` directory filtered out
+- ✅ GrepTool: output format matches `grep -rn` convention (`path:line:content`), context blocks with `|`/`:` separators
+- ✅ FindPathTool: glob matching via `globset::Glob`, .gitignore-aware walking, pagination (50 per page, offset-based)
+- ✅ FindPathTool: results sorted alphabetically, relative paths only, total count header
+- ✅ FindPathTool: hint on zero-match when pattern lacks `**/` or `/` (suggests recursive pattern)
+- ✅ Both tools use `tokio::task::spawn_blocking` for the synchronous `ignore` walker — `std::fs` inside (not `tokio::fs`)
+- ✅ Both tools validate project root via `canonicalize()`
+- ✅ `src/tools/mod.rs` updated: added `pub mod grep;`, `pub mod find_path;`, re-exports, updated doc comment
+- ✅ No changes to `fs.rs`, `read_file.rs`, `edit_file.rs`, `git.rs`, `terminal.rs`, `runner.rs`, `read_tool.rs`
+
+### Change Log
+
+- 2026-02-10: Story 8.3 implementation complete — GrepTool and FindPathTool created with full test suites (51 tests total), dependencies added, module registry updated
+
 ### File List
+
+| File | Change |
+|------|--------|
+| `Cargo.toml` | **MODIFIED** — Added `ignore = "0.4"` and `globset = "0.4"` to `[dependencies]` |
+| `src/tools/grep.rs` | **CREATED** — Full GrepTool implementation + 29 unit tests |
+| `src/tools/find_path.rs` | **CREATED** — Full FindPathTool implementation + 22 unit tests |
+| `src/tools/mod.rs` | **MODIFIED** — Added `pub mod grep;`, `pub mod find_path;`, `pub use grep::GrepTool;`, `pub use find_path::FindPathTool;`, updated doc comment |
