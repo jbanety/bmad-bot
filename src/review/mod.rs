@@ -74,6 +74,7 @@ use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
 use rig::message::Text;
 use rig::providers::{anthropic, openai};
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
+use rig::tools::think::ThinkTool;
 
 use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
@@ -82,7 +83,9 @@ use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::provider::{ProviderError, copilot_headers, resolve_api_key};
 use crate::supervisor::decisions::DecisionLog;
 use crate::supervisor::{AskSupervisor, EscalationSlot};
-use crate::tools::{GitTool, ListDirectoryTool, TerminalTool};
+use crate::tools::{
+    EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
+};
 use crate::watcher::StoryInfo;
 
 /// Maximum chat turns for a review session (safety net).
@@ -282,19 +285,25 @@ impl ReviewRunner {
                     })?;
 
                 let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, list_dir, terminal, supervisor) = self.create_tools(
-                    &project_root,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                )?;
+                let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
+                    self.create_tools(
+                        &project_root,
+                        escalation_slot.clone(),
+                        decision_log.clone(),
+                    )?;
 
                 let agent = client
                     .agent(model)
                     .preamble(&preamble)
                     .tool(git)
+                    .tool(read_file)
+                    .tool(edit_file)
+                    .tool(grep)
+                    .tool(find_path)
                     .tool(list_dir)
                     .tool(terminal)
                     .tool(supervisor)
+                    .tool(ThinkTool)
                     .build();
 
                 self.drive_review_session(&agent, story, escalation_slot, decision_log)
@@ -309,19 +318,25 @@ impl ReviewRunner {
                     })?;
 
                 let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, list_dir, terminal, supervisor) = self.create_tools(
-                    &project_root,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                )?;
+                let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
+                    self.create_tools(
+                        &project_root,
+                        escalation_slot.clone(),
+                        decision_log.clone(),
+                    )?;
 
                 let agent = client
                     .agent(model)
                     .preamble(&preamble)
                     .tool(git)
+                    .tool(read_file)
+                    .tool(edit_file)
+                    .tool(grep)
+                    .tool(find_path)
                     .tool(list_dir)
                     .tool(terminal)
                     .tool(supervisor)
+                    .tool(ThinkTool)
                     .build();
 
                 self.drive_review_session(&agent, story, escalation_slot, decision_log)
@@ -349,19 +364,25 @@ impl ReviewRunner {
                     .completions_api();
 
                 let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, list_dir, terminal, supervisor) = self.create_tools(
-                    &project_root,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                )?;
+                let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
+                    self.create_tools(
+                        &project_root,
+                        escalation_slot.clone(),
+                        decision_log.clone(),
+                    )?;
 
                 let agent = client
                     .agent(model)
                     .preamble(&preamble)
                     .tool(git)
+                    .tool(read_file)
+                    .tool(edit_file)
+                    .tool(grep)
+                    .tool(find_path)
                     .tool(list_dir)
                     .tool(terminal)
                     .tool(supervisor)
+                    .tool(ThinkTool)
                     .build();
 
                 self.drive_review_session(&agent, story, escalation_slot, decision_log)
@@ -406,14 +427,30 @@ impl ReviewRunner {
         ))
     }
 
-    /// Create the 4 tools for the rig agent: git, list_directory, terminal, ask_supervisor.
+    /// Create the 8 tools for the rig agent: 7 custom tools + ask_supervisor.
     fn create_tools(
         &self,
         project_root: &Path,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<(GitTool, ListDirectoryTool, TerminalTool, AskSupervisor), ReviewError> {
+    ) -> Result<
+        (
+            GitTool,
+            ReadFileTool,
+            EditFileTool,
+            GrepTool,
+            FindPathTool,
+            ListDirectoryTool,
+            TerminalTool,
+            AskSupervisor,
+        ),
+        ReviewError,
+    > {
         let git = GitTool::new(project_root.to_path_buf());
+        let read_file = ReadFileTool::new(project_root.to_path_buf());
+        let edit_file = EditFileTool::new(project_root.to_path_buf());
+        let grep = GrepTool::new(project_root.to_path_buf());
+        let find_path = FindPathTool::new(project_root.to_path_buf());
         let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
         let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
 
@@ -423,7 +460,9 @@ impl ReviewRunner {
                     reason: format!("Failed to create AskSupervisor: {e}"),
                 })?;
 
-        Ok((git, list_dir, terminal, supervisor))
+        Ok((
+            git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
+        ))
     }
 
     /// Drive the review session chat loop.

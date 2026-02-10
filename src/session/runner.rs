@@ -27,7 +27,9 @@ use crate::session::provider::{ProviderError, resolve_api_key};
 use crate::session::state::{ChatMessage, SessionState};
 use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
 use crate::supervisor::{AskSupervisor, EscalationSlot};
-use crate::tools::{GitTool, ListDirectoryTool, TerminalTool};
+use crate::tools::{
+    EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
+};
 use crate::watcher::StoryInfo;
 use futures::StreamExt;
 use git2::{BranchType, Repository};
@@ -879,13 +881,17 @@ impl SessionRunner {
             })?;
 
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-        let (git, list_dir, terminal, supervisor) =
+        let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
             self.create_tools(&project_root, escalation_slot, decision_log)?;
 
         let agent = client
             .agent(model)
             .preamble(&preamble)
             .tool(git)
+            .tool(read_file)
+            .tool(edit_file)
+            .tool(grep)
+            .tool(find_path)
             .tool(list_dir)
             .tool(terminal)
             .tool(supervisor)
@@ -894,7 +900,7 @@ impl SessionRunner {
 
         tracing::info!(
             action = "agent_built",
-            tools = 5,
+            tools = 9,
             model = %model,
             provider = "anthropic",
             "Rig agent built"
@@ -924,13 +930,17 @@ impl SessionRunner {
                 })?;
 
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-        let (git, list_dir, terminal, supervisor) =
+        let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
             self.create_tools(&project_root, escalation_slot, decision_log)?;
 
         let agent = client
             .agent(model)
             .preamble(&preamble)
             .tool(git)
+            .tool(read_file)
+            .tool(edit_file)
+            .tool(grep)
+            .tool(find_path)
             .tool(list_dir)
             .tool(terminal)
             .tool(supervisor)
@@ -939,7 +949,7 @@ impl SessionRunner {
 
         tracing::info!(
             action = "agent_built",
-            tools = 5,
+            tools = 9,
             model = %model,
             provider = "openai",
             "Rig agent built"
@@ -976,13 +986,17 @@ impl SessionRunner {
             .completions_api();
 
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-        let (git, list_dir, terminal, supervisor) =
+        let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
             self.create_tools(&project_root, escalation_slot, decision_log)?;
 
         let agent = client
             .agent(model)
             .preamble(&preamble)
             .tool(git)
+            .tool(read_file)
+            .tool(edit_file)
+            .tool(grep)
+            .tool(find_path)
             .tool(list_dir)
             .tool(terminal)
             .tool(supervisor)
@@ -991,7 +1005,7 @@ impl SessionRunner {
 
         tracing::info!(
             action = "agent_built",
-            tools = 5,
+            tools = 9,
             model = %model,
             provider = "github-copilot",
             "Rig agent built (Completions API)"
@@ -1012,8 +1026,18 @@ impl SessionRunner {
         Ok(r#"You are an AI agent operating autonomously in a BMAD workflow environment.
 
 ## Tools
-You have access to these tools: git, filesystem, terminal, ask_supervisor.
-Use them to read files, explore the project, run commands, and ask the supervisor when you need clarification.
+You have access to these tools: edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, plus a built-in think tool for reasoning.
+
+## Tool Usage Rules
+- **ALWAYS use `edit_file` with mode="edit"** to modify existing files. NEVER rewrite entire files unless creating a new file (mode="create") or a complete rewrite is truly necessary (mode="overwrite").
+- **Use `read_file` with line ranges** for large files. Read the outline first, then target specific sections with start_line/end_line.
+- **Use `grep` to find symbols** before editing — never assume file paths or line numbers.
+- **Use `find_path`** to discover files by name pattern when you don't know the full path.
+- **Use `list_directory`** to explore directory structure.
+- **Use `terminal`** for build commands, tests, mkdir, rm, and other shell operations.
+- **Use `ask_supervisor`** when you need clarification on requirements, architecture decisions, or are uncertain about the correct approach.
+- When `edit_file` fails (ambiguous match), use `read_file` with a line range to get more context, then retry with a larger `old_text` fragment.
+- When making multiple related changes in one file, batch them in a single `edit_file` call with multiple edit operations.
 
 ## Communication
 OVERRIDE: communication_language = English
@@ -1101,14 +1125,30 @@ OVERRIDE: communication_language = English
         Ok((rig_history, chat_history))
     }
 
-    /// Create the 4 tools for the rig agent: git, list_directory, terminal, ask_supervisor.
+    /// Create the 8 tools for the rig agent: 7 custom tools + ask_supervisor.
     fn create_tools(
         &self,
         project_root: &Path,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<(GitTool, ListDirectoryTool, TerminalTool, AskSupervisor), ProviderError> {
+    ) -> Result<
+        (
+            GitTool,
+            ReadFileTool,
+            EditFileTool,
+            GrepTool,
+            FindPathTool,
+            ListDirectoryTool,
+            TerminalTool,
+            AskSupervisor,
+        ),
+        ProviderError,
+    > {
         let git = GitTool::new(project_root.to_path_buf());
+        let read_file = ReadFileTool::new(project_root.to_path_buf());
+        let edit_file = EditFileTool::new(project_root.to_path_buf());
+        let grep = GrepTool::new(project_root.to_path_buf());
+        let find_path = FindPathTool::new(project_root.to_path_buf());
         let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
         let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
 
@@ -1119,7 +1159,9 @@ OVERRIDE: communication_language = English
                     reason: format!("Failed to create AskSupervisor: {e}"),
                 })?;
 
-        Ok((git, list_dir, terminal, supervisor))
+        Ok((
+            git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
+        ))
     }
 
     /// Extract the last `n` exchanges (user+assistant pairs) from chat history.

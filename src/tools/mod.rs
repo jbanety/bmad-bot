@@ -1,15 +1,12 @@
-//! Tool modules for the rig agent — git, terminal, read-file, edit-file, grep, find-path, and list-directory.
+//! Tool modules for the rig agent — 7 focused tools for autonomous development.
 //!
-//! This module exposes tools that the LLM agent uses during autonomous
-//! development sessions:
-//!
-//! - **[`GitTool`]** — Git operations (clone, checkout, branch, add, commit, push, diff, status, log) via `git2`
-//! - **[`TerminalTool`]** — Shell command execution via `tokio::process` with timeout protection
-//! - **[`ReadFileTool`]** — Read files with optional line ranges and automatic outline mode for large files
-//! - **[`EditFileTool`]** — Surgical search-replace edits, create new files, overwrite when justified
-//! - **[`GrepTool`]** — Regex-based content search across project files with .gitignore respect and pagination
-//! - **[`FindPathTool`]** — Glob-based file path discovery with .gitignore respect and pagination
-//! - **[`ListDirectoryTool`]** — List directory contents with entry types and file sizes, directories first
+//! - **[`EditFileTool`]** — Surgical search-replace edits, create new files, overwrite
+//! - **[`ReadFileTool`]** — Partial reading (line ranges) + automatic outline mode for large files
+//! - **[`GrepTool`]** — Regex search across project file contents with glob filtering
+//! - **[`FindPathTool`]** — Glob-based file path discovery
+//! - **[`ListDirectoryTool`]** — List directory contents with types and sizes
+//! - **[`GitTool`]** — Git operations via git2
+//! - **[`TerminalTool`]** — Shell command execution with timeout
 
 pub mod edit_file;
 pub mod find_path;
