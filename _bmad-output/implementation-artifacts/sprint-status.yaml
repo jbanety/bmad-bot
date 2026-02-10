@@ -105,8 +105,8 @@ development_status:
   7-10-response-analyzer-supervisor-rules-integration-tests: blocked # depends-on: 7-1
   epic-7-retrospective: optional
 
-  epic-8: backlog # depends-on: epic-4 (Story 4.1 as baseline)
-  8-1-read-file-tool-partial-reading-outline-mode: backlog
+  epic-8: in-progress # depends-on: epic-4 (Story 4.1 as baseline)
+  8-1-read-file-tool-partial-reading-outline-mode: ready-for-dev
   8-2-edit-file-tool-surgical-search-replace-editing: backlog # depends-on: 8-1
   8-3-grep-tool-find-path-tool-codebase-search-navigation: backlog # depends-on: 8-1
   8-4-list-directory-tool-fstool-removal-complete-migration: backlog # depends-on: 8-3
