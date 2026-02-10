@@ -40,6 +40,14 @@ use crate::watcher::StoryInfo;
 /// Maximum chat turns for a review session (safety net).
 const MAX_REVIEW_TURNS: usize = 100;
 
+/// Maximum number of full session retries for transient errors (e.g. malformed tool calls).
+///
+/// When the LLM sends malformed tool call arguments (e.g. two JSON objects concatenated),
+/// rig includes the broken tool call in conversation history, causing the API to reject
+/// all subsequent turns with 400 "invalid_tool_call_format". The only recovery is to
+/// retry with a fresh session (clean history). This constant limits how many times we retry.
+const MAX_SESSION_RETRIES: usize = 2;
+
 /// Terminal tool timeout in seconds for commands executed by the review agent.
 const TERMINAL_TIMEOUT_SECS: u64 = 30;
 
@@ -164,20 +172,48 @@ impl ReviewRunner {
     ///
     /// This method NEVER panics or returns an unhandled error. All failures
     /// are caught and returned as [`ReviewOutcome::Skipped`] or [`ReviewOutcome::Failed`].
+    ///
+    /// **Retry logic:** If the session fails due to a malformed tool call (rig/API bug
+    /// where concatenated JSON args poison the conversation history), the entire session
+    /// is retried from scratch with a clean agent and history.
     pub async fn run(&self, story: &StoryInfo) -> ReviewOutcome {
-        match self.run_inner(story).await {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                tracing::error!(
-                    action = "review_failed",
-                    error = %e,
-                    story_key = %story.story_key,
-                    "Code review failed — skipping"
-                );
-                ReviewOutcome::Skipped {
-                    reason: e.to_string(),
+        for attempt in 0..=MAX_SESSION_RETRIES {
+            match self.run_inner(story).await {
+                Ok(outcome) => return outcome,
+                Err(e) => {
+                    let error_str = e.to_string();
+                    let is_retryable = error_str.contains("invalid_tool_call_format")
+                        || error_str.contains("not in a valid JSON format");
+
+                    if is_retryable && attempt < MAX_SESSION_RETRIES {
+                        tracing::warn!(
+                            action = "review_retry",
+                            attempt = attempt + 1,
+                            max_retries = MAX_SESSION_RETRIES,
+                            error = %error_str,
+                            story_key = %story.story_key,
+                            "Malformed tool call poisoned history — retrying with fresh session"
+                        );
+                        continue;
+                    }
+
+                    tracing::error!(
+                        action = "review_failed",
+                        error = %e,
+                        story_key = %story.story_key,
+                        attempt = attempt + 1,
+                        "Code review failed — skipping"
+                    );
+                    return ReviewOutcome::Skipped {
+                        reason: e.to_string(),
+                    };
                 }
             }
+        }
+
+        // Unreachable — the loop always returns on the last attempt
+        ReviewOutcome::Skipped {
+            reason: "Review exhausted all retries".to_string(),
         }
     }
 

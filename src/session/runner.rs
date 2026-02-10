@@ -1730,7 +1730,7 @@ impl SessionRunner {
                 // config.yaml which may set communication_language to a non-English
                 // language, causing the agent to respond in that language. The response
                 // analyzer only matches English patterns, so we must enforce English here.
-                let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. DS";
+                let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [DS]";
                 state.add_user_message(initial_message);
 
                 let activation_turn = activation_chat_history.len() / 2;

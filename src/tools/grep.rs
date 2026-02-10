@@ -162,7 +162,7 @@ impl GrepTool {
 
         // Build directory walker
         let walker = WalkBuilder::new(&project_root)
-            .hidden(true)
+            .hidden(false)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
