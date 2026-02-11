@@ -1,6 +1,6 @@
 # Story 7.1: Integration Test Infrastructure & Fixtures
 
-Status: review
+Status: done
 
 ## Story
 
@@ -383,4 +383,13 @@ Claude claude-sonnet-4-20250514
 - `tests/integration/helpers/fixtures.rs` — NEW: make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo, make_test_session_state
 - `tests/integration/test_mocks.rs` — NEW: 21 self-verification tests for mock implementations
 - `tests/integration/test_fixtures.rs` — NEW: 16 self-verification tests for fixture builders
-- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED: 7-1 status → in-progress → review
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED: 7-1 status → done
+- `src/auth/github_copilot.rs` — MODIFIED: added Default impl (clippy fix)
+- `src/pipeline.rs` — MODIFIED: collapsed nested if (clippy fix)
+- `src/review/mod.rs` — MODIFIED: allowed type_complexity (clippy fix)
+- `src/session/analyzer.rs` — MODIFIED: added #[derive(Default)] (clippy fix)
+- `src/session/dev_agent.rs` — MODIFIED: collapsed nested if (clippy fix)
+- `src/session/runner.rs` — MODIFIED: allowed type_complexity, fixed imports (clippy fix)
+- `src/tools/grep.rs` — MODIFIED: collapsed nested if (clippy fix)
+- `src/tools/read_file.rs` — MODIFIED: fixed let_and_return (clippy fix)
+- `src/tools/terminal.rs` — MODIFIED: collapsed nested if (clippy fix)
