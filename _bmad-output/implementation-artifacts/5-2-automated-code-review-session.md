@@ -29,9 +29,9 @@ so that code quality issues are caught and fixed before I review the PR.
    **And** the agent commits the fixes in separate commits (distinct from dev agent commits) with full context
    **And** the agent's review report response is captured in `ReviewOutcome::Completed { report }`
 
-4. **Given** a PR is created by the orchestrator after the review
-   **When** the `ReviewOutcome::Completed` contains a report
-   **Then** the orchestrator posts the review report as a comment on the PR via `GitProvider::add_comment()`
+4. **Given** a PR was already created by the orchestrator before the review
+   **When** the review completes with `ReviewOutcome::Completed` containing a report
+   **Then** the orchestrator pushes any review fix commits to update the PR, then posts the review report as a comment on the PR via `GitProvider::add_comment()`
    **And** the review comment includes: summary of findings, severity levels, fixes applied, and any remaining concerns
 
 5. **Given** the review LLM provider is unavailable or errors out

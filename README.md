@@ -28,8 +28,8 @@ BMAD Bot is a Rust daemon that autonomously picks up user stories from a sprint 
   - [3. Pre-Development Preparation](#3-pre-development-preparation)
   - [4. Development Session](#4-development-session)
   - [5. Supervisor](#5-supervisor)
-  - [6. Code Review](#6-code-review)
-  - [7. Pull Request Creation](#7-pull-request-creation)
+  - [6. Pull Request Creation](#6-pull-request-creation)
+  - [7. Code Review](#7-code-review)
   - [8. Notifications](#8-notifications)
 - [Resilience & Recovery](#resilience--recovery)
 - [Project Structure](#project-structure)
@@ -50,24 +50,30 @@ BMAD Bot is a Rust daemon that autonomously picks up user stories from a sprint 
 │                                    Story Pipeline                   │
 │                                          │                          │
 │                          ┌───────────────┼───────────────┐          │
-│                          ▼               ▼               ▼          │
-│                    Branch Setup    Dev Session     Code Review       │
-│                          │          (LLM Agent)    (LLM Agent)      │
+│                          ▼               ▼               │          │
+│                    Branch Setup    Dev Session            │          │
+│                          │          (LLM Agent)          │          │
 │                          │               │               │          │
 │                          │               ▼               │          │
 │                          │          Supervisor           │          │
 │                          │        (Rules + LLM)          │          │
 │                          │               │               │          │
-│                          └───────────────┼───────────────┘          │
-│                                          ▼                          │
-│                                    PR Creation ──► Notifications    │
-│                                  (GitHub/GitLab)    (Telegram)      │
+│                          └───────────────┘               │          │
+│                                   │                      │          │
+│                                   ▼                      ▼          │
+│                             PR Creation ──►       Code Review       │
+│                           (GitHub/GitLab)          (LLM Agent)      │
+│                                   │                      │          │
+│                                   └──────────┬───────────┘          │
+│                                              ▼                      │
+│                                        Notifications                │
+│                                         (Telegram)                  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 1. The daemon polls `sprint-status.yaml` at a configurable interval
 2. Stories marked `ready-for-dev` with satisfied dependencies are picked up
-3. For each story: branch → LLM dev session → optional code review → PR → notify
+3. For each story: branch → LLM dev session → PR → optional code review → notify
 4. The daemon never stops — a single story failure doesn't halt the run
 
 ---
@@ -77,7 +83,7 @@ BMAD Bot is a Rust daemon that autonomously picks up user stories from a sprint 
 - **Autonomous Story Implementation** — LLM agents execute the full BMAD `dev-story` workflow with git, filesystem, and terminal tools
 - **Multi-Provider LLM Support** — Anthropic (Claude), OpenAI (GPT), and GitHub Copilot — configure different providers per role (dev, review, supervisor)
 - **Intelligent Supervisor** — Three-tier question handling: deterministic rule engine → LLM fallback with project context → human escalation
-- **Automated Code Review** — Optional adversarial review by a separate LLM session before PR creation
+- **Automated Code Review** — Optional adversarial review by a separate LLM session after PR creation, with findings posted as PR comments
 - **Dependency Resolution** — Topological sort with cascade blocking — stories are processed in the correct order
 - **Crash Recovery** — Write-Ahead Log (WAL) ensures no work is lost on unexpected shutdown
 - **Context Window Recovery** — Detects context limit errors, summarizes history, and bootstraps a fresh session to continue
@@ -97,7 +103,7 @@ BMAD Bot is built as a modular Rust daemon with clear separation of concerns:
 | `cli` | CLI interface (init, start, status, logs), daemon lifecycle |
 | `config` | YAML config loading, `.env` secrets, BMAD auto-discovery |
 | `watcher` | Sprint status polling, story detection, dependency resolution |
-| `pipeline` | Story lifecycle orchestration (session → review → PR → notify) |
+| `pipeline` | Story lifecycle orchestration (session → PR → review → notify) |
 | `session` | Rig agent construction, chat loop, WAL state, branch management |
 | `supervisor` | Rule engine + LLM fallback + human escalation for agent questions |
 | `review` | Adversarial code review via separate LLM session |
@@ -374,19 +380,21 @@ When the agent encounters questions or decision points, it calls the `ask_superv
 
 Every supervisor decision is logged with the question, answer, reasoning, and source.
 
-### 6. Code Review
+### 6. Pull Request Creation
 
-When `code_review_enabled: true`, a **separate LLM session** runs the BMAD adversarial code review workflow (`"CR"` command). The review agent:
-- Examines all changes made by the dev agent
-- Can commit fixes in a separate commit
-- Produces a review report for the PR
-
-### 7. Pull Request Creation
-
-The daemon creates a PR on GitHub (via [octocrab](https://crates.io/crates/octocrab)) or GitLab (via REST API) with:
+The daemon pushes the story branch to the remote, then creates a PR on GitHub (via [octocrab](https://crates.io/crates/octocrab)) or GitLab (via REST API) with:
 - An agent-written PR title and description
 - A "Supervisor Decisions" section listing all decisions made during the session
 - For failed/escalated stories: partial code with a description of the failure
+
+The PR is immediately visible for human review, even when automated code review is disabled.
+
+### 7. Code Review
+
+When `code_review_enabled: true`, a **separate LLM session** runs the BMAD adversarial code review workflow (`"CR"` command) on the already-created PR. The review agent:
+- Examines all changes made by the dev agent
+- Can commit fixes in a separate commit (pushed to update the PR)
+- Produces a review report posted as a comment on the PR
 
 ### 8. Notifications
 

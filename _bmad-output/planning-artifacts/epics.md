@@ -862,7 +862,7 @@ So that the daemon inherits the user's full git configuration (credential manage
 
 ## Epic 5: Code Review & Pull Request Delivery
 
-The daemon optionally launches a code review via a separate LLM after the dev session, with fixes in separate commits and review posted as a PR comment. It creates a Pull Request on GitHub or GitLab with an agent-written description including a Supervisor Decisions section. PRs are also created for blocked/failed stories with partial code and failure context. After this epic, the user wakes up to PRs ready for human review.
+The daemon creates a Pull Request on GitHub or GitLab with an agent-written description immediately after the dev session, including a Supervisor Decisions section. The PR is visible for human review right away. It then optionally launches a code review via a separate LLM, with fixes in separate commits pushed to update the PR and review posted as a PR comment. PRs are also created for blocked/failed stories with partial code and failure context. After this epic, the user wakes up to PRs ready for human review.
 
 ### Story 5.1: Git Provider Trait & GitHub PR Creation
 
@@ -917,9 +917,9 @@ So that code quality issues are caught and fixed before I review.
 **And** the agent commits the fixes in separate commits (distinct from dev agent commits) with full context
 **And** the agent's review report response is captured in `ReviewOutcome::Completed { report }`
 
-**Given** a PR is created by the orchestrator after the review
-**When** the `ReviewOutcome::Completed` contains a report
-**Then** the orchestrator posts the review report as a comment on the PR via `GitProvider::add_comment()`
+**Given** a PR was already created by the orchestrator before the review
+**When** the review completes with `ReviewOutcome::Completed` containing a report
+**Then** the orchestrator pushes any review fix commits to update the PR, then posts the review report as a comment on the PR via `GitProvider::add_comment()`
 **And** the review comment includes: summary of findings, severity levels, fixes applied, and any remaining concerns
 
 **Given** the review LLM provider is unavailable or errors out
@@ -1248,42 +1248,44 @@ So that I'm confident the daemon picks the right stories in the right order.
 
 As a developer,
 I want integration tests that verify the full `StoryPipeline.process_story()` flow with mocked dependencies,
-So that I'm confident the orchestration logic correctly chains session → review → PR → notification.
+So that I'm confident the orchestration logic correctly chains session → PR → review → notification.
 
 **Acceptance Criteria:**
 
 **Given** a `StoryPipeline` constructed with:
-- MockSessionRunner returning `SessionOutcome::Completed`
-- MockReviewRunner returning `ReviewOutcome::Completed { report: "LGTM" }`
+- MockDevRunner returning `SessionOutcome::Completed`
+- MockCodeReviewer returning `ReviewOutcome::Completed { report: "LGTM" }`
 - MockGitProvider returning `Ok(PrInfo { id: "42", url: "https://...", number: 42 })`
 - MockNotifier capturing notifications
 **When** `process_story()` is called with a valid `StoryInfo`
 **Then** the pipeline returns `PipelineResult` with `status: Completed` and `pr_url: Some("https://...")`
+**And** MockGitProvider received a `create_pr` call **before** MockCodeReviewer was called
 **And** MockNotifier captured exactly one story notification with the correct story key and PR link
 **And** MockGitProvider received a `create_pr` call with a title matching `feat({story_key}): ...`
 **And** MockGitProvider received an `add_comment` call with the review report as body
 
-**Given** the same setup but MockSessionRunner returns `SessionOutcome::Failed { error: "LLM timeout" }`
+**Given** the same setup but MockDevRunner returns `SessionOutcome::Failed { error: "LLM timeout" }`
 **When** `process_story()` is called
 **Then** the pipeline returns `PipelineResult` with `status: Failed` and `error_detail: Some("LLM timeout")`
 **And** a PR is still created (partial work PR) with title containing `[NEEDS REVIEW]`
 **And** MockNotifier captured a notification with failure status
 
-**Given** the same setup but MockSessionRunner returns `SessionOutcome::Escalated { question: "..." }`
+**Given** the same setup but MockDevRunner returns `SessionOutcome::Escalated { question: "..." }`
 **When** `process_story()` is called
 **Then** the pipeline returns `PipelineResult` with `status: Blocked`
-**And** a PR is created with the escalation context in the description
+**And** NO PR is created (`create_pr` not called — escalation skips PR)
 **And** MockNotifier captured a notification with blocked/escalated status
 
 **Given** a `StoryPipeline` with `code_review_enabled: false` in config
 **When** `process_story()` is called and session succeeds
-**Then** MockReviewRunner is NOT called (review skipped)
-**And** PR is created without a review comment
+**Then** MockCodeReviewer is NOT called (review skipped)
+**And** PR is created without a review comment (`add_comment` not called)
 **And** the pipeline result is still `Completed`
 
 **Given** a `StoryPipeline` where MockGitProvider's `create_pr` returns an error
 **When** `process_story()` is called and session succeeds
 **Then** the pipeline returns `PipelineResult` with `pr_url: None` and an error detail about PR creation failure
+**And** MockCodeReviewer is NOT called (no PR means no point running review)
 **And** MockNotifier still receives a notification (notification is best-effort, never blocks)
 
 **Dependencies:** Story 7.1

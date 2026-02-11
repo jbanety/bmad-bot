@@ -6,7 +6,7 @@ Status: ready-for-dev
 
 As a developer,
 I want integration tests that verify the full `StoryPipeline.process_story()` flow with mocked dependencies,
-So that I'm confident the orchestration logic correctly chains session → review → PR → notification.
+So that I'm confident the orchestration logic correctly chains session → PR → review → notification.
 
 ## Acceptance Criteria
 
@@ -17,9 +17,10 @@ So that I'm confident the orchestration logic correctly chains session → revie
    - MockNotifier capturing notifications
    **When** `process_story()` is called with a valid `StoryInfo`
    **Then** the pipeline returns `PipelineResult` with `status: Completed` and `pr_url: Some("https://...")`
-   **And** MockNotifier captured exactly one story notification with the correct story key and PR link
+   **And** MockGitProvider received a `create_pr` call **before** MockCodeReviewer was called
    **And** MockGitProvider received a `create_pr` call with a title matching `feat({story_key}): ...`
    **And** MockGitProvider received an `add_comment` call with the review report as body
+   **And** MockNotifier captured exactly one story notification with the correct story key and PR link
 
 2. **Given** the same setup but MockDevRunner returns `SessionOutcome::Failed { error: "LLM timeout" }`
    **When** `process_story()` is called
@@ -35,18 +36,20 @@ So that I'm confident the orchestration logic correctly chains session → revie
 
 4. **Given** a `StoryPipeline` with `code_review_enabled: false` in config
    **When** `process_story()` is called and session succeeds
-   **Then** MockCodeReviewer is NOT called (review skipped)
-   **And** PR is created without a review comment (`add_comment` not called)
+   **Then** PR is created immediately after push (no review step)
+   **And** MockCodeReviewer is NOT called (review skipped)
+   **And** MockGitProvider does NOT receive `add_comment` (no review report to post)
    **And** the pipeline result is still `Completed`
 
 5. **Given** a `StoryPipeline` where MockGitProvider's `create_pr` returns an error
    **When** `process_story()` is called and session succeeds
    **Then** the pipeline returns `PipelineResult` with `pr_url: None` and an error detail about PR creation failure
+   **And** MockCodeReviewer is NOT called (no PR means no point running review)
    **And** MockNotifier still receives a notification (notification is best-effort, never blocks)
 
 6. **Given** a `StoryPipeline` where MockCodeReviewer returns `ReviewOutcome::Failed`
    **When** `process_story()` is called and session succeeds
-   **Then** the pipeline still creates a PR (review failure is non-blocking)
+   **Then** the PR already exists (created before review ran)
    **And** MockGitProvider does NOT receive `add_comment` (no review report to post)
    **And** the pipeline result is `Completed`
 
@@ -403,25 +406,27 @@ pub fn build_pr_title(story_key: &str, story_title: &str, is_failure: bool) -> S
 
 1. Calls `self.dev_runner.run_dev_session(story)` → `SessionOutcome`
 2. **If `Completed`:**
-   a. If `config.code_review_enabled` → calls `self.code_reviewer.run_review(story)`
-      - `ReviewOutcome::Completed { report }` → stores report for PR comment
-      - `ReviewOutcome::Failed` → logs warning, no report (continues to PR)
-      - `ReviewOutcome::Skipped` → logs info, no report (continues to PR)
+   a. Pushes story branch to remote via `push_branch()`
    b. Builds PR title: `"feat({story_key}): {title}"`
    c. Calls `self.git_provider.create_pr(params)`
-   d. If PR ok AND review report present → calls `self.git_provider.add_comment(pr_id, report)` (failure logged, non-blocking)
-   e. Calls `self.notifier.notify_story()` (failure logged, non-blocking)
-   f. Returns `PipelineResult { status: Completed, pr_url: Some(url) }`
-   g. If PR creation fails → returns `{ status: Error, pr_url: None, error_detail: "PR creation failed: ..." }`
+   d. If PR creation fails → returns `{ status: Error, pr_url: None, error_detail: "PR creation failed: ..." }` (review is skipped)
+   e. If `config.code_review_enabled` → calls `self.code_reviewer.run_review(story)`
+      - `ReviewOutcome::Completed { report }` → stores report, pushes review fix commits via second `push_branch()`
+      - `ReviewOutcome::Failed` → logs warning, no report (PR already exists)
+      - `ReviewOutcome::Skipped` → logs info, no report (PR already exists)
+   f. If review report present → calls `self.git_provider.add_comment(pr_id, report)` (failure logged, non-blocking)
+   g. Calls `self.notifier.notify_story()` (failure logged, non-blocking)
+   h. Returns `PipelineResult { status: Completed, pr_url: Some(url) }`
 3. **If `Escalated`:**
    a. Does **NOT** create a PR (no `create_pr` call)
    b. Calls `self.notifier.notify_story()` with `StoryStatus::Blocked`
    c. Returns `{ status: Blocked, pr_url: None, error_detail: "Escalated: {question} — {reason}" }`
 4. **If `Failed`:**
-   a. Builds failure PR title: `"wip({story_key}): {title} [NEEDS REVIEW]"`
-   b. Calls `self.git_provider.create_pr()` (partial work PR)
-   c. Notifies with `StoryStatus::Error`
-   d. Returns `{ status: Error, pr_url: Some(url) or None, error_detail: Some(error) }`
+   a. Pushes partial work branch via `push_branch()`
+   b. Builds failure PR title: `"wip({story_key}): {title} [NEEDS REVIEW]"`
+   c. Calls `self.git_provider.create_pr()` (partial work PR)
+   d. Notifies with `StoryStatus::Error`
+   e. Returns `{ status: Error, pr_url: Some(url) or None, error_detail: Some(error) }`
 
 #### `story_id` Extraction Logic
 
