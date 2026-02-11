@@ -1,19 +1,21 @@
 #![deny(clippy::all)]
 #![warn(dead_code)] // FIXME: Change to #![deny(dead_code)] once all modules have real implementations
 
-mod auth;
 mod cli;
-mod config;
-mod git_provider;
-mod llm_context;
-mod llm_logging;
-mod notifier;
-mod pipeline;
-mod review;
-mod session;
-mod supervisor;
-mod tools;
-mod watcher;
+
+// Re-export library crate modules so cli can use crate:: paths
+pub use bmad_bot::auth;
+pub use bmad_bot::config;
+pub use bmad_bot::git_provider;
+pub use bmad_bot::llm_context;
+pub use bmad_bot::llm_logging;
+pub use bmad_bot::notifier;
+pub use bmad_bot::pipeline;
+pub use bmad_bot::review;
+pub use bmad_bot::session;
+pub use bmad_bot::supervisor;
+pub use bmad_bot::tools;
+pub use bmad_bot::watcher;
 
 use anyhow::Result;
 use clap::Parser;
