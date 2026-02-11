@@ -4,9 +4,9 @@ use crate::helpers::mocks::*;
 
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::Notifier;
+use bmad_bot::notifier::{RunSummary, StoryNotification, StoryStatus};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
-use bmad_bot::notifier::{StoryNotification, StoryStatus, RunSummary};
 
 use crate::helpers::fixtures::make_test_story;
 
@@ -74,10 +74,7 @@ async fn test_mock_git_provider_tracks_calls() {
         .await
         .expect("should succeed");
 
-    provider
-        .get_pr_url("1")
-        .await
-        .expect("should succeed");
+    provider.get_pr_url("1").await.expect("should succeed");
 
     let calls = provider.calls();
     assert_eq!(calls.len(), 3);
@@ -119,8 +116,7 @@ async fn test_mock_git_provider_add_comment_configurable() {
 
 #[tokio::test]
 async fn test_mock_git_provider_get_pr_url_configurable() {
-    let provider = MockGitProvider::new()
-        .with_get_pr_url(Ok("https://custom.url/pr/99".into()));
+    let provider = MockGitProvider::new().with_get_pr_url(Ok("https://custom.url/pr/99".into()));
 
     let url = provider.get_pr_url("99").await.expect("should succeed");
     assert_eq!(url, "https://custom.url/pr/99");

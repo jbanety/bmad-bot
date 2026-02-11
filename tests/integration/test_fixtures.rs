@@ -28,10 +28,15 @@ fn test_make_test_config_uses_provided_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config = make_test_config(tmp.path());
 
-    assert!(config
-        .bmad_paths
-        .implementation_artifacts
-        .contains(&tmp.path().file_name().unwrap().to_string_lossy().to_string()));
+    assert!(
+        config.bmad_paths.implementation_artifacts.contains(
+            &tmp.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        )
+    );
 }
 
 #[test]
@@ -61,16 +66,20 @@ fn test_make_test_secrets_all_fields_populated() {
 #[test]
 fn test_make_test_secrets_contain_do_not_use_marker() {
     let secrets = make_test_secrets();
-    assert!(secrets
-        .anthropic_api_key
-        .as_ref()
-        .unwrap()
-        .contains("DO-NOT-USE"));
-    assert!(secrets
-        .github_token
-        .as_ref()
-        .unwrap()
-        .contains("DO-NOT-USE"));
+    assert!(
+        secrets
+            .anthropic_api_key
+            .as_ref()
+            .unwrap()
+            .contains("DO-NOT-USE")
+    );
+    assert!(
+        secrets
+            .github_token
+            .as_ref()
+            .unwrap()
+            .contains("DO-NOT-USE")
+    );
 }
 
 // ---------------------------------------------------------------------------

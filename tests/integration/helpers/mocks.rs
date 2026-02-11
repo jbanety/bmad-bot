@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
-use bmad_bot::session::SessionOutcome;
 use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::SessionOutcome;
 use bmad_bot::supervisor::decisions::DecisionRecord;
 use bmad_bot::watcher::StoryInfo;
 
@@ -50,7 +50,7 @@ impl MockGitProvider {
             }))),
             add_comment_result: Arc::new(Mutex::new(Ok(()))),
             get_pr_url_result: Arc::new(Mutex::new(Ok(
-                "https://github.com/test/test/pull/1".into(),
+                "https://github.com/test/test/pull/1".into()
             ))),
             calls: Arc::new(Mutex::new(Vec::new())),
         }

@@ -47,11 +47,7 @@ pub fn make_test_config(dir: &Path) -> BotConfig {
             },
         },
         bmad_paths: BmadPathsConfig {
-            project_root: dir
-                .parent()
-                .unwrap_or(dir)
-                .display()
-                .to_string(),
+            project_root: dir.parent().unwrap_or(dir).display().to_string(),
             output_folder: dir.display().to_string(),
             planning_artifacts: dir.display().to_string(),
             implementation_artifacts: dir.display().to_string(),
