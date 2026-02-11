@@ -52,45 +52,45 @@ story_location: "{project-root}/_bmad-output/implementation-artifacts"
 
 development_status:
   epic-1: in-progress
-  1-1-project-scaffolding-configuration-validation: review
-  1-2-cli-framework-daemon-lifecycle: review
-  1-3-interactive-init-command: review
-  1-4-status-logs-bmad-discovery: review
-  1-5-git-remote-auto-detection-init: review
-  1-6-github-copilot-oauth-device-flow-authentication: review
+  1-1-project-scaffolding-configuration-validation: done
+  1-2-cli-framework-daemon-lifecycle: done
+  1-3-interactive-init-command: done
+  1-4-status-logs-bmad-discovery: done
+  1-5-git-remote-auto-detection-init: done
+  1-6-github-copilot-oauth-device-flow-authentication: done
   epic-1-retrospective: optional
 
   epic-2: in-progress
-  2-1-sprint-status-polling-story-detection: review
-  2-2-dependency-resolution-execution-order: review
-  2-3-cascade-blocking: review
+  2-1-sprint-status-polling-story-detection: done
+  2-2-dependency-resolution-execution-order: done
+  2-3-cascade-blocking: done
   epic-2-retrospective: optional
 
   epic-3: in-progress
-  3-1-supervisor-tool-skeleton-rule-engine: review
-  3-2-llm-fallback-with-project-context: review
-  3-3-human-escalation: review
-  3-4-decision-logging-traceability: review
+  3-1-supervisor-tool-skeleton-rule-engine: done
+  3-2-llm-fallback-with-project-context: done
+  3-3-human-escalation: done
+  3-4-decision-logging-traceability: done
   epic-3-retrospective: optional
 
   epic-4: in-progress
-  4-1-rig-tools-implementation-git-filesystem-terminal: review
-  4-2-agent-session-setup-chat-loop: review # depends-on: 4-1
-  4-3-pre-development-preparation-branch-management: review # depends-on: 4-2
-  4-4-migrate-git-operations-to-cli: review
+  4-1-rig-tools-implementation-git-filesystem-terminal: done
+  4-2-agent-session-setup-chat-loop: done # depends-on: 4-1
+  4-3-pre-development-preparation-branch-management: done # depends-on: 4-2
+  4-4-migrate-git-operations-to-cli: done
   epic-4-retrospective: optional
 
   epic-5: in-progress
-  5-1-git-provider-trait-github-pr-creation: review
-  5-2-automated-code-review-session: review
-  5-3-gitlab-merge-request-support: review
+  5-1-git-provider-trait-github-pr-creation: done
+  5-2-automated-code-review-session: done
+  5-3-gitlab-merge-request-support: done
   epic-5-retrospective: optional
 
   epic-6: in-progress
-  6-1-telegram-notifications: review
-  6-2-http-retry-error-resilience: review
-  6-3-crash-recovery-via-session-wal: review
-  6-4-context-window-limit-recovery: review
+  6-1-telegram-notifications: done
+  6-2-http-retry-error-resilience: done
+  6-3-crash-recovery-via-session-wal: done
+  6-4-context-window-limit-recovery: done
   epic-6-retrospective: optional
 
   epic-7: in-progress # was blocked by epic-8 — epic-8 now in review, tooling surface finalized
@@ -107,9 +107,9 @@ development_status:
   epic-7-retrospective: optional
 
   epic-8: in-progress # depends-on: epic-4 (Story 4.1 as baseline)
-  8-1-read-file-tool-partial-reading-outline-mode: review
-  8-2-edit-file-tool-surgical-search-replace-editing: review # depends-on: 8-1
-  8-3-grep-tool-find-path-tool-codebase-search-navigation: review # depends-on: 8-1
-  8-4-list-directory-tool-fstool-removal-complete-migration: review # depends-on: 8-3
-  8-5-agent-integration-preamble-registration-session-update: review # depends-on: 8-4
+  8-1-read-file-tool-partial-reading-outline-mode: done
+  8-2-edit-file-tool-surgical-search-replace-editing: done # depends-on: 8-1
+  8-3-grep-tool-find-path-tool-codebase-search-navigation: done # depends-on: 8-1
+  8-4-list-directory-tool-fstool-removal-complete-migration: done # depends-on: 8-3
+  8-5-agent-integration-preamble-registration-session-update: done # depends-on: 8-4
   epic-8-retrospective: optional
