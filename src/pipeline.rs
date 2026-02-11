@@ -513,6 +513,10 @@ impl StoryPipeline {
     /// Send a notification for a single story result (non-blocking).
     /// Push a local branch to the remote using git CLI.
     ///
+    /// Uses `--force-with-lease` because story branches are single-developer
+    /// branches that may be rebased/reset between daemon runs. This is safe
+    /// and avoids non-fast-forward rejections from previous attempts.
+    ///
     /// Authentication is inherited from the user's git configuration (SSH agent,
     /// credential helper, osxkeychain, etc.). No HTTPS URL construction or
     /// credential callback needed.
@@ -522,7 +526,7 @@ impl StoryPipeline {
         let output = tokio::process::Command::new("git")
             .arg("-C")
             .arg(&repo_path)
-            .args(["push", "origin", branch])
+            .args(["push", "--force-with-lease", "origin", branch])
             .output()
             .await
             .map_err(|e| PipelineError::Init {
