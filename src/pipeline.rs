@@ -311,7 +311,7 @@ impl StoryPipeline {
                     );
                 }
 
-                // Phase 7 — Mark story done in sprint-status.yaml (best-effort)
+                // Phase 7 — Mark story done in sprint-status.yaml, commit & push (best-effort)
                 let sprint_status_path =
                     Path::new(&self.config.bmad_paths.implementation_artifacts)
                         .join("sprint-status.yaml");
@@ -325,6 +325,51 @@ impl StoryPipeline {
                             error = %e,
                             "Failed to mark story as done in sprint-status.yaml"
                         );
+                    } else {
+                        // Commit & push the status change so it lands in the PR
+                        let repo_path = &self.config.bmad_paths.project_root;
+                        let commit_msg = format!("chore(sprint-status): mark {story_key} done");
+                        let git_add = tokio::process::Command::new("git")
+                            .arg("-C")
+                            .arg(repo_path)
+                            .args([
+                                "add",
+                                sprint_status_path.to_str().unwrap_or("sprint-status.yaml"),
+                            ])
+                            .output()
+                            .await;
+                        let add_ok = git_add.as_ref().is_ok_and(|o| o.status.success());
+                        if add_ok {
+                            let git_commit = tokio::process::Command::new("git")
+                                .arg("-C")
+                                .arg(repo_path)
+                                .args(["commit", "-m", &commit_msg])
+                                .output()
+                                .await;
+                            let commit_ok = git_commit.as_ref().is_ok_and(|o| o.status.success());
+                            if commit_ok {
+                                if let Err(e) = self.push_branch(&branch).await {
+                                    tracing::warn!(
+                                        action = "sprint_status_push_failed",
+                                        story_key = %story_key,
+                                        error = %e,
+                                        "Failed to push sprint-status commit — PR may not reflect done status"
+                                    );
+                                }
+                            } else {
+                                tracing::warn!(
+                                    action = "sprint_status_commit_failed",
+                                    story_key = %story_key,
+                                    "Failed to commit sprint-status.yaml update"
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                action = "sprint_status_add_failed",
+                                story_key = %story_key,
+                                "Failed to git add sprint-status.yaml"
+                            );
+                        }
                     }
                 }
 
