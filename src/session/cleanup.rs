@@ -198,15 +198,17 @@ pub async fn preserve_partial_work(repo_path: &Path, story_key: &str, question: 
 /// # Arguments
 /// - `sprint_status_path` — path to `sprint-status.yaml`
 /// - `story_key` — the story key to update (e.g., "3-3-human-escalation")
+/// - `new_status` — the target status value (e.g., "done", "needs-clarification")
 ///
 /// # Errors
 /// Returns [`SessionError::StateFileFailed`] if:
 /// - The file cannot be read
 /// - The story key is not found in the file
 /// - The file cannot be written back
-pub async fn mark_story_needs_clarification(
+pub async fn update_story_status(
     sprint_status_path: &Path,
     story_key: &str,
+    new_status: &str,
 ) -> Result<(), SessionError> {
     let content = tokio::fs::read_to_string(sprint_status_path)
         .await
@@ -214,7 +216,8 @@ pub async fn mark_story_needs_clarification(
             reason: format!("Failed to read sprint-status: {e}"),
         })?;
 
-    // Pattern: "  story-key: current-status" → "  story-key: needs-clarification"
+    // Pattern: "  story-key: current-status" → "  story-key: <new_status>"
+    // Preserves trailing comments (e.g., "# depends-on: 1-1")
     let pattern = format!(r"(?m)(^\s*{}\s*:\s*)\S+", regex::escape(story_key));
     let re = regex::Regex::new(&pattern).map_err(|e| SessionError::StateFileFailed {
         reason: format!("Invalid regex for story key: {e}"),
@@ -226,7 +229,8 @@ pub async fn mark_story_needs_clarification(
         });
     }
 
-    let updated = re.replace(&content, "${1}needs-clarification").to_string();
+    let replacement = format!("${{1}}{new_status}");
+    let updated = re.replace(&content, replacement.as_str()).to_string();
 
     tokio::fs::write(sprint_status_path, &updated)
         .await
@@ -237,11 +241,21 @@ pub async fn mark_story_needs_clarification(
     tracing::info!(
         action = "story_status_update",
         story_id = %story_key,
-        new_status = "needs-clarification",
-        "Story marked as needs-clarification in sprint-status.yaml"
+        new_status = %new_status,
+        "Story status updated in sprint-status.yaml"
     );
 
     Ok(())
+}
+
+/// Convenience wrapper: marks a story as `needs-clarification` in sprint-status.yaml.
+///
+/// See [`update_story_status`] for full documentation.
+pub async fn mark_story_needs_clarification(
+    sprint_status_path: &Path,
+    story_key: &str,
+) -> Result<(), SessionError> {
+    update_story_status(sprint_status_path, story_key, "needs-clarification").await
 }
 
 #[cfg(test)]
@@ -294,6 +308,110 @@ development_status:
 
         let content = tokio::fs::read_to_string(&path).await.expect("read");
         assert!(content.contains("3-3-human-escalation: needs-clarification"));
+    }
+
+    // -----------------------------------------------------------------------
+    // update_story_status tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_update_story_status_to_done() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status())
+            .await
+            .expect("write");
+
+        update_story_status(&path, "1-2-cli-framework", "done")
+            .await
+            .expect("should succeed");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("1-2-cli-framework: done"));
+    }
+
+    #[tokio::test]
+    async fn test_update_story_status_preserves_other_statuses() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status())
+            .await
+            .expect("write");
+
+        update_story_status(&path, "2-1-polling", "done")
+            .await
+            .expect("should succeed");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("2-1-polling: done"));
+        assert!(content.contains("1-1-scaffolding: done"));
+        assert!(content.contains("1-2-cli-framework: review"));
+        assert!(content.contains("2-2-deps: ready-for-dev"));
+        assert!(content.contains("3-3-human-escalation: in-progress"));
+    }
+
+    #[tokio::test]
+    async fn test_update_story_status_preserves_comments() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status())
+            .await
+            .expect("write");
+
+        update_story_status(&path, "3-3-human-escalation", "done")
+            .await
+            .expect("should succeed");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("# STATUS DEFINITIONS:"));
+        assert!(content.contains("# Story Status:"));
+    }
+
+    #[tokio::test]
+    async fn test_update_story_status_missing_key_returns_error() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status())
+            .await
+            .expect("write");
+
+        let result = update_story_status(&path, "99-99-nonexistent", "done").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let display = format!("{err}");
+        assert!(display.contains("99-99-nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_update_story_status_missing_file_returns_error() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("nonexistent.yaml");
+
+        let result = update_story_status(&path, "3-3-human-escalation", "done").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let display = format!("{err}");
+        assert!(display.contains("Failed to read sprint-status"));
+    }
+
+    #[tokio::test]
+    async fn test_update_story_status_preserves_trailing_comments() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        let content = r#"development_status:
+  epic-1: in-progress
+  1-1-scaffolding: review # depends-on: nothing
+  1-2-cli: blocked # depends-on: 1-1
+"#;
+        tokio::fs::write(&path, content).await.expect("write");
+
+        update_story_status(&path, "1-1-scaffolding", "done")
+            .await
+            .expect("should succeed");
+
+        let updated = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(updated.contains("1-1-scaffolding: done # depends-on: nothing"));
+        assert!(updated.contains("1-2-cli: blocked # depends-on: 1-1"));
     }
 
     #[tokio::test]

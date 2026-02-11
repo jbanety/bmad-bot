@@ -1,13 +1,13 @@
 //! Story pipeline orchestrator — daemon Layer 3 error handling and story lifecycle.
 //!
 //! The [`StoryPipeline`] struct encapsulates the full story processing pipeline:
-//! session → optional review → push → PR creation → notification. It implements the
+//! session → push → PR creation → optional review → notification. It implements the
 //! "never stop the run" principle: no single story failure halts the daemon.
 //!
 //! Use [`StoryPipeline::new`] to construct, then [`process_eligible_stories`] to
 //! run a batch of stories from the watcher.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::{BotConfig, BotSecrets};
@@ -19,6 +19,7 @@ use crate::notifier::{Notifier, RunSummary, StoryNotification, StoryStatus, crea
 use crate::review::ReviewOutcome;
 use crate::review::ReviewRunner;
 use crate::session::SessionOutcome;
+use crate::session::cleanup::update_story_status;
 use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
 use crate::supervisor::decisions::format_pr_decisions_section;
@@ -310,7 +311,24 @@ impl StoryPipeline {
                     );
                 }
 
-                // Phase 7 — Notify
+                // Phase 7 — Mark story done in sprint-status.yaml (best-effort)
+                let sprint_status_path =
+                    Path::new(&self.config.bmad_paths.implementation_artifacts)
+                        .join("sprint-status.yaml");
+                if sprint_status_path.exists() {
+                    if let Err(e) =
+                        update_story_status(&sprint_status_path, &story_key, "done").await
+                    {
+                        tracing::warn!(
+                            action = "sprint_status_update_failed",
+                            story_key = %story_key,
+                            error = %e,
+                            "Failed to mark story as done in sprint-status.yaml"
+                        );
+                    }
+                }
+
+                // Phase 8 — Notify
                 let result = PipelineResult {
                     story_key: story_key.clone(),
                     status: StoryStatus::Completed,
