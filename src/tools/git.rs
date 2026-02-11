@@ -1,8 +1,8 @@
-//! Git operations tool — exposes git (branch, checkout, commit, push) to the rig agent via `git2`.
+//! Git operations tool — exposes git (branch, checkout, commit, push) to the rig agent via Git CLI.
 //!
 //! Implements the rig `Tool` trait with 9 git actions: clone, checkout, branch_create,
-//! add, commit, push, diff, status, log. All operations use `git2` (libgit2 bindings).
-//! Network operations (clone, push) are wrapped in `tokio::task::spawn_blocking`.
+//! add, commit, push, diff, status, log. All operations use `tokio::process::Command`
+//! to invoke the `git` CLI as a subprocess.
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -12,10 +12,9 @@ use std::path::PathBuf;
 
 /// Git operations tool for the rig agent.
 ///
-/// Exposes 9 git actions via `git2`: clone, checkout, branch_create, add, commit,
-/// push, diff, status, log. The struct holds only configuration — the repository
-/// is opened fresh on each `call()` invocation for `Serialize`/`Deserialize` and
-/// `Send + Sync` safety.
+/// Exposes 9 git actions via Git CLI subprocess: clone, checkout, branch_create, add, commit,
+/// push, diff, status, log. The struct holds only configuration — git is invoked fresh
+/// on each `call()` invocation via `tokio::process::Command`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitTool {
     /// Absolute path to the git repository root.
@@ -55,13 +54,15 @@ pub enum GitToolError {
         action: String,
     },
 
-    /// Wraps git2 errors with action context.
-    #[error("Git {action} failed: {reason}")]
-    GitError {
+    /// Git CLI command failed with non-zero exit code.
+    #[error("Git {action} failed (exit code {exit_code}): {stderr}")]
+    CommandFailed {
         /// The git action that failed.
         action: String,
-        /// Description of the git2 error.
-        reason: String,
+        /// The stderr output from the git command.
+        stderr: String,
+        /// The exit code from the git process.
+        exit_code: i32,
     },
 
     /// Required argument not provided.
@@ -80,10 +81,10 @@ pub enum GitToolError {
         reason: String,
     },
 
-    /// `spawn_blocking` join failure.
-    #[error("Task join error: {reason}")]
-    TaskJoinError {
-        /// Description of the join error.
+    /// I/O error when spawning git subprocess.
+    #[error("Failed to execute git: {reason}")]
+    IoError {
+        /// Description of the I/O error.
         reason: String,
     },
 }
@@ -94,384 +95,197 @@ impl GitTool {
         Self { repo_path }
     }
 
-    /// Open the git repository at `self.repo_path`.
-    fn open_repo(&self) -> Result<git2::Repository, GitToolError> {
-        git2::Repository::open(&self.repo_path).map_err(|e| GitToolError::GitError {
-            action: "open".to_string(),
-            reason: e.to_string(),
-        })
-    }
-
-    /// Clone a remote repository to `self.repo_path`.
-    fn handle_clone(&self, url: &str) -> Result<String, GitToolError> {
-        let url = url.to_string();
-        let path = self.repo_path.clone();
-        git2::Repository::clone(&url, &path).map_err(|e| GitToolError::GitError {
-            action: "clone".to_string(),
-            reason: e.to_string(),
-        })?;
-        Ok(format!("Cloned {} to {}", url, path.display()))
-    }
-
-    /// Checkout an existing branch.
-    fn handle_checkout(&self, branch: &str) -> Result<String, GitToolError> {
-        let repo = self.open_repo()?;
-
-        // Resolve the branch reference
-        let (object, reference) =
-            repo.revparse_ext(branch)
-                .map_err(|e| GitToolError::GitError {
-                    action: "checkout".to_string(),
-                    reason: format!("Cannot resolve '{}': {}", branch, e),
-                })?;
-
-        repo.checkout_tree(&object, None)
-            .map_err(|e| GitToolError::GitError {
-                action: "checkout".to_string(),
+    /// Run a git command with `-C <repo_path>` and the given arguments.
+    ///
+    /// Returns `(stdout, stderr)` on success (zero exit code).
+    /// Returns `GitToolError::CommandFailed` on non-zero exit.
+    async fn run_git(&self, action: &str, args: &[&str]) -> Result<(String, String), GitToolError> {
+        let output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_path)
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| GitToolError::IoError {
                 reason: e.to_string(),
             })?;
 
-        match reference {
-            Some(r) => {
-                if let Some(name) = r.name() {
-                    repo.set_head(name).map_err(|e| GitToolError::GitError {
-                        action: "checkout".to_string(),
-                        reason: e.to_string(),
-                    })?;
-                }
-            }
-            None => {
-                // Detached HEAD
-                repo.set_head_detached(object.id())
-                    .map_err(|e| GitToolError::GitError {
-                        action: "checkout".to_string(),
-                        reason: e.to_string(),
-                    })?;
-            }
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            return Err(GitToolError::CommandFailed {
+                action: action.to_string(),
+                stderr,
+                exit_code: output.status.code().unwrap_or(-1),
+            });
         }
 
+        Ok((stdout, stderr))
+    }
+
+    /// Clone a remote repository to `self.repo_path`.
+    async fn handle_clone(&self, url: &str) -> Result<String, GitToolError> {
+        let path_str = self
+            .repo_path
+            .to_str()
+            .ok_or_else(|| GitToolError::PathError {
+                reason: format!("Invalid repo path: {}", self.repo_path.display()),
+            })?;
+
+        let output = tokio::process::Command::new("git")
+            .args(["clone", url, path_str])
+            .output()
+            .await
+            .map_err(|e| GitToolError::IoError {
+                reason: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(GitToolError::CommandFailed {
+                action: "clone".to_string(),
+                stderr: stderr.to_string(),
+                exit_code: output.status.code().unwrap_or(-1),
+            });
+        }
+
+        Ok(format!("Cloned {} to {}", url, self.repo_path.display()))
+    }
+
+    /// Checkout an existing branch.
+    async fn handle_checkout(&self, branch: &str) -> Result<String, GitToolError> {
+        self.run_git("checkout", &["checkout", branch]).await?;
         Ok(format!("Checked out branch '{}'", branch))
     }
 
     /// Create a new branch from HEAD or a specified base, then checkout.
-    fn handle_branch_create(
+    async fn handle_branch_create(
         &self,
         branch: &str,
         from_branch: Option<&str>,
     ) -> Result<String, GitToolError> {
-        let repo = self.open_repo()?;
-
-        // Find the base commit
         let base_name = from_branch.unwrap_or("HEAD");
-        let base_obj = repo
-            .revparse_single(base_name)
-            .map_err(|e| GitToolError::GitError {
-                action: "branch_create".to_string(),
-                reason: format!("Cannot resolve '{}': {}", base_name, e),
-            })?;
-
-        let base_commit = base_obj
-            .peel_to_commit()
-            .map_err(|e| GitToolError::GitError {
-                action: "branch_create".to_string(),
-                reason: format!("Cannot peel to commit: {}", e),
-            })?;
-
-        // Create the branch
-        repo.branch(branch, &base_commit, false)
-            .map_err(|e| GitToolError::GitError {
-                action: "branch_create".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        // Checkout the new branch
-        let refname = format!("refs/heads/{}", branch);
-        let obj = repo
-            .revparse_single(&refname)
-            .map_err(|e| GitToolError::GitError {
-                action: "branch_create".to_string(),
-                reason: format!("Cannot resolve new branch: {}", e),
-            })?;
-
-        repo.checkout_tree(&obj, None)
-            .map_err(|e| GitToolError::GitError {
-                action: "branch_create".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        repo.set_head(&refname)
-            .map_err(|e| GitToolError::GitError {
-                action: "branch_create".to_string(),
-                reason: e.to_string(),
-            })?;
-
+        let mut args = vec!["checkout", "-b", branch];
+        // Only pass from_branch if explicitly provided (not HEAD, which is the default)
+        if let Some(fb) = from_branch {
+            args.push(fb);
+        }
+        self.run_git("branch_create", &args).await?;
         Ok(format!(
             "Created and checked out branch '{}' from {}",
             branch, base_name
         ))
     }
 
-    /// Stage files via index.
-    fn handle_add(&self, paths: &[String]) -> Result<String, GitToolError> {
-        let repo = self.open_repo()?;
-        let mut index = repo.index().map_err(|e| GitToolError::GitError {
-            action: "add".to_string(),
-            reason: e.to_string(),
-        })?;
+    /// Stage files.
+    async fn handle_add(&self, paths: &[String]) -> Result<String, GitToolError> {
+        // If paths contains "*", use "." to stage all
+        let effective_paths: Vec<&str> = if paths.iter().any(|p| p == "*") {
+            vec!["."]
+        } else {
+            paths.iter().map(|s| s.as_str()).collect()
+        };
 
-        index
-            .add_all(paths.iter(), git2::IndexAddOption::DEFAULT, None)
-            .map_err(|e| GitToolError::GitError {
-                action: "add".to_string(),
-                reason: e.to_string(),
-            })?;
+        let mut args: Vec<&str> = vec!["add"];
+        args.extend(&effective_paths);
 
-        index.write().map_err(|e| GitToolError::GitError {
-            action: "add".to_string(),
-            reason: e.to_string(),
-        })?;
-
+        self.run_git("add", &args).await?;
         Ok(format!("Staged {} path pattern(s)", paths.len()))
     }
 
     /// Create a commit on the current branch with staged changes.
-    fn handle_commit(&self, message: &str) -> Result<String, GitToolError> {
-        let repo = self.open_repo()?;
+    async fn handle_commit(&self, message: &str) -> Result<String, GitToolError> {
+        let (stdout, _stderr) = self.run_git("commit", &["commit", "-m", message]).await?;
 
-        let sig = repo
-            .signature()
-            .or_else(|_| git2::Signature::now("bmad-bot", "bmad-bot@localhost"))
-            .map_err(|e| GitToolError::GitError {
-                action: "commit".to_string(),
-                reason: format!("Cannot create signature: {}", e),
-            })?;
+        // Extract short SHA from the commit output
+        // git commit output first line is like: "[branch abc1234] commit message"
+        let short_sha = stdout
+            .lines()
+            .next()
+            .and_then(|line| {
+                // Find content between [ and ]
+                let start = line.find('[')? + 1;
+                let end = line.find(']')?;
+                let bracket_content = &line[start..end];
+                // The SHA is after the space: "branch abc1234"
+                bracket_content.split_whitespace().last().map(String::from)
+            })
+            .unwrap_or_else(|| "unknown".to_string());
 
-        let mut index = repo.index().map_err(|e| GitToolError::GitError {
-            action: "commit".to_string(),
-            reason: e.to_string(),
-        })?;
-
-        let tree_oid = index.write_tree().map_err(|e| GitToolError::GitError {
-            action: "commit".to_string(),
-            reason: e.to_string(),
-        })?;
-
-        let tree = repo
-            .find_tree(tree_oid)
-            .map_err(|e| GitToolError::GitError {
-                action: "commit".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        // Get parent commit (if any — first commit has no parent)
-        let parent = match repo.head() {
-            Ok(head) => {
-                let target = head.target().ok_or_else(|| GitToolError::GitError {
-                    action: "commit".to_string(),
-                    reason: "HEAD has no target".to_string(),
-                })?;
-                Some(
-                    repo.find_commit(target)
-                        .map_err(|e| GitToolError::GitError {
-                            action: "commit".to_string(),
-                            reason: e.to_string(),
-                        })?,
-                )
-            }
-            Err(_) => None,
-        };
-
-        let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
-
-        let oid = repo
-            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
-            .map_err(|e| GitToolError::GitError {
-                action: "commit".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let short_sha = &oid.to_string()[..7.min(oid.to_string().len())];
         Ok(format!("Committed {}: {}", short_sha, message))
     }
 
     /// Push a branch to a remote.
-    fn handle_push(&self, remote: &str, branch: &str) -> Result<String, GitToolError> {
-        let repo = self.open_repo()?;
-
-        let mut remote_obj = repo
-            .find_remote(remote)
-            .map_err(|e| GitToolError::GitError {
-                action: "push".to_string(),
-                reason: format!("Cannot find remote '{}': {}", remote, e),
-            })?;
-
-        let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
-
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(|_url, username, allowed_types| {
-            if allowed_types.contains(git2::CredentialType::SSH_KEY) {
-                return git2::Cred::ssh_key_from_agent(username.unwrap_or("git"));
-            }
-            if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
-                let config = git2::Config::open_default()?;
-                return git2::Cred::credential_helper(&config, _url, username);
-            }
-            Err(git2::Error::from_str("no suitable credentials found"))
-        });
-
-        let mut push_options = git2::PushOptions::new();
-        push_options.remote_callbacks(callbacks);
-
-        remote_obj
-            .push(&[&refspec], Some(&mut push_options))
-            .map_err(|e| GitToolError::GitError {
-                action: "push".to_string(),
-                reason: e.to_string(),
-            })?;
-
+    async fn handle_push(&self, remote: &str, branch: &str) -> Result<String, GitToolError> {
+        self.run_git("push", &["push", remote, branch]).await?;
         Ok(format!("Pushed branch '{}' to remote '{}'", branch, remote))
     }
 
     /// Diff working directory against HEAD (unstaged changes).
-    fn handle_diff(&self) -> Result<String, GitToolError> {
-        let repo = self.open_repo()?;
+    async fn handle_diff(&self) -> Result<String, GitToolError> {
+        let (stdout, _stderr) = self.run_git("diff", &["diff"]).await?;
 
-        let diff = repo
-            .diff_index_to_workdir(None, None)
-            .map_err(|e| GitToolError::GitError {
-                action: "diff".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let mut diff_output = String::new();
-        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-            let origin = line.origin();
-            if origin == '+' || origin == '-' || origin == ' ' {
-                diff_output.push(origin);
-            }
-            if let Ok(content) = std::str::from_utf8(line.content()) {
-                diff_output.push_str(content);
-            }
-            true
-        })
-        .map_err(|e| GitToolError::GitError {
-            action: "diff".to_string(),
-            reason: e.to_string(),
-        })?;
-
-        if diff_output.is_empty() {
+        if stdout.trim().is_empty() {
             Ok("No changes detected".to_string())
         } else {
-            Ok(diff_output)
+            Ok(stdout)
         }
     }
 
-    /// Return file statuses as formatted text.
-    fn handle_status(&self) -> Result<String, GitToolError> {
-        let repo = self.open_repo()?;
+    /// Return file statuses using `--porcelain` for stable, parseable output.
+    async fn handle_status(&self) -> Result<String, GitToolError> {
+        let (stdout, _stderr) = self.run_git("status", &["status", "--porcelain"]).await?;
 
-        let statuses = repo.statuses(None).map_err(|e| GitToolError::GitError {
-            action: "status".to_string(),
-            reason: e.to_string(),
-        })?;
+        if stdout.trim().is_empty() {
+            Ok("Clean working directory".to_string())
+        } else {
+            // Porcelain output: "XY path" — convert to simpler "X path" format
+            let mut output = String::new();
+            for line in stdout.lines() {
+                if line.len() < 3 {
+                    continue;
+                }
+                let status_chars = &line[..2];
+                let path = line[3..].trim();
 
-        if statuses.is_empty() {
-            return Ok("Clean working directory".to_string());
-        }
+                let label = if status_chars.contains('?') || status_chars.contains('A') {
+                    "A"
+                } else if status_chars.contains('M') {
+                    "M"
+                } else if status_chars.contains('D') {
+                    "D"
+                } else if status_chars.contains('R') {
+                    "R"
+                } else {
+                    "?"
+                };
 
-        let mut output = String::new();
-        for entry in statuses.iter() {
-            let status = entry.status();
-            let path = entry.path().unwrap_or("<invalid utf-8>");
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&format!("{} {}", label, path));
+            }
 
-            let label = if status.contains(git2::Status::WT_NEW)
-                || status.contains(git2::Status::INDEX_NEW)
-            {
-                "A"
-            } else if status.contains(git2::Status::WT_MODIFIED)
-                || status.contains(git2::Status::INDEX_MODIFIED)
-            {
-                "M"
-            } else if status.contains(git2::Status::WT_DELETED)
-                || status.contains(git2::Status::INDEX_DELETED)
-            {
-                "D"
-            } else if status.contains(git2::Status::WT_RENAMED)
-                || status.contains(git2::Status::INDEX_RENAMED)
-            {
-                "R"
+            if output.is_empty() {
+                Ok("Clean working directory".to_string())
             } else {
-                "?"
-            };
-
-            if !output.is_empty() {
-                output.push('\n');
+                Ok(output)
             }
-            output.push_str(&format!("{} {}", label, path));
         }
-
-        Ok(output)
     }
 
-    /// Return last N commit messages with short SHA and author.
-    fn handle_log(&self, max_count: usize) -> Result<String, GitToolError> {
-        let repo = self.open_repo()?;
+    /// Return last N commit messages in oneline format.
+    async fn handle_log(&self, max_count: usize) -> Result<String, GitToolError> {
+        let count_arg = format!("-{}", max_count);
+        let (stdout, _stderr) = self
+            .run_git("log", &["log", "--oneline", &count_arg])
+            .await?;
 
-        let mut revwalk = repo.revwalk().map_err(|e| GitToolError::GitError {
-            action: "log".to_string(),
-            reason: e.to_string(),
-        })?;
-
-        revwalk.push_head().map_err(|e| GitToolError::GitError {
-            action: "log".to_string(),
-            reason: e.to_string(),
-        })?;
-
-        revwalk
-            .set_sorting(git2::Sort::TIME)
-            .map_err(|e| GitToolError::GitError {
-                action: "log".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let mut output = String::new();
-
-        for (count, oid_result) in revwalk.enumerate() {
-            if count >= max_count {
-                break;
-            }
-            let oid = oid_result.map_err(|e| GitToolError::GitError {
-                action: "log".to_string(),
-                reason: e.to_string(),
-            })?;
-
-            let commit = repo.find_commit(oid).map_err(|e| GitToolError::GitError {
-                action: "log".to_string(),
-                reason: e.to_string(),
-            })?;
-
-            let short_sha = &oid.to_string()[..7.min(oid.to_string().len())];
-            let author = commit.author();
-            let author_name = author.name().unwrap_or("<unknown>");
-            let message = commit.summary().unwrap_or("<no message>");
-            let time = commit.time();
-            let timestamp = chrono::DateTime::from_timestamp(time.seconds(), 0)
-                .map(|dt| dt.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "unknown-date".to_string());
-
-            if !output.is_empty() {
-                output.push('\n');
-            }
-            output.push_str(&format!(
-                "{} | {} | {} | {}",
-                short_sha, author_name, timestamp, message
-            ));
-        }
-
-        if output.is_empty() {
+        if stdout.trim().is_empty() {
             Ok("No commits found".to_string())
         } else {
-            Ok(output)
+            Ok(stdout.trim_end().to_string())
         }
     }
 }
@@ -550,14 +364,7 @@ impl Tool for GitTool {
                         argument: "url".to_string(),
                     })?;
                 tracing::info!(action = "git_clone", url = %url, "Cloning repository");
-                let repo_path = self.repo_path.clone();
-                let url_owned = url.to_string();
-                let tool = GitTool::new(repo_path);
-                tokio::task::spawn_blocking(move || tool.handle_clone(&url_owned))
-                    .await
-                    .map_err(|e| GitToolError::TaskJoinError {
-                        reason: e.to_string(),
-                    })??
+                self.handle_clone(url).await?
             }
             "checkout" => {
                 let branch =
@@ -568,7 +375,7 @@ impl Tool for GitTool {
                             argument: "branch".to_string(),
                         })?;
                 tracing::info!(action = "git_checkout", branch = %branch, "Checking out branch");
-                self.handle_checkout(branch)?
+                self.handle_checkout(branch).await?
             }
             "branch_create" => {
                 let branch =
@@ -579,7 +386,8 @@ impl Tool for GitTool {
                             argument: "branch".to_string(),
                         })?;
                 tracing::info!(action = "git_branch_create", branch = %branch, "Creating branch");
-                self.handle_branch_create(branch, args.from_branch.as_deref())?
+                self.handle_branch_create(branch, args.from_branch.as_deref())
+                    .await?
             }
             "add" => {
                 let paths = args
@@ -594,7 +402,7 @@ impl Tool for GitTool {
                     path_count = paths.len(),
                     "Staging files"
                 );
-                self.handle_add(paths)?
+                self.handle_add(paths).await?
             }
             "commit" => {
                 let message =
@@ -605,7 +413,7 @@ impl Tool for GitTool {
                             argument: "message".to_string(),
                         })?;
                 tracing::info!(action = "git_commit", "Creating commit");
-                self.handle_commit(message)?
+                self.handle_commit(message).await?
             }
             "push" => {
                 let branch =
@@ -617,28 +425,20 @@ impl Tool for GitTool {
                         })?;
                 let remote = args.remote.as_deref().unwrap_or("origin");
                 tracing::info!(action = "git_push", remote = %remote, branch = %branch, "Pushing to remote");
-                let repo_path = self.repo_path.clone();
-                let remote_owned = remote.to_string();
-                let branch_owned = branch.to_string();
-                let tool = GitTool::new(repo_path);
-                tokio::task::spawn_blocking(move || tool.handle_push(&remote_owned, &branch_owned))
-                    .await
-                    .map_err(|e| GitToolError::TaskJoinError {
-                        reason: e.to_string(),
-                    })??
+                self.handle_push(remote, branch).await?
             }
             "diff" => {
                 tracing::info!(action = "git_diff", "Getting diff");
-                self.handle_diff()?
+                self.handle_diff().await?
             }
             "status" => {
                 tracing::info!(action = "git_status", "Getting status");
-                self.handle_status()?
+                self.handle_status().await?
             }
             "log" => {
                 let max_count = args.max_count.unwrap_or(10);
                 tracing::info!(action = "git_log", max_count = max_count, "Getting log");
-                self.handle_log(max_count)?
+                self.handle_log(max_count).await?
             }
             other => {
                 return Err(GitToolError::InvalidAction {
@@ -658,34 +458,55 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// Helper: create a temp dir with an initialized git repo and an initial commit.
-    fn init_repo_with_commit(dir: &std::path::Path) -> git2::Repository {
-        let repo = git2::Repository::init(dir).unwrap();
+    /// Helper: create a temp dir with an initialized git repo and an initial commit (CLI-based).
+    fn init_repo_with_commit(dir: &std::path::Path) {
+        // Initialize repo
+        let output = std::process::Command::new("git")
+            .args(["init", dir.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
 
-        // Configure user for commits
-        let mut config = repo.config().unwrap();
-        config.set_str("user.name", "Test User").unwrap();
-        config.set_str("user.email", "test@example.com").unwrap();
+        // Set identity for commits (required in CI/test environments)
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "user.email", "test@example.com"])
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "user.name", "Test User"])
+            .output()
+            .expect("git config name");
+
+        // Rename default branch to main
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["branch", "-M", "main"])
+            .output()
+            .expect("git branch rename");
 
         // Create an initial file and commit
         let file_path = dir.join("README.md");
         fs::write(&file_path, "# Test Repo\n").unwrap();
 
-        let mut index = repo.index().unwrap();
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .unwrap();
-        index.write().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["add", "."])
+            .output()
+            .expect("git add");
 
-        let tree_oid = index.write_tree().unwrap();
-        {
-            let tree = repo.find_tree(tree_oid).unwrap();
-            let sig = repo.signature().unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
-                .unwrap();
-        }
-
-        repo
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["commit", "-m", "Initial commit"])
+            .output()
+            .expect("git commit");
+        assert!(output.status.success(), "git commit failed");
     }
 
     #[tokio::test]
@@ -796,12 +617,14 @@ mod tests {
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("Invalid git action"));
 
-        let err = GitToolError::GitError {
+        let err = GitToolError::CommandFailed {
             action: "commit".to_string(),
-            reason: "nothing to commit".to_string(),
+            stderr: "nothing to commit".to_string(),
+            exit_code: 1,
         };
         assert!(err.to_string().contains("commit"));
         assert!(err.to_string().contains("nothing to commit"));
+        assert!(err.to_string().contains("exit code 1"));
 
         let err = GitToolError::MissingArgument {
             action: "checkout".to_string(),
@@ -815,10 +638,10 @@ mod tests {
         };
         assert!(err.to_string().contains("not a directory"));
 
-        let err = GitToolError::TaskJoinError {
-            reason: "task panicked".to_string(),
+        let err = GitToolError::IoError {
+            reason: "command not found".to_string(),
         };
-        assert!(err.to_string().contains("task panicked"));
+        assert!(err.to_string().contains("command not found"));
     }
 
     #[test]
@@ -996,11 +819,17 @@ mod tests {
         let result = tool.call(create_args).await.unwrap();
         assert!(result.contains("Created and checked out branch 'feature/test-branch'"));
 
-        // Verify HEAD points to new branch
-        let repo = git2::Repository::open(dir.path()).unwrap();
-        let head = repo.head().unwrap();
-        assert!(head.is_branch());
-        assert_eq!(head.shorthand().unwrap(), "feature/test-branch");
+        // Verify HEAD points to new branch using git CLI
+        let head_output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        let current_branch = String::from_utf8_lossy(&head_output.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(current_branch, "feature/test-branch");
     }
 
     #[tokio::test]

@@ -3,6 +3,8 @@
 //! Provides utilities to detect git provider, repository owner, repository name,
 //! and default branch from the local `.git` configuration. Used by the interactive
 //! init wizard to pre-fill git settings and reduce manual input.
+//!
+//! All git operations use `std::process::Command` to invoke the `git` CLI.
 
 use std::path::Path;
 
@@ -100,20 +102,21 @@ pub fn map_host_to_provider(host: &str) -> Option<String> {
 /// Detects git remote information from the repository at the given path.
 ///
 /// Discovery logic:
-/// 1. Opens the git repo via `git2::Repository::discover()`
-/// 2. Looks for `origin` remote first
-/// 3. If no `origin` and exactly one remote → uses it automatically (AC #10)
-/// 4. If no `origin` and multiple remotes → returns `MultipleRemotes` for user selection
-/// 5. Parses the remote URL and detects default branch from HEAD
+/// 1. Verifies a git repo exists via `git rev-parse --git-dir`
+/// 2. Lists remotes via `git remote`
+/// 3. Looks for `origin` remote first
+/// 4. If no `origin` and exactly one remote → uses it automatically (AC #10)
+/// 5. If no `origin` and multiple remotes → returns `MultipleRemotes` for user selection
+/// 6. Parses the remote URL and detects default branch from HEAD
 ///
 /// Returns `NotAvailable` silently on any failure (no `.git`, no remotes, bad URL).
 pub fn detect_git_remote(project_path: &Path) -> GitDetectionResult {
-    let repo = match git2::Repository::discover(project_path) {
-        Ok(r) => r,
-        Err(_) => return GitDetectionResult::NotAvailable,
-    };
+    // Verify this is a git repo
+    if !is_git_repo(project_path) {
+        return GitDetectionResult::NotAvailable;
+    }
 
-    detect_from_repo(&repo, None)
+    detect_from_repo(project_path, None)
 }
 
 /// Detects git remote information using a specific remote name.
@@ -121,34 +124,57 @@ pub fn detect_git_remote(project_path: &Path) -> GitDetectionResult {
 /// Used when the caller already knows which remote to inspect (e.g., after
 /// user selects from a multi-remote prompt).
 pub fn detect_git_remote_with_name(project_path: &Path, remote_name: &str) -> GitDetectionResult {
-    let repo = match git2::Repository::discover(project_path) {
-        Ok(r) => r,
-        Err(_) => return GitDetectionResult::NotAvailable,
-    };
+    // Verify this is a git repo
+    if !is_git_repo(project_path) {
+        return GitDetectionResult::NotAvailable;
+    }
 
-    detect_from_repo(&repo, Some(remote_name))
+    detect_from_repo(project_path, Some(remote_name))
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Core detection logic operating on an opened repository.
+/// Check if the given path is inside a git repository.
+fn is_git_repo(project_path: &Path) -> bool {
+    match std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+    {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+
+/// Core detection logic operating on a verified git repository path.
 ///
 /// If `preferred_remote` is `Some`, uses that remote directly. Otherwise,
 /// applies the origin → single-remote → multiple-remotes discovery logic.
-fn detect_from_repo(repo: &git2::Repository, preferred_remote: Option<&str>) -> GitDetectionResult {
+fn detect_from_repo(project_path: &Path, preferred_remote: Option<&str>) -> GitDetectionResult {
     if let Some(name) = preferred_remote {
-        return detect_single_remote(repo, name);
+        return detect_single_remote(project_path, name);
     }
 
-    // Collect all remote names
-    let remotes = match repo.remotes() {
-        Ok(r) => r,
-        Err(_) => return GitDetectionResult::NotAvailable,
+    // List all remote names via `git remote`
+    let remote_output = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .arg("remote")
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return GitDetectionResult::NotAvailable,
     };
 
-    let remote_names: Vec<String> = remotes.iter().flatten().map(String::from).collect();
+    let stdout = String::from_utf8_lossy(&remote_output.stdout);
+    let remote_names: Vec<String> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(String::from)
+        .collect();
 
     if remote_names.is_empty() {
         return GitDetectionResult::NotAvailable;
@@ -156,12 +182,12 @@ fn detect_from_repo(repo: &git2::Repository, preferred_remote: Option<&str>) -> 
 
     // Prefer origin
     if remote_names.iter().any(|n| n == "origin") {
-        return detect_single_remote(repo, "origin");
+        return detect_single_remote(project_path, "origin");
     }
 
     // Exactly one remote (not origin) → use it automatically (AC #10)
     if remote_names.len() == 1 {
-        return detect_single_remote(repo, &remote_names[0]);
+        return detect_single_remote(project_path, &remote_names[0]);
     }
 
     // Multiple remotes, no origin → user must choose
@@ -169,16 +195,24 @@ fn detect_from_repo(repo: &git2::Repository, preferred_remote: Option<&str>) -> 
 }
 
 /// Detects remote info from a single named remote.
-fn detect_single_remote(repo: &git2::Repository, remote_name: &str) -> GitDetectionResult {
-    let remote = match repo.find_remote(remote_name) {
-        Ok(r) => r,
-        Err(_) => return GitDetectionResult::NotAvailable,
+fn detect_single_remote(project_path: &Path, remote_name: &str) -> GitDetectionResult {
+    // Get remote URL via `git remote get-url <name>`
+    let url_output = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .args(["remote", "get-url", remote_name])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return GitDetectionResult::NotAvailable,
     };
 
-    let url = match remote.url() {
-        Some(u) => u.to_string(),
-        None => return GitDetectionResult::NotAvailable,
-    };
+    let url = String::from_utf8_lossy(&url_output.stdout)
+        .trim()
+        .to_string();
+    if url.is_empty() {
+        return GitDetectionResult::NotAvailable;
+    }
 
     let (host, owner, repo_name) = match parse_git_remote_url(&url) {
         Some(parsed) => parsed,
@@ -186,7 +220,7 @@ fn detect_single_remote(repo: &git2::Repository, remote_name: &str) -> GitDetect
     };
 
     let provider = map_host_to_provider(&host);
-    let default_branch = detect_default_branch(repo);
+    let default_branch = detect_default_branch(project_path);
 
     GitDetectionResult::Detected(GitRemoteInfo {
         provider,
@@ -200,18 +234,24 @@ fn detect_single_remote(repo: &git2::Repository, remote_name: &str) -> GitDetect
 
 /// Detects the default branch name from HEAD.
 ///
-/// Uses `repo.head()` to get the current branch. Falls back to `"main"`
-/// if HEAD is detached, unborn, or unreadable.
-fn detect_default_branch(repo: &git2::Repository) -> String {
-    match repo.head() {
-        Ok(reference) => {
-            if let Some(shorthand) = reference.shorthand() {
-                shorthand.to_string()
-            } else {
+/// Uses `git rev-parse --abbrev-ref HEAD` to get the current branch.
+/// Falls back to `"main"` if HEAD is detached, unborn, or unreadable.
+fn detect_default_branch(project_path: &Path) -> String {
+    match std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if branch.is_empty() || branch == "HEAD" {
                 "main".to_string()
+            } else {
+                branch
             }
         }
-        Err(_) => "main".to_string(),
+        _ => "main".to_string(),
     }
 }
 
@@ -296,12 +336,57 @@ fn parse_owner_repo_from_path(host: &str, path: &str) -> Option<(String, String,
 }
 
 // ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- CLI-based test fixtures ---
+
+    /// Initialize a git repo with an initial commit in a tempdir.
+    fn init_test_repo(dir: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["init", dir.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
+
+        // Set identity for commits (required in CI/test environments)
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "user.email", "test@test.com"])
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "user.name", "Test"])
+            .output()
+            .expect("git config name");
+    }
+
+    /// Add a remote to a test repo.
+    fn add_remote(dir: &Path, name: &str, url: &str) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["remote", "add", name, url])
+            .output()
+            .expect("git remote add");
+        assert!(output.status.success(), "git remote add failed");
+    }
+
+    /// Create an initial empty commit so HEAD exists.
+    fn create_initial_commit(dir: &Path) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .output()
+            .expect("git commit");
+        assert!(output.status.success(), "git commit failed");
+    }
 
     // --- parse_git_remote_url tests ---
 
@@ -466,7 +551,7 @@ mod tests {
         );
     }
 
-    // --- detect_git_remote tests ---
+    // --- detect_git_remote tests (CLI-based fixtures) ---
 
     #[test]
     fn test_detect_returns_not_available_for_non_git_dir() {
@@ -478,18 +563,17 @@ mod tests {
     #[test]
     fn test_detect_with_configured_origin_remote() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        init_test_repo(tmp.path());
 
         // Configure origin remote
-        repo.remote("origin", "git@github.com:test-owner/test-repo.git")
-            .unwrap();
+        add_remote(
+            tmp.path(),
+            "origin",
+            "git@github.com:test-owner/test-repo.git",
+        );
 
         // Create an initial commit so HEAD exists
-        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-        let tree_id = repo.index().unwrap().write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
+        create_initial_commit(tmp.path());
 
         let result = detect_git_remote(tmp.path());
         match result {
@@ -507,14 +591,14 @@ mod tests {
     #[test]
     fn test_detect_single_non_origin_remote_auto_selects() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        init_test_repo(tmp.path());
 
         // Configure a single remote named "upstream" (not origin)
-        repo.remote(
+        add_remote(
+            tmp.path(),
             "upstream",
             "git@github.com:upstream-owner/upstream-repo.git",
-        )
-        .unwrap();
+        );
 
         let result = detect_git_remote(tmp.path());
         match result {
@@ -530,11 +614,10 @@ mod tests {
     #[test]
     fn test_detect_multiple_remotes_no_origin_returns_list() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        init_test_repo(tmp.path());
 
-        repo.remote("upstream", "git@github.com:up/repo.git")
-            .unwrap();
-        repo.remote("fork", "git@github.com:fork/repo.git").unwrap();
+        add_remote(tmp.path(), "upstream", "git@github.com:up/repo.git");
+        add_remote(tmp.path(), "fork", "git@github.com:fork/repo.git");
 
         let result = detect_git_remote(tmp.path());
         match result {
@@ -550,9 +633,9 @@ mod tests {
     #[test]
     fn test_detect_returns_not_available_for_malformed_url() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        init_test_repo(tmp.path());
 
-        repo.remote("origin", "not-a-valid-url").unwrap();
+        add_remote(tmp.path(), "origin", "not-a-valid-url");
 
         let result = detect_git_remote(tmp.path());
         assert_eq!(result, GitDetectionResult::NotAvailable);
@@ -561,7 +644,7 @@ mod tests {
     #[test]
     fn test_detect_no_remotes_returns_not_available() {
         let tmp = tempfile::tempdir().unwrap();
-        git2::Repository::init(tmp.path()).unwrap();
+        init_test_repo(tmp.path());
 
         let result = detect_git_remote(tmp.path());
         assert_eq!(result, GitDetectionResult::NotAvailable);
@@ -570,23 +653,17 @@ mod tests {
     #[test]
     fn test_detect_default_branch_from_head() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        init_test_repo(tmp.path());
 
-        repo.remote("origin", "https://github.com/owner/repo.git")
-            .unwrap();
+        add_remote(tmp.path(), "origin", "https://github.com/owner/repo.git");
 
         // Create initial commit on default branch
-        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-        let tree_id = repo.index().unwrap().write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
+        create_initial_commit(tmp.path());
 
         let result = detect_git_remote(tmp.path());
         match result {
             GitDetectionResult::Detected(info) => {
-                // git2::Repository::init creates a "main" or "master" branch depending on config
-                // The branch name should be non-empty and valid
+                // git init creates a branch depending on config — the branch name should be non-empty and valid
                 assert!(!info.default_branch.is_empty());
             }
             other => panic!("Expected Detected, got {:?}", other),
@@ -596,11 +673,10 @@ mod tests {
     #[test]
     fn test_detect_default_branch_fallback_when_no_head() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        init_test_repo(tmp.path());
 
         // No commits → HEAD is unborn
-        repo.remote("origin", "https://github.com/owner/repo.git")
-            .unwrap();
+        add_remote(tmp.path(), "origin", "https://github.com/owner/repo.git");
 
         let result = detect_git_remote(tmp.path());
         match result {
@@ -614,15 +690,18 @@ mod tests {
     #[test]
     fn test_detect_with_specific_remote_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        init_test_repo(tmp.path());
 
-        repo.remote("origin", "git@github.com:origin-owner/origin-repo.git")
-            .unwrap();
-        repo.remote(
+        add_remote(
+            tmp.path(),
+            "origin",
+            "git@github.com:origin-owner/origin-repo.git",
+        );
+        add_remote(
+            tmp.path(),
             "upstream",
             "git@gitlab.com:upstream-owner/upstream-repo.git",
-        )
-        .unwrap();
+        );
 
         let result = detect_git_remote_with_name(tmp.path(), "upstream");
         match result {

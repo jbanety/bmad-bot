@@ -7,11 +7,10 @@
 //!   (chains from dependency branch if it exists locally, otherwise falls back to default)
 //! - [`ensure_story_branch`] — creates or reuses the story branch and checks it out
 //!
-//! These functions are **synchronous** (git2 is a blocking C library). The caller
+//! These functions are **synchronous** (for use with `spawn_blocking`). The caller
 //! in `SessionRunner::run()` MUST wrap them in `tokio::task::spawn_blocking()`.
 
 use crate::watcher::StoryInfo;
-use git2::{BranchType, Repository, build::CheckoutBuilder};
 use std::path::Path;
 
 /// Errors originating from branch operations.
@@ -44,13 +43,13 @@ pub enum BranchError {
         branch: String,
     },
 
-    /// Failed to open the git repository.
-    #[error("Failed to open repo at {path}: {reason}")]
-    RepoOpenFailed {
-        /// Path to the repository that could not be opened.
-        path: String,
-        /// Description of the open failure.
-        reason: String,
+    /// A git CLI command failed.
+    #[error("Git command failed: {command}: {stderr}")]
+    CommandFailed {
+        /// The command that failed.
+        command: String,
+        /// The stderr output from the command.
+        stderr: String,
     },
 }
 
@@ -74,6 +73,22 @@ pub enum BranchAction {
     },
 }
 
+/// Check if a local branch exists using `git branch --list`.
+///
+/// Returns `true` if the branch exists locally, `false` otherwise.
+/// On any CLI error, returns `false` (safe fallback).
+fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
+    match std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["branch", "--list", branch_name])
+        .output()
+    {
+        Ok(output) => output.status.success() && !output.stdout.is_empty(),
+        Err(_) => false,
+    }
+}
+
 /// Determine which base branch to create the story branch from.
 ///
 /// Resolution logic:
@@ -84,9 +99,9 @@ pub enum BranchAction {
 ///
 /// # Arguments
 /// * `story` — The story being developed (contains `dependencies` from watcher)
-/// * `repo` — An open git2 `Repository` reference
+/// * `repo_path` — Path to the git repository root
 /// * `default_branch` — Fallback branch name (typically `"main"`)
-pub fn determine_base_branch(story: &StoryInfo, repo: &Repository, default_branch: &str) -> String {
+pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch: &str) -> String {
     if story.dependencies.is_empty() {
         tracing::info!(
             action = "base_branch_resolved",
@@ -102,7 +117,7 @@ pub fn determine_base_branch(story: &StoryInfo, repo: &Repository, default_branc
     let last_dep = &story.dependencies[story.dependencies.len() - 1];
     let candidate = format!("story/{last_dep}");
 
-    let exists = repo.find_branch(&candidate, BranchType::Local).is_ok();
+    let exists = branch_exists(repo_path, &candidate);
 
     if exists {
         tracing::info!(
@@ -132,8 +147,8 @@ pub fn determine_base_branch(story: &StoryInfo, repo: &Repository, default_branc
 /// - If the branch already exists, checks it out and returns [`BranchAction::Reused`].
 /// - If the branch does not exist, creates it from `base_branch` and returns [`BranchAction::Created`].
 ///
-/// This function is **synchronous** because git2 is blocking. The caller MUST wrap
-/// it in `tokio::task::spawn_blocking()` to avoid blocking the async runtime.
+/// This function is **synchronous**. The caller MUST wrap it in
+/// `tokio::task::spawn_blocking()` to avoid blocking the async runtime.
 ///
 /// # Arguments
 /// * `repo_path` — Path to the git repository root
@@ -141,22 +156,16 @@ pub fn determine_base_branch(story: &StoryInfo, repo: &Repository, default_branc
 /// * `base_branch` — The branch to create from if `branch_name` doesn't exist
 ///
 /// # Errors
-/// Returns [`BranchError`] if the repo can't be opened, the base branch is missing,
-/// or branch creation/checkout fails.
+/// Returns [`BranchError`] if the base branch is missing, or branch creation/checkout fails.
 pub fn ensure_story_branch(
     repo_path: &Path,
     branch_name: &str,
     base_branch: &str,
 ) -> Result<BranchAction, BranchError> {
-    let repo = Repository::open(repo_path).map_err(|e| BranchError::RepoOpenFailed {
-        path: repo_path.display().to_string(),
-        reason: e.to_string(),
-    })?;
-
     // Check if the branch already exists
-    if repo.find_branch(branch_name, BranchType::Local).is_ok() {
+    if branch_exists(repo_path, branch_name) {
         // Branch exists — check it out
-        checkout_branch(&repo, branch_name)?;
+        checkout_branch(repo_path, branch_name)?;
 
         tracing::info!(
             action = "branch_reuse",
@@ -169,29 +178,31 @@ pub fn ensure_story_branch(
         });
     }
 
-    // Branch does not exist — create from base
-    let base = repo
-        .find_branch(base_branch, BranchType::Local)
-        .map_err(|_| BranchError::BaseBranchNotFound {
+    // Verify the base branch exists before trying to create from it
+    if !branch_exists(repo_path, base_branch) {
+        return Err(BranchError::BaseBranchNotFound {
             branch: base_branch.to_string(),
-        })?;
+        });
+    }
 
-    let commit = base
-        .get()
-        .peel_to_commit()
+    // Branch does not exist — create from base and checkout
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["checkout", "-b", branch_name, base_branch])
+        .output()
         .map_err(|e| BranchError::CreationFailed {
             branch: branch_name.to_string(),
-            reason: format!("Failed to get tip commit of base branch: {e}"),
+            reason: format!("Failed to execute git: {e}"),
         })?;
 
-    repo.branch(branch_name, &commit, false)
-        .map_err(|e| BranchError::CreationFailed {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BranchError::CreationFailed {
             branch: branch_name.to_string(),
-            reason: e.to_string(),
-        })?;
-
-    // Checkout the new branch
-    checkout_branch(&repo, branch_name)?;
+            reason: stderr.to_string(),
+        });
+    }
 
     tracing::info!(
         action = "branch_created",
@@ -207,20 +218,24 @@ pub fn ensure_story_branch(
 }
 
 /// Set HEAD to the given branch and update the working directory.
-fn checkout_branch(repo: &Repository, branch_name: &str) -> Result<(), BranchError> {
-    let refname = format!("refs/heads/{branch_name}");
-
-    repo.set_head(&refname)
+fn checkout_branch(repo_path: &Path, branch_name: &str) -> Result<(), BranchError> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["checkout", branch_name])
+        .output()
         .map_err(|e| BranchError::CheckoutFailed {
             branch: branch_name.to_string(),
-            reason: format!("set_head failed: {e}"),
+            reason: format!("Failed to execute git: {e}"),
         })?;
 
-    repo.checkout_head(Some(CheckoutBuilder::default().force()))
-        .map_err(|e| BranchError::CheckoutFailed {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BranchError::CheckoutFailed {
             branch: branch_name.to_string(),
-            reason: format!("checkout_head failed: {e}"),
-        })?;
+            reason: stderr.to_string(),
+        });
+    }
 
     Ok(())
 }
@@ -228,42 +243,53 @@ fn checkout_branch(repo: &Repository, branch_name: &str) -> Result<(), BranchErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use git2::Signature;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    /// Create a temporary git repo with an initial commit on `main`.
-    ///
-    /// git2 requires at least one commit for branch operations. The default
-    /// branch created by `Repository::init()` may not be named "main", so
-    /// we explicitly create a "main" branch from the initial commit.
-    fn init_test_repo() -> (TempDir, Repository) {
+    /// Create a temporary git repo with an initial commit on `main` (CLI-based).
+    fn init_test_repo() -> (TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let repo = Repository::init(dir.path()).expect("init");
+        let path = dir.path().to_path_buf();
 
-        // Create an initial commit (scoped to drop `tree` before moving `repo`)
-        {
-            let sig = Signature::now("test", "test@test.com").expect("sig");
-            let tree_id = repo.index().expect("index").write_tree().expect("tree");
-            let tree = repo.find_tree(tree_id).expect("find tree");
-            repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
-                .expect("commit");
-        }
+        // Initialize repo
+        let output = std::process::Command::new("git")
+            .args(["init", path.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
 
-        // Ensure "main" branch exists — the default branch might be "master"
-        {
-            let head_commit = repo.head().expect("head").peel_to_commit().expect("commit");
-            if repo.find_branch("main", BranchType::Local).is_err() {
-                repo.branch("main", &head_commit, false)
-                    .expect("create main");
-            }
-        }
-        // Set HEAD to main
-        repo.set_head("refs/heads/main").expect("set head to main");
-        repo.checkout_head(Some(CheckoutBuilder::default().force()))
-            .expect("checkout main");
+        // Set identity for commits (required in CI/test environments)
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["config", "user.email", "test@test.com"])
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["config", "user.name", "Test"])
+            .output()
+            .expect("git config name");
 
-        (dir, repo)
+        // Rename default branch to main
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["branch", "-M", "main"])
+            .output()
+            .expect("git branch rename");
+
+        // Create initial empty commit (branch operations need at least one commit)
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["commit", "--allow-empty", "-m", "initial commit"])
+            .output()
+            .expect("git commit");
+        assert!(output.status.success(), "git commit failed");
+
+        (dir, path)
     }
 
     /// Create a minimal `StoryInfo` for tests.
@@ -286,11 +312,19 @@ mod tests {
         }
     }
 
-    /// Helper: create a branch with a commit in a test repo.
-    fn create_branch_with_commit(repo: &Repository, branch_name: &str) {
-        let head_commit = repo.head().expect("head").peel_to_commit().expect("commit");
-        repo.branch(branch_name, &head_commit, false)
-            .expect("create branch");
+    /// Helper: create a branch with a commit in a test repo (CLI-based).
+    fn create_branch_with_commit(repo_path: &Path, branch_name: &str) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["branch", branch_name])
+            .output()
+            .expect("git branch create");
+        assert!(
+            output.status.success(),
+            "git branch create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -299,50 +333,50 @@ mod tests {
 
     #[test]
     fn test_determine_base_branch_no_deps_returns_default() {
-        let (_dir, repo) = init_test_repo();
+        let (_dir, path) = init_test_repo();
         let story = make_story("1-1-scaffolding", vec![]);
 
-        let base = determine_base_branch(&story, &repo, "main");
+        let base = determine_base_branch(&story, &path, "main");
         assert_eq!(base, "main");
     }
 
     #[test]
     fn test_determine_base_branch_dep_branch_exists_returns_parent() {
-        let (_dir, repo) = init_test_repo();
+        let (_dir, path) = init_test_repo();
 
         // Create the dependency branch
-        create_branch_with_commit(&repo, "story/4-1-rig-tools");
+        create_branch_with_commit(&path, "story/4-1-rig-tools");
 
         let story = make_story("4-2-session-setup", vec!["4-1-rig-tools"]);
 
-        let base = determine_base_branch(&story, &repo, "main");
+        let base = determine_base_branch(&story, &path, "main");
         assert_eq!(base, "story/4-1-rig-tools");
     }
 
     #[test]
     fn test_determine_base_branch_dep_branch_missing_returns_default() {
-        let (_dir, repo) = init_test_repo();
+        let (_dir, path) = init_test_repo();
 
         // Dependency exists in StoryInfo but branch is NOT in repo
         let story = make_story("4-2-session-setup", vec!["4-1-rig-tools"]);
 
-        let base = determine_base_branch(&story, &repo, "main");
+        let base = determine_base_branch(&story, &path, "main");
         assert_eq!(base, "main");
     }
 
     #[test]
     fn test_determine_base_branch_uses_last_dependency() {
-        let (_dir, repo) = init_test_repo();
+        let (_dir, path) = init_test_repo();
 
         // Create only the second dep branch
-        create_branch_with_commit(&repo, "story/4-2-session-setup");
+        create_branch_with_commit(&path, "story/4-2-session-setup");
 
         let story = make_story(
             "4-3-branch-mgmt",
             vec!["4-1-rig-tools", "4-2-session-setup"],
         );
 
-        let base = determine_base_branch(&story, &repo, "main");
+        let base = determine_base_branch(&story, &path, "main");
         // Should check the LAST dep (4-2), which exists
         assert_eq!(base, "story/4-2-session-setup");
     }
@@ -353,10 +387,10 @@ mod tests {
 
     #[test]
     fn test_ensure_story_branch_creates_new_from_main() {
-        let (dir, repo) = init_test_repo();
+        let (_dir, path) = init_test_repo();
 
-        let result = ensure_story_branch(dir.path(), "story/1-1-scaffolding", "main")
-            .expect("should succeed");
+        let result =
+            ensure_story_branch(&path, "story/1-1-scaffolding", "main").expect("should succeed");
 
         match result {
             BranchAction::Created {
@@ -369,46 +403,54 @@ mod tests {
             BranchAction::Reused { .. } => panic!("Expected Created, got Reused"),
         }
 
-        // Verify HEAD is on the new branch
-        let head = repo.head().expect("head");
-        assert_eq!(
-            head.shorthand().expect("shorthand"),
-            "story/1-1-scaffolding"
-        );
+        // Verify HEAD is on the new branch using git CLI
+        let head_output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        let current_branch = String::from_utf8_lossy(&head_output.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(current_branch, "story/1-1-scaffolding");
     }
 
     #[test]
     fn test_ensure_story_branch_creates_from_parent_branch() {
-        let (dir, repo) = init_test_repo();
+        let (_dir, path) = init_test_repo();
 
-        // Create parent branch with a unique commit
-        let head_commit = repo.head().expect("head").peel_to_commit().expect("commit");
-        repo.branch("story/4-1-rig-tools", &head_commit, false)
-            .expect("create parent");
-        repo.set_head("refs/heads/story/4-1-rig-tools")
-            .expect("set head");
-        repo.checkout_head(Some(CheckoutBuilder::default().force()))
-            .expect("checkout");
+        // Create parent branch
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["checkout", "-b", "story/4-1-rig-tools"])
+            .output()
+            .expect("git checkout -b");
+        assert!(output.status.success());
 
         // Add a commit on the parent branch
-        let sig = Signature::now("test", "test@test.com").expect("sig");
-        let parent_commit = repo.head().expect("head").peel_to_commit().expect("commit");
-        let tree_id = repo.index().expect("index").write_tree().expect("tree");
-        let tree = repo.find_tree(tree_id).expect("find tree");
-        let parent_oid = repo
-            .commit(
-                Some("HEAD"),
-                &sig,
-                &sig,
-                "parent branch commit",
-                &tree,
-                &[&parent_commit],
-            )
-            .expect("commit on parent");
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["commit", "--allow-empty", "-m", "parent branch commit"])
+            .output()
+            .expect("git commit");
+        assert!(output.status.success());
 
-        let result =
-            ensure_story_branch(dir.path(), "story/4-2-session-setup", "story/4-1-rig-tools")
-                .expect("should succeed");
+        // Get parent commit SHA for later comparison
+        let parent_sha_output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        let parent_sha = String::from_utf8_lossy(&parent_sha_output.stdout)
+            .trim()
+            .to_string();
+
+        let result = ensure_story_branch(&path, "story/4-2-session-setup", "story/4-1-rig-tools")
+            .expect("should succeed");
 
         match result {
             BranchAction::Created {
@@ -422,21 +464,29 @@ mod tests {
         }
 
         // Verify child branch has the parent's commit
-        let child_head = repo.head().expect("head").peel_to_commit().expect("commit");
-        assert_eq!(child_head.id(), parent_oid);
+        let child_sha_output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        let child_sha = String::from_utf8_lossy(&child_sha_output.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(child_sha, parent_sha);
     }
 
     #[test]
     fn test_ensure_story_branch_reuses_existing() {
-        let (dir, _repo) = init_test_repo();
+        let (_dir, path) = init_test_repo();
 
         // First call — creates the branch
-        let first = ensure_story_branch(dir.path(), "story/2-1-polling", "main")
+        let first = ensure_story_branch(&path, "story/2-1-polling", "main")
             .expect("first call should succeed");
         assert!(matches!(first, BranchAction::Created { .. }));
 
         // Second call — should reuse the existing branch
-        let second = ensure_story_branch(dir.path(), "story/2-1-polling", "main")
+        let second = ensure_story_branch(&path, "story/2-1-polling", "main")
             .expect("second call should succeed");
         match second {
             BranchAction::Reused { branch_name } => {
@@ -448,9 +498,9 @@ mod tests {
 
     #[test]
     fn test_ensure_story_branch_base_not_found_returns_error() {
-        let (dir, _repo) = init_test_repo();
+        let (_dir, path) = init_test_repo();
 
-        let result = ensure_story_branch(dir.path(), "story/1-1-scaffolding", "nonexistent-branch");
+        let result = ensure_story_branch(&path, "story/1-1-scaffolding", "nonexistent-branch");
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -469,12 +519,13 @@ mod tests {
         let result = ensure_story_branch(dir.path(), "story/1-1-scaffolding", "main");
 
         assert!(result.is_err());
+        // With CLI-based approach, this will fail at branch_exists (returns false for base)
+        // leading to BaseBranchNotFound since git commands fail on non-repo dirs
         match result.unwrap_err() {
-            BranchError::RepoOpenFailed { path, reason } => {
-                assert!(path.contains(dir.path().to_str().unwrap()));
-                assert!(!reason.is_empty());
+            BranchError::BaseBranchNotFound { .. } => {
+                // Expected — branch_exists returns false for non-repo dir
             }
-            other => panic!("Expected RepoOpenFailed, got: {other:?}"),
+            other => panic!("Expected BaseBranchNotFound, got: {other:?}"),
         }
     }
 
@@ -512,12 +563,12 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("develop"));
 
-        let err = BranchError::RepoOpenFailed {
-            path: "/tmp/bad".to_string(),
-            reason: "not a repo".to_string(),
+        let err = BranchError::CommandFailed {
+            command: "git checkout".to_string(),
+            stderr: "error: pathspec 'x' did not match".to_string(),
         };
         let display = format!("{err}");
-        assert!(display.contains("/tmp/bad"));
-        assert!(display.contains("not a repo"));
+        assert!(display.contains("git checkout"));
+        assert!(display.contains("pathspec"));
     }
 }

@@ -33,7 +33,7 @@ use crate::tools::{
     EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
 };
 use crate::watcher::StoryInfo;
-use git2::{BranchType, Repository};
+
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
@@ -280,11 +280,16 @@ impl SessionRunner {
             let rp = repo_path.clone();
             let bn = branch_name_for_git.clone();
             match tokio::task::spawn_blocking(move || -> Result<bool, String> {
-                let repo =
-                    Repository::open(&rp).map_err(|e| format!("Failed to open repo: {e}"))?;
-                // Check if branch exists
-                repo.find_branch(&bn, BranchType::Local)
-                    .map_err(|_| format!("Recovery branch not found: {bn}"))?;
+                // Check if branch exists using git CLI
+                let output = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&rp)
+                    .args(["branch", "--list", &bn])
+                    .output()
+                    .map_err(|e| format!("git branch --list failed: {e}"))?;
+                if !output.status.success() || output.stdout.is_empty() {
+                    return Err(format!("Recovery branch not found: {bn}"));
+                }
                 Ok(true)
             })
             .await
@@ -565,24 +570,10 @@ impl SessionRunner {
         let default_branch = self.config.git_provider.target_branch.clone();
         let branch_name = story.branch_name.clone();
 
-        // Resolve base branch (needs repo open for branch lookup)
-        let base_branch = match Repository::open(&repo_path) {
-            Ok(repo) => determine_base_branch(story, &repo, &default_branch),
-            Err(e) => {
-                tracing::error!(
-                    action = "session_failed",
-                    error = %e,
-                    "Failed to open repo for base branch resolution"
-                );
-                return SessionOutcome::Failed {
-                    story_key: story.story_key.clone(),
-                    error: format!("Failed to open repo: {e}"),
-                    decisions: vec![],
-                };
-            }
-        };
+        // Resolve base branch (CLI-based, no repo open needed)
+        let base_branch = determine_base_branch(story, &repo_path, &default_branch);
 
-        // Create/checkout story branch — wrap blocking git2 call in spawn_blocking
+        // Create/checkout story branch — wrap blocking git CLI call in spawn_blocking
         let rp = repo_path.clone();
         let bn = branch_name.clone();
         let bb = base_branch.clone();

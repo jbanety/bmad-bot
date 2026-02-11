@@ -18,15 +18,14 @@ use crate::session::SessionError;
 /// Preserves partial work on the story branch during escalation.
 ///
 /// This function is **best-effort** — it returns a `String` summary, NEVER an error.
-/// Every git2 operation is individually guarded: failures are logged via `tracing::error!()`
+/// Every git CLI operation is individually guarded: failures are logged via `tracing::error!()`
 /// and a fallback summary is returned. The escalation flow must NEVER be blocked by a
 /// preservation failure.
 ///
 /// # Operations (all best-effort)
-/// 1. Open the git repo at `repo_path`
-/// 2. Check for uncommitted changes (staged or unstaged)
-/// 3. If dirty: stage all changes and commit with a WIP message including the question
-/// 4. Build a summary string with branch name, commit status, and file list
+/// 1. Check for uncommitted changes via `git status --porcelain`
+/// 2. If dirty: stage all changes via `git add .` and commit with a WIP message
+/// 3. Build a summary string with branch name, commit status, and file list
 ///
 /// # Arguments
 /// - `repo_path` — path to the git repository root
@@ -36,79 +35,133 @@ use crate::session::SessionError;
 /// # Returns
 /// A human-readable summary string describing the preserved partial work.
 pub async fn preserve_partial_work(repo_path: &Path, story_key: &str, question: &str) -> String {
-    let repo = match git2::Repository::open(repo_path) {
-        Ok(r) => r,
+    // Check for dirty state via `git status --porcelain`
+    let status_output = match tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["status", "--porcelain"])
+        .output()
+        .await
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!(
+                    action = "preserve_partial_work",
+                    story_id = %story_key,
+                    error = %stderr,
+                    "git status --porcelain failed — skipping preservation"
+                );
+                return format!("Preservation failed — git status failed: {stderr}");
+            }
+            String::from_utf8_lossy(&output.stdout).to_string()
+        }
         Err(e) => {
             tracing::error!(
                 action = "preserve_partial_work",
                 story_id = %story_key,
                 error = %e,
-                "Failed to open git repo — skipping preservation"
+                "Failed to execute git status — skipping preservation"
             );
-            return format!("Preservation failed — could not open repo: {e}");
+            return format!("Preservation failed — could not execute git: {e}");
         }
     };
 
-    // Check for dirty state
-    let statuses = match repo.statuses(Some(
-        git2::StatusOptions::new()
-            .include_untracked(true)
-            .recurse_untracked_dirs(true),
-    )) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                action = "preserve_partial_work",
-                story_id = %story_key,
-                error = %e,
-                "Failed to check git status — skipping preservation"
-            );
-            return format!("Preservation failed — could not read status: {e}");
-        }
-    };
-
-    let changed_files: Vec<String> = statuses
-        .iter()
-        .filter_map(|s| s.path().map(String::from))
+    // Parse changed files from porcelain output
+    let changed_files: Vec<String> = status_output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            // Porcelain format: "XY path" — skip the 2-char status + space
+            if line.len() > 3 {
+                line[3..].trim().to_string()
+            } else {
+                line.trim().to_string()
+            }
+        })
         .collect();
 
-    let has_changes = !statuses.is_empty();
+    let has_changes = !changed_files.is_empty();
 
     if has_changes {
-        let commit_result = (|| -> Result<(), git2::Error> {
-            let mut index = repo.index()?;
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
-            index.write()?;
-            let tree_id = index.write_tree()?;
-            let tree = repo.find_tree(tree_id)?;
-            let head = repo.head()?.peel_to_commit()?;
-            let sig = repo
-                .signature()
-                .or_else(|_| git2::Signature::now("bmad-bot", "bmad-bot@localhost"))?;
-            let message =
-                format!("chore: WIP — escalated for human clarification\n\nQuestion: {question}");
-            repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &[&head])?;
-            Ok(())
-        })();
+        // Stage all changes: git add .
+        let add_result = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["add", "."])
+            .output()
+            .await;
 
-        if let Err(e) = commit_result {
-            tracing::error!(
-                action = "preserve_partial_work",
-                story_id = %story_key,
-                error = %e,
-                "Failed to create WIP commit — changes remain unstaged"
-            );
-            // Continue to build summary anyway — partial info is better than nothing
+        match &add_result {
+            Err(e) => {
+                tracing::error!(
+                    action = "preserve_partial_work",
+                    story_id = %story_key,
+                    error = %e,
+                    "Failed to stage changes — changes remain unstaged"
+                );
+            }
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!(
+                    action = "preserve_partial_work",
+                    story_id = %story_key,
+                    error = %stderr,
+                    "git add failed — changes remain unstaged"
+                );
+            }
+            _ => {}
+        }
+
+        // Commit with WIP message
+        let message =
+            format!("chore: WIP — escalated for human clarification\n\nQuestion: {question}");
+        let commit_result = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["commit", "-m", &message])
+            .output()
+            .await;
+
+        match &commit_result {
+            Err(e) => {
+                tracing::error!(
+                    action = "preserve_partial_work",
+                    story_id = %story_key,
+                    error = %e,
+                    "Failed to create WIP commit — changes remain staged"
+                );
+            }
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!(
+                    action = "preserve_partial_work",
+                    story_id = %story_key,
+                    error = %stderr,
+                    "git commit failed — changes remain staged"
+                );
+            }
+            _ => {}
         }
     }
 
-    // Build summary — each step individually guarded
-    let branch = match repo.head() {
-        Ok(head) => head
-            .shorthand()
-            .map(String::from)
-            .unwrap_or_else(|| "unknown".to_string()),
-        Err(_) => "unknown".to_string(),
+    // Build summary — get branch name (individually guarded)
+    let branch = match tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["branch", "--show-current"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            let b = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if b.is_empty() {
+                "unknown".to_string()
+            } else {
+                b
+            }
+        }
+        _ => "unknown".to_string(),
     };
 
     let summary = format!(
@@ -309,33 +362,46 @@ development_status:
     }
 
     // -----------------------------------------------------------------------
-    // preserve_partial_work tests
+    // preserve_partial_work tests (CLI-based fixtures)
     // -----------------------------------------------------------------------
 
-    /// Helper: create a git repo with an initial commit in a tempdir.
-    fn init_test_repo(dir: &Path) -> git2::Repository {
-        let repo = git2::Repository::init(dir).expect("init repo");
+    /// Helper: create a git repo with an initial commit in a tempdir (CLI-based).
+    fn init_test_repo(dir: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["init", dir.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
 
-        // Create initial commit so HEAD exists
-        let sig = git2::Signature::now("test", "test@test.com").expect("sig");
-        {
-            let tree_id = {
-                let mut index = repo.index().expect("index");
-                index.write_tree().expect("write tree")
-            };
-            let tree = repo.find_tree(tree_id).expect("find tree");
-            repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
-                .expect("initial commit");
-        }
+        // Set identity for commits (required in CI/test environments)
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "user.email", "test@test.com"])
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "user.name", "test"])
+            .output()
+            .expect("git config name");
 
-        repo
+        // Create initial empty commit so HEAD exists
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["commit", "--allow-empty", "-m", "Initial commit"])
+            .output()
+            .expect("git commit");
+        assert!(output.status.success(), "git commit failed");
     }
 
     #[tokio::test]
     async fn test_preserve_partial_work_dirty_tree_creates_wip_commit() {
         let dir = TempDir::new().expect("tempdir");
         let repo_path = dir.path();
-        let _repo = init_test_repo(repo_path);
+        init_test_repo(repo_path);
 
         // Create a dirty file
         std::fs::write(repo_path.join("new_file.rs"), "fn main() {}").expect("write file");
@@ -353,7 +419,7 @@ development_status:
     async fn test_preserve_partial_work_clean_tree_no_commit() {
         let dir = TempDir::new().expect("tempdir");
         let repo_path = dir.path();
-        let _repo = init_test_repo(repo_path);
+        init_test_repo(repo_path);
 
         let summary = preserve_partial_work(repo_path, "3-3-test", "What DB?").await;
 
@@ -371,7 +437,7 @@ development_status:
     async fn test_preserve_partial_work_summary_includes_branch_name() {
         let dir = TempDir::new().expect("tempdir");
         let repo_path = dir.path();
-        let _repo = init_test_repo(repo_path);
+        init_test_repo(repo_path);
 
         let summary = preserve_partial_work(repo_path, "3-3-test", "q").await;
 
@@ -392,17 +458,13 @@ development_status:
             summary.contains("Preservation failed"),
             "should return fallback: {summary}"
         );
-        assert!(
-            summary.contains("could not open repo"),
-            "should mention repo open failure: {summary}"
-        );
     }
 
     #[tokio::test]
     async fn test_preserve_partial_work_multiple_files() {
         let dir = TempDir::new().expect("tempdir");
         let repo_path = dir.path();
-        let _repo = init_test_repo(repo_path);
+        init_test_repo(repo_path);
 
         // Create multiple dirty files
         std::fs::write(repo_path.join("a.rs"), "a").expect("write");
@@ -429,7 +491,7 @@ development_status:
         // 1. Git repo with dirty working tree
         let repo_path = dir.path().join("repo");
         std::fs::create_dir_all(&repo_path).expect("mkdir");
-        let _repo = init_test_repo(&repo_path);
+        init_test_repo(&repo_path);
         std::fs::write(repo_path.join("wip.rs"), "fn wip() {}").expect("write dirty file");
 
         // 2. Sprint-status file
@@ -513,7 +575,7 @@ development_status:
         // Git repo (clean — no partial work to preserve)
         let repo_path = dir.path().join("repo");
         std::fs::create_dir_all(&repo_path).expect("mkdir");
-        let _repo = init_test_repo(&repo_path);
+        init_test_repo(&repo_path);
 
         // Sprint-status path that does NOT exist — status update will fail
         let sprint_path = dir.path().join("nonexistent-sprint-status.yaml");

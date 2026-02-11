@@ -5,7 +5,7 @@
 //! - **[`GrepTool`]** — Regex search across project file contents with glob filtering
 //! - **[`FindPathTool`]** — Glob-based file path discovery
 //! - **[`ListDirectoryTool`]** — List directory contents with types and sizes
-//! - **[`GitTool`]** — Git operations via git2
+//! - **[`GitTool`]** — Git operations via Git CLI
 //! - **[`TerminalTool`]** — Shell command execution with timeout
 
 pub mod edit_file;

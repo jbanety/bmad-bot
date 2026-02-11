@@ -123,8 +123,6 @@ pub struct StoryPipeline {
     session_runner: SessionRunner,
     /// Code review session runner.
     review_runner: ReviewRunner,
-    /// Token used for HTTPS git push authentication (GitHub PAT or GitLab token).
-    git_push_token: String,
 }
 
 impl StoryPipeline {
@@ -172,7 +170,6 @@ impl StoryPipeline {
             notifier,
             session_runner,
             review_runner,
-            git_push_token: token.to_string(),
         })
     }
 
@@ -437,78 +434,40 @@ impl StoryPipeline {
     }
 
     /// Send a notification for a single story result (non-blocking).
-    /// Push a local branch to the remote using git2 over HTTPS with token auth.
+    /// Push a local branch to the remote using git CLI.
     ///
-    /// Constructs an HTTPS push URL from the config (`repo_owner`/`repo_name`) and
-    /// authenticates with the git provider token (GitHub PAT or GitLab token).
-    /// The configured remote URL (which may be SSH) is bypassed — we push directly
-    /// to the HTTPS endpoint so the daemon works without an SSH agent.
-    /// Runs in `spawn_blocking` to avoid blocking tokio.
+    /// Authentication is inherited from the user's git configuration (SSH agent,
+    /// credential helper, osxkeychain, etc.). No HTTPS URL construction or
+    /// credential callback needed.
     async fn push_branch(&self, branch: &str) -> Result<(), PipelineError> {
         let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
-        let branch = branch.to_string();
-        let token = self.git_push_token.clone();
 
-        // Build HTTPS push URL from config — works for both GitHub and GitLab
-        let push_url = match self.config.git_provider.provider.as_str() {
-            "github" => format!(
-                "https://github.com/{}/{}.git",
-                self.config.git_provider.repo_owner, self.config.git_provider.repo_name
-            ),
-            "gitlab" => format!(
-                "https://gitlab.com/{}/{}.git",
-                self.config.git_provider.repo_owner, self.config.git_provider.repo_name
-            ),
-            other => {
-                return Err(PipelineError::Init {
-                    reason: format!("Unsupported git provider for push: {other}"),
-                });
-            }
-        };
-
-        tokio::task::spawn_blocking(move || {
-            let repo = git2::Repository::open(&repo_path).map_err(|e| PipelineError::Init {
-                reason: format!("Cannot open repo at {}: {e}", repo_path.display()),
+        let output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "origin", branch])
+            .output()
+            .await
+            .map_err(|e| PipelineError::Init {
+                reason: format!("Failed to execute git push: {e}"),
             })?;
 
-            let mut remote = repo
-                .remote_anonymous(&push_url)
-                .map_err(|e| PipelineError::Init {
-                    reason: format!("Cannot create anonymous remote for {push_url}: {e}"),
-                })?;
-
-            let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-
-            let mut callbacks = git2::RemoteCallbacks::new();
-            callbacks.credentials(move |_url, _username, _allowed_types| {
-                // HTTPS token auth: "x-access-token" + PAT for GitHub,
-                // "oauth2" + token for GitLab — both work with userpass_plaintext
-                git2::Cred::userpass_plaintext("x-access-token", &token)
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PipelineError::PrCreation {
+                story_key: String::new(),
+                branch: branch.to_string(),
+                reason: format!("Git push failed: {stderr}"),
             });
+        }
 
-            let mut push_options = git2::PushOptions::new();
-            push_options.remote_callbacks(callbacks);
+        tracing::info!(
+            action = "branch_pushed",
+            branch = %branch,
+            "Branch pushed to origin"
+        );
 
-            remote
-                .push(&[&refspec], Some(&mut push_options))
-                .map_err(|e| PipelineError::PrCreation {
-                    story_key: String::new(),
-                    branch: branch.clone(),
-                    reason: format!("Git push failed: {e}"),
-                })?;
-
-            tracing::info!(
-                action = "branch_pushed",
-                branch = %branch,
-                "Branch pushed to origin via HTTPS"
-            );
-
-            Ok(())
-        })
-        .await
-        .map_err(|e| PipelineError::Init {
-            reason: format!("Push task join error: {e}"),
-        })?
+        Ok(())
     }
 
     async fn notify_story_result(&self, result: &PipelineResult) {

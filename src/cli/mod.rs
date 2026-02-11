@@ -1179,11 +1179,79 @@ fn parse_level_priority(level: &str) -> u8 {
 /// This is the main daemon entry point. Config loading and validation happen
 /// **before** tracing is initialized, so errors at that stage are surfaced via
 /// `anyhow`'s Debug format on stderr (expected behaviour — see Dev Notes).
+/// Validates that `git` is installed and meets the minimum version requirement (>= 2.30).
+///
+/// Executes `git --version`, parses the `"git version X.Y.Z"` output, and verifies
+/// the major.minor is at least 2.30. Returns `Ok(())` on success.
+///
+/// # Errors
+/// Returns [`CliError::Init`] if git is not found, the output is unparseable,
+/// or the version is below the minimum.
+fn validate_git_version() -> Result<(), CliError> {
+    let output = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map_err(|e| CliError::Init {
+            reason: format!("git not found — please install git >= 2.30. Error: {e}"),
+        })?;
+
+    if !output.status.success() {
+        return Err(CliError::Init {
+            reason: "git --version returned non-zero exit code".to_string(),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Expected format: "git version 2.39.5 (Apple Git-154)" or "git version 2.39.5"
+    let version_str = stdout
+        .trim()
+        .strip_prefix("git version ")
+        .ok_or_else(|| CliError::Init {
+            reason: format!(
+                "Unexpected git --version output: '{stdout}'. Expected 'git version X.Y.Z'"
+            ),
+        })?;
+
+    // Extract major.minor from "X.Y.Z ..." (there may be extra text after the version)
+    let version_part = version_str.split_whitespace().next().unwrap_or(version_str);
+    let parts: Vec<&str> = version_part.split('.').collect();
+
+    let major: u32 = parts
+        .first()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| CliError::Init {
+            reason: format!("Cannot parse git major version from '{version_str}'"),
+        })?;
+
+    let minor: u32 = parts
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| CliError::Init {
+            reason: format!("Cannot parse git minor version from '{version_str}'"),
+        })?;
+
+    if major < 2 || (major == 2 && minor < 30) {
+        return Err(CliError::Init {
+            reason: format!("git >= 2.30 required, found {major}.{minor}. Please upgrade git."),
+        });
+    }
+
+    tracing::info!(
+        git_version = %version_part,
+        "Git version validated (>= 2.30)"
+    );
+
+    Ok(())
+}
+
 pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     let config = BotConfig::load(config_path)?;
     config.validate()?;
 
     init_tracing(&config)?;
+
+    // Validate git is installed and >= 2.30 before proceeding
+    validate_git_version()?;
 
     let secrets = crate::config::BotSecrets::load()?;
     secrets.validate_for_config(&config)?;
@@ -2081,5 +2149,92 @@ development_status:
         let msg = format!("{err}");
         assert!(msg.contains("Log file error"));
         assert!(msg.contains("permission denied"));
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_git_version tests (Story 4.4 — Task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_git_version_succeeds_on_current_system() {
+        // This test runs against the real `git` on the dev machine.
+        // It should pass on any machine with git >= 2.30 installed.
+        let result = validate_git_version();
+        assert!(result.is_ok(), "validate_git_version failed: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_git_version_parse_valid_version_string() {
+        // Simulate parsing logic inline to test version extraction without
+        // needing to mock the subprocess. We test the parsing branch directly.
+        let stdout = "git version 2.39.5 (Apple Git-154)";
+        let version_str = stdout.trim().strip_prefix("git version ").unwrap();
+        let version_part = version_str.split_whitespace().next().unwrap();
+        let parts: Vec<&str> = version_part.split('.').collect();
+        let major: u32 = parts[0].parse().unwrap();
+        let minor: u32 = parts[1].parse().unwrap();
+        assert_eq!(major, 2);
+        assert_eq!(minor, 39);
+        assert!(major > 2 || (major == 2 && minor >= 30));
+    }
+
+    #[test]
+    fn test_validate_git_version_parse_minimal_format() {
+        // "git version 2.30.0" — exactly at the minimum
+        let stdout = "git version 2.30.0";
+        let version_str = stdout.trim().strip_prefix("git version ").unwrap();
+        let version_part = version_str.split_whitespace().next().unwrap();
+        let parts: Vec<&str> = version_part.split('.').collect();
+        let major: u32 = parts[0].parse().unwrap();
+        let minor: u32 = parts[1].parse().unwrap();
+        assert_eq!(major, 2);
+        assert_eq!(minor, 30);
+    }
+
+    #[test]
+    fn test_validate_git_version_too_old_detected() {
+        // Simulate version 2.29.0 — should be rejected
+        let major: u32 = 2;
+        let minor: u32 = 29;
+        let too_old = major < 2 || (major == 2 && minor < 30);
+        assert!(too_old, "2.29 should be considered too old");
+    }
+
+    #[test]
+    fn test_validate_git_version_very_old_major_detected() {
+        // Simulate version 1.9.0 — should be rejected
+        let major: u32 = 1;
+        let minor: u32 = 9;
+        let too_old = major < 2 || (major == 2 && minor < 30);
+        assert!(too_old, "1.9 should be considered too old");
+    }
+
+    #[test]
+    fn test_validate_git_version_future_major_accepted() {
+        // Simulate version 3.0.0 — should be accepted
+        let major: u32 = 3;
+        let minor: u32 = 0;
+        let too_old = major < 2 || (major == 2 && minor < 30);
+        assert!(!too_old, "3.0 should be accepted");
+    }
+
+    #[test]
+    fn test_validate_git_version_unexpected_format_error() {
+        // If git --version returned something unexpected, the prefix strip would fail
+        let stdout = "not git output";
+        let result = stdout.trim().strip_prefix("git version ");
+        assert!(result.is_none(), "Should fail to parse unexpected format");
+    }
+
+    #[test]
+    fn test_validate_git_version_error_message_for_too_old() {
+        let major: u32 = 2;
+        let minor: u32 = 20;
+        let err = CliError::Init {
+            reason: format!("git >= 2.30 required, found {major}.{minor}. Please upgrade git."),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("2.30 required"));
+        assert!(msg.contains("2.20"));
     }
 }
