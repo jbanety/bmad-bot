@@ -196,36 +196,7 @@ impl StoryPipeline {
                 branch,
                 decisions,
             } => {
-                // Phase 2 — Code Review (optional)
-                let review_report = if self.config.code_review_enabled {
-                    match self.review_runner.run(story).await {
-                        ReviewOutcome::Completed { report, .. } => Some(report),
-                        ReviewOutcome::Failed {
-                            story_key: rk,
-                            error,
-                        } => {
-                            tracing::warn!(
-                                action = "review_failed",
-                                story_key = %rk,
-                                error = %error,
-                                "Code review failed — continuing to PR creation"
-                            );
-                            None
-                        }
-                        ReviewOutcome::Skipped { reason } => {
-                            tracing::info!(
-                                action = "review_skipped",
-                                reason = %reason,
-                                "Code review skipped — continuing to PR creation"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                // Phase 3 — Push branch to remote before PR creation
+                // Phase 2 — Push branch to remote before PR creation
                 if let Err(e) = self.push_branch(&branch).await {
                     tracing::error!(
                         action = "push_failed",
@@ -244,7 +215,7 @@ impl StoryPipeline {
                     return result;
                 }
 
-                // Phase 4 — Success PR
+                // Phase 3 — Create PR (before review so it's visible immediately)
                 let decisions_section = format_pr_decisions_section(&decisions);
                 let pr_title = build_pr_title(&story_key, &story_title, false);
                 let pr_body = build_pr_description(&PrDescriptionParams {
@@ -261,36 +232,15 @@ impl StoryPipeline {
                     target_branch: self.config.git_provider.target_branch.clone(),
                 };
 
-                match self.git_provider.create_pr(pr_params).await {
-                    Ok(pr_info) => {
-                        // Post review comment if available (non-blocking)
-                        if let Some(ref report) = review_report
-                            && let Err(e) = self.git_provider.add_comment(&pr_info.id, report).await
-                        {
-                            tracing::error!(
-                                action = "pr_comment_failed",
-                                pr_id = %pr_info.id,
-                                error = %e,
-                                "Failed to post review comment — PR created successfully"
-                            );
-                        }
-
-                        let result = PipelineResult {
-                            story_key: story_key.clone(),
-                            status: StoryStatus::Completed,
-                            pr_url: Some(pr_info.url.clone()),
-                            error_detail: None,
-                        };
-                        self.notify_story_result(&result).await;
-                        result
-                    }
+                let pr_info = match self.git_provider.create_pr(pr_params).await {
+                    Ok(info) => info,
                     Err(e) => {
                         tracing::error!(
                             action = "pr_creation_failed",
                             story_key = %story_key,
                             branch = %branch,
                             error = %e,
-                            "PR creation failed — notifying human with branch name"
+                            "PR creation failed — skipping review, notifying human with branch name"
                         );
 
                         let result = PipelineResult {
@@ -302,9 +252,73 @@ impl StoryPipeline {
                             )),
                         };
                         self.notify_story_result(&result).await;
-                        result
+                        return result;
+                    }
+                };
+
+                // Phase 4 — Code Review (optional, on existing PR)
+                let review_report = if self.config.code_review_enabled {
+                    match self.review_runner.run(story).await {
+                        ReviewOutcome::Completed { report, .. } => Some(report),
+                        ReviewOutcome::Failed {
+                            story_key: rk,
+                            error,
+                        } => {
+                            tracing::warn!(
+                                action = "review_failed",
+                                story_key = %rk,
+                                error = %error,
+                                "Code review failed — PR already exists"
+                            );
+                            None
+                        }
+                        ReviewOutcome::Skipped { reason } => {
+                            tracing::info!(
+                                action = "review_skipped",
+                                reason = %reason,
+                                "Code review skipped — PR already exists"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Phase 5 — Push review fix commits to update PR (if review ran)
+                if review_report.is_some() {
+                    if let Err(e) = self.push_branch(&branch).await {
+                        tracing::warn!(
+                            action = "review_push_failed",
+                            story_key = %story_key,
+                            branch = %branch,
+                            error = %e,
+                            "Failed to push review fix commits — PR still exists with dev commits"
+                        );
                     }
                 }
+
+                // Phase 6 — Post review comment on PR (non-blocking)
+                if let Some(ref report) = review_report
+                    && let Err(e) = self.git_provider.add_comment(&pr_info.id, report).await
+                {
+                    tracing::error!(
+                        action = "pr_comment_failed",
+                        pr_id = %pr_info.id,
+                        error = %e,
+                        "Failed to post review comment — PR created successfully"
+                    );
+                }
+
+                // Phase 7 — Notify
+                let result = PipelineResult {
+                    story_key: story_key.clone(),
+                    status: StoryStatus::Completed,
+                    pr_url: Some(pr_info.url.clone()),
+                    error_detail: None,
+                };
+                self.notify_story_result(&result).await;
+                result
             }
 
             SessionOutcome::Escalated { report, decisions } => {
