@@ -232,6 +232,31 @@ async fn test_mock_session_runner_returns_configured_failed() {
 }
 
 #[tokio::test]
+async fn test_mock_session_runner_returns_configured_escalated() {
+    use bmad_bot::session::escalation::EscalationReport;
+
+    let report = EscalationReport::new(
+        "7-1-infra".into(),
+        "How do I proceed?".into(),
+        "Documentation unclear".into(),
+        "story/7-1-infra".into(),
+        "Partial work preserved".into(),
+    );
+    let mock = MockSessionRunner::new().with_outcome(SessionOutcome::Escalated {
+        report,
+        decisions: Vec::new(),
+    });
+    let story = make_test_story("7-1-infra", "infra", Vec::new());
+
+    let outcome = mock.run(&story).await;
+    assert!(matches!(outcome, SessionOutcome::Escalated { .. }));
+    if let SessionOutcome::Escalated { report, .. } = outcome {
+        assert_eq!(report.story_key, "7-1-infra");
+        assert_eq!(report.question, "How do I proceed?");
+    }
+}
+
+#[tokio::test]
 async fn test_mock_session_runner_tracks_run_calls() {
     let mock = MockSessionRunner::new();
     let story1 = make_test_story("7-1-infra", "infra", Vec::new());

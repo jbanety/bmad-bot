@@ -40,8 +40,15 @@ pub struct MockGitProvider {
     calls: Arc<Mutex<Vec<GitProviderCall>>>,
 }
 
+impl Default for MockGitProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockGitProvider {
     /// Create a new `MockGitProvider` with default OK responses.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             create_pr_result: Arc::new(Mutex::new(Ok(PrInfo {
@@ -81,35 +88,62 @@ impl MockGitProvider {
     }
 }
 
-/// Clone the inner result for return. `GitProviderError` is not `Clone`, so we must
-/// re-create from the stored variant.
+/// Clone `GitProviderError` — the type is not `Clone`, so we reconstruct each variant.
+fn clone_git_provider_error(e: &GitProviderError) -> GitProviderError {
+    match e {
+        GitProviderError::ApiError { status, message } => GitProviderError::ApiError {
+            status: *status,
+            message: message.clone(),
+        },
+        GitProviderError::AuthenticationFailed { reason } => {
+            GitProviderError::AuthenticationFailed {
+                reason: reason.clone(),
+            }
+        }
+        GitProviderError::BranchNotFound { branch } => GitProviderError::BranchNotFound {
+            branch: branch.clone(),
+        },
+        GitProviderError::RateLimited { retry_after_secs } => GitProviderError::RateLimited {
+            retry_after_secs: *retry_after_secs,
+        },
+        GitProviderError::NetworkError { reason } => GitProviderError::NetworkError {
+            reason: reason.clone(),
+        },
+        GitProviderError::InvalidResponse { reason } => GitProviderError::InvalidResponse {
+            reason: reason.clone(),
+        },
+        GitProviderError::InvalidPrId { pr_id } => GitProviderError::InvalidPrId {
+            pr_id: pr_id.clone(),
+        },
+        GitProviderError::ProviderNotConfigured { provider } => {
+            GitProviderError::ProviderNotConfigured {
+                provider: provider.clone(),
+            }
+        }
+        GitProviderError::BuildError { reason } => GitProviderError::BuildError {
+            reason: reason.clone(),
+        },
+    }
+}
+
 fn clone_pr_result(r: &Result<PrInfo, GitProviderError>) -> Result<PrInfo, GitProviderError> {
     match r {
         Ok(info) => Ok(info.clone()),
-        Err(_) => Err(GitProviderError::ApiError {
-            status: 500,
-            message: "mock error".into(),
-        }),
+        Err(e) => Err(clone_git_provider_error(e)),
     }
 }
 
 fn clone_comment_result(r: &Result<(), GitProviderError>) -> Result<(), GitProviderError> {
     match r {
         Ok(()) => Ok(()),
-        Err(_) => Err(GitProviderError::ApiError {
-            status: 500,
-            message: "mock error".into(),
-        }),
+        Err(e) => Err(clone_git_provider_error(e)),
     }
 }
 
 fn clone_url_result(r: &Result<String, GitProviderError>) -> Result<String, GitProviderError> {
     match r {
         Ok(url) => Ok(url.clone()),
-        Err(_) => Err(GitProviderError::ApiError {
-            status: 500,
-            message: "mock error".into(),
-        }),
+        Err(e) => Err(clone_git_provider_error(e)),
     }
 }
 
@@ -163,8 +197,15 @@ pub struct MockNotifier {
     summary_result: Arc<Mutex<Result<(), NotifierError>>>,
 }
 
+impl Default for MockNotifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockNotifier {
     /// Create a new `MockNotifier` that succeeds on all calls.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -217,12 +258,27 @@ impl MockNotifier {
     }
 }
 
+/// Clone `NotifierError` — the type is not `Clone`, so we reconstruct each variant.
+fn clone_notifier_error(e: &NotifierError) -> NotifierError {
+    match e {
+        NotifierError::HttpRequest { reason } => NotifierError::HttpRequest {
+            reason: reason.clone(),
+        },
+        NotifierError::ApiError { status, body } => NotifierError::ApiError {
+            status: *status,
+            body: body.clone(),
+        },
+        NotifierError::ResponseParse { reason } => NotifierError::ResponseParse {
+            reason: reason.clone(),
+        },
+        NotifierError::Disabled => NotifierError::Disabled,
+    }
+}
+
 fn clone_notifier_result(r: &Result<(), NotifierError>) -> Result<(), NotifierError> {
     match r {
         Ok(()) => Ok(()),
-        Err(_) => Err(NotifierError::HttpRequest {
-            reason: "mock error".into(),
-        }),
+        Err(e) => Err(clone_notifier_error(e)),
     }
 }
 
@@ -270,8 +326,15 @@ pub struct MockSessionRunner {
     wal_calls: Arc<Mutex<u32>>,
 }
 
+impl Default for MockSessionRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockSessionRunner {
     /// Create a new `MockSessionRunner` that returns `Completed` by default.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             outcome: Arc::new(Mutex::new(SessionOutcome::Completed {
@@ -360,8 +423,15 @@ pub struct MockReviewRunner {
     run_calls: Arc<Mutex<Vec<ReviewRunCall>>>,
 }
 
+impl Default for MockReviewRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockReviewRunner {
     /// Create a new `MockReviewRunner` that returns `Completed` by default.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             outcome: Arc::new(Mutex::new(ReviewOutcome::Completed {
