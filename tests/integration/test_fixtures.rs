@@ -4,7 +4,7 @@ use crate::helpers::fixtures;
 
 use bmad_bot::session::SessionState;
 use bmad_bot::watcher::SprintStatusFile;
-use std::path::Path;
+
 
 // ---------------------------------------------------------------------------
 // make_test_config tests (Task 7.5)

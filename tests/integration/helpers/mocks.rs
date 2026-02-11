@@ -200,6 +200,7 @@ impl MockNotifier {
     }
 
     /// Configure the return value for `notify_run_summary`.
+    #[allow(dead_code)] // Public API for future integration tests
     pub fn with_summary_result(self, result: Result<(), NotifierError>) -> Self {
         *self.summary_result.lock().unwrap() = result;
         self
