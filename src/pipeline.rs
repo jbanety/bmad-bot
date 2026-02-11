@@ -197,20 +197,30 @@ impl StoryPipeline {
                 branch,
                 decisions,
             } => {
-                // Phase 2 — Push branch to remote before PR creation
-                if let Err(e) = self.push_branch(&branch).await {
-                    tracing::error!(
-                        action = "push_failed",
-                        story_key = %story_key,
-                        branch = %branch,
-                        error = %e,
-                        "Git push failed — cannot create PR without remote branch"
-                    );
+                // Phase 2 — Push branch to remote before PR creation (non-blocking)
+                let push_ok = match self.push_branch(&branch).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            action = "push_failed",
+                            story_key = %story_key,
+                            branch = %branch,
+                            error = %e,
+                            "Git push failed — work preserved locally, skipping PR/review"
+                        );
+                        false
+                    }
+                };
+
+                if !push_ok {
+                    // Work is committed locally on the branch — skip PR/review, mark Completed
                     let result = PipelineResult {
                         story_key: story_key.clone(),
-                        status: StoryStatus::Error,
+                        status: StoryStatus::Completed,
                         pr_url: None,
-                        error_detail: Some(format!("Git push failed: {e}. Branch: {branch}")),
+                        error_detail: Some(format!(
+                            "Push failed — work preserved on local branch: {branch}"
+                        )),
                     };
                     self.notify_story_result(&result).await;
                     return result;
@@ -557,8 +567,22 @@ impl StoryPipeline {
                 reason: format!("Failed to execute git push: {e}"),
             })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            tracing::info!(
+                action = "branch_pushed",
+                branch = %branch,
+                "Branch pushed to origin"
+            );
+            return Ok(());
+        }
+
+        // Push failed — check for stale/rejected refs and attempt recovery
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let is_stale = stderr.contains("stale info")
+            || stderr.contains("[rejected]")
+            || stderr.contains("non-fast-forward");
+
+        if !is_stale {
             return Err(PipelineError::PrCreation {
                 story_key: String::new(),
                 branch: branch.to_string(),
@@ -566,13 +590,45 @@ impl StoryPipeline {
             });
         }
 
+        // Stale refs detected — prune and retry once
         tracing::info!(
-            action = "branch_pushed",
+            action = "push_stale_detected",
             branch = %branch,
-            "Branch pushed to origin"
+            "Push rejected due to stale refs — pruning and retrying"
         );
 
-        Ok(())
+        let _ = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["remote", "prune", "origin"])
+            .output()
+            .await;
+
+        let retry = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "--force-with-lease", "origin", branch])
+            .output()
+            .await
+            .map_err(|e| PipelineError::Init {
+                reason: format!("Failed to execute git push (retry): {e}"),
+            })?;
+
+        if retry.status.success() {
+            tracing::info!(
+                action = "branch_pushed",
+                branch = %branch,
+                "Branch pushed to origin after prune"
+            );
+            return Ok(());
+        }
+
+        let retry_stderr = String::from_utf8_lossy(&retry.stderr);
+        Err(PipelineError::PrCreation {
+            story_key: String::new(),
+            branch: branch.to_string(),
+            reason: format!("Git push failed after prune: {retry_stderr}"),
+        })
     }
 
     async fn notify_story_result(&self, result: &PipelineResult) {
