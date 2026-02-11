@@ -281,6 +281,35 @@ async fn test_mock_session_runner_check_and_recover_wal_returns_none() {
     assert!(result.is_none());
 }
 
+#[tokio::test]
+async fn test_mock_session_runner_returns_escalated() {
+    use bmad_bot::session::escalation::EscalationReport;
+
+    let mock = MockSessionRunner::new(SessionOutcome::Escalated {
+        report: EscalationReport {
+            story_key: "1-1-blocked".into(),
+            question: "How do I proceed with XYZ?".into(),
+            reason: "Unclear spec".into(),
+            branch_name: "story/1-1-blocked".into(),
+            partial_work_summary: "Started implementation...".into(),
+            escalated_at: "2026-02-10T10:00:00Z".into(),
+        },
+        decisions: vec![],
+    });
+
+    let story = make_test_story("1-1-blocked", "blocked", vec![]);
+    let outcome = mock.run(&story).await;
+
+    match outcome {
+        SessionOutcome::Escalated { report, .. } => {
+            assert_eq!(report.story_key, "1-1-blocked");
+            assert_eq!(report.question, "How do I proceed with XYZ?");
+            assert_eq!(report.partial_work_summary, "Started implementation...");
+        }
+        _ => panic!("Expected Escalated outcome"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MockReviewRunner tests
 // ---------------------------------------------------------------------------
@@ -359,26 +388,25 @@ async fn test_mock_review_runner_returns_failed() {
 // Send + Sync verification tests
 // ---------------------------------------------------------------------------
 
+/// Helper to verify a type implements Send + Sync.
+fn assert_send_sync<T: Send + Sync>() {}
+
 #[test]
 fn test_mock_git_provider_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<MockGitProvider>();
 }
 
 #[test]
 fn test_mock_notifier_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<MockNotifier>();
 }
 
 #[test]
 fn test_mock_session_runner_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<MockSessionRunner>();
 }
 
 #[test]
 fn test_mock_review_runner_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<MockReviewRunner>();
 }

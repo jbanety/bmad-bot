@@ -39,6 +39,12 @@ pub struct MockGitProvider {
     calls: Arc<Mutex<Vec<GitProviderCall>>>,
 }
 
+impl Default for MockGitProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockGitProvider {
     /// Create a new `MockGitProvider` with default success responses.
     pub fn new() -> Self {
@@ -175,6 +181,12 @@ pub enum NotifierCall {
 /// Captures all calls into a `Vec` for later assertion.
 pub struct MockNotifier {
     calls: Arc<Mutex<Vec<NotifierCall>>>,
+}
+
+impl Default for MockNotifier {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockNotifier {
