@@ -124,7 +124,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - GitHub API via octocrab — Token from `.env`
 - GitLab API via reqwest — Token from `.env`
 - Telegram API via reqwest — Bot token from `.env`
-- Local git repo via git2 (libgit2) — SSH key or credential helper
+- Git CLI (>= 2.30) via `tokio::process::Command` / `std::process::Command` — inherits user's full git configuration (SSH agent, credential manager, osxkeychain, commit signing, `.gitconfig` identity). System dependency validated at daemon startup. Replaces former `git2` (libgit2) embedded library
 - Local filesystem via std::fs / tokio::fs
 - Local terminal via tokio::process
 
@@ -178,6 +178,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR38: Epic 6 — Detect context window limit error and bootstrap fresh session with compressed context
 - FR39: Epic 1 — Authenticate with GitHub Copilot via OAuth Device Flow and exchange tokens at runtime (Completions API with IDE-specific headers)
 - FR40: Epic 1/6 — Log all LLM requests and responses via dedicated llm_logging module for debugging and operations visibility
+- FR41: Epic 4 (Story 4.4) — Validate git CLI availability at startup and fail fast if missing
 
 ## Epic List
 
@@ -194,8 +195,8 @@ The supervisor can intercept agent questions and answer them via a deterministic
 **FRs covered:** FR12, FR13, FR14, FR15, FR16, FR17
 
 ### Epic 4: Autonomous Development Session
-The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After this epic, stories are developed end-to-end by the agent. *(Note: Story 4.1's monolithic FsTool is refactored into surgical tools in Epic 8.)*
-**FRs covered:** FR5, FR6, FR7, FR8, FR9, FR10, FR11
+The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After this epic, stories are developed end-to-end by the agent. *(Note: Story 4.1's monolithic FsTool is refactored into surgical tools in Epic 8. Story 4.4 migrates all git operations from git2 to Git CLI.)*
+**FRs covered:** FR5, FR6, FR7, FR8, FR9, FR10, FR11, FR41
 
 ### Epic 5: Code Review & Pull Request Delivery
 The daemon optionally launches a code review via a separate LLM after the dev session, with fixes in separate commits and review posted as a PR comment. It creates a Pull Request on GitHub with an agent-written description including a Supervisor Decisions section. PRs are also created for blocked/failed stories with partial code and failure context. After this epic, the user wakes up to PRs ready for human review.
@@ -797,6 +798,65 @@ So that each story is developed with up-to-date context and on a clean dedicated
 **When** the agent attempts to create it
 **Then** the agent detects the existing branch, checks it out, and continues from the current state
 **And** the situation is logged via `tracing::info!()` with `action = "branch_reuse"`
+
+### Story 4.4: Migrate All Git Operations from git2 to Git CLI
+
+> **Triggered by:** Production incident (2026-02-10) — daemon push authentication failure. SSH agent not available in background process context. See `architect-brief-git-cli-migration.md` for full rationale.
+
+As a daemon operator,
+I want all git operations to use the Git CLI instead of the git2 (libgit2) library,
+So that the daemon inherits the user's full git configuration (credential manager, SSH agent, commit signing, `.gitconfig` identity) and eliminates the dual auth path (git2 SSH vs HTTPS token workaround).
+
+**Acceptance Criteria:**
+
+**Given** the daemon starts up
+**When** the startup validation runs
+**Then** it executes `git --version` and verifies git is available
+**And** it fails fast with a clear, actionable error message if git is missing
+**And** this check runs in `cli/mod.rs::run_start()` alongside existing config validation
+
+**Given** the `GitTool` in `src/tools/git.rs` currently uses `git2` for 9 actions (clone, checkout, branch_create, add, commit, push, diff, status, log)
+**When** the migration is applied
+**Then** each action is rewritten to use `tokio::process::Command::new("git")` with appropriate arguments
+**And** the working directory is always set explicitly via `-C <path>` or `.current_dir(path)`
+**And** both stdout and stderr are captured — stderr included in error messages for LLM-readable diagnostics
+**And** `--porcelain` flags are used where available (status, diff) for stable, parseable output
+**And** non-zero exit codes are mapped to `GitToolError::CommandFailed` with the full stderr content
+**And** output is returned as-is (git CLI output is already human/LLM-readable)
+
+**Given** the branch management in `src/session/branch.rs` currently uses `git2` for 3 functions (`determine_base_branch`, `ensure_story_branch`, `checkout_branch`)
+**When** the migration is applied
+**Then** each function is rewritten to use `std::process::Command::new("git")` (sync context, called from `spawn_blocking`)
+**And** `determine_base_branch()` uses `git branch --list` to check branch existence
+**And** `ensure_story_branch()` uses `git checkout -b` (create) or `git checkout` (reuse)
+**And** `checkout_branch()` uses `git checkout`
+
+**Given** the pipeline push in `src/pipeline.rs` currently uses a hybrid HTTPS token workaround
+**When** the migration is applied
+**Then** `push_branch()` is simplified to `git push origin <branch>` via `tokio::process::Command`
+**And** authentication is inherited from the user's git configuration (SSH agent, credential helper, osxkeychain)
+**And** the HTTPS URL construction workaround is removed
+
+**Given** all git operations have been migrated
+**When** the `git2` crate is no longer referenced anywhere
+**Then** `git2` is removed from `Cargo.toml`
+**And** compile time and binary size are reduced (libgit2 + libssh2 + OpenSSL transitive C dependencies eliminated)
+
+**Given** the migration is complete
+**When** existing unit tests are updated
+**Then** tests mock CLI output (stdout/stderr + exit code) instead of creating in-memory git2 repositories
+**And** all tests pass with the new implementation
+
+**Given** the migration is complete
+**When** documentation is updated
+**Then** `project-context.md` replaces "Git Operations: git2 (embedded libgit2, no CLI dependency)" with "Git Operations: Git CLI subprocess — requires git installed on host"
+
+**Technical Notes:**
+- This story replaces the git2 implementation from Story 4.1 and the branch management from Story 4.3 with Git CLI equivalents
+- Also replaces the pipeline push HTTPS workaround (hotfix commits `62929b2` and `eaafa28`)
+- Estimated reduction: ~600 lines of git2 boilerplate → ~250 lines of CLI calls
+- Follows the "Git CLI Subprocess Pattern" defined in the Architecture Decision Document
+- Cross-cutting: touches `tools/git.rs` (Epic 4), `session/branch.rs` (Epic 4), `pipeline.rs` (Epic 5 area), `cli/mod.rs` (Epic 1 area)
 
 ---
 

@@ -91,6 +91,7 @@ classification:
 
 **Distribution:**
 - Build from source via `cargo install`. Targets Linux and macOS.
+- **System prerequisite:** `git` must be installed on the host. The daemon validates git availability at startup and fails fast with a clear error if missing.
 
 ### Growth (Phase 2)
 
@@ -306,6 +307,7 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 - **FR34:** The daemon can handle cooperative shutdown on SIGTERM/SIGINT via a shared `ShutdownFlag` (Arc<AtomicBool>) propagated across pipeline → session → streaming chat layers. The flag can interrupt mid-streaming chunks and mid-tool-call loops, not just between steps. On shutdown: saves WAL state, commits partial work, notifies
 - **FR35:** The daemon can notify the human of any blocking error (session crash, git failure, LLM provider down)
 - **FR36:** The daemon can validate configuration at startup and report missing or invalid settings
+- **FR41:** The daemon can validate git CLI availability at startup (by running `git --version`) and fail fast with a clear error message if git is missing
 
 ## Non-Functional Requirements
 
@@ -313,7 +315,7 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 
 - API keys and tokens never stored in committed config — secrets loaded from gitignored `.env` or secrets file
 - Secrets never logged by `tracing` — structured logging filters sensitive fields
-- Git credentials from environment, never hardcoded
+- Git credentials inherited from user's git configuration (SSH agent, credential manager, osxkeychain) — daemon does not manage git auth directly
 
 ### Integration
 
