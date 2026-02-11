@@ -8,8 +8,8 @@ date: '2026-02-10'
 lastStep: 8
 status: 'complete'
 completedAt: '2026-02-07'
-revisedAt: '2026-02-10'
-revisionNote: 'Decision 7 added — Surgical Development Tooling. FsTool split into focused tools (EditFile, ReadFile, Grep, FindPath, ListDirectory) modeled on Claude Code/Zed patterns. Preamble expanded with tool usage rules. Project structure and module map updated.'
+revisedAt: '2026-02-11'
+revisionNote: 'git2 (libgit2) replaced by Git CLI (>= 2.30) across all components — GitTool, session/branch.rs, pipeline.rs. Motivated by daemon SSH agent unavailability, inconsistent auth paths, and missing user git config (commit signing, credential managers). Removes git2 crate dependency entirely. Git version validation added to daemon startup.'
 ---
 
 # Architecture Decision Document
@@ -37,7 +37,7 @@ _This document builds collaboratively through step-by-step discovery. Sections a
 ### Technical Constraints & Dependencies
 
 - **rig-core maturity:** Core dependency for agent orchestration. Evaluate early — fallback is direct LLM provider API calls.
-- **git2 (libgit2):** Embedded, no external git CLI dependency. All git operations through library bindings.
+- **Git CLI (>= 2.30):** All git operations via subprocess (`tokio::process::Command` / `std::process::Command`). Requires `git` installed on host — acceptable for a developer tool targeting machines that already have git. Inherits user's full git configuration (credential managers, commit signing, SSH agent, `.gitconfig` identity). Replaces the previous `git2` (libgit2) embedded approach, which could not access the user's SSH agent in daemon context and ignored user git config.
 - **LLM provider variability:** Three providers may behave differently (rate limits, response formats, error codes). Abstraction layer required. GitHub Copilot requires streaming (`stream: true`) and IDE-specific headers.
 - **BMAD files are read-only:** The daemon never modifies anything under `_bmad/`. All output goes to `_bmad-output/`.
 - **Sequential execution in MVP:** Simplifies architecture significantly — no concurrency primitives needed for story processing.
@@ -64,7 +64,7 @@ No traditional starter template applies. Rust daemon projects start from `cargo 
 ### Selected Approach: cargo init + curated dependencies
 
 **Rationale:**
-Rust ecosystem does not have opinionated starter templates like web frameworks. The Project Context already locks the core stack (tokio, rig-core, git2, serde, tracing). The remaining foundation decisions are CLI framework, config loading, Git provider abstraction, and signal handling.
+Rust ecosystem does not have opinionated starter templates like web frameworks. The Project Context already locks the core stack (tokio, rig-core, serde, tracing, Git CLI). The remaining foundation decisions are CLI framework, config loading, Git provider abstraction, and signal handling.
 
 **Initialization Command:**
 
@@ -145,7 +145,7 @@ bmad-bot/
 │   │   └── mod.rs
 │   ├── tools/
 │   │   ├── mod.rs
-│   │   ├── git.rs
+│   │   ├── git.rs                     # GitTool — git operations via Git CLI subprocess
 │   │   ├── fs.rs
 │   │   └── terminal.rs
 │   ├── git_provider/
@@ -393,6 +393,10 @@ This is a developer tool, not infrastructure software. Users can background it w
 
 ### Decision 7: Surgical Development Tooling — Focused Tools Modeled on Claude Code/Zed
 
+> **Amendment (2026-02-11) — GitTool: git2 → Git CLI migration**
+>
+> The `GitTool` (row 6 in the table below) now uses **Git CLI subprocess calls** instead of `git2` (libgit2). A production incident (2026-02-10) revealed that the daemon cannot access the user's SSH agent when running as a background process, causing `git2` push operations to fail. Additionally, `git2` ignores user git configuration (commit signing, credential managers, `.gitconfig` identity). The migration applies to all three git-using components: `tools/git.rs` (agent-facing), `session/branch.rs` (daemon branch management), and `pipeline.rs` (push). The `git2` crate is fully removed from `Cargo.toml`. See architect brief `architect-brief-git-cli-migration.md` for full rationale and scope.
+
 **Decision:** Replace the monolithic `FsTool` (read/write/list/mkdir/delete/exists) with **5 focused tools** — `EditFileTool`, `ReadFileTool`, `GrepTool`, `FindPathTool`, `ListDirectoryTool` — bringing the total agent toolset from 5 to 9 tools. The system preamble is expanded with detailed tool usage rules.
 
 **Problem Statement:**
@@ -414,7 +418,7 @@ The current `FsTool` with its `write` action requires the agent to regenerate th
 | 3 | **GrepTool** | _(new)_ | Regex search across project file contents with glob filtering and pagination |
 | 4 | **FindPathTool** | _(new)_ | Glob-based file path discovery with pagination |
 | 5 | **ListDirectoryTool** | FsTool `list` | List directory contents with types and sizes |
-| 6 | **GitTool** | _(unchanged)_ | Git operations via git2 |
+| 6 | **GitTool** | _(unchanged)_ | Git operations via Git CLI subprocess (`tokio::process::Command`) |
 | 7 | **TerminalTool** | _(unchanged)_ | Shell command execution with timeout |
 | 8 | **AskSupervisor** | _(unchanged)_ | Supervisor question tool |
 | 9 | **ThinkTool** | _(unchanged)_ | rig built-in reasoning tool |
@@ -523,8 +527,8 @@ git, terminal, ask_supervisor, plus a built-in think tool for reasoning.
 ### Decision Impact Analysis
 
 **Implementation Sequence:**
-1. Foundation: cargo init, CLI (clap), config loading, cooperative shutdown (ShutdownFlag in `run_start()`, signal handler task, propagation to pipeline/session)
-2. Tools: git (git2), edit_file, read_file, grep, find_path, list_directory, terminal as rig Tool traits
+1. Foundation: cargo init, CLI (clap), config loading, cooperative shutdown (ShutdownFlag in `run_start()`, signal handler task, propagation to pipeline/session), git version validation (>= 2.30)
+2. Tools: git (Git CLI), edit_file, read_file, grep, find_path, list_directory, terminal as rig Tool traits
 3. Watcher: sprint-status.yaml parser, dependency graph, pre-gate logic
 4. Session: rig agent setup with XML context activation, streaming chat loop, state file persistence, `llm_context` module for ContextBuilder
 5. Supervisor: ask_supervisor tool, rule engine, LLM fallback (architect session), decision logging
@@ -572,7 +576,7 @@ pub enum WatcherError {
 
 ### Rig Tool Implementation Pattern — Standard Structure
 
-Every rig tool (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor) follows the same structural pattern:
+Every rig tool (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor) follows the same structural pattern. Note: `GitTool` uses `tokio::process::Command` to invoke the `git` CLI — each action maps to a subprocess call with structured output parsing.
 
 ```
 // 1. Serializable struct with shared state
@@ -732,6 +736,47 @@ impl BotConfig {
 - Secrets (API keys, tokens) loaded from `.env` via dotenvy, stored separately
 - Validation errors are descriptive — report exactly which field failed and why
 
+### Git CLI Subprocess Pattern — Working Directory & Error Handling
+
+All git CLI calls follow a consistent pattern for subprocess invocation:
+
+```
+// Async context (GitTool, pipeline.rs)
+let output = tokio::process::Command::new("git")
+    .arg("-C").arg(&self.project_root)   // Always set working directory explicitly
+    .args(&["status", "--porcelain"])
+    .output()
+    .await?;
+
+if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    return Err(GitToolError::CommandFailed { cmd: "status", stderr: stderr.into() });
+}
+let stdout = String::from_utf8_lossy(&output.stdout);
+
+// Sync context (session/branch.rs — called from spawn_blocking or sync init)
+let output = std::process::Command::new("git")
+    .arg("-C").arg(&project_root)
+    .args(&["checkout", "-b", &branch_name])
+    .output()?;
+```
+
+**Mandatory rules:**
+- Always use `-C <path>` or `.current_dir(path)` — never rely on process-level `cwd`
+- Capture both stdout and stderr — include stderr in error messages for LLM-readable diagnostics
+- Use `--porcelain` flags where available (`status`, `diff`, `log`) for stable, parseable output
+- Use `tokio::process::Command` in async contexts (tools, pipeline), `std::process::Command` in sync contexts (branch.rs via `spawn_blocking`)
+- Check `output.status.success()` — map non-zero exit codes to the module's thiserror enum
+
+**Startup validation:** The daemon's `run_start()` verifies git availability and minimum version before proceeding:
+
+```
+// In cli/mod.rs::run_start(), before entering the polling loop
+let output = std::process::Command::new("git").arg("--version").output()?;
+// Parse "git version X.Y.Z" → require >= 2.30
+// Fail fast with clear error if git missing or too old
+```
+
 ### Git Provider Trait Pattern — Params as Structs
 
 ```
@@ -868,7 +913,7 @@ bmad-bot/
 │   │   ├── grep.rs                   # GrepTool — regex search across project file contents
 │   │   ├── find_path.rs             # FindPathTool — glob-based file path discovery
 │   │   ├── list_directory.rs        # ListDirectoryTool — list directory contents with types/sizes
-│   │   ├── git.rs                    # GitTool — git operations via git2 (unchanged)
+│   │   ├── git.rs                    # GitTool — git operations via Git CLI subprocess (tokio::process::Command)
 │   │   └── terminal.rs              # TerminalTool — shell command execution with timeout (unchanged)
 │   ├── git_provider/
 │   │   ├── mod.rs                    # GitProvider trait + factory
@@ -978,10 +1023,10 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 
 ### Data Flow
 
-1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>` + `Arc<BotSecrets>`. `cli/run_start()` creates the `ShutdownFlag` and spawns the signal handler task.
+1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>` + `Arc<BotSecrets>`. `cli/run_start()` validates git availability (`git --version` → require >= 2.30), creates the `ShutdownFlag`, and spawns the signal handler task.
 2. **Crash check:** `SessionRunner::check_and_recover_wal()` checks for existing WAL file → if found, `pipeline.recover_and_process()` resumes the interrupted session (skip to step 5 with loaded history)
 3. **Poll:** `watcher/` reads `sprint-status.yaml` from configured output path → `deps.rs` computes topological sort and pre-gate → eligible stories or sleep until next cycle. Uses `tokio::time::interval` which **ticks immediately on first call** — daemon polls at launch, not after `polling_interval_secs`.
-4. **Session init:** `session/runner.rs` builds the system preamble (operational instructions + tool usage rules + language override), then constructs the rig agent with **9 tools** (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool). Build methods return concrete `Agent<M>` types to satisfy `StreamingChat` trait bounds. Provider-specific builders: `build_anthropic_agent()` (Anthropic API), `build_openai_agent()` (OpenAI Responses API), `build_copilot_agent()` (Completions API + IDE headers).
+4. **Session init:** `session/runner.rs` builds the system preamble (operational instructions + tool usage rules + language override), then constructs the rig agent with **9 tools** (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool). `GitTool` invokes the `git` CLI via `tokio::process::Command`, inheriting the user's full git configuration. Build methods return concrete `Agent<M>` types to satisfy `StreamingChat` trait bounds. Provider-specific builders: `build_anthropic_agent()` (Anthropic API), `build_openai_agent()` (OpenAI Responses API), `build_copilot_agent()` (Completions API + IDE headers).
 5. **Agent activation:** `activate_agent()` sends the BMAD dev agent file (`dev.md`) as the first user message wrapped in Zed-style XML context tags (via `ContextBuilder`). The agent processes activation steps via tools (loads `config.yaml`, displays greeting/menu). Returns `(rig_history, chat_history)` for subsequent turns.
 6. **Chat loop:** Sends `"DS"` via `streaming_chat()` → agent works autonomously via tools → `state.rs` persists chat history (WAL) after each turn. **All LLM calls use streaming** — `streaming_chat()` consumes SSE stream, collects text, handles tool calls via rig's multi-turn stream. ShutdownFlag checked between every chunk. `llm_logging` records request/response payloads.
 7. **During session:** Agent calls `ask_supervisor` tool as needed → rule engine → LLM fallback (architect session) → or escalation (stops session)
@@ -1000,7 +1045,7 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 | GitHub API | `git_provider/github.rs` | HTTPS via octocrab | Token from `.env` | |
 | GitLab API | `git_provider/gitlab.rs` | HTTPS via reqwest | Token from `.env` | |
 | Telegram API | `notifier/mod.rs` | HTTPS via reqwest | Bot token from `.env` | |
-| Local git repo | `tools/git.rs` | libgit2 via git2 | SSH key or credential helper | |
+| Git CLI (>= 2.30) | `tools/git.rs`, `session/branch.rs`, `pipeline.rs` | Subprocess via `tokio::process::Command` / `std::process::Command` | Inherits user's git config (SSH agent, credential manager, osxkeychain) | System dependency — validated at daemon startup. Replaces former `git2` (libgit2) embedded library. Enables commit signing, user identity, and unified auth path |
 | Local filesystem | `tools/edit_file.rs`, `read_file.rs`, `grep.rs`, `find_path.rs`, `list_directory.rs` | std::fs / tokio::fs | OS permissions | 5 focused tools replacing former monolithic FsTool |
 | Local terminal | `tools/terminal.rs` | tokio::process | OS permissions | Configurable timeout |
 | BMAD config | `config/mod.rs` | File read (YAML) | Filesystem access | |
@@ -1023,7 +1068,7 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 
 **Decision Compatibility:**
 All architectural decisions work together without conflicts:
-- rig-core + tokio + git2 + reqwest + tracing — no dependency conflicts, all async-compatible
+- rig-core + tokio + reqwest + tracing — no dependency conflicts, all async-compatible. Git operations via CLI subprocess (no native library dependency)
 - Hybrid supervisor model (streaming chat loop + ask_supervisor tool) aligns naturally with rig's `StreamingChat` trait and `Tool` trait
 - Daemon-reads/agent-writes model is consistent with "BMAD files are sacred" principle and "daemon as minimal orchestrator"
 - Session WAL file + crash recovery is consistent with cooperative shutdown requirements
@@ -1101,7 +1146,7 @@ All architectural decisions work together without conflicts:
 
 | # | Priority | Gap | Resolution |
 |---|----------|-----|------------|
-| 1 | Minor | `review/` module needs diff access — `ReviewContext` struct should include branch name for git2 diff computation | Implementation detail — resolved when coding `review/mod.rs` |
+| 1 | Minor | `review/` module needs diff access — `ReviewContext` struct should include branch name for `git diff` computation via CLI | Implementation detail — resolved when coding `review/mod.rs` |
 | 2 | Minor | Supervisor LLM fallback needs project docs as context — source paths come from `BotConfig` (planning_artifacts, project_knowledge) | Implementation detail — supervisor reads paths from config |
 | 3 | Minor | Exact `bmad-bot.yaml` field schema not specified | Normal for architecture stage — defined during `config/` implementation |
 | 4 | Minor | ReadFileTool outline mode uses regex heuristics, not AST parsing — may miss some symbols in complex Rust code | Acceptable trade-off: 90%+ coverage with zero dependencies. Can be enhanced incrementally with tree-sitter if needed |
@@ -1114,7 +1159,7 @@ All architectural decisions work together without conflicts:
 **✅ Requirements Analysis**
 - [x] Project context thoroughly analyzed (38 FRs, 4 NFR categories)
 - [x] Scale and complexity assessed (medium, CLI daemon)
-- [x] Technical constraints identified (rig maturity, git2, BMAD read-only, Copilot streaming requirement)
+- [x] Technical constraints identified (rig maturity, Git CLI >= 2.30, BMAD read-only, Copilot streaming requirement)
 - [x] Cross-cutting concerns mapped (errors, logging, secrets, LLM abstraction, traceability, cooperative shutdown)
 
 **✅ Architectural Decisions**

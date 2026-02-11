@@ -20,7 +20,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Async Runtime:** tokio (latest stable)
 - **AI Agent Framework:** rig-core (latest stable)
 - **Serialization:** serde + serde_yaml
-- **Git Operations:** git2 (embedded libgit2, no CLI dependency)
+- **Git Operations:** Git CLI (>= 2.30) via subprocess (`tokio::process::Command` / `std::process::Command`). Requires `git` installed on host. Inherits user's full git configuration (credential managers, commit signing, SSH agent, `.gitconfig` identity). Validated at daemon startup.
 - **HTTP Client:** reqwest (Telegram API, GitHub Copilot adapter)
 - **Logging:** tracing (structured logging for daemon)
 - **All crates:** latest stable versions, no pinned versions
@@ -52,7 +52,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
   - `grep` — regex search across project file contents with glob filtering
   - `find_path` — glob-based file path discovery
   - `list_directory` — list directory contents with types and sizes
-  - `git` — branch, checkout, commit, push, diff, status, log via `git2`
+  - `git` — branch, checkout, commit, push, diff, status, log via Git CLI subprocess
   - `terminal` — shell command execution with timeout (also used for mkdir, rm, build, test)
   - `ask_supervisor` — supervisor question tool (rule engine → LLM fallback → escalation)
   - `ThinkTool` — rig built-in reasoning tool (no custom implementation)
@@ -150,8 +150,9 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 ### CLI Rules
 
-- **Commands:** `bmad-bot init` (interactive setup → generates `bmad-bot.yaml` + `.env`), `bmad-bot start` (launches daemon), `bmad-bot status` (current state summary), `bmad-bot logs` (structured tracing logs)
+- **CLI Commands:** `bmad-bot init` (interactive setup → generates `bmad-bot.yaml` + `.env`), `bmad-bot start` (launches daemon), `bmad-bot status` (current state summary), `bmad-bot logs` (structured tracing logs)
 - **Config validation:** Both `init` and `start` validate configuration before proceeding — missing keys, unreachable repos, invalid YAML all reported clearly
+- **Git validation:** `bmad-bot start` verifies `git --version` >= 2.30 before entering the polling loop. Fails fast with a clear error if git is missing or too old
 - **BMAD auto-discovery:** On startup, detect BMAD version and installed modules from the project repo
 - **Graceful shutdown:** SIGTERM/SIGINT handled — finish current step if possible, commit partial work, create PR with progress description, notify human, then exit cleanly. No corrupted branches, no half-committed files.
 
@@ -200,4 +201,4 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Review quarterly for outdated rules
 - Remove rules that become obvious over time
 
-Last Updated: 2026-02-07 — Synchronized with PRD: added pre-gate dependency model, CLI rules, decisions file pattern, resilience rules, graceful shutdown, updated module structure
+Last Updated: 2026-02-11 — git2 (libgit2) replaced by Git CLI (>= 2.30) across all components (tools/git.rs, session/branch.rs, pipeline.rs). Removes git2 crate. Adds git version validation at startup. See architect-brief-git-cli-migration.md for full rationale.
