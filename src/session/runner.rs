@@ -12,6 +12,8 @@
 //! match arms on the provider name to construct and drive concrete agent types
 //! (following the established pattern from `supervisor/architect.rs`).
 
+#![allow(clippy::type_complexity)]
+
 use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm_logging::{
@@ -42,7 +44,7 @@ use rig::streaming::StreamingChat;
 use rig::tools::think::ThinkTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 /// Maximum number of chat turns before the safety net kicks in.
 ///
@@ -2199,6 +2201,7 @@ impl SessionRunner {
 mod tests {
     use super::*;
     use crate::config::*;
+    use std::sync::atomic::AtomicBool;
 
     /// Helper: create a minimal BotConfig for runner tests.
     fn make_runner_test_config(artifacts_dir: &Path) -> BotConfig {

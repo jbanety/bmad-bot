@@ -335,8 +335,7 @@ fn extract_signature(line: &str) -> &str {
     // Strip trailing opening brace and whitespace
     let sig = sig.strip_suffix('{').unwrap_or(sig).trim_end();
     // Strip trailing comma
-    let sig = sig.strip_suffix(',').unwrap_or(sig).trim_end();
-    sig
+    sig.strip_suffix(',').unwrap_or(sig).trim_end()
 }
 
 impl Tool for ReadFileTool {

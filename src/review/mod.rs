@@ -14,6 +14,8 @@
 //! - [`ReviewOutcome`] — the three possible results of a review run
 //! - [`ReviewRunner`] — the main review lifecycle manager
 
+#![allow(clippy::type_complexity)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

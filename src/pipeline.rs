@@ -297,16 +297,16 @@ impl StoryPipeline {
                 };
 
                 // Phase 5 — Push review fix commits to update PR (if review ran)
-                if review_report.is_some() {
-                    if let Err(e) = self.push_branch(&branch).await {
-                        tracing::warn!(
-                            action = "review_push_failed",
-                            story_key = %story_key,
-                            branch = %branch,
-                            error = %e,
-                            "Failed to push review fix commits — PR still exists with dev commits"
-                        );
-                    }
+                if review_report.is_some()
+                    && let Err(e) = self.push_branch(&branch).await
+                {
+                    tracing::warn!(
+                        action = "review_push_failed",
+                        story_key = %story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Failed to push review fix commits — PR still exists with dev commits"
+                    );
                 }
 
                 // Phase 6 — Post review comment on PR (non-blocking)

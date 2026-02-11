@@ -174,7 +174,7 @@ const STORY_SELECTION_PATTERNS: &[&str] = &[
 /// 7. Default — "Continue."
 ///
 /// All pattern matching is case-insensitive substring search.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ResponseAnalyzer;
 
 impl ResponseAnalyzer {

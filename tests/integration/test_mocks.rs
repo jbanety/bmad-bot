@@ -5,11 +5,11 @@
 
 use crate::helpers::mocks::*;
 
+use crate::helpers::fixtures::make_test_story;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
-use bmad_bot::notifier::{Notifier, NotifierError, StoryNotification, StoryStatus, RunSummary};
+use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification, StoryStatus};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
-use crate::helpers::fixtures::make_test_story;
 
 // ---------------------------------------------------------------------------
 // Send + Sync bound verification

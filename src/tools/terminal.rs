@@ -194,10 +194,10 @@ impl TerminalTool {
     /// Check command against the blocked patterns blocklist.
     fn check_blocked_patterns(command: &str) -> Option<String> {
         for pattern in BLOCKED_COMMAND_PATTERNS {
-            if let Ok(re) = Regex::new(pattern) {
-                if re.is_match(command) {
-                    return Some(format!("Matches blocked pattern: {pattern}"));
-                }
+            if let Ok(re) = Regex::new(pattern)
+                && re.is_match(command)
+            {
+                return Some(format!("Matches blocked pattern: {pattern}"));
             }
         }
         None

@@ -3,6 +3,8 @@
 //! Provides configurable mocks for `GitProvider`, `Notifier`, `SessionRunner`, and `ReviewRunner`.
 //! All mocks use `Arc<Mutex<...>>` for interior mutability and are `Send + Sync`.
 
+#![allow(dead_code)] // Mock helpers are provided for future integration tests
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -49,7 +51,7 @@ impl MockGitProvider {
             }))),
             add_comment_result: Arc::new(Mutex::new(Ok(()))),
             get_pr_url_result: Arc::new(Mutex::new(Ok(
-                "https://github.com/test/test/pull/1".into(),
+                "https://github.com/test/test/pull/1".into()
             ))),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
@@ -325,7 +327,7 @@ impl MockSessionRunner {
     /// Check for WAL recovery (always returns `None` in mock).
     pub async fn check_and_recover_wal(&self) -> Option<()> {
         *self.wal_calls.lock().expect("lock") += 1;
-        self.wal_recovery.lock().expect("lock").clone()
+        *self.wal_recovery.lock().expect("lock")
     }
 
     /// Return all `run` calls.

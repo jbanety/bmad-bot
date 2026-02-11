@@ -101,18 +101,18 @@ where
 
     loop {
         // Cooperative shutdown check — between every chunk/tool-call round
-        if let Some(flag) = shutdown {
-            if flag.load(Ordering::Relaxed) {
-                tracing::info!(
-                    action = "shutdown_requested",
-                    "Shutdown flag detected in streaming loop"
-                );
-                return Err(rig::completion::PromptError::CompletionError(
-                    rig::completion::CompletionError::ResponseError(
-                        "Shutdown requested (Ctrl+C)".to_string(),
-                    ),
-                ));
-            }
+        if let Some(flag) = shutdown
+            && flag.load(Ordering::Relaxed)
+        {
+            tracing::info!(
+                action = "shutdown_requested",
+                "Shutdown flag detected in streaming loop"
+            );
+            return Err(rig::completion::PromptError::CompletionError(
+                rig::completion::CompletionError::ResponseError(
+                    "Shutdown requested (Ctrl+C)".to_string(),
+                ),
+            ));
         }
 
         let Some(chunk) = stream.next().await else {

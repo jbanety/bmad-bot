@@ -24,10 +24,12 @@ fn test_make_test_config_produces_valid_config() {
     assert_eq!(config.llm.review.provider, "anthropic");
     assert_eq!(config.llm.supervisor.provider, "anthropic");
     assert!(!config.notifications.telegram.enabled);
-    assert!(config
-        .bmad_paths
-        .project_root
-        .contains(dir.path().to_str().expect("path")));
+    assert!(
+        config
+            .bmad_paths
+            .project_root
+            .contains(dir.path().to_str().expect("path"))
+    );
 }
 
 #[test]
@@ -58,16 +60,20 @@ fn test_make_test_secrets_all_fields_populated() {
 fn test_make_test_secrets_contain_do_not_use_marker() {
     let secrets = make_test_secrets();
 
-    assert!(secrets
-        .anthropic_api_key
-        .as_ref()
-        .expect("key")
-        .contains("DO-NOT-USE"));
-    assert!(secrets
-        .github_token
-        .as_ref()
-        .expect("key")
-        .contains("DO-NOT-USE"));
+    assert!(
+        secrets
+            .anthropic_api_key
+            .as_ref()
+            .expect("key")
+            .contains("DO-NOT-USE")
+    );
+    assert!(
+        secrets
+            .github_token
+            .as_ref()
+            .expect("key")
+            .contains("DO-NOT-USE")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +88,10 @@ fn test_make_test_story_parses_key_correctly() {
     assert_eq!(story.story_num, 1);
     assert_eq!(story.story_id, "7.1");
     assert_eq!(story.story_key, "7-1-integration-test-infrastructure");
-    assert_eq!(story.branch_name, "story/7-1-integration-test-infrastructure");
+    assert_eq!(
+        story.branch_name,
+        "story/7-1-integration-test-infrastructure"
+    );
     assert_eq!(story.label, "integration test infrastructure");
     assert_eq!(story.status, "ready-for-dev");
     assert!(story.dependencies.is_empty());
@@ -133,11 +142,7 @@ fn test_write_sprint_status_creates_parseable_yaml() {
 
     // Verify it's parseable by SprintStatusFile
     let status = SprintStatusFile::load(&path, dir.path());
-    assert!(
-        status.is_ok(),
-        "Should parse: {:?}",
-        status.err()
-    );
+    assert!(status.is_ok(), "Should parse: {:?}", status.err());
 
     let status = status.expect("parsed");
     let stories = status.stories();
@@ -158,8 +163,7 @@ fn test_write_sprint_status_includes_all_entry_types() {
 
     write_sprint_status(dir.path(), &entries);
 
-    let content =
-        std::fs::read_to_string(dir.path().join("sprint-status.yaml")).expect("read");
+    let content = std::fs::read_to_string(dir.path().join("sprint-status.yaml")).expect("read");
     assert!(content.contains("epic-1: in-progress"));
     assert!(content.contains("1-1-story: done"));
     assert!(content.contains("epic-1-retrospective: optional"));
