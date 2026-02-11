@@ -19,7 +19,7 @@ use crate::notifier::{Notifier, RunSummary, StoryNotification, StoryStatus, crea
 use crate::review::ReviewOutcome;
 use crate::review::ReviewRunner;
 use crate::session::SessionOutcome;
-use crate::session::cleanup::update_story_status;
+use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
 use crate::supervisor::decisions::format_pr_decisions_section;
@@ -326,9 +326,33 @@ impl StoryPipeline {
                             "Failed to mark story as done in sprint-status.yaml"
                         );
                     } else {
+                        // Unblock dependent stories (blocked → ready-for-dev)
+                        match unblock_dependents(&sprint_status_path, &story_key).await {
+                            Ok(unblocked) if !unblocked.is_empty() => {
+                                tracing::info!(
+                                    action = "dependents_unblocked",
+                                    story_key = %story_key,
+                                    unblocked_count = unblocked.len(),
+                                    unblocked = %unblocked.join(", "),
+                                    "Unblocked dependent stories"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    action = "unblock_dependents_failed",
+                                    story_key = %story_key,
+                                    error = %e,
+                                    "Failed to unblock dependent stories"
+                                );
+                            }
+                            _ => {}
+                        }
+
                         // Commit & push the status change so it lands in the PR
                         let repo_path = &self.config.bmad_paths.project_root;
-                        let commit_msg = format!("chore(sprint-status): mark {story_key} done");
+                        let commit_msg = format!(
+                            "chore(sprint-status): mark {story_key} done, unblock dependents"
+                        );
                         let git_add = tokio::process::Command::new("git")
                             .arg("-C")
                             .arg(repo_path)

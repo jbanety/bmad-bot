@@ -258,6 +258,71 @@ pub async fn mark_story_needs_clarification(
     update_story_status(sprint_status_path, story_key, "needs-clarification").await
 }
 
+/// Transitions `blocked` stories that depend on `completed_key` to `ready-for-dev`.
+///
+/// Scans sprint-status.yaml for lines matching the pattern:
+/// ```text
+///   some-story-key: blocked  # depends-on: <completed_key>
+/// ```
+/// and replaces `blocked` with `ready-for-dev`. Only exact single-dependency
+/// matches are unblocked (multi-dep parsing is left to the watcher's resolver).
+///
+/// Returns the list of story keys that were unblocked (may be empty).
+///
+/// Best-effort: errors reading/writing the file are returned, but a file with
+/// no matching dependents is not an error.
+pub async fn unblock_dependents(
+    sprint_status_path: &Path,
+    completed_key: &str,
+) -> Result<Vec<String>, SessionError> {
+    let content = tokio::fs::read_to_string(sprint_status_path)
+        .await
+        .map_err(|e| SessionError::StateFileFailed {
+            reason: format!("Failed to read sprint-status: {e}"),
+        })?;
+
+    // Match lines like: "  story-key: blocked  # depends-on: completed_key"
+    // Captures: (1) leading whitespace + story key + colon + whitespace, (2) story key alone
+    let pattern = format!(
+        r"(?m)^(\s*(\S+)\s*:\s*)blocked(\s*#\s*depends-on:\s*{}\b)",
+        regex::escape(completed_key)
+    );
+    let re = regex::Regex::new(&pattern).map_err(|e| SessionError::StateFileFailed {
+        reason: format!("Invalid regex for dependency pattern: {e}"),
+    })?;
+
+    // Collect unblocked keys before mutating
+    let unblocked: Vec<String> = re
+        .captures_iter(&content)
+        .filter_map(|cap| cap.get(2).map(|m| m.as_str().to_string()))
+        .collect();
+
+    if unblocked.is_empty() {
+        return Ok(unblocked);
+    }
+
+    let updated = re
+        .replace_all(&content, "${1}ready-for-dev${3}")
+        .to_string();
+
+    tokio::fs::write(sprint_status_path, &updated)
+        .await
+        .map_err(|e| SessionError::StateFileFailed {
+            reason: format!("Failed to write sprint-status: {e}"),
+        })?;
+
+    for key in &unblocked {
+        tracing::info!(
+            action = "story_unblocked",
+            story_key = %key,
+            dependency = %completed_key,
+            "Dependent story unblocked: blocked → ready-for-dev"
+        );
+    }
+
+    Ok(unblocked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +477,158 @@ development_status:
         let updated = tokio::fs::read_to_string(&path).await.expect("read");
         assert!(updated.contains("1-1-scaffolding: done # depends-on: nothing"));
         assert!(updated.contains("1-2-cli: blocked # depends-on: 1-1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // unblock_dependents tests
+    // -----------------------------------------------------------------------
+
+    fn sample_sprint_status_with_deps() -> String {
+        r#"# STATUS DEFINITIONS:
+# ==================
+development_status:
+  epic-7: in-progress
+  7-1-infra: done
+  7-2-config-tests: blocked # depends-on: 7-1-infra
+  7-3-watcher-tests: blocked # depends-on: 7-1-infra
+  7-4-pipeline-tests: blocked # depends-on: 7-1-infra
+  7-5-wal-tests: blocked # depends-on: 7-1-infra
+  epic-8: in-progress
+  8-1-read-file: done
+  8-2-edit-file: blocked # depends-on: 8-1-read-file
+  8-3-grep: review
+"#
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_happy_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status_with_deps())
+            .await
+            .expect("write");
+
+        let unblocked = unblock_dependents(&path, "7-1-infra")
+            .await
+            .expect("should succeed");
+
+        assert_eq!(unblocked.len(), 4);
+        assert!(unblocked.contains(&"7-2-config-tests".to_string()));
+        assert!(unblocked.contains(&"7-3-watcher-tests".to_string()));
+        assert!(unblocked.contains(&"7-4-pipeline-tests".to_string()));
+        assert!(unblocked.contains(&"7-5-wal-tests".to_string()));
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("7-2-config-tests: ready-for-dev # depends-on: 7-1-infra"));
+        assert!(content.contains("7-3-watcher-tests: ready-for-dev # depends-on: 7-1-infra"));
+        assert!(content.contains("7-4-pipeline-tests: ready-for-dev # depends-on: 7-1-infra"));
+        assert!(content.contains("7-5-wal-tests: ready-for-dev # depends-on: 7-1-infra"));
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_only_blocked_stories() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status_with_deps())
+            .await
+            .expect("write");
+
+        let unblocked = unblock_dependents(&path, "8-1-read-file")
+            .await
+            .expect("should succeed");
+
+        assert_eq!(unblocked.len(), 1);
+        assert_eq!(unblocked[0], "8-2-edit-file");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("8-2-edit-file: ready-for-dev # depends-on: 8-1-read-file"));
+        // Non-blocked story with no depends-on for this key should be untouched
+        assert!(content.contains("8-3-grep: review"));
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_no_matches_returns_empty() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status_with_deps())
+            .await
+            .expect("write");
+
+        let unblocked = unblock_dependents(&path, "99-99-nonexistent")
+            .await
+            .expect("should succeed even with no matches");
+
+        assert!(unblocked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_preserves_other_statuses() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status_with_deps())
+            .await
+            .expect("write");
+
+        unblock_dependents(&path, "7-1-infra")
+            .await
+            .expect("should succeed");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("7-1-infra: done"));
+        assert!(content.contains("epic-7: in-progress"));
+        assert!(content.contains("8-1-read-file: done"));
+        assert!(content.contains("8-2-edit-file: blocked # depends-on: 8-1-read-file"));
+        assert!(content.contains("8-3-grep: review"));
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_preserves_comments() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status_with_deps())
+            .await
+            .expect("write");
+
+        unblock_dependents(&path, "7-1-infra")
+            .await
+            .expect("should succeed");
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("# STATUS DEFINITIONS:"));
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_no_partial_key_match() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        let content = r#"development_status:
+  7-1-infra: done
+  7-10-extra: blocked # depends-on: 7-1-infra-extended
+  7-2-config: blocked # depends-on: 7-1-infra
+"#;
+        tokio::fs::write(&path, content).await.expect("write");
+
+        let unblocked = unblock_dependents(&path, "7-1-infra")
+            .await
+            .expect("should succeed");
+
+        // Only 7-2-config matches exactly, not 7-10-extra (different dep key)
+        assert_eq!(unblocked.len(), 1);
+        assert_eq!(unblocked[0], "7-2-config");
+
+        let updated = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(updated.contains("7-10-extra: blocked # depends-on: 7-1-infra-extended"));
+        assert!(updated.contains("7-2-config: ready-for-dev # depends-on: 7-1-infra"));
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_missing_file_returns_error() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("nonexistent.yaml");
+
+        let result = unblock_dependents(&path, "7-1-infra").await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
