@@ -1,6 +1,6 @@
 # Story 7.1: Integration Test Infrastructure & Fixtures
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -35,60 +35,60 @@ So that all integration tests can be written concisely and consistently.
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Create `src/lib.rs` to expose crate modules for integration tests (AC: #3 — BLOCKER)
-  - [ ] 0.1 Create `src/lib.rs` with `pub mod` declarations for all modules needed by integration tests: `config`, `watcher`, `git_provider`, `notifier`, `session`, `review`, `pipeline`
-  - [ ] 0.2 Remove the corresponding `mod X;` declarations from `src/main.rs` and replace with `use bmad_bot::*;` or selective `use bmad_bot::{config, watcher, ...};` imports
-  - [ ] 0.3 Keep `mod cli;` in `main.rs` (CLI is binary-only, not needed by integration tests)
-  - [ ] 0.4 Add `pub use session::state::{SessionState, ChatMessage};` re-export in `src/session/mod.rs` (currently `mod state;` is private)
-  - [ ] 0.5 Verify `cargo build` still compiles, `cargo test` passes all existing 573+ unit tests
+- [x] Task 0: Create `src/lib.rs` to expose crate modules for integration tests (AC: #3 — BLOCKER)
+  - [x] 0.1 Create `src/lib.rs` with `pub mod` declarations for all modules needed by integration tests: `config`, `watcher`, `git_provider`, `notifier`, `session`, `review`, `pipeline`
+  - [x] 0.2 Remove the corresponding `mod X;` declarations from `src/main.rs` and replace with `use bmad_bot::*;` or selective `use bmad_bot::{config, watcher, ...};` imports
+  - [x] 0.3 Keep `mod cli;` in `main.rs` (CLI is binary-only, not needed by integration tests)
+  - [x] 0.4 Add `pub use session::state::{SessionState, ChatMessage};` re-export in `src/session/mod.rs` (currently `mod state;` is private)
+  - [x] 0.5 Verify `cargo build` still compiles, `cargo test` passes all existing 573+ unit tests
 
-- [ ] Task 1: Create `tests/integration/` directory structure (AC: #1, #3)
-  - [ ] 1.1 Create `tests/integration.rs` as the Cargo test binary entry point
-  - [ ] 1.2 Create `tests/integration/helpers/mod.rs` to re-export all helpers
-  - [ ] 1.3 Create `tests/integration/helpers/mocks.rs` for mock implementations
-  - [ ] 1.4 Create `tests/integration/helpers/fixtures.rs` for fixture builders
+- [x] Task 1: Create `tests/integration/` directory structure (AC: #1, #3)
+  - [x] 1.1 Create `tests/integration.rs` as the Cargo test binary entry point
+  - [x] 1.2 Create `tests/integration/helpers/mod.rs` to re-export all helpers
+  - [x] 1.3 Create `tests/integration/helpers/mocks.rs` for mock implementations
+  - [x] 1.4 Create `tests/integration/helpers/fixtures.rs` for fixture builders
 
-- [ ] Task 2: Implement `MockGitProvider` (AC: #1)
-  - [ ] 2.1 Create struct with `Arc<Mutex<...>>` fields for configurable return values
-  - [ ] 2.2 Implement `GitProvider` trait (`create_pr`, `add_comment`, `get_pr_url`)
-  - [ ] 2.3 Add call-tracking `Vec` for assertions (which methods were called, with what args)
-  - [ ] 2.4 Verify `Send + Sync` bound satisfaction
+- [x] Task 2: Implement `MockGitProvider` (AC: #1)
+  - [x] 2.1 Create struct with `Arc<Mutex<...>>` fields for configurable return values
+  - [x] 2.2 Implement `GitProvider` trait (`create_pr`, `add_comment`, `get_pr_url`)
+  - [x] 2.3 Add call-tracking `Vec` for assertions (which methods were called, with what args)
+  - [x] 2.4 Verify `Send + Sync` bound satisfaction
 
-- [ ] Task 3: Implement `MockNotifier` (AC: #1)
-  - [ ] 3.1 Create struct with `Arc<Mutex<Vec<...>>>` for captured notifications
-  - [ ] 3.2 Implement `Notifier` trait (`notify_story`, `notify_run_summary`)
-  - [ ] 3.3 Provide `calls()` / `story_calls()` / `summary_calls()` accessor methods for assertions
-  - [ ] 3.4 Verify `Send + Sync` bound satisfaction
+- [x] Task 3: Implement `MockNotifier` (AC: #1)
+  - [x] 3.1 Create struct with `Arc<Mutex<Vec<...>>>` for captured notifications
+  - [x] 3.2 Implement `Notifier` trait (`notify_story`, `notify_run_summary`)
+  - [x] 3.3 Provide `calls()` / `story_calls()` / `summary_calls()` accessor methods for assertions
+  - [x] 3.4 Verify `Send + Sync` bound satisfaction
 
-- [ ] Task 4: Implement `MockSessionRunner` (AC: #1)
-  - [ ] 4.1 Create standalone struct with configurable `SessionOutcome` return
-  - [ ] 4.2 Implement `async fn run(&self, story: &StoryInfo) -> SessionOutcome`
-  - [ ] 4.3 Implement `async fn check_and_recover_wal(&self) -> Option<RecoveryInfo>` (returns None)
-  - [ ] 4.4 Add call tracking for verification
+- [x] Task 4: Implement `MockSessionRunner` (AC: #1)
+  - [x] 4.1 Create standalone struct with configurable `SessionOutcome` return
+  - [x] 4.2 Implement `async fn run(&self, story: &StoryInfo) -> SessionOutcome`
+  - [x] 4.3 Implement `async fn check_and_recover_wal(&self) -> Option<RecoveryInfo>` (returns None)
+  - [x] 4.4 Add call tracking for verification
 
-- [ ] Task 5: Implement `MockReviewRunner` (AC: #1)
-  - [ ] 5.1 Create standalone struct with configurable `ReviewOutcome` return
-  - [ ] 5.2 Implement `async fn run(&self, story: &StoryInfo) -> ReviewOutcome`
-  - [ ] 5.3 Add call tracking for verification
+- [x] Task 5: Implement `MockReviewRunner` (AC: #1)
+  - [x] 5.1 Create standalone struct with configurable `ReviewOutcome` return
+  - [x] 5.2 Implement `async fn run(&self, story: &StoryInfo) -> ReviewOutcome`
+  - [x] 5.3 Add call tracking for verification
 
-- [ ] Task 6: Implement fixture builder functions (AC: #2)
-  - [ ] 6.1 `make_test_config(dir)` — builds a complete valid `BotConfig` using provided temp dir
-  - [ ] 6.2 `make_test_secrets()` — builds `BotSecrets` with dummy tokens for all providers
-  - [ ] 6.3 `make_test_story(key, label, deps)` — parses key to build complete `StoryInfo`
-  - [ ] 6.4 `write_sprint_status(dir, entries)` — writes valid YAML from `Vec<(&str, &str)>` containing ALL entry types (epics, stories, retrospectives) under `development_status:`
-  - [ ] 6.5 `write_wal_file(dir, state)` — writes valid WAL YAML from `SessionState`
-  - [ ] 6.6 `create_test_repo(dir)` — initializes git repo with initial commit via `git2`
+- [x] Task 6: Implement fixture builder functions (AC: #2)
+  - [x] 6.1 `make_test_config(dir)` — builds a complete valid `BotConfig` using provided temp dir
+  - [x] 6.2 `make_test_secrets()` — builds `BotSecrets` with dummy tokens for all providers
+  - [x] 6.3 `make_test_story(key, label, deps)` — parses key to build complete `StoryInfo`
+  - [x] 6.4 `write_sprint_status(dir, entries)` — writes valid YAML from `Vec<(&str, &str)>` containing ALL entry types (epics, stories, retrospectives) under `development_status:`
+  - [x] 6.5 `write_wal_file(dir, state)` — writes valid WAL YAML from `SessionState`
+  - [x] 6.6 `create_test_repo(dir)` — initializes git repo with initial commit via `git2`
 
-- [ ] Task 7: Write self-verification tests (AC: #3)
-  - [ ] 7.1 Test `MockGitProvider` returns configured values and tracks calls
-  - [ ] 7.2 Test `MockNotifier` captures notifications correctly
-  - [ ] 7.3 Test `MockSessionRunner` returns configured outcomes
-  - [ ] 7.4 Test `MockReviewRunner` returns configured outcomes
-  - [ ] 7.5 Test all fixture builders produce valid data structures
-  - [ ] 7.6 Test `write_sprint_status` writes parseable YAML
-  - [ ] 7.7 Test `write_wal_file` writes parseable WAL YAML
-  - [ ] 7.8 Test `create_test_repo` creates a valid git repo with HEAD commit
-  - [ ] 7.9 Test all mock types satisfy `Send + Sync` bounds
+- [x] Task 7: Write self-verification tests (AC: #3)
+  - [x] 7.1 Test `MockGitProvider` returns configured values and tracks calls
+  - [x] 7.2 Test `MockNotifier` captures notifications correctly
+  - [x] 7.3 Test `MockSessionRunner` returns configured outcomes
+  - [x] 7.4 Test `MockReviewRunner` returns configured outcomes
+  - [x] 7.5 Test all fixture builders produce valid data structures
+  - [x] 7.6 Test `write_sprint_status` writes parseable YAML
+  - [x] 7.7 Test `write_wal_file` writes parseable WAL YAML
+  - [x] 7.8 Test `create_test_repo` creates a valid git repo with HEAD commit
+  - [x] 7.9 Test all mock types satisfy `Send + Sync` bounds
 
 ## Dev Notes
 
@@ -357,8 +357,36 @@ tests/
 
 ### Agent Model Used
 
+Claude Sonnet 4 (claude-sonnet-4-20250514)
+
 ### Debug Log References
+
+N/A
 
 ### Completion Notes List
 
+- **Task 0 (BLOCKER):** Created `src/lib.rs` exposing all modules (auth, config, git_provider, llm_context, llm_logging, notifier, pipeline, review, session, supervisor, tools, watcher) as `pub mod`. Removed `mod` declarations from `main.rs` (kept `mod cli;`). Changed `session::state` from `pub(crate)` to `pub`. Updated all `crate::` references in `src/cli/` to `bmad_bot::`. Added `git2 = "0.20"` as dev-dependency (was NOT in Cargo.toml despite story notes claiming it was). All 847 existing tests pass.
+- **Task 1:** Created `tests/integration.rs` entry point with `#[path]` attributes pointing to `tests/integration/` subdirectory. Created `tests/integration/helpers/mod.rs`, `mocks.rs`, `fixtures.rs`.
+- **Task 2:** Implemented `MockGitProvider` with `Arc<Mutex<...>>` for configurable return values, `GitProvider` trait impl, call-tracking via `GitProviderCall` enum, builder pattern (`with_create_pr`, `with_add_comment`, `with_get_pr_url`). Wrote `clone_git_provider_error()` helper matching actual codebase error variants (9 variants, not 6 as story notes suggested).
+- **Task 3:** Implemented `MockNotifier` with `Arc<Mutex<Vec<NotifierCall>>>`, `Notifier` trait impl, `calls()`, `story_calls()`, `summary_calls()` accessors.
+- **Task 4:** Implemented `MockSessionRunner` standalone struct with configurable `SessionOutcome`, `run()` method, `check_and_recover_wal()` returning `None`, call tracking.
+- **Task 5:** Implemented `MockReviewRunner` standalone struct with configurable `ReviewOutcome`, `run()` method, call tracking.
+- **Task 6:** Implemented all fixture builders: `make_test_config(dir)`, `make_test_secrets()`, `make_test_story(key, label, deps)`, `write_sprint_status(dir, entries)`, `write_wal_file(dir, state)`, `create_test_repo(dir)`. Note: `BotSecrets` field is `github_copilot_oauth_token` not `github_models_api_key` as story notes suggested.
+- **Task 7:** 39 self-verification tests pass: 6 for MockGitProvider, 3 for MockNotifier, 4 for MockSessionRunner, 4 for MockReviewRunner, 4 for Send+Sync bounds, 3 for make_test_config, 2 for make_test_secrets, 4 for make_test_story, 3 for write_sprint_status, 3 for write_wal_file, 3 for create_test_repo.
+- **Decisions:** Added `git2 = "0.20"` as dev-dependency (not present in Cargo.toml). Used `#[path]` attributes in integration.rs for module paths. Exposed ALL modules in lib.rs (not just the 7 listed in task 0.1) because session/review/pipeline depend on auth, llm_context, llm_logging, supervisor, tools.
+
 ### File List
+
+- `src/lib.rs` — NEW: library crate entry point exposing all modules
+- `src/main.rs` — MODIFIED: removed mod declarations, kept only mod cli
+- `src/session/mod.rs` — MODIFIED: changed `pub(crate) mod state` to `pub mod state`
+- `src/cli/mod.rs` — MODIFIED: changed `crate::` to `bmad_bot::` for auth, config, session, watcher, pipeline imports
+- `src/cli/state.rs` — MODIFIED: changed `crate::config::` to `bmad_bot::config::`
+- `Cargo.toml` — MODIFIED: added `git2 = "0.20"` to dev-dependencies
+- `tests/integration.rs` — NEW: integration test binary entry point
+- `tests/integration/helpers/mod.rs` — NEW: re-exports mocks and fixtures
+- `tests/integration/helpers/mocks.rs` — NEW: MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+- `tests/integration/helpers/fixtures.rs` — NEW: make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+- `tests/integration/test_mocks.rs` — NEW: 22 self-verification tests for all mock implementations
+- `tests/integration/test_fixtures.rs` — NEW: 17 self-verification tests for all fixture builders
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED: story status updated
