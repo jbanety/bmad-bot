@@ -524,21 +524,92 @@ git, terminal, ask_supervisor, plus a built-in think tool for reasoning.
 
 **Affects:** tools module (major restructure), session/runner.rs (preamble + tool registration), supervisor/read_tool.rs, review/mod.rs, project-context.md
 
+### Decision 8: LLM Provider Abstraction — BuiltAgent Enum + AgentFactory
+
+> **Added (2026-02-12) — Production incident: gpt-5.2-codex via GitHub Copilot**
+>
+> A production bug revealed that the Copilot proxy branch unconditionally used the Chat Completions API (`/chat/completions`), but newer OpenAI models like `gpt-5.2-codex` only support the Responses API (`/responses`). This decision centralizes all LLM provider construction and eliminates ~610 lines of duplicated provider match arms across 5 call sites. See architect brief `architect-brief-llm-provider-abstraction.md` for full rationale and scope.
+
+**Decision:** Centralize all LLM provider construction behind a `BuiltAgent` enum with `stream_chat()` dispatch and an `AgentFactory` struct. API format selection is hardcoded per provider/model — not configurable.
+
+**Problem Statement:**
+rig-core's `Chat` trait is not object-safe (associated types, `Self: Sized`), so `dyn Chat` is impossible. The codebase used 3-arm match statements (anthropic / openai / copilot) duplicated across `session/runner.rs` (run + resume + 3 build methods), `review/mod.rs`, and `supervisor/architect.rs` — ~610 lines of near-identical provider-specific code. Adding a provider or fixing a provider quirk required changes in every match site.
+
+**Rationale:**
+- **Enum dispatch** is the idiomatic Rust pattern when trait objects are unavailable — one match per `stream_chat()` call, negligible overhead vs seconds-long LLM calls
+- **Single construction site** — provider selection, API key resolution, Copilot token exchange, and API format detection happen once in `AgentFactory::build()`
+- **Hardcoded API format** — the API format is a deterministic property of the provider behind the model, not a user preference:
+  - **Anthropic** → Messages API (always)
+  - **OpenAI direct** → Responses API (always, rig default)
+  - **GitHub Copilot** → proxy to multiple backends. Explicit match on known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) → Responses API. **Everything else falls back to Completions API** — safe default for non-OpenAI models (Claude, Mistral, etc.). The inverse default would break non-OpenAI models.
+- **No config override** — `api_format` in user config would expose an internal implementation detail. When OpenAI introduces new model name patterns, update `copilot_requires_responses_api()` — it's a one-liner
+
+**Core Design:**
+
+```
+pub enum BuiltAgent {
+    Anthropic(Agent<anthropic::CompletionModel>),
+    OpenAiResponses(Agent<openai::responses_api::ResponsesCompletionModel>),
+    OpenAiCompletions(Agent<openai::completion::CompletionModel>),
+}
+
+impl BuiltAgent {
+    pub async fn stream_chat(&self, prompt, history, shutdown) -> Result<String, PromptError> {
+        match self { /* delegates to streaming_chat() for each variant */ }
+    }
+}
+
+pub struct AgentFactory { config, secrets, copilot_cache }
+
+impl AgentFactory {
+    pub async fn build(&self, role: LlmRole, preamble: &str, tools: ToolSet)
+        -> Result<BuiltAgent, ProviderError>
+    {
+        match provider {
+            "anthropic" => BuiltAgent::Anthropic(..),
+            "openai" => BuiltAgent::OpenAiResponses(..),
+            "github-copilot" => {
+                if copilot_requires_responses_api(model) {
+                    BuiltAgent::OpenAiResponses(..)  // OpenAI models via proxy
+                } else {
+                    BuiltAgent::OpenAiCompletions(..) // fallback: safe for non-OpenAI
+                }
+            }
+        }
+    }
+}
+
+fn copilot_requires_responses_api(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.starts_with("gpt-") || m.starts_with("o1-") || m.starts_with("o3-") || m.contains("codex")
+}
+```
+
+**Impact:**
+- `session/runner.rs` — removes `build_anthropic_agent`, `build_openai_agent`, `build_copilot_agent` and all provider match arms; replaced by single `agent_factory.build(LlmRole::Dev, ..)` call
+- `review/mod.rs` — same pattern, `agent_factory.build(LlmRole::Review, ..)`
+- `supervisor/architect.rs` — same pattern, `agent_factory.build(LlmRole::Supervisor, ..)`
+- `pipeline.rs` — passes `AgentFactory` to `StoryPipeline` instead of individual provider configs
+- `session/provider.rs` — absorbed into `AgentFactory` (resolve_api_key, copilot_headers)
+
+**Affects:** llm module (new agent_factory.rs), session module, review module, supervisor module, pipeline
+
 ### Decision Impact Analysis
 
 **Implementation Sequence:**
 1. Foundation: cargo init, CLI (clap), config loading, cooperative shutdown (ShutdownFlag in `run_start()`, signal handler task, propagation to pipeline/session), git version validation (>= 2.30)
 2. Tools: git (Git CLI), edit_file, read_file, grep, find_path, list_directory, terminal as rig Tool traits
 3. Watcher: sprint-status.yaml parser, dependency graph, pre-gate logic
-4. Session: rig agent setup with XML context activation, streaming chat loop, state file persistence, `llm_context` module for ContextBuilder
+4. Session: rig agent setup with XML context activation, streaming chat loop, state file persistence, `llm/context` module for ContextBuilder, `llm/agent_factory` for centralized provider construction
 5. Supervisor: ask_supervisor tool, rule engine, LLM fallback (architect session), decision logging
 6. Git Provider: GitHub + GitLab PR creation trait + implementations
 7. Review: separate LLM session for code review (optional, configurable)
 8. Notifier: Telegram integration
 
 **Cross-Component Dependencies:**
-- Session depends on: tools (edit_file, read_file, grep, find_path, list_directory, git, terminal), supervisor, config, git_provider, llm_context, llm_logging, auth (for Copilot)
-- Pipeline depends on: session, review, git_provider, notifier, config
+- Session depends on: tools (edit_file, read_file, grep, find_path, list_directory, git, terminal), supervisor, config, git_provider, llm/context, llm/logging, llm/agent_factory
+- AgentFactory depends on: config (provider/model per role), auth (CopilotTokenCache for Copilot token exchange)
+- Pipeline depends on: session, review, git_provider, notifier, config, llm/agent_factory
 - Supervisor depends on: config (LLM provider for fallback), decisions logging
 - Watcher depends on: config (paths, polling interval)
 - Git Provider depends on: config (provider selection, credentials)
@@ -921,8 +992,11 @@ bmad-bot/
 │   │   └── gitlab.rs                # GitLab impl (reqwest)
 │   ├── notifier/
 │   │   └── mod.rs                    # Notifier trait + Telegram impl + NoopNotifier
-│   ├── llm_context.rs                # Zed-style XML ContextBuilder — adaptive backtick fencing, absolute path resolution, multi-file support
-│   ├── llm_logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
+│   ├── llm/
+│   │   ├── mod.rs                    # LLM module root (re-exports context, logging, agent_factory)
+│   │   ├── agent_factory.rs          # AgentFactory + BuiltAgent enum dispatch — centralized LLM provider construction, Copilot API format detection
+│   │   ├── context.rs                # Zed-style XML ContextBuilder — adaptive backtick fencing, absolute path resolution, multi-file support
+│   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
     └── e2e/
@@ -935,8 +1009,8 @@ bmad-bot/
 |-----|--------|--------|-----------|
 | FR1-4 | Story Management | `watcher/` | `mod.rs` (polling), `deps.rs` (pre-gate, topological sort) |
 | FR5-7 | Pre-Dev Preparation | *BMAD Agent* | Handled by agent via tools — no daemon code |
-| FR8-11 | Development Session | `session/`, `llm_context` | `runner.rs` (streaming chat loop, XML context activation, context-limit recovery), `analyzer.rs` (response analysis), `provider.rs` (LLM construction), `branch.rs` (branch management), `cleanup.rs` (partial work), `escalation.rs` (escalation handling), `state.rs` (WAL persistence) |
-| FR12-17 | Supervision | `supervisor/` | `mod.rs` (ask_supervisor tool), `rules.rs` (rule engine), `architect.rs` (LLM fallback), `read_tool.rs` (read-only fs for architect — uses ReadFileTool), `decisions.rs` (decision logging) |
+| FR8-11 | Development Session | `session/`, `llm/` | `runner.rs` (streaming chat loop, XML context activation, context-limit recovery), `analyzer.rs` (response analysis), `llm/agent_factory.rs` (AgentFactory + BuiltAgent — centralized provider construction), `branch.rs` (branch management), `cleanup.rs` (partial work), `escalation.rs` (escalation handling), `state.rs` (WAL persistence) |
+| FR12-17 | Supervision | `supervisor/`, `llm/` | `mod.rs` (ask_supervisor tool), `rules.rs` (rule engine), `architect.rs` (LLM fallback via AgentFactory), `read_tool.rs` (read-only fs for architect — uses ReadFileTool), `decisions.rs` (decision logging) |
 | FR18-20 | Code Review | `review/` | `mod.rs` |
 | FR21-24 | PR Management | `git_provider/` | `mod.rs` (trait), `github.rs`, `gitlab.rs` |
 | FR25-26 | Notifications | `notifier/` | `mod.rs` |
@@ -946,7 +1020,8 @@ bmad-bot/
 | FR39 | Copilot Auth | `auth/` | `github_copilot.rs` (OAuth Device Flow, token exchange, CopilotTokenCache) |
 | FR40 | LLM Logging | `llm_logging.rs` | Request/response payload logging, `bmad_bot::llm` tracing target |
 | — | Pipeline Orchestration | `pipeline.rs` | `StoryPipeline` — orchestrates full story pipeline (session → review → PR → notify) |
-| — | XML Context | `llm_context.rs` | `ContextBuilder` for agent activation (Zed-style XML formatting) |
+| — | LLM Provider Abstraction | `llm/agent_factory.rs` | `AgentFactory` + `BuiltAgent` enum — centralized provider construction, Copilot API format detection, `stream_chat()` dispatch |
+| — | XML Context | `llm/context.rs` | `ContextBuilder` for agent activation (Zed-style XML formatting) |
 | — | Agent Dev Tools | `tools/` | `edit_file.rs`, `read_file.rs`, `grep.rs`, `find_path.rs`, `list_directory.rs`, `git.rs`, `terminal.rs` — 7 custom tools + ThinkTool (rig built-in) + ask_supervisor |
 
 ### Architectural Boundaries
@@ -967,9 +1042,10 @@ bmad-bot/
   │                  │
   │           ┌──────┴──────┐
   └──────────▶│  session/   │
-              │  runner.rs  │◀─── llm_context.rs (XML context for activation)
-              │  analyzer.rs│◀─── llm_logging.rs (request/response logging)
-              │  provider.rs│◀─── auth/github_copilot.rs (Copilot token)
+              │  runner.rs  │◀─── llm/context.rs (XML context for activation)
+              │  analyzer.rs│◀─── llm/logging.rs (request/response logging)
+              │             │◀─── llm/agent_factory.rs (BuiltAgent + provider construction)
+              │             │◀─── auth/github_copilot.rs (Copilot token)
               │  branch.rs  │
               │  cleanup.rs │
               │  state.rs   │
@@ -1015,7 +1091,8 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 - **session → tools:** 8 tools registered at agent build time via `.tool()` (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor) + ThinkTool — no direct calls from session to tools
 - **session → supervisor:** Supervisor is a rig tool called by the agent autonomously, not by the daemon
 - **session → llm_context:** SessionRunner uses `ContextBuilder` to format `dev.md` as Zed-style XML for agent activation
-- **session → auth:** SessionRunner uses `CopilotTokenCache` to resolve short-lived Copilot session tokens at runtime (via `session/provider.rs`)
+- **session → llm/agent_factory:** SessionRunner delegates all LLM provider construction to `AgentFactory::build()`, which returns a `BuiltAgent` with unified `stream_chat()`. No provider-specific logic in session code.
+- **llm/agent_factory → auth:** `AgentFactory` uses `CopilotTokenCache` internally to resolve short-lived Copilot session tokens at runtime
 - **pipeline → review:** Passes `StoryInfo` (story_key, branch_name, specs_path). `ReviewRunner` loads the same BMAD dev persona (`dev.md`), sends `"CR"` as initial command, `ResponseAnalyzer` handles interaction patterns (story selection, fix decisions, completion detection), post-review phase captures agent commit + markdown report in `ReviewOutcome::Completed { report }`, orchestrator posts report as PR comment via `GitProvider::add_comment()`
 - **pipeline → git_provider:** Passes `CreatePrParams` after session/review complete
 - **pipeline → notifier:** Passes `NotificationData` (status, story info, PR link if available, error details if any)
@@ -1026,7 +1103,7 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>` + `Arc<BotSecrets>`. `cli/run_start()` validates git availability (`git --version` → require >= 2.30), creates the `ShutdownFlag`, and spawns the signal handler task.
 2. **Crash check:** `SessionRunner::check_and_recover_wal()` checks for existing WAL file → if found, `pipeline.recover_and_process()` resumes the interrupted session (skip to step 5 with loaded history)
 3. **Poll:** `watcher/` reads `sprint-status.yaml` from configured output path → `deps.rs` computes topological sort and pre-gate → eligible stories or sleep until next cycle. Uses `tokio::time::interval` which **ticks immediately on first call** — daemon polls at launch, not after `polling_interval_secs`.
-4. **Session init:** `session/runner.rs` builds the system preamble (operational instructions + tool usage rules + language override), then constructs the rig agent with **9 tools** (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool). `GitTool` invokes the `git` CLI via `tokio::process::Command`, inheriting the user's full git configuration. Build methods return concrete `Agent<M>` types to satisfy `StreamingChat` trait bounds. Provider-specific builders: `build_anthropic_agent()` (Anthropic API), `build_openai_agent()` (OpenAI Responses API), `build_copilot_agent()` (Completions API + IDE headers).
+4. **Session init:** `session/runner.rs` builds the system preamble (operational instructions + tool usage rules + language override), then uses `AgentFactory::build()` to construct the rig agent with **9 tools** (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool). `GitTool` invokes the `git` CLI via `tokio::process::Command`, inheriting the user's full git configuration. `AgentFactory` centralizes all provider construction behind a `BuiltAgent` enum with `stream_chat()` dispatch. Provider resolution is hardcoded: Anthropic → Messages API, OpenAI → Responses API, GitHub Copilot → explicit match on known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) for Responses API, fallback to Completions API for all other models (safe default for non-OpenAI backends).
 5. **Agent activation:** `activate_agent()` sends the BMAD dev agent file (`dev.md`) as the first user message wrapped in Zed-style XML context tags (via `ContextBuilder`). The agent processes activation steps via tools (loads `config.yaml`, displays greeting/menu). Returns `(rig_history, chat_history)` for subsequent turns.
 6. **Chat loop:** Sends `"DS"` via `streaming_chat()` → agent works autonomously via tools → `state.rs` persists chat history (WAL) after each turn. **All LLM calls use streaming** — `streaming_chat()` consumes SSE stream, collects text, handles tool calls via rig's multi-turn stream. ShutdownFlag checked between every chunk. `llm_logging` records request/response payloads.
 7. **During session:** Agent calls `ask_supervisor` tool as needed → rule engine → LLM fallback (architect session) → or escalation (stops session)
@@ -1039,9 +1116,9 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 
 | Integration | Module | Protocol | Auth | Notes |
 |-------------|--------|----------|------|-------|
-| LLM Provider (Anthropic) | `session/`, `supervisor/`, `review/` | HTTPS via rig-core | API key from `.env` | Standard Anthropic API |
-| LLM Provider (OpenAI) | `session/`, `supervisor/`, `review/` | HTTPS via rig-core | API key from `.env` | Uses **Responses API** (`build_openai_agent`) |
-| LLM Provider (GitHub Copilot) | `session/`, `supervisor/`, `review/`, `auth/` | HTTPS via rig-core + reqwest | OAuth token from `.env` → exchanged at runtime for short-lived Copilot session token via `GET https://api.github.com/copilot_internal/v2/token` | Uses **Completions API** (`build_copilot_agent`). Requires IDE headers: `Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id` ("vscode-chat"). Base URL derived from token `proxy-ep` field; default: `https://api.individual.githubcopilot.com`. Headers injected via rig's `.http_headers()` builder. Provider construction in `session/provider.rs` with `copilot_headers()` helper |
+| LLM Provider (Anthropic) | `llm/agent_factory.rs` | HTTPS via rig-core | API key from `.env` | Anthropic Messages API. Constructed via `AgentFactory::build()` → `BuiltAgent::Anthropic` |
+| LLM Provider (OpenAI) | `llm/agent_factory.rs` | HTTPS via rig-core | API key from `.env` | Uses **Responses API**. Constructed via `AgentFactory::build()` → `BuiltAgent::OpenAiResponses` |
+| LLM Provider (GitHub Copilot) | `llm/agent_factory.rs`, `auth/` | HTTPS via rig-core + reqwest | OAuth token from `.env` → exchanged at runtime for short-lived Copilot session token via `GET https://api.github.com/copilot_internal/v2/token` | Proxy to multiple backends — API format is **hardcoded per model**: known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) use **Responses API** (`BuiltAgent::OpenAiResponses`), all other models (Claude, Mistral, etc.) **fallback to Completions API** (`BuiltAgent::OpenAiCompletions`) — safe default for non-OpenAI backends. Requires IDE headers: `Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id` ("vscode-chat"). Base URL derived from token `proxy-ep` field; default: `https://api.individual.githubcopilot.com`. Headers injected via rig's `.http_headers()` builder. Provider construction centralized in `AgentFactory` with `copilot_requires_responses_api()` heuristic |
 | GitHub API | `git_provider/github.rs` | HTTPS via octocrab | Token from `.env` | |
 | GitLab API | `git_provider/gitlab.rs` | HTTPS via reqwest | Token from `.env` | |
 | Telegram API | `notifier/mod.rs` | HTTPS via reqwest | Bot token from `.env` | |

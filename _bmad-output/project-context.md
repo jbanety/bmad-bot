@@ -46,6 +46,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 #### rig Agent + Tool Calling
 - The LLM agent is instantiated via `rig-core` with the BMAD dev agent persona (Amelia)
+- **Agent construction is centralized in `llm/agent_factory.rs`** — `AgentFactory::build(role, preamble, tools)` returns a `BuiltAgent` enum with unified `stream_chat()` dispatch. No provider-specific logic in session, review, or supervisor code.
 - **9 tools exposed to the agent via rig:**
   - `edit_file` — surgical search_replace edits, create new files, overwrite when justified
   - `read_file` — partial reading (line ranges) + automatic outline mode for large files (>300 lines)
@@ -95,11 +96,17 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **PR for blocked/failed stories:** Even when a story fails or is escalated, the daemon creates a PR with partial code and a description of the failure point — nothing is lost silently
 - PR description is agent-written and includes a dedicated "🤖 Supervisor Decisions" section
 
-#### Multi-Provider LLM Config
+#### Multi-Provider LLM Config — AgentFactory + BuiltAgent
 - Three independent LLM roles: **dev** (Amelia session), **review** (code review), **supervisor** (question answering)
 - Supported providers: Anthropic, OpenAI, GitHub Copilot
-- GitHub Copilot uses OpenAI-compatible API — likely a thin adapter or base URL swap in rig
+- **All provider construction is centralized in `AgentFactory`** (`src/llm/agent_factory.rs`). Since rig's `Chat` trait is not object-safe, `BuiltAgent` uses enum dispatch to wrap concrete agent types with a unified `stream_chat()` method.
+- **API format is hardcoded per provider/model — not configurable:**
+  - **Anthropic** → Messages API (always)
+  - **OpenAI direct** → Responses API (always, rig default)
+  - **GitHub Copilot** → proxy to multiple backends. Known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) → Responses API. **Everything else → Completions API** (safe fallback for non-OpenAI models like Claude, Mistral, etc.)
+- `copilot_requires_responses_api()` is the hardcoded heuristic — new OpenAI model families are a one-liner addition. No `api_format` config — the API format is a deterministic property of the provider behind the model, not a user preference.
 - API keys stored in environment variables, never in config files
+- `AgentFactory` owns the `CopilotTokenCache` — Copilot token exchange is handled internally, not passed around
 
 ### Testing Rules
 
@@ -121,6 +128,11 @@ _This file contains critical rules and patterns that AI agents must follow when 
   │   └── mod.rs          # init, start, status, logs commands
   ├── config/
   │   └── mod.rs           # YAML config + .env secrets loading + validation
+  ├── llm/
+  │   ├── mod.rs           # LLM module root (re-exports context, logging, agent_factory)
+  │   ├── agent_factory.rs # AgentFactory + BuiltAgent enum dispatch — centralized provider construction, Copilot API format detection
+  │   ├── context.rs       # Zed-style XML ContextBuilder
+  │   └── logging.rs       # LLM request/response debug logging
   ├── watcher/
   │   ├── mod.rs
   │   └── deps.rs          # Dependency graph resolution + cascade blocking
@@ -201,4 +213,4 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Review quarterly for outdated rules
 - Remove rules that become obvious over time
 
-Last Updated: 2026-02-11 — git2 (libgit2) replaced by Git CLI (>= 2.30) across all components (tools/git.rs, session/branch.rs, pipeline.rs). Removes git2 crate. Adds git version validation at startup. See architect-brief-git-cli-migration.md for full rationale.
+Last Updated: 2026-02-12 — LLM provider construction centralized in `llm/agent_factory.rs` (`AgentFactory` + `BuiltAgent` enum dispatch). Fixes Copilot gpt-5.2-codex Responses API bug. API format hardcoded per provider/model: Anthropic → Messages API, OpenAI → Responses API, GitHub Copilot → explicit match on OpenAI model families for Responses API, fallback to Completions API for all other models. ~610 lines of duplicated provider match arms eliminated. See architect-brief-llm-provider-abstraction.md for full rationale.

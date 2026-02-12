@@ -98,10 +98,10 @@ impl AgentFactory {
             "openai" => { /* build OpenAI Responses API agent */ }
             "github-copilot" => {
                 let (token, url) = self.resolve_copilot(api_key).await?;
-                if copilot_needs_responses_api(model) {
+                if copilot_requires_responses_api(model) {
                     /* build with Responses API client */
                 } else {
-                    /* build with Completions API client */
+                    /* fallback: Completions API (safe default for unknown models) */
                 }
             }
         }
@@ -112,19 +112,24 @@ impl AgentFactory {
 ### Copilot API Format Detection
 
 ```rust
-/// Detect whether a model requires the OpenAI Responses API.
+/// Determine whether a model proxied via GitHub Copilot requires the OpenAI Responses API.
 ///
-/// OpenAI is progressively migrating models to Responses API only.
-/// Models proxied via GitHub Copilot that target OpenAI backends
-/// need the correct API format, while non-OpenAI models (Claude, etc.)
-/// always use Chat Completions format through the proxy.
-fn copilot_needs_responses_api(model: &str) -> bool {
+/// GitHub Copilot is a proxy that routes to multiple backends (OpenAI, Anthropic, etc.).
+/// OpenAI models require the Responses API — Chat Completions returns 400 for newer models.
+/// All other models (Claude, Mistral, etc.) use Chat Completions through the proxy.
+///
+/// This is hardcoded, not configurable — the API format is a deterministic property
+/// of the provider behind the model, not a user preference.
+///
+/// Fallback: Chat Completions API (safe default — works for all non-OpenAI models).
+fn copilot_requires_responses_api(model: &str) -> bool {
     let m = model.to_lowercase();
+    // Known OpenAI model families that require Responses API
     m.starts_with("gpt-") || m.starts_with("o1-") || m.starts_with("o3-") || m.contains("codex")
 }
 ```
 
-This heuristic covers current and foreseeable OpenAI model naming. Non-OpenAI models (Claude via Copilot) continue using Completions API.
+This is hardcoded by design. The API format is a fact about the provider behind the model — OpenAI models require Responses API, everything else uses Chat Completions. The fallback to Completions API is the safe default: unknown models go through Completions, which works for all non-OpenAI backends. The inverse (defaulting to Responses API) would break non-OpenAI models. When OpenAI introduces new model name patterns, add them to the match — it's a one-liner.
 
 ### Activation Helper
 
@@ -208,7 +213,7 @@ One line to build. One line to run. No provider branching in session/review code
 | Benefit | Detail |
 |---------|--------|
 | **Fixes gpt-5.2-codex bug** | Copilot branch correctly selects Responses vs Completions API per model |
-| **Future-proof** | New OpenAI models auto-detected — add pattern to `copilot_needs_responses_api()` |
+| **Future-proof** | Known OpenAI model families matched explicitly; unknown models fall back safely to Completions API. Adding a new OpenAI model family is a one-liner in `copilot_requires_responses_api()` |
 | **~610 lines of duplication eliminated** | Single match in factory replaces 5 match sites |
 | **Adding a provider = 1 file change** | Add variant to `BuiltAgent`, add arm to factory. No changes in runner/review/supervisor |
 | **Copilot token caching centralized** | `AgentFactory` owns the `CopilotTokenCache` — no more passing it around |
@@ -221,7 +226,7 @@ One line to build. One line to run. No provider branching in session/review code
 |-----------|------------|
 | Enum dispatch adds one match per `stream_chat` call | Negligible overhead — one branch per LLM call (which takes seconds) |
 | `BuiltAgent` enum must be updated when rig adds providers | Acceptable — rig provider additions are rare and this is already a compile-time concern |
-| Model name heuristic for API format detection | Conservative defaults + easy to update. Could add a config override (`api_format: responses`) if needed later |
+| Model name heuristic for API format detection | Hardcoded by design — API format is a deterministic property of the provider, not a user config. Fallback to Completions API is the safe default. New OpenAI model families are a one-liner addition |
 | `run_session` currently generic over `A: Chat + StreamingChat` | Must be updated to accept `&BuiltAgent` directly and use `BuiltAgent::stream_chat()` instead of the generic `streaming_chat()` |
 
 ## Dependency Changes
