@@ -202,6 +202,7 @@ mod tests {
         let config = LlmRoleConfig {
             provider: "gemini".to_string(),
             model: "gemini-pro".to_string(),
+            reasoning_effort: None,
         };
 
         let result = create_completion_model(&config, &secrets);
@@ -290,6 +291,7 @@ mod tests {
         let config = LlmRoleConfig {
             provider: "anthropic".to_string(),
             model: "claude-sonnet-4-20250514".to_string(),
+            reasoning_effort: None,
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "sk-ant-test-key");
@@ -301,6 +303,7 @@ mod tests {
         let config = LlmRoleConfig {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
+            reasoning_effort: None,
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "sk-openai-test-key");
@@ -312,6 +315,7 @@ mod tests {
         let config = LlmRoleConfig {
             provider: "github-copilot".to_string(),
             model: "gpt-4o".to_string(),
+            reasoning_effort: None,
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "gh-models-test-key");
@@ -323,6 +327,7 @@ mod tests {
         let config = LlmRoleConfig {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
+            reasoning_effort: None,
         };
         let result = create_completion_model(&config, &secrets);
         assert!(result.is_err());

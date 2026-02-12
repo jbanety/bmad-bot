@@ -729,14 +729,17 @@ development_status:
                 dev: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
+                    reasoning_effort: None,
                 },
                 review: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
+                    reasoning_effort: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
+                    reasoning_effort: None,
                 },
             },
             notifications: NotificationConfig {

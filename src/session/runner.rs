@@ -1812,14 +1812,17 @@ mod tests {
                 dev: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test-model".to_string(),
+                    reasoning_effort: None,
                 },
                 review: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test-model".to_string(),
+                    reasoning_effort: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test-model".to_string(),
+                    reasoning_effort: None,
                 },
             },
             notifications: NotificationConfig {

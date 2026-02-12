@@ -149,7 +149,17 @@ pub struct LlmRoleConfig {
     pub provider: String,
     /// Model identifier, e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`.
     pub model: String,
+    /// Optional reasoning effort level for OpenAI-compatible models.
+    ///
+    /// Supported values: `"low"`, `"medium"`, `"high"`, `"xhigh"`.
+    /// Only effective for OpenAI and GitHub Copilot providers using the Responses API.
+    /// Ignored for Anthropic and Copilot models routed through Chat Completions API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
+
+/// Valid values for `reasoning_effort`.
+const VALID_REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 
 /// Git hosting provider configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -296,7 +306,7 @@ impl BotConfig {
         Ok(())
     }
 
-    /// Validates that a single LLM role has a recognised provider.
+    /// Validates that a single LLM role has a recognised provider and valid optional fields.
     fn validate_llm_role(
         &self,
         field_prefix: &str,
@@ -312,6 +322,21 @@ impl BotConfig {
                 ),
             });
         }
+
+        // Validate reasoning_effort if provided
+        if let Some(ref effort) = role.reasoning_effort {
+            if !VALID_REASONING_EFFORTS.contains(&effort.as_str()) {
+                return Err(ConfigError::InvalidField {
+                    field: format!("{field_prefix}.reasoning_effort"),
+                    reason: format!(
+                        "invalid value '{}'; expected one of: {}",
+                        effort,
+                        VALID_REASONING_EFFORTS.join(", ")
+                    ),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -342,14 +367,17 @@ impl BotConfig {
                 dev: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
+                    reasoning_effort: None,
                 },
                 review: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
+                    reasoning_effort: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
+                    reasoning_effort: None,
                 },
             },
             notifications: NotificationConfig {
@@ -1070,5 +1098,115 @@ bmad_paths:
         );
         let config: BotConfig = serde_yml::from_str(&reparsed).unwrap();
         assert!(config.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // reasoning_effort tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_reasoning_effort_defaults_to_none() {
+        let config: BotConfig = serde_yml::from_str(VALID_YAML).unwrap();
+        assert!(config.llm.dev.reasoning_effort.is_none());
+        assert!(config.llm.review.reasoning_effort.is_none());
+        assert!(config.llm.supervisor.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn test_config_reasoning_effort_parses_valid_values() {
+        for value in &["low", "medium", "high", "xhigh"] {
+            let yaml = VALID_YAML.replace(
+                "model: claude-sonnet-4-20250514",
+                &format!("model: claude-sonnet-4-20250514\n    reasoning_effort: {value}"),
+            );
+            let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+            assert_eq!(config.llm.dev.reasoning_effort.as_deref(), Some(*value));
+            assert!(config.validate().is_ok(), "'{value}' should be valid");
+        }
+    }
+
+    #[test]
+    fn test_config_reasoning_effort_rejects_invalid_value() {
+        let yaml = VALID_YAML.replace(
+            "model: claude-sonnet-4-20250514",
+            "model: claude-sonnet-4-20250514\n    reasoning_effort: turbo",
+        );
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::InvalidField { field, reason } => {
+                assert!(
+                    field.contains("reasoning_effort"),
+                    "field should mention reasoning_effort, got: {field}"
+                );
+                assert!(
+                    reason.contains("turbo"),
+                    "reason should mention the invalid value, got: {reason}"
+                );
+            }
+            other => panic!("Expected InvalidField, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_config_reasoning_effort_not_serialized_when_none() {
+        let config = valid_config();
+        let yaml = serde_yml::to_string(&config).unwrap();
+        assert!(
+            !yaml.contains("reasoning_effort"),
+            "reasoning_effort should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn test_config_reasoning_effort_serialized_when_some() {
+        let mut config = valid_config();
+        config.llm.dev.reasoning_effort = Some("high".to_string());
+        let yaml = serde_yml::to_string(&config).unwrap();
+        assert!(
+            yaml.contains("reasoning_effort: high"),
+            "reasoning_effort should appear in serialized YAML"
+        );
+    }
+
+    #[test]
+    fn test_config_reasoning_effort_per_role() {
+        let yaml = format!(
+            r#"
+polling_interval_secs: 60
+log_format: pretty
+log_level: info
+git_provider:
+  provider: github
+  repo_owner: test-org
+  repo_name: test-repo
+llm:
+  dev:
+    provider: github-copilot
+    model: gpt-5.2-codex
+    reasoning_effort: xhigh
+  review:
+    provider: github-copilot
+    model: gpt-5.2-codex
+    reasoning_effort: low
+  supervisor:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+notifications:
+  telegram:
+    enabled: false
+    chat_id: ""
+bmad_paths:
+  project_root: "."
+  output_folder: "_bmad-output"
+  planning_artifacts: "_bmad-output/planning-artifacts"
+  implementation_artifacts: "_bmad-output/implementation-artifacts"
+"#
+        );
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.llm.dev.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(config.llm.review.reasoning_effort.as_deref(), Some("low"));
+        assert!(config.llm.supervisor.reasoning_effort.is_none());
     }
 }

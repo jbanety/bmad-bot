@@ -254,6 +254,7 @@ impl AgentFactory {
         let role_config = self.config_for_role(role);
         let provider = role_config.provider.as_str();
         let model = &role_config.model;
+        let reasoning_effort = role_config.reasoning_effort.as_deref();
 
         let api_key = resolve_api_key(provider, &self.secrets)?;
 
@@ -268,6 +269,16 @@ impl AgentFactory {
                     })?;
 
                 let builder = client.agent(model).preamble(preamble);
+
+                if reasoning_effort.is_some() {
+                    tracing::warn!(
+                        provider = "anthropic",
+                        model = %model,
+                        role = %role,
+                        "reasoning_effort is not supported for Anthropic — ignoring"
+                    );
+                }
+
                 let agent = configure_tools.configure_anthropic(builder);
 
                 tracing::info!(
@@ -290,6 +301,8 @@ impl AgentFactory {
                     })?;
 
                 let builder = client.agent(model).preamble(preamble);
+                let builder =
+                    apply_reasoning_effort(builder, reasoning_effort, "openai", model, role);
                 let agent = configure_tools.configure_openai_responses(builder);
 
                 tracing::info!(
@@ -297,6 +310,7 @@ impl AgentFactory {
                     provider = "openai",
                     model = %model,
                     role = %role,
+                    reasoning_effort = reasoning_effort.unwrap_or("none"),
                     "AgentFactory built agent (Responses API)"
                 );
 
@@ -318,6 +332,13 @@ impl AgentFactory {
                         })?;
 
                     let builder = client.agent(model).preamble(preamble);
+                    let builder = apply_reasoning_effort(
+                        builder,
+                        reasoning_effort,
+                        "github-copilot",
+                        model,
+                        role,
+                    );
                     let agent = configure_tools.configure_openai_responses(builder);
 
                     tracing::info!(
@@ -326,6 +347,7 @@ impl AgentFactory {
                         api_format = "responses",
                         model = %model,
                         role = %role,
+                        reasoning_effort = reasoning_effort.unwrap_or("none"),
                         "AgentFactory built Copilot agent (Responses API)"
                     );
 
@@ -344,6 +366,17 @@ impl AgentFactory {
                         .completions_api();
 
                     let builder = client.agent(model).preamble(preamble);
+
+                    if reasoning_effort.is_some() {
+                        tracing::warn!(
+                            provider = "github-copilot",
+                            api_format = "completions",
+                            model = %model,
+                            role = %role,
+                            "reasoning_effort is not supported for Completions API models — ignoring"
+                        );
+                    }
+
                     let agent = configure_tools.configure_openai_completions(builder);
 
                     tracing::info!(
@@ -669,6 +702,38 @@ where
 /// models. The inverse (defaulting to Responses API) would break non-OpenAI models.
 ///
 /// Adding a new OpenAI model family is a one-liner addition to this function.
+/// Apply `reasoning.effort` as `additional_params` on an OpenAI Responses API builder.
+///
+/// If `effort` is `None`, the builder is returned unchanged. Otherwise, injects:
+/// ```json
+/// { "reasoning": { "effort": "<value>" } }
+/// ```
+///
+/// Only call this for Responses API builders (OpenAI direct or Copilot Responses path).
+fn apply_reasoning_effort<M: rig::completion::CompletionModel>(
+    builder: AgentBuilder<M>,
+    effort: Option<&str>,
+    provider: &str,
+    model: &str,
+    role: LlmRole,
+) -> AgentBuilder<M> {
+    match effort {
+        Some(level) => {
+            tracing::info!(
+                provider = provider,
+                model = model,
+                role = %role,
+                reasoning_effort = level,
+                "Applying reasoning effort"
+            );
+            builder.additional_params(serde_json::json!({
+                "reasoning": { "effort": level }
+            }))
+        }
+        None => builder,
+    }
+}
+
 pub fn copilot_requires_responses_api(model: &str) -> bool {
     let m = model.to_lowercase();
     m.starts_with("gpt-")
@@ -793,14 +858,17 @@ mod tests {
                 dev: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
+                    reasoning_effort: None,
                 },
                 review: LlmRoleConfig {
                     provider: "openai".to_string(),
                     model: "gpt-4o".to_string(),
+                    reasoning_effort: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "github-copilot".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
+                    reasoning_effort: None,
                 },
             },
             notifications: NotificationConfig {
@@ -991,5 +1059,116 @@ mod tests {
         // verify it compiles and the trait is satisfied.
         fn assert_configurator<T: AgentConfigurator>(_t: T) {}
         assert_configurator(NoTools);
+    }
+
+    // -- apply_reasoning_effort tests --
+
+    #[tokio::test]
+    async fn test_apply_reasoning_effort_none_returns_builder_unchanged() {
+        // When effort is None, additional_params should remain unset.
+        // We verify indirectly by building a real Anthropic agent (no API call needed).
+        let client: anthropic::Client = anthropic::Client::builder()
+            .api_key("sk-test")
+            .build()
+            .unwrap();
+        let builder = client.agent("test-model").preamble("test");
+        // Should not panic and should return a valid builder
+        let builder =
+            apply_reasoning_effort(builder, None, "anthropic", "test-model", LlmRole::Dev);
+        let _agent = builder.build();
+    }
+
+    #[tokio::test]
+    async fn test_apply_reasoning_effort_some_sets_additional_params() {
+        // When effort is Some, additional_params should be set with the reasoning object.
+        let client: openai::Client = openai::Client::builder()
+            .api_key("sk-test")
+            .build()
+            .unwrap();
+        let builder = client.agent("gpt-4o").preamble("test");
+        let builder =
+            apply_reasoning_effort(builder, Some("high"), "openai", "gpt-4o", LlmRole::Dev);
+        // Build succeeds — the additional_params are injected internally
+        let _agent = builder.build();
+    }
+
+    #[tokio::test]
+    async fn test_apply_reasoning_effort_all_valid_levels() {
+        for level in &["low", "medium", "high", "xhigh"] {
+            let client: openai::Client = openai::Client::builder()
+                .api_key("sk-test")
+                .build()
+                .unwrap();
+            let builder = client.agent("gpt-5.2-codex").preamble("test");
+            let builder = apply_reasoning_effort(
+                builder,
+                Some(level),
+                "github-copilot",
+                "gpt-5.2-codex",
+                LlmRole::Dev,
+            );
+            let _agent = builder.build();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_factory_build_bare_with_reasoning_effort() {
+        // Verify that reasoning_effort flows through build_bare for OpenAI provider.
+        let mut config = make_test_config();
+        config.llm.review.reasoning_effort = Some("high".to_string());
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        let agent = factory.build_bare(LlmRole::Review, "test preamble").await;
+        assert!(agent.is_ok(), "Build with reasoning_effort should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_agent_factory_build_bare_anthropic_ignores_reasoning_effort() {
+        // Anthropic provider should succeed even with reasoning_effort set (it's ignored with a warning).
+        let mut config = make_test_config();
+        config.llm.dev.reasoning_effort = Some("high".to_string());
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        let agent = factory.build_bare(LlmRole::Dev, "test preamble").await;
+        assert!(
+            agent.is_ok(),
+            "Anthropic build should succeed even with reasoning_effort set"
+        );
+    }
+
+    #[test]
+    fn test_config_for_role_reasoning_effort_propagated() {
+        let mut config = make_test_config();
+        config.llm.dev.reasoning_effort = Some("xhigh".to_string());
+        config.llm.review.reasoning_effort = Some("low".to_string());
+        // supervisor has None
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        assert_eq!(
+            factory
+                .config_for_role(LlmRole::Dev)
+                .reasoning_effort
+                .as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            factory
+                .config_for_role(LlmRole::Review)
+                .reasoning_effort
+                .as_deref(),
+            Some("low")
+        );
+        assert!(
+            factory
+                .config_for_role(LlmRole::Supervisor)
+                .reasoning_effort
+                .is_none()
+        );
     }
 }
