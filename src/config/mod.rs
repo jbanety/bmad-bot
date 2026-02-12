@@ -71,7 +71,7 @@ pub enum ConfigError {
 // ---------------------------------------------------------------------------
 
 /// Top-level daemon configuration loaded from `bmad-bot.yaml`.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BotConfig {
     /// Polling interval in seconds. Must be > 0.
     #[serde(default = "default_polling_interval")]
@@ -132,7 +132,7 @@ fn default_log_file() -> String {
 }
 
 /// LLM provider configuration for each agent role.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LlmConfig {
     /// Provider + model for the dev agent (Amelia).
     pub dev: LlmRoleConfig,
@@ -143,7 +143,7 @@ pub struct LlmConfig {
 }
 
 /// Provider + model pair for a single LLM role.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LlmRoleConfig {
     /// One of: `"anthropic"`, `"openai"`, `"github-copilot"`.
     pub provider: String,
@@ -152,7 +152,7 @@ pub struct LlmRoleConfig {
 }
 
 /// Git hosting provider configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GitProviderConfig {
     /// One of: `"github"`, `"gitlab"`.
     pub provider: String,
@@ -171,14 +171,14 @@ fn default_target_branch() -> String {
 }
 
 /// Notification channel configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NotificationConfig {
     /// Telegram notification settings.
     pub telegram: TelegramConfig,
 }
 
 /// Telegram notification settings.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TelegramConfig {
     /// Whether Telegram notifications are enabled.
     #[serde(default)]
@@ -189,7 +189,7 @@ pub struct TelegramConfig {
 }
 
 /// Paths to BMAD project artifacts.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BmadPathsConfig {
     /// Root of the project repository.
     pub project_root: String,

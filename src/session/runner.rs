@@ -12,8 +12,8 @@
 //! match arms on the provider name to construct and drive concrete agent types
 //! (following the established pattern from `supervisor/architect.rs`).
 
-use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
-use crate::config::{BotConfig, BotSecrets};
+use crate::config::BotConfig;
+use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{
     log_llm_error, log_llm_history, log_llm_history_summary, log_llm_request, log_llm_response,
 };
@@ -23,26 +23,36 @@ use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_b
 use crate::session::cleanup::{mark_story_needs_clarification, preserve_partial_work};
 /// Re-export [`ShutdownFlag`] so existing callers (`pipeline.rs`, `cli/mod.rs`) keep working.
 pub use crate::session::dev_agent::ShutdownFlag;
-use crate::session::dev_agent::{self, activate_agent, streaming_chat};
+use crate::session::dev_agent::{self};
 use crate::session::escalation::EscalationReport;
-use crate::session::provider::{ProviderError, resolve_api_key};
+use crate::session::provider::ProviderError;
 use crate::session::state::{ChatMessage, SessionState};
 use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
 use crate::supervisor::{AskSupervisor, EscalationSlot};
 use crate::tools::{
     EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
 };
+
+/// Type alias for the standard 8-tool set returned by [`SessionRunner::create_tools()`].
+///
+/// Avoids `clippy::type_complexity` on the 8-element tuple.
+type ToolSet = (
+    GitTool,
+    ReadFileTool,
+    EditFileTool,
+    GrepTool,
+    FindPathTool,
+    ListDirectoryTool,
+    TerminalTool,
+    AskSupervisor,
+);
 use crate::watcher::StoryInfo;
 
-use rig::agent::Agent;
-use rig::client::CompletionClient;
-use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
-use rig::providers::{anthropic, openai};
-use rig::streaming::StreamingChat;
+use rig::completion::Message;
 use rig::tools::think::ThinkTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 /// Maximum number of chat turns before the safety net kicks in.
 ///
@@ -207,14 +217,12 @@ fn is_context_limit_error(error_msg: &str) -> bool {
 pub struct SessionRunner {
     /// Shared daemon configuration.
     config: Arc<BotConfig>,
-    /// Shared secrets (API keys loaded from `.env`).
-    secrets: Arc<BotSecrets>,
+    /// Centralized agent construction factory (owns secrets + Copilot token cache).
+    agent_factory: Arc<AgentFactory>,
     /// Path to the WAL state file: `{implementation_artifacts}/.bmad-bot-session.yaml`.
     state_file_path: PathBuf,
     /// Stateless response analyzer (constructed once, reused).
     analyzer: ResponseAnalyzer,
-    /// In-memory cache for GitHub Copilot session tokens (persists across stories).
-    copilot_cache: std::sync::Mutex<CopilotTokenCache>,
     /// Cooperative shutdown flag — checked between streaming chunks and chat turns.
     shutdown: ShutdownFlag,
 }
@@ -228,59 +236,20 @@ impl SessionRunner {
     /// The `shutdown` flag is shared with the signal handler task spawned by the
     /// daemon. When set to `true`, the session exits cleanly after the current
     /// streaming chunk, saving partial work via the WAL.
-    pub fn new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>, shutdown: ShutdownFlag) -> Self {
+    pub fn new(
+        config: Arc<BotConfig>,
+        agent_factory: Arc<AgentFactory>,
+        shutdown: ShutdownFlag,
+    ) -> Self {
         let state_file_path =
             Path::new(&config.bmad_paths.implementation_artifacts).join(".bmad-bot-session.yaml");
         Self {
             config,
-            secrets,
+            agent_factory,
             state_file_path,
             analyzer: ResponseAnalyzer::new(),
-            copilot_cache: std::sync::Mutex::new(CopilotTokenCache::new()),
             shutdown,
         }
-    }
-
-    /// Resolve a Copilot session token and base URL from the OAuth token.
-    ///
-    /// Uses the internal [`CopilotTokenCache`] so that repeated calls within
-    /// the same daemon run reuse a valid cached token. Returns
-    /// `(session_token, base_url)` on success, or a formatted error string.
-    ///
-    /// The `std::sync::Mutex` guard is NOT held across the async exchange call
-    /// to satisfy clippy's `await_holding_lock` lint.
-    async fn resolve_copilot_session(&self, oauth_token: &str) -> Result<(String, String), String> {
-        // Phase 1: check cache under lock, return immediately if valid
-        {
-            let cache = self
-                .copilot_cache
-                .lock()
-                .map_err(|e| format!("Copilot cache lock poisoned: {e}"))?;
-            if let Some(pair) = cache.try_get_cached() {
-                return Ok(pair);
-            }
-        } // MutexGuard dropped here
-
-        // Phase 2: exchange token WITHOUT holding the lock
-        let http_client = ReqwestCopilotHttpClient::new();
-        let resp = http_client
-            .exchange_copilot_token(oauth_token)
-            .await
-            .map_err(|e| format!("Copilot token exchange failed: {e}"))?;
-
-        let base_url = crate::auth::github_copilot::derive_base_url_from_token(&resp.token);
-        let token = resp.token.clone();
-
-        // Phase 3: store result under lock
-        {
-            let mut cache = self
-                .copilot_cache
-                .lock()
-                .map_err(|e| format!("Copilot cache lock poisoned: {e}"))?;
-            cache.store(resp.token, base_url.clone(), resp.expires_at);
-        }
-
-        Ok((token, base_url))
     }
 
     /// Check for an interrupted session WAL file and prepare recovery data.
@@ -444,155 +413,52 @@ impl SessionRunner {
             }
         }
 
-        // Phase 2 — Resolve API key
+        // Phase 2 — Build agent via factory (handles API key resolution + Copilot token exchange)
         let provider_name = state.provider.clone();
         let model_name = state.model.clone();
-        let api_key = match resolve_api_key(&provider_name, &self.secrets) {
-            Ok(key) => key,
-            Err(e) => {
-                tracing::error!(
-                    action = "crash_recovery_api_key_failed",
-                    provider = %provider_name,
-                    error = %e,
-                    "Failed to resolve API key for recovery"
-                );
-                let _ = SessionState::delete(&self.state_file_path).await;
-                return SessionOutcome::Failed {
-                    story_key: story_info.story_key.clone(),
-                    error: format!("Recovery API key resolution failed: {e}"),
-                    decisions: vec![],
-                };
-            }
-        };
-
-        // Phase 3 — Reconstruct agent and run recovered session
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
         let decision_log = DecisionLog::new();
         let base_branch = state.base_branch.clone();
 
-        let outcome = match provider_name.as_str() {
-            "anthropic" => {
-                match self.build_anthropic_agent(
-                    &story_info,
-                    &api_key,
-                    &model_name,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(agent) => {
-                        self.run_session(
-                            &agent,
-                            &story_info,
-                            &provider_name,
-                            &model_name,
-                            &base_branch,
-                            escalation_slot.clone(),
-                            decision_log.clone(),
-                            Some(state),
-                        )
-                        .await
-                    }
-                    Err(e) => {
-                        tracing::error!(action = "crash_recovery_agent_failed", error = %e, "Agent build failed during recovery");
-                        SessionOutcome::Failed {
-                            story_key: story_info.story_key.clone(),
-                            error: format!("Recovery agent build failed: {e}"),
-                            decisions: decision_log.records(),
-                        }
-                    }
-                }
-            }
-            "openai" => {
-                match self.build_openai_agent(
-                    &story_info,
-                    &api_key,
-                    &model_name,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(agent) => {
-                        self.run_session(
-                            &agent,
-                            &story_info,
-                            &provider_name,
-                            &model_name,
-                            &base_branch,
-                            escalation_slot.clone(),
-                            decision_log.clone(),
-                            Some(state),
-                        )
-                        .await
-                    }
-                    Err(e) => {
-                        tracing::error!(action = "crash_recovery_agent_failed", error = %e, "Agent build failed during recovery");
-                        SessionOutcome::Failed {
-                            story_key: story_info.story_key.clone(),
-                            error: format!("Recovery agent build failed: {e}"),
-                            decisions: decision_log.records(),
-                        }
-                    }
-                }
-            }
-            "github-copilot" => {
-                // Exchange OAuth token for short-lived Copilot session token
-                let (session_token, base_url) = match self.resolve_copilot_session(&api_key).await {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        tracing::error!(action = "crash_recovery_copilot_failed", error = %e, "Copilot token exchange failed during recovery");
-                        return SessionOutcome::Failed {
-                            story_key: story_info.story_key.clone(),
-                            error: e,
-                            decisions: decision_log.records(),
-                        };
-                    }
-                };
-
-                match self.build_copilot_agent(
-                    &story_info,
-                    &session_token,
-                    &model_name,
-                    &base_url,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(agent) => {
-                        self.run_session(
-                            &agent,
-                            &story_info,
-                            &provider_name,
-                            &model_name,
-                            &base_branch,
-                            escalation_slot.clone(),
-                            decision_log.clone(),
-                            Some(state),
-                        )
-                        .await
-                    }
-                    Err(e) => {
-                        tracing::error!(action = "crash_recovery_agent_failed", error = %e, "Agent build failed during recovery");
-                        SessionOutcome::Failed {
-                            story_key: story_info.story_key.clone(),
-                            error: format!("Recovery agent build failed: {e}"),
-                            decisions: decision_log.records(),
-                        }
-                    }
-                }
-            }
-            other => {
+        let agent = match self
+            .build_agent_for_role(
+                LlmRole::Dev,
+                &story_info,
+                escalation_slot.clone(),
+                decision_log.clone(),
+            )
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
                 tracing::error!(
-                    action = "crash_recovery_unsupported_provider",
-                    provider = %other,
-                    "Unsupported provider in WAL"
+                    action = "crash_recovery_agent_failed",
+                    error = %e,
+                    "Agent build failed during recovery"
                 );
-                SessionOutcome::Failed {
+                let _ = SessionState::delete(&self.state_file_path).await;
+                return SessionOutcome::Failed {
                     story_key: story_info.story_key.clone(),
-                    error: format!("Unsupported provider in WAL: {other}"),
-                    decisions: vec![],
-                }
+                    error: format!("Recovery agent build failed: {e}"),
+                    decisions: decision_log.records(),
+                };
             }
         };
 
-        // Phase 4 — ALWAYS delete WAL after recovery attempt (prevents infinite loops)
+        let outcome = self
+            .run_session(
+                &agent,
+                &story_info,
+                &provider_name,
+                &model_name,
+                &base_branch,
+                escalation_slot.clone(),
+                decision_log.clone(),
+                Some(state),
+            )
+            .await;
+
+        // Phase 3 — ALWAYS delete WAL after recovery attempt (prevents infinite loops)
         let _ = SessionState::delete(&self.state_file_path).await;
 
         outcome
@@ -617,23 +483,6 @@ impl SessionRunner {
             story_key = %story.story_key,
             "Starting dev session"
         );
-
-        // Resolve API key before building agent
-        let api_key = match resolve_api_key(&self.config.llm.dev.provider, &self.secrets) {
-            Ok(key) => key,
-            Err(e) => {
-                tracing::error!(
-                    action = "session_failed",
-                    error = %e,
-                    "Failed to resolve API key"
-                );
-                return SessionOutcome::Failed {
-                    story_key: story.story_key.clone(),
-                    error: format!("Provider setup failed: {e}"),
-                    decisions: vec![],
-                };
-            }
-        };
 
         // --- Branch setup (BEFORE agent build) ---
         let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
@@ -705,121 +554,43 @@ impl SessionRunner {
         let provider = &self.config.llm.dev.provider;
         let model = &self.config.llm.dev.model;
 
-        // Build agent and run chat loop — match on provider because Chat is not object-safe
-        let outcome = match provider.as_str() {
-            "anthropic" => {
-                match self.build_anthropic_agent(
-                    story,
-                    &api_key,
-                    model,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(agent) => {
-                        self.run_session(
-                            &agent,
-                            story,
-                            provider,
-                            model,
-                            &base_branch,
-                            escalation_slot.clone(),
-                            decision_log.clone(),
-                            None,
-                        )
-                        .await
-                    }
-                    Err(e) => SessionOutcome::Failed {
-                        story_key: story.story_key.clone(),
-                        error: format!("Agent build failed: {e}"),
-                        decisions: decision_log.records(),
-                    },
-                }
-            }
-            "openai" => {
-                match self.build_openai_agent(
-                    story,
-                    &api_key,
-                    model,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(agent) => {
-                        self.run_session(
-                            &agent,
-                            story,
-                            provider,
-                            model,
-                            &base_branch,
-                            escalation_slot.clone(),
-                            decision_log.clone(),
-                            None,
-                        )
-                        .await
-                    }
-                    Err(e) => SessionOutcome::Failed {
-                        story_key: story.story_key.clone(),
-                        error: format!("Agent build failed: {e}"),
-                        decisions: decision_log.records(),
-                    },
-                }
-            }
-            "github-copilot" => {
-                // Exchange OAuth token for short-lived Copilot session token
-                let (session_token, base_url) = match self.resolve_copilot_session(&api_key).await {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        tracing::error!(
-                            action = "session_failed",
-                            error = %e,
-                            "Copilot token exchange failed"
-                        );
-                        return SessionOutcome::Failed {
-                            story_key: story.story_key.clone(),
-                            error: e,
-                            decisions: decision_log.records(),
-                        };
-                    }
-                };
-
-                tracing::info!(
-                    action = "copilot_token_exchanged",
-                    "Copilot session token obtained"
+        // Build agent via AgentFactory — single call replaces 3-arm provider match
+        let agent = match self
+            .build_agent_for_role(
+                LlmRole::Dev,
+                story,
+                escalation_slot.clone(),
+                decision_log.clone(),
+            )
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!(
+                    action = "session_failed",
+                    error = %e,
+                    "Agent build failed"
                 );
-
-                match self.build_copilot_agent(
-                    story,
-                    &session_token,
-                    model,
-                    &base_url,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(agent) => {
-                        self.run_session(
-                            &agent,
-                            story,
-                            provider,
-                            model,
-                            &base_branch,
-                            escalation_slot.clone(),
-                            decision_log.clone(),
-                            None,
-                        )
-                        .await
-                    }
-                    Err(e) => SessionOutcome::Failed {
-                        story_key: story.story_key.clone(),
-                        error: format!("Agent build failed: {e}"),
-                        decisions: decision_log.records(),
-                    },
-                }
+                return SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Agent build failed: {e}"),
+                    decisions: decision_log.records(),
+                };
             }
-            other => SessionOutcome::Failed {
-                story_key: story.story_key.clone(),
-                error: format!("Unsupported provider: {other}"),
-                decisions: vec![],
-            },
         };
+
+        let outcome = self
+            .run_session(
+                &agent,
+                story,
+                provider,
+                model,
+                &base_branch,
+                escalation_slot.clone(),
+                decision_log.clone(),
+                None,
+            )
+            .await;
 
         let outcome_type = match &outcome {
             SessionOutcome::Completed { .. } => "completed",
@@ -836,157 +607,33 @@ impl SessionRunner {
         outcome
     }
 
-    /// Build an Anthropic agent with the BMAD dev persona and 4 tools.
-    fn build_anthropic_agent(
-        &self,
-        story: &StoryInfo,
-        api_key: &str,
-        model: &str,
-        escalation_slot: EscalationSlot,
-        decision_log: DecisionLog,
-    ) -> Result<Agent<anthropic::completion::CompletionModel>, ProviderError> {
-        let preamble = self.build_preamble(story)?;
-
-        let client: anthropic::Client = anthropic::Client::builder()
-            .api_key(api_key)
-            .build()
-            .map_err(|e| ProviderError::ClientCreation {
-                provider: "anthropic".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-        let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
-            self.create_tools(&project_root, escalation_slot, decision_log)?;
-
-        let agent = client
-            .agent(model)
-            .preamble(&preamble)
-            .tool(git)
-            .tool(read_file)
-            .tool(edit_file)
-            .tool(grep)
-            .tool(find_path)
-            .tool(list_dir)
-            .tool(terminal)
-            .tool(supervisor)
-            .tool(ThinkTool)
-            .build();
-
-        tracing::info!(
-            action = "agent_built",
-            tools = 9,
-            model = %model,
-            provider = "anthropic",
-            "Rig agent built"
-        );
-
-        Ok(agent)
-    }
-
-    /// Build an OpenAI agent (Responses API — default for native OpenAI models).
-    fn build_openai_agent(
-        &self,
-        story: &StoryInfo,
-        api_key: &str,
-        model: &str,
-        escalation_slot: EscalationSlot,
-        decision_log: DecisionLog,
-    ) -> Result<Agent<openai::responses_api::ResponsesCompletionModel>, ProviderError> {
-        let preamble = self.build_preamble(story)?;
-
-        let client: openai::Client =
-            openai::Client::builder()
-                .api_key(api_key)
-                .build()
-                .map_err(|e| ProviderError::ClientCreation {
-                    provider: "openai".to_string(),
-                    reason: e.to_string(),
-                })?;
-
-        let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-        let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
-            self.create_tools(&project_root, escalation_slot, decision_log)?;
-
-        let agent = client
-            .agent(model)
-            .preamble(&preamble)
-            .tool(git)
-            .tool(read_file)
-            .tool(edit_file)
-            .tool(grep)
-            .tool(find_path)
-            .tool(list_dir)
-            .tool(terminal)
-            .tool(supervisor)
-            .tool(ThinkTool)
-            .build();
-
-        tracing::info!(
-            action = "agent_built",
-            tools = 9,
-            model = %model,
-            provider = "openai",
-            "Rig agent built"
-        );
-
-        Ok(agent)
-    }
-
-    /// Build a GitHub Copilot agent (Completions API — required for proxied models like Claude).
+    /// Build a [`BuiltAgent`] for a given role using the [`AgentFactory`].
     ///
-    /// Copilot proxies requests to various model backends (Anthropic, OpenAI, etc.).
-    /// Many of these do not support the newer Responses API, so we use the
-    /// Chat Completions API via [`openai::CompletionsClient`].
-    fn build_copilot_agent(
+    /// Creates the standard 9-tool set (7 custom + AskSupervisor + ThinkTool)
+    /// and delegates to [`AgentFactory::build()`] for provider-specific client
+    /// construction.
+    async fn build_agent_for_role(
         &self,
+        role: LlmRole,
         story: &StoryInfo,
-        api_key: &str,
-        model: &str,
-        base_url: &str,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<Agent<openai::completion::CompletionModel>, ProviderError> {
+    ) -> Result<BuiltAgent, ProviderError> {
         let preamble = self.build_preamble(story)?;
-
-        let client: openai::CompletionsClient = openai::Client::builder()
-            .api_key(api_key)
-            .base_url(base_url)
-            .http_headers(super::provider::copilot_headers())
-            .build()
-            .map_err(|e| ProviderError::ClientCreation {
-                provider: "github-copilot".to_string(),
-                reason: e.to_string(),
-            })?
-            .completions_api();
-
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
         let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
             self.create_tools(&project_root, escalation_slot, decision_log)?;
 
-        let agent = client
-            .agent(model)
-            .preamble(&preamble)
-            .tool(git)
-            .tool(read_file)
-            .tool(edit_file)
-            .tool(grep)
-            .tool(find_path)
-            .tool(list_dir)
-            .tool(terminal)
-            .tool(supervisor)
-            .tool(ThinkTool)
-            .build();
-
-        tracing::info!(
-            action = "agent_built",
-            tools = 9,
-            model = %model,
-            provider = "github-copilot",
-            "Rig agent built (Completions API)"
-        );
-
-        Ok(agent)
+        self.agent_factory
+            .build(
+                role,
+                &preamble,
+                crate::configure_agent_tools!(
+                    git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
+                    ThinkTool
+                ),
+            )
+            .await
     }
 
     /// Build the agent system prompt with operational instructions.
@@ -1007,19 +654,7 @@ impl SessionRunner {
         project_root: &Path,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<
-        (
-            GitTool,
-            ReadFileTool,
-            EditFileTool,
-            GrepTool,
-            FindPathTool,
-            ListDirectoryTool,
-            TerminalTool,
-            AskSupervisor,
-        ),
-        ProviderError,
-    > {
+    ) -> Result<ToolSet, ProviderError> {
         let git = GitTool::new(project_root.to_path_buf());
         let read_file = ReadFileTool::new(project_root.to_path_buf());
         let edit_file = EditFileTool::new(project_root.to_path_buf());
@@ -1028,12 +663,16 @@ impl SessionRunner {
         let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
         let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
 
-        let supervisor =
-            AskSupervisor::with_architect_from_config(&self.config, escalation_slot, decision_log)
-                .map_err(|e| ProviderError::ClientCreation {
-                    provider: "supervisor".to_string(),
-                    reason: format!("Failed to create AskSupervisor: {e}"),
-                })?;
+        let supervisor = AskSupervisor::with_architect_from_config(
+            &self.config,
+            Some(Arc::clone(&self.agent_factory)),
+            escalation_slot,
+            decision_log,
+        )
+        .map_err(|e| ProviderError::ClientCreation {
+            provider: "supervisor".to_string(),
+            reason: format!("Failed to create AskSupervisor: {e}"),
+        })?;
 
         Ok((
             git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
@@ -1122,12 +761,9 @@ impl SessionRunner {
         &self,
         state: &SessionState,
         story: &StoryInfo,
-        provider: &str,
-        model: &str,
+        _provider: &str,
+        _model: &str,
     ) -> Result<String, String> {
-        let api_key = resolve_api_key(provider, &self.secrets)
-            .map_err(|e| format!("Summarization API key failed: {e}"))?;
-
         let format_history = |messages: &[ChatMessage]| -> String {
             messages
                 .iter()
@@ -1159,114 +795,29 @@ impl SessionRunner {
             key = story.story_key,
         );
 
-        // Attempt summarization — provider-specific because Chat is not object-safe
-        let copilot_cache_ref = &self.copilot_cache;
-        let summarize_with_prompt = |prompt: &str,
-                                     prov: &str,
-                                     mdl: &str,
-                                     key: &str|
-         -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<String, String>> + '_>,
-        > {
-            let prompt = prompt.to_string();
-            let prov = prov.to_string();
-            let mdl = mdl.to_string();
+        // Build a bare summarization agent via the factory — no tools needed.
+        let preamble = "You are a technical session summarizer. Be concise but comprehensive.";
+        let summarize_with_prompt = |prompt: String| {
             let flag = Arc::clone(&self.shutdown);
-            let key = key.to_string();
-            Box::pin(async move {
-                let preamble =
-                    "You are a technical session summarizer. Be concise but comprehensive.";
-                match prov.as_str() {
-                    "anthropic" => {
-                        let client: anthropic::Client = anthropic::Client::builder()
-                            .api_key(&key)
-                            .build()
-                            .map_err(|e| format!("Summarization client failed: {e}"))?;
-                        let agent = client.agent(&mdl).preamble(preamble).build();
-                        log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result =
-                            streaming_chat(&agent, prompt.as_str(), vec![], Some(&flag)).await;
-                        match &result {
-                            Ok(r) => log_llm_response("dev-summarize", 0, r),
-                            Err(e) => log_llm_error("dev-summarize", 0, &e),
-                        }
-                        result.map_err(|e| e.to_string())
-                    }
-                    "openai" => {
-                        let client: openai::Client = openai::Client::builder()
-                            .api_key(&key)
-                            .build()
-                            .map_err(|e| format!("Summarization client failed: {e}"))?;
-                        let agent = client.agent(&mdl).preamble(preamble).build();
-                        log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result =
-                            streaming_chat(&agent, prompt.as_str(), vec![], Some(&flag)).await;
-                        match &result {
-                            Ok(r) => log_llm_response("dev-summarize", 0, r),
-                            Err(e) => log_llm_error("dev-summarize", 0, &e),
-                        }
-                        result.map_err(|e| e.to_string())
-                    }
-                    "github-copilot" => {
-                        // Check cache first (short lock, no await)
-                        let cached = {
-                            let cache = copilot_cache_ref
-                                .lock()
-                                .map_err(|e| format!("Copilot cache lock poisoned: {e}"))?;
-                            cache.try_get_cached()
-                        };
-
-                        let (sess_tok, base) = if let Some(pair) = cached {
-                            pair
-                        } else {
-                            // Exchange without holding lock
-                            let http_client = ReqwestCopilotHttpClient::new();
-                            let resp =
-                                http_client
-                                    .exchange_copilot_token(&key)
-                                    .await
-                                    .map_err(|e| {
-                                        format!(
-                                            "Copilot token exchange for summarization failed: {e}"
-                                        )
-                                    })?;
-                            let base_url = crate::auth::github_copilot::derive_base_url_from_token(
-                                &resp.token,
-                            );
-                            let token = resp.token.clone();
-                            // Store under lock
-                            {
-                                let mut cache = copilot_cache_ref
-                                    .lock()
-                                    .map_err(|e| format!("Copilot cache lock poisoned: {e}"))?;
-                                cache.store(resp.token, base_url.clone(), resp.expires_at);
-                            }
-                            (token, base_url)
-                        };
-
-                        let client: openai::CompletionsClient = openai::Client::builder()
-                            .api_key(&sess_tok)
-                            .base_url(&base)
-                            .http_headers(super::provider::copilot_headers())
-                            .build()
-                            .map_err(|e| format!("Summarization client failed: {e}"))?
-                            .completions_api();
-                        let agent = client.agent(&mdl).preamble(preamble).build();
-                        log_llm_request("dev-summarize", 0, &prompt, 0);
-                        let result =
-                            streaming_chat(&agent, prompt.as_str(), vec![], Some(&flag)).await;
-                        match &result {
-                            Ok(r) => log_llm_response("dev-summarize", 0, r),
-                            Err(e) => log_llm_error("dev-summarize", 0, &e),
-                        }
-                        result.map_err(|e| e.to_string())
-                    }
-                    other => Err(format!("Unsupported provider for summarization: {other}")),
+            let factory = Arc::clone(&self.agent_factory);
+            async move {
+                let agent = factory
+                    .build_bare(LlmRole::Dev, preamble)
+                    .await
+                    .map_err(|e| format!("Summarization agent build failed: {e}"))?;
+                log_llm_request("dev-summarize", 0, &prompt, 0);
+                let result = agent
+                    .stream_chat(prompt.as_str(), vec![], Some(&flag))
+                    .await;
+                match &result {
+                    Ok(r) => log_llm_response("dev-summarize", 0, r),
+                    Err(e) => log_llm_error("dev-summarize", 0, e),
                 }
-            })
+                result.map_err(|e| e.to_string())
+            }
         };
 
-        match summarize_with_prompt(&summarization_prompt, provider, model, &api_key).await {
+        match summarize_with_prompt(summarization_prompt).await {
             Ok(summary) => Ok(summary),
             Err(e) => {
                 // Fallback: if the full history was too large, retry with last 50%
@@ -1291,11 +842,9 @@ impl SessionRunner {
                          {truncated_text}",
                         key = story.story_key,
                     );
-                    summarize_with_prompt(&fallback_prompt, provider, model, &api_key)
-                        .await
-                        .map_err(|e2| {
-                            format!("Summarization failed even with truncated history: {e2}")
-                        })
+                    summarize_with_prompt(fallback_prompt).await.map_err(|e2| {
+                        format!("Summarization failed even with truncated history: {e2}")
+                    })
                 } else {
                     Err(format!("Summarization failed: {e}"))
                 }
@@ -1375,169 +924,47 @@ impl SessionRunner {
             "Session summary generated for recovery"
         );
 
-        // Step 3-7 — Build fresh agent, drive activation, delegate to run_session()
-        // All inside provider match arm because Chat trait is not object-safe.
-        let api_key = match resolve_api_key(provider, &self.secrets) {
-            Ok(key) => key,
+        // Step 3 — Build fresh agent via AgentFactory (single call, no provider match)
+        let agent = match self
+            .build_agent_for_role(
+                LlmRole::Dev,
+                story,
+                escalation_slot.clone(),
+                decision_log.clone(),
+            )
+            .await
+        {
+            Ok(a) => a,
             Err(e) => {
-                tracing::error!(
-                    action = "context_limit_api_key_failed",
-                    error = %e,
-                    "API key resolution failed during recovery"
-                );
+                tracing::error!(action = "context_limit_agent_failed", error = %e, "Recovery agent build failed");
                 return SessionOutcome::Failed {
                     story_key: story.story_key.clone(),
-                    error: format!("Recovery API key resolution failed: {e}"),
+                    error: format!("Recovery agent build failed: {e}"),
                     decisions: decision_log.records(),
                 };
             }
         };
 
-        // Macro-like closure to drive activation and run_session for a concrete agent type.
-        // We must duplicate the activation logic per provider arm because Chat is not object-safe.
         let recovery_message = self.build_recovery_message(story, &summary, &formatted_exchanges);
 
-        match provider {
-            "anthropic" => {
-                let agent = match self.build_anthropic_agent(
-                    story,
-                    &api_key,
-                    model,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::error!(action = "context_limit_agent_failed", error = %e, "Recovery agent build failed");
-                        return SessionOutcome::Failed {
-                            story_key: story.story_key.clone(),
-                            error: format!("Recovery agent build failed: {e}"),
-                            decisions: decision_log.records(),
-                        };
-                    }
-                };
-
-                match self
-                    .drive_activation_and_recover(
-                        &agent,
-                        state,
-                        story,
-                        provider,
-                        model,
-                        base_branch,
-                        escalation_slot,
-                        decision_log,
-                        &recovery_message,
-                        recovery_depth,
-                    )
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(outcome) => outcome,
-                }
-            }
-            "openai" => {
-                let agent = match self.build_openai_agent(
-                    story,
-                    &api_key,
-                    model,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::error!(action = "context_limit_agent_failed", error = %e, "Recovery agent build failed");
-                        return SessionOutcome::Failed {
-                            story_key: story.story_key.clone(),
-                            error: format!("Recovery agent build failed: {e}"),
-                            decisions: decision_log.records(),
-                        };
-                    }
-                };
-
-                match self
-                    .drive_activation_and_recover(
-                        &agent,
-                        state,
-                        story,
-                        provider,
-                        model,
-                        base_branch,
-                        escalation_slot,
-                        decision_log,
-                        &recovery_message,
-                        recovery_depth,
-                    )
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(outcome) => outcome,
-                }
-            }
-            "github-copilot" => {
-                // Exchange OAuth token for short-lived Copilot session token
-                let (session_token, base_url) = match self.resolve_copilot_session(&api_key).await {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        tracing::error!(action = "context_limit_copilot_failed", error = %e, "Copilot token exchange failed during recovery");
-                        return SessionOutcome::Failed {
-                            story_key: story.story_key.clone(),
-                            error: e,
-                            decisions: decision_log.records(),
-                        };
-                    }
-                };
-
-                let agent = match self.build_copilot_agent(
-                    story,
-                    &session_token,
-                    model,
-                    &base_url,
-                    escalation_slot.clone(),
-                    decision_log.clone(),
-                ) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::error!(action = "context_limit_agent_failed", error = %e, "Recovery agent build failed");
-                        return SessionOutcome::Failed {
-                            story_key: story.story_key.clone(),
-                            error: format!("Recovery agent build failed: {e}"),
-                            decisions: decision_log.records(),
-                        };
-                    }
-                };
-
-                match self
-                    .drive_activation_and_recover(
-                        &agent,
-                        state,
-                        story,
-                        provider,
-                        model,
-                        base_branch,
-                        escalation_slot,
-                        decision_log,
-                        &recovery_message,
-                        recovery_depth,
-                    )
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(outcome) => outcome,
-                }
-            }
-            other => {
-                tracing::error!(
-                    action = "context_limit_unsupported_provider",
-                    provider = %other,
-                    "Unsupported provider for recovery"
-                );
-                SessionOutcome::Failed {
-                    story_key: story.story_key.clone(),
-                    error: format!("Unsupported provider for recovery: {other}"),
-                    decisions: decision_log.records(),
-                }
-            }
+        // Step 4-7 — Drive activation and delegate to run_session()
+        match self
+            .drive_activation_and_recover(
+                &agent,
+                state,
+                story,
+                provider,
+                model,
+                base_branch,
+                escalation_slot,
+                decision_log,
+                &recovery_message,
+                recovery_depth,
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(outcome) => outcome,
         }
     }
 
@@ -1545,13 +972,13 @@ impl SessionRunner {
     /// and delegate to `run_session()` for the recovered chat loop.
     ///
     /// This is factored out to avoid duplicating the activation logic across
-    /// provider match arms. The agent type is generic (`<A: Chat>`).
+    /// provider match arms. Accepts `&BuiltAgent` — no generics needed.
     ///
     /// Returns `Ok(SessionOutcome)` on success, `Err(SessionOutcome)` on failure.
     #[allow(clippy::too_many_arguments)]
-    async fn drive_activation_and_recover<A, M>(
+    async fn drive_activation_and_recover(
         &self,
-        agent: &A,
+        agent: &BuiltAgent,
         original_state: &SessionState,
         story: &StoryInfo,
         provider: &str,
@@ -1561,28 +988,23 @@ impl SessionRunner {
         decision_log: DecisionLog,
         recovery_message: &str,
         recovery_depth: usize,
-    ) -> Result<SessionOutcome, SessionOutcome>
-    where
-        A: Chat + StreamingChat<M, M::StreamingResponse>,
-        M: CompletionModel + 'static,
-        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
-    {
+    ) -> Result<SessionOutcome, SessionOutcome> {
         // Step 4a — Activate agent: send dev.md as user message
-        let (mut activation_history, mut compressed_history) = activate_agent(
-            agent,
-            &self.config.bmad_paths.project_root,
-            "dev-recovery",
-            Some(&self.shutdown),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(action = "context_limit_activation_failed", error = %e);
-            SessionOutcome::Failed {
-                story_key: story.story_key.clone(),
-                error: format!("Recovery activation failed: {e}"),
-                decisions: decision_log.records(),
-            }
-        })?;
+        let (mut activation_history, mut compressed_history) = agent
+            .activate_agent(
+                &self.config.bmad_paths.project_root,
+                "dev-recovery",
+                Some(&self.shutdown),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(action = "context_limit_activation_failed", error = %e);
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Recovery activation failed: {e}"),
+                    decisions: decision_log.records(),
+                }
+            })?;
 
         // Step 4b — Enter chat mode with English language override.
         // The BMAD activation loads config.yaml which may set communication_language
@@ -1590,22 +1012,18 @@ impl SessionRunner {
         let ch_msg = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CH";
         let ch_turn = compressed_history.len() / 2;
         log_llm_request("dev-recovery", ch_turn, ch_msg, activation_history.len());
-        let ch_response = streaming_chat(
-            agent,
-            ch_msg,
-            activation_history.clone(),
-            Some(&self.shutdown),
-        )
-        .await
-        .map_err(|e| {
-            log_llm_error("dev-recovery", 0, &e);
-            tracing::error!(action = "context_limit_activation_ch_failed", error = %e);
-            SessionOutcome::Failed {
-                story_key: story.story_key.clone(),
-                error: format!("Recovery activation CH failed: {e}"),
-                decisions: decision_log.records(),
-            }
-        })?;
+        let ch_response = agent
+            .stream_chat(ch_msg, activation_history.clone(), Some(&self.shutdown))
+            .await
+            .map_err(|e| {
+                log_llm_error("dev-recovery", 0, &e);
+                tracing::error!(action = "context_limit_activation_ch_failed", error = %e);
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Recovery activation CH failed: {e}"),
+                    decisions: decision_log.records(),
+                }
+            })?;
         log_llm_response("dev-recovery", ch_turn, &ch_response);
         activation_history.push(Message::user(ch_msg));
         activation_history.push(Message::assistant(&ch_response));
@@ -1626,22 +1044,22 @@ impl SessionRunner {
             "Load the project context",
             activation_history.len(),
         );
-        let ctx_response = streaming_chat(
-            agent,
-            "Load the project context",
-            activation_history.clone(),
-            Some(&self.shutdown),
-        )
-        .await
-        .map_err(|e| {
-            log_llm_error("dev-recovery", ctx_turn, &e);
-            tracing::error!(action = "context_limit_activation_ctx_failed", error = %e);
-            SessionOutcome::Failed {
-                story_key: story.story_key.clone(),
-                error: format!("Recovery activation load context failed: {e}"),
-                decisions: decision_log.records(),
-            }
-        })?;
+        let ctx_response = agent
+            .stream_chat(
+                "Load the project context",
+                activation_history.clone(),
+                Some(&self.shutdown),
+            )
+            .await
+            .map_err(|e| {
+                log_llm_error("dev-recovery", ctx_turn, &e);
+                tracing::error!(action = "context_limit_activation_ctx_failed", error = %e);
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("Recovery activation load context failed: {e}"),
+                    decisions: decision_log.records(),
+                }
+            })?;
         log_llm_response("dev-recovery", ctx_turn, &ctx_response);
         activation_history.push(Message::user("Load the project context"));
         activation_history.push(Message::assistant(&ctx_response));
@@ -1719,9 +1137,9 @@ impl SessionRunner {
     /// The turn counter is offset by `chat_history.len() / 2` to account for
     /// pre-crash turns against `MAX_CHAT_TURNS`.
     #[allow(clippy::too_many_arguments)]
-    async fn run_session<A, M>(
+    async fn run_session(
         &self,
-        agent: &A,
+        agent: &BuiltAgent,
         story: &StoryInfo,
         provider: &str,
         model: &str,
@@ -1729,12 +1147,7 @@ impl SessionRunner {
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
         recovered_state: Option<SessionState>,
-    ) -> SessionOutcome
-    where
-        A: Chat + StreamingChat<M, M::StreamingResponse>,
-        M: CompletionModel + 'static,
-        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
-    {
+    ) -> SessionOutcome {
         let mut retries: usize = 0;
         const MAX_RETRIES: usize = 3;
 
@@ -1759,13 +1172,13 @@ impl SessionRunner {
                 // Retries transient errors (503, 429, timeouts) with exponential backoff.
                 let mut activation_retries = 0usize;
                 let (activation_rig_history, activation_chat_history) = loop {
-                    match activate_agent(
-                        agent,
-                        &self.config.bmad_paths.project_root,
-                        "dev-session",
-                        Some(&self.shutdown),
-                    )
-                    .await
+                    match agent
+                        .activate_agent(
+                            &self.config.bmad_paths.project_root,
+                            "dev-session",
+                            Some(&self.shutdown),
+                        )
+                        .await
                     {
                         Ok(pair) => break pair,
                         Err(e) => {
@@ -1826,13 +1239,13 @@ impl SessionRunner {
                         initial_message,
                         activation_rig_history.len(),
                     );
-                    match streaming_chat(
-                        agent,
-                        initial_message,
-                        activation_rig_history.clone(),
-                        Some(&self.shutdown),
-                    )
-                    .await
+                    match agent
+                        .stream_chat(
+                            initial_message,
+                            activation_rig_history.clone(),
+                            Some(&self.shutdown),
+                        )
+                        .await
                     {
                         Ok(r) => {
                             log_llm_response("dev-session", 0, &r);
@@ -1902,13 +1315,13 @@ impl SessionRunner {
                     );
 
                     // Activate agent: send dev.md as user message
-                    let (activation_rig_history, activation_chat_history) = match activate_agent(
-                        agent,
-                        &self.config.bmad_paths.project_root,
-                        "dev-recovery",
-                        Some(&self.shutdown),
-                    )
-                    .await
+                    let (activation_rig_history, activation_chat_history) = match agent
+                        .activate_agent(
+                            &self.config.bmad_paths.project_root,
+                            "dev-recovery",
+                            Some(&self.shutdown),
+                        )
+                        .await
                     {
                         Ok(pair) => pair,
                         Err(e) => {
@@ -1943,13 +1356,13 @@ impl SessionRunner {
                         initial_message,
                         activation_rig_history.len(),
                     );
-                    let response = match streaming_chat(
-                        agent,
-                        initial_message,
-                        activation_rig_history,
-                        Some(&self.shutdown),
-                    )
-                    .await
+                    let response = match agent
+                        .stream_chat(
+                            initial_message,
+                            activation_rig_history,
+                            Some(&self.shutdown),
+                        )
+                        .await
                     {
                         Ok(r) => {
                             log_llm_response("dev-recovery", 0, &r);
@@ -2009,13 +1422,9 @@ impl SessionRunner {
                             turn_offset,
                             &state.chat_history[..state.chat_history.len() - 1],
                         );
-                        let response = match streaming_chat(
-                            agent,
-                            last_user_msg.as_str(),
-                            history,
-                            Some(&self.shutdown),
-                        )
-                        .await
+                        let response = match agent
+                            .stream_chat(last_user_msg.as_str(), history, Some(&self.shutdown))
+                            .await
                         {
                             Ok(r) => {
                                 log_llm_response("dev-recovery", turn_offset, &r);
@@ -2100,7 +1509,10 @@ impl SessionRunner {
                     let history = state.to_rig_messages();
 
                     log_llm_request("dev-session", turn, commit_msg, history.len());
-                    match streaming_chat(agent, commit_msg, history, Some(&self.shutdown)).await {
+                    match agent
+                        .stream_chat(commit_msg, history, Some(&self.shutdown))
+                        .await
+                    {
                         Ok(r) => {
                             log_llm_response("dev-session", turn, &r);
                             state.add_assistant_message(&r);
@@ -2151,13 +1563,9 @@ impl SessionRunner {
                             "[pr-summary-prompt]",
                             history.len(),
                         );
-                        match streaming_chat(
-                            agent,
-                            pr_summary_prompt,
-                            history,
-                            Some(&self.shutdown),
-                        )
-                        .await
+                        match agent
+                            .stream_chat(pr_summary_prompt, history, Some(&self.shutdown))
+                            .await
                         {
                             Ok(r) => {
                                 log_llm_response("dev-session", turn + 1, &r);
@@ -2278,7 +1686,9 @@ impl SessionRunner {
 
                     log_llm_request("dev-session", turn, &reply, history.len());
                     log_llm_history_summary("dev-session", turn, &state.chat_history);
-                    match streaming_chat(agent, reply.as_str(), history, Some(&self.shutdown)).await
+                    match agent
+                        .stream_chat(reply.as_str(), history, Some(&self.shutdown))
+                        .await
                     {
                         Ok(r) => {
                             log_llm_response("dev-session", turn, &r);
@@ -2386,6 +1796,7 @@ impl SessionRunner {
 mod tests {
     use super::*;
     use crate::config::*;
+    use std::sync::atomic::AtomicBool;
 
     /// Helper: create a minimal BotConfig for runner tests.
     fn make_runner_test_config(artifacts_dir: &Path) -> BotConfig {
@@ -2446,14 +1857,20 @@ mod tests {
         }
     }
 
+    /// Helper: create an AgentFactory for tests.
+    fn make_test_factory(config: Arc<BotConfig>) -> Arc<AgentFactory> {
+        let secrets = Arc::new(make_test_secrets());
+        Arc::new(AgentFactory::new(config, secrets))
+    }
+
     #[test]
     fn test_session_runner_new_sets_state_file_path() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, secrets, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown);
 
         assert!(
             runner
@@ -2470,10 +1887,10 @@ mod tests {
     fn test_state_file_path_derived_from_config() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, secrets, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown);
 
         let expected = dir.path().join(".bmad-bot-session.yaml");
         assert_eq!(runner.state_file_path, expected);
@@ -2485,10 +1902,10 @@ mod tests {
         // the state_file_path derivation from Story 4.2
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, secrets, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown);
 
         // Must still be {implementation_artifacts}/.bmad-bot-session.yaml
         let expected = dir.path().join(".bmad-bot-session.yaml");
@@ -2642,10 +2059,10 @@ mod tests {
     async fn test_check_wal_returns_none_when_no_file() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, secrets, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown);
 
         let result = runner.check_and_recover_wal().await;
         assert!(
@@ -2658,7 +2075,7 @@ mod tests {
     async fn test_check_wal_returns_some_when_file_exists() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let _secrets = Arc::new(make_test_secrets());
 
         // Create a valid WAL file
         let state = make_recovery_state();
@@ -2666,7 +2083,8 @@ mod tests {
         state.save(&wal_path).await.expect("save WAL");
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let runner = SessionRunner::new(config, secrets, shutdown);
+        let factory = make_test_factory(Arc::clone(&config));
+        let runner = SessionRunner::new(config, factory, shutdown);
 
         let result = runner.check_and_recover_wal().await;
         assert!(result.is_some(), "Should return Some when WAL file exists");
@@ -2684,7 +2102,7 @@ mod tests {
     async fn test_check_wal_deletes_corrupt_file() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let _secrets = Arc::new(make_test_secrets());
 
         // Write corrupt YAML
         let wal_path = dir.path().join(".bmad-bot-session.yaml");
@@ -2694,7 +2112,8 @@ mod tests {
         assert!(wal_path.exists(), "Corrupt WAL should exist before check");
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let runner = SessionRunner::new(config, secrets, shutdown);
+        let factory = make_test_factory(Arc::clone(&config));
+        let runner = SessionRunner::new(config, factory, shutdown);
 
         let result = runner.check_and_recover_wal().await;
         assert!(result.is_none(), "Should return None for corrupt WAL");
@@ -2775,7 +2194,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let _secrets = Arc::new(make_test_secrets());
 
         let mut state = make_recovery_state();
         state.chat_history = vec![
@@ -2801,7 +2220,8 @@ mod tests {
         state.save(&wal_path).await.expect("save WAL");
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let runner = SessionRunner::new(config, secrets, shutdown);
+        let factory = make_test_factory(Arc::clone(&config));
+        let runner = SessionRunner::new(config, factory, shutdown);
         let recovery = runner
             .check_and_recover_wal()
             .await
@@ -2826,14 +2246,15 @@ mod tests {
         // (pre-Story 4.3) can still be loaded and recovered
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let _secrets = Arc::new(make_test_secrets());
 
         let state = make_legacy_recovery_state();
         let wal_path = dir.path().join(".bmad-bot-session.yaml");
         state.save(&wal_path).await.expect("save WAL");
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let runner = SessionRunner::new(config, secrets, shutdown);
+        let factory = make_test_factory(Arc::clone(&config));
+        let runner = SessionRunner::new(config, factory, shutdown);
         let recovery = runner
             .check_and_recover_wal()
             .await
@@ -3084,11 +2505,11 @@ mod tests {
     fn make_test_runner() -> SessionRunner {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
-        let secrets = Arc::new(make_test_secrets());
+        let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
         // Leak the tempdir so it isn't dropped (this is fine in tests)
         std::mem::forget(dir);
-        SessionRunner::new(config, secrets, shutdown)
+        SessionRunner::new(config, factory, shutdown)
     }
 
     fn make_test_story_info() -> StoryInfo {

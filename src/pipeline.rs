@@ -15,6 +15,7 @@ use crate::git_provider::{
     CreatePrParams, GitProvider, PrDescriptionParams, PrSummary, build_pr_description,
     build_pr_title, create_provider,
 };
+use crate::llm::AgentFactory;
 use crate::notifier::{Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier};
 use crate::review::ReviewOutcome;
 use crate::review::ReviewRunner;
@@ -163,12 +164,20 @@ impl StoryPipeline {
         // Factory never fails — returns NoopNotifier as fallback
         let notifier = create_notifier(&config.notifications, &secrets);
 
+        // Create the centralized AgentFactory — owns secrets + Copilot token cache.
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
+
         let session_runner = SessionRunner::new(
             Arc::clone(&config),
-            Arc::clone(&secrets),
+            Arc::clone(&agent_factory),
             Arc::clone(&shutdown),
         );
-        let review_runner = ReviewRunner::new(Arc::clone(&config), Arc::clone(&secrets), shutdown);
+        let review_runner = ReviewRunner::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+            Arc::clone(&agent_factory),
+            shutdown,
+        );
 
         Ok(Self {
             config,
@@ -313,16 +322,16 @@ impl StoryPipeline {
                 };
 
                 // Phase 5 — Push review fix commits to update PR (if review ran)
-                if review_report.is_some() {
-                    if let Err(e) = self.push_branch(&branch).await {
-                        tracing::warn!(
-                            action = "review_push_failed",
-                            story_key = %story_key,
-                            branch = %branch,
-                            error = %e,
-                            "Failed to push review fix commits — PR still exists with dev commits"
-                        );
-                    }
+                if review_report.is_some()
+                    && let Err(e) = self.push_branch(&branch).await
+                {
+                    tracing::warn!(
+                        action = "review_push_failed",
+                        story_key = %story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Failed to push review fix commits — PR still exists with dev commits"
+                    );
                 }
 
                 // Phase 6 — Post review comment on PR (non-blocking)

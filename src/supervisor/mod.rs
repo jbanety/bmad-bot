@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::BotConfig;
+use crate::llm::agent_factory::AgentFactory;
 use crate::session::escalation::EscalationInfo;
 
 /// Shared escalation slot between the `AskSupervisor` tool and the session chat loop.
@@ -191,12 +192,17 @@ impl AskSupervisor {
     ///
     /// This reads the `architect.md` agent file, resolves the supervisor LLM
     /// provider/model/key, and stores everything for on-demand session creation.
+    ///
+    /// When `factory` is provided, the [`ArchitectSession`] delegates all agent
+    /// construction to the shared [`AgentFactory`] instead of resolving keys
+    /// from the environment (legacy path).
     pub fn with_architect_from_config(
         config: &BotConfig,
+        factory: Option<Arc<AgentFactory>>,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
     ) -> Result<Self, ArchitectSessionError> {
-        let session = ArchitectSession::new(config)?;
+        let session = ArchitectSession::new_with_factory(config, factory)?;
         Ok(Self {
             rule_engine: RuleEngine::new(),
             answer_provider: Some(Box::new(session)),

@@ -205,10 +205,10 @@ impl GrepTool {
             };
 
             // Apply include_pattern filter
-            if let Some(ref matcher) = glob_matcher {
-                if !matcher.is_match(&rel_path) {
-                    continue;
-                }
+            if let Some(ref matcher) = glob_matcher
+                && !matcher.is_match(&rel_path)
+            {
+                continue;
             }
 
             files_searched += 1;

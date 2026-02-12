@@ -18,24 +18,35 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use rig::client::CompletionClient;
-use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
-use rig::providers::{anthropic, openai};
-use rig::streaming::StreamingChat;
+use rig::completion::Message;
 use rig::tools::think::ThinkTool;
 
-use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
+use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
-use crate::session::dev_agent::{self, ShutdownFlag, activate_agent, streaming_chat};
-use crate::session::provider::{ProviderError, copilot_headers, resolve_api_key};
+use crate::session::dev_agent::{self, ShutdownFlag};
+use crate::session::provider::ProviderError;
 use crate::supervisor::decisions::DecisionLog;
 use crate::supervisor::{AskSupervisor, EscalationSlot};
 use crate::tools::{
     EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
 };
 use crate::watcher::StoryInfo;
+
+/// Type alias for the standard 8-tool set returned by [`ReviewRunner::create_tools()`].
+///
+/// Avoids `clippy::type_complexity` on the 8-element tuple.
+type ReviewToolSet = (
+    GitTool,
+    ReadFileTool,
+    EditFileTool,
+    GrepTool,
+    FindPathTool,
+    ListDirectoryTool,
+    TerminalTool,
+    AskSupervisor,
+);
 
 /// Maximum chat turns for a review session (safety net).
 const MAX_REVIEW_TURNS: usize = 100;
@@ -151,6 +162,8 @@ pub struct ReviewRunner {
     config: Arc<BotConfig>,
     /// Shared secrets (API keys loaded from `.env`).
     secrets: Arc<BotSecrets>,
+    /// Centralized agent construction factory.
+    agent_factory: Arc<AgentFactory>,
     /// Stateless response analyzer (constructed once, reused).
     analyzer: ResponseAnalyzer,
     /// Cooperative shutdown flag — checked between streaming chunks and chat turns.
@@ -159,10 +172,16 @@ pub struct ReviewRunner {
 
 impl ReviewRunner {
     /// Create a new review runner.
-    pub fn new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>, shutdown: ShutdownFlag) -> Self {
+    pub fn new(
+        config: Arc<BotConfig>,
+        secrets: Arc<BotSecrets>,
+        agent_factory: Arc<AgentFactory>,
+        shutdown: ShutdownFlag,
+    ) -> Self {
         Self {
             config,
             secrets,
+            agent_factory,
             analyzer: ResponseAnalyzer::new(),
             shutdown,
         }
@@ -262,9 +281,30 @@ impl ReviewRunner {
             "Starting code review session"
         );
 
-        // 1. Resolve API key for review provider
-        let api_key = resolve_api_key(&self.config.llm.review.provider, &self.secrets).map_err(
-            |e| match e {
+        // 1. Build generic preamble (same as SessionRunner)
+        let preamble = dev_agent::build_preamble();
+
+        // 2. Create shared resources
+        let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
+        let decision_log = DecisionLog::new();
+
+        // 3. Build agent via AgentFactory — single call replaces 3-arm provider match
+        let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
+        let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
+            self.create_tools(&project_root, escalation_slot.clone(), decision_log.clone())?;
+
+        let agent = self
+            .agent_factory
+            .build(
+                LlmRole::Review,
+                &preamble,
+                crate::configure_agent_tools!(
+                    git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
+                    ThinkTool
+                ),
+            )
+            .await
+            .map_err(|e| match e {
                 ProviderError::MissingApiKey { env_var, .. } => ReviewError::ApiKeyMissing {
                     provider: self.config.llm.review.provider.clone(),
                     env_var,
@@ -272,137 +312,12 @@ impl ReviewRunner {
                 other => ReviewError::ProviderInit {
                     reason: other.to_string(),
                 },
-            },
-        )?;
+            })?;
 
-        // 2. Build generic preamble (same as SessionRunner)
-        let preamble = dev_agent::build_preamble();
-
-        // 3. Create shared resources
-        let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
-        let decision_log = DecisionLog::new();
-
-        let provider = &self.config.llm.review.provider;
-        let model = &self.config.llm.review.model;
-
-        // 4. Build agent and run — match on provider because Chat is NOT object-safe
-        let outcome = match provider.as_str() {
-            "anthropic" => {
-                let client: anthropic::Client = anthropic::Client::builder()
-                    .api_key(&api_key)
-                    .build()
-                    .map_err(|e| ReviewError::ProviderInit {
-                        reason: e.to_string(),
-                    })?;
-
-                let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
-                    self.create_tools(
-                        &project_root,
-                        escalation_slot.clone(),
-                        decision_log.clone(),
-                    )?;
-
-                let agent = client
-                    .agent(model)
-                    .preamble(&preamble)
-                    .tool(git)
-                    .tool(read_file)
-                    .tool(edit_file)
-                    .tool(grep)
-                    .tool(find_path)
-                    .tool(list_dir)
-                    .tool(terminal)
-                    .tool(supervisor)
-                    .tool(ThinkTool)
-                    .build();
-
-                self.drive_review_session(&agent, story, escalation_slot, decision_log)
-                    .await
-            }
-            "openai" => {
-                let client: openai::Client = openai::Client::builder()
-                    .api_key(&api_key)
-                    .build()
-                    .map_err(|e| ReviewError::ProviderInit {
-                        reason: e.to_string(),
-                    })?;
-
-                let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
-                    self.create_tools(
-                        &project_root,
-                        escalation_slot.clone(),
-                        decision_log.clone(),
-                    )?;
-
-                let agent = client
-                    .agent(model)
-                    .preamble(&preamble)
-                    .tool(git)
-                    .tool(read_file)
-                    .tool(edit_file)
-                    .tool(grep)
-                    .tool(find_path)
-                    .tool(list_dir)
-                    .tool(terminal)
-                    .tool(supervisor)
-                    .tool(ThinkTool)
-                    .build();
-
-                self.drive_review_session(&agent, story, escalation_slot, decision_log)
-                    .await
-            }
-            "github-copilot" => {
-                // Exchange OAuth token for short-lived Copilot session token
-                let http_client = ReqwestCopilotHttpClient::new();
-                let mut cache = CopilotTokenCache::new();
-                let (session_token, base_url) = cache
-                    .resolve(&http_client, &api_key)
-                    .await
-                    .map_err(|e| ReviewError::ProviderInit {
-                        reason: format!("Copilot token exchange failed: {e}"),
-                    })?;
-
-                let client: openai::CompletionsClient = openai::Client::builder()
-                    .api_key(&session_token)
-                    .base_url(&base_url)
-                    .http_headers(copilot_headers())
-                    .build()
-                    .map_err(|e| ReviewError::ProviderInit {
-                        reason: e.to_string(),
-                    })?
-                    .completions_api();
-
-                let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
-                let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
-                    self.create_tools(
-                        &project_root,
-                        escalation_slot.clone(),
-                        decision_log.clone(),
-                    )?;
-
-                let agent = client
-                    .agent(model)
-                    .preamble(&preamble)
-                    .tool(git)
-                    .tool(read_file)
-                    .tool(edit_file)
-                    .tool(grep)
-                    .tool(find_path)
-                    .tool(list_dir)
-                    .tool(terminal)
-                    .tool(supervisor)
-                    .tool(ThinkTool)
-                    .build();
-
-                self.drive_review_session(&agent, story, escalation_slot, decision_log)
-                    .await
-            }
-            other => Err(ReviewError::UnsupportedProvider {
-                provider: other.into(),
-            }),
-        }?;
+        // 4. Drive the review session
+        let outcome = self
+            .drive_review_session(&agent, story, escalation_slot, decision_log)
+            .await?;
 
         let outcome_type = match &outcome {
             ReviewOutcome::Completed { .. } => "completed",
@@ -425,19 +340,7 @@ impl ReviewRunner {
         project_root: &Path,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
-    ) -> Result<
-        (
-            GitTool,
-            ReadFileTool,
-            EditFileTool,
-            GrepTool,
-            FindPathTool,
-            ListDirectoryTool,
-            TerminalTool,
-            AskSupervisor,
-        ),
-        ReviewError,
-    > {
+    ) -> Result<ReviewToolSet, ReviewError> {
         let git = GitTool::new(project_root.to_path_buf());
         let read_file = ReadFileTool::new(project_root.to_path_buf());
         let edit_file = EditFileTool::new(project_root.to_path_buf());
@@ -446,11 +349,15 @@ impl ReviewRunner {
         let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
         let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
 
-        let supervisor =
-            AskSupervisor::with_architect_from_config(&self.config, escalation_slot, decision_log)
-                .map_err(|e| ReviewError::AgentBuildFailed {
-                    reason: format!("Failed to create AskSupervisor: {e}"),
-                })?;
+        let supervisor = AskSupervisor::with_architect_from_config(
+            &self.config,
+            Some(Arc::clone(&self.agent_factory)),
+            escalation_slot,
+            decision_log,
+        )
+        .map_err(|e| ReviewError::AgentBuildFailed {
+            reason: format!("Failed to create AskSupervisor: {e}"),
+        })?;
 
         Ok((
             git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
@@ -467,35 +374,30 @@ impl ReviewRunner {
     ///
     /// The `story_reply` parameter for the analyzer uses `story.specs_path` (file path),
     /// NOT the story key, because the CR workflow asks for the story file path.
-    async fn drive_review_session<A, M>(
+    async fn drive_review_session(
         &self,
-        agent: &A,
+        agent: &BuiltAgent,
         story: &StoryInfo,
         escalation_slot: EscalationSlot,
         _decision_log: DecisionLog,
-    ) -> Result<ReviewOutcome, ReviewError>
-    where
-        A: Chat + StreamingChat<M, M::StreamingResponse>,
-        M: CompletionModel + 'static,
-        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
-    {
+    ) -> Result<ReviewOutcome, ReviewError> {
         // The CR workflow asks "which story file to review" — reply with the file path
         let story_reply = story.specs_path.display().to_string();
 
         // Activate agent: send dev.md as user message (same flow as dev session)
-        let (activation_rig_history, _activation_chat_history) = activate_agent(
-            agent,
-            &self.config.bmad_paths.project_root,
-            "code-review",
-            Some(&self.shutdown),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(action = "review_activation_failed", error = %e);
-            ReviewError::AgentBuildFailed {
-                reason: format!("Agent activation failed: {e}"),
-            }
-        })?;
+        let (activation_rig_history, _activation_chat_history) = agent
+            .activate_agent(
+                &self.config.bmad_paths.project_root,
+                "code-review",
+                Some(&self.shutdown),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(action = "review_activation_failed", error = %e);
+                ReviewError::AgentBuildFailed {
+                    reason: format!("Agent activation failed: {e}"),
+                }
+            })?;
 
         // Send "CR" with English language override (same pattern as DS in dev session)
         let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [CR]";
@@ -505,20 +407,20 @@ impl ReviewRunner {
             initial_message,
             activation_rig_history.len(),
         );
-        let response = streaming_chat(
-            agent,
-            initial_message,
-            activation_rig_history,
-            Some(&self.shutdown),
-        )
-        .await
-        .map_err(|e| {
-            log_llm_error("code-review", 1, &e);
-            ReviewError::ChatFailed {
-                turn: 1,
-                reason: e.to_string(),
-            }
-        })?;
+        let response = agent
+            .stream_chat(
+                initial_message,
+                activation_rig_history,
+                Some(&self.shutdown),
+            )
+            .await
+            .map_err(|e| {
+                log_llm_error("code-review", 1, &e);
+                ReviewError::ChatFailed {
+                    turn: 1,
+                    reason: e.to_string(),
+                }
+            })?;
         log_llm_response("code-review", 1, &response);
 
         tracing::debug!(
@@ -626,7 +528,10 @@ impl ReviewRunner {
                 .collect();
 
             log_llm_request("code-review", turn, &reply, history.len());
-            match streaming_chat(agent, reply.as_str(), history, Some(&self.shutdown)).await {
+            match agent
+                .stream_chat(reply.as_str(), history, Some(&self.shutdown))
+                .await
+            {
                 Ok(r) => {
                     log_llm_response("code-review", turn, &r);
                     retries = 0;
@@ -808,7 +713,8 @@ mod tests {
         });
 
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let runner = ReviewRunner::new(config.clone(), secrets, shutdown);
+        let agent_factory = Arc::new(AgentFactory::new(config.clone(), secrets.clone()));
+        let runner = ReviewRunner::new(config.clone(), secrets, agent_factory, shutdown);
         // Verify config is stored by checking a known field
         assert_eq!(runner.config.llm.review.provider, "anthropic");
     }

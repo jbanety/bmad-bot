@@ -10,68 +10,19 @@
 //!
 //! Each `ask()` call creates an entirely fresh session (no persistence).
 
-use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::BotConfig;
+use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
-use crate::session::provider::copilot_headers;
 use async_trait::async_trait;
-use futures::StreamExt;
-use rig::agent::MultiTurnStreamItem;
-use rig::client::CompletionClient;
-use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
-use rig::message::Text;
-use rig::providers::{anthropic, openai};
-use rig::streaming::{StreamedAssistantContent, StreamingChat};
+use rig::completion::Message;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::read_tool::ReadFile;
 
-/// Maximum tool-call rounds allowed per single prompt in the streaming loop.
-const STREAMING_MAX_TURNS: usize = 100;
-
-/// Send a prompt via streaming and collect the complete text response (architect variant).
-async fn streaming_architect_chat<A, M>(
-    agent: &A,
-    prompt: impl Into<Message> + Send,
-    history: Vec<Message>,
-) -> Result<String, rig::completion::PromptError>
-where
-    A: StreamingChat<M, M::StreamingResponse>,
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Clone + Unpin + GetTokenUsage,
-{
-    let mut stream = agent
-        .stream_chat(prompt, history)
-        .multi_turn(STREAMING_MAX_TURNS)
-        .await;
-
-    let mut acc = String::new();
-
-    loop {
-        let Some(chunk) = stream.next().await else {
-            break;
-        };
-
-        match chunk {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                Text { text },
-            ))) => {
-                acc.push_str(&text);
-            }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => {
-                break;
-            }
-            Err(e) => {
-                return Err(rig::completion::PromptError::CompletionError(
-                    rig::completion::CompletionError::ResponseError(e.to_string()),
-                ));
-            }
-            _ => continue,
-        }
-    }
-
-    Ok(acc)
-}
+// -----------------------------------------------------------------------
+// Error type
+// -----------------------------------------------------------------------
 
 // -----------------------------------------------------------------------
 // Error type
@@ -158,41 +109,42 @@ pub trait AnswerProvider: Send + Sync + std::fmt::Debug {
 
 /// Holds the configuration needed to create fresh BMAD Architect sessions on demand.
 ///
-/// Each `ask()` call creates a brand-new rig agent, drives a 3-turn conversation,
-/// and discards the session. No state is persisted between calls.
+/// Each `ask()` call creates a brand-new rig agent via [`AgentFactory`], drives a
+/// 3-turn conversation, and discards the session. No state is persisted between calls.
 #[derive(Debug)]
 pub struct ArchitectSession {
     /// Full content of `architect.md` — used as the agent preamble.
     agent_file_content: String,
-    /// Provider name (`"anthropic"`, `"openai"`, `"github-copilot"`).
-    provider: String,
-    /// Model identifier (e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`).
-    model: String,
-    /// Resolved API key value (read from env at construction time).
-    api_key: String,
+    /// Centralized agent construction factory.
+    agent_factory: Arc<AgentFactory>,
     /// Project root path — for the ReadFile tool boundary.
     project_root: PathBuf,
-}
-
-/// The environment variable name for a given provider.
-fn env_var_for_provider(provider: &str) -> Result<&'static str, ArchitectSessionError> {
-    match provider {
-        "anthropic" => Ok("ANTHROPIC_API_KEY"),
-        "openai" => Ok("OPENAI_API_KEY"),
-        "github-copilot" => Ok("GITHUB_COPILOT_OAUTH_TOKEN"),
-        other => Err(ArchitectSessionError::UnsupportedProvider {
-            provider: other.to_string(),
-        }),
-    }
 }
 
 impl ArchitectSession {
     /// Create a new `ArchitectSession` from the daemon's [`BotConfig`].
     ///
-    /// This reads the `architect.md` file, resolves the supervisor LLM config,
-    /// and reads the API key from the environment. It does **not** create a rig
-    /// agent — that happens per question in [`ask()`](AnswerProvider::ask).
+    /// This reads the `architect.md` file and stores a reference to the
+    /// [`AgentFactory`]. It does **not** create a rig agent — that happens
+    /// per question in [`ask()`](AnswerProvider::ask).
+    ///
+    /// # Legacy constructor
+    ///
+    /// The previous constructor resolved API keys from the environment directly.
+    /// Now the `AgentFactory` handles all provider setup (API keys, Copilot token
+    /// exchange, API format detection).
     pub fn new(config: &BotConfig) -> Result<Self, ArchitectSessionError> {
+        Self::new_with_factory(config, None)
+    }
+
+    /// Create a new `ArchitectSession` with an explicit [`AgentFactory`].
+    ///
+    /// When `factory` is `None`, a new factory is created from the config and
+    /// environment secrets (backward-compatible with the legacy constructor).
+    pub fn new_with_factory(
+        config: &BotConfig,
+        factory: Option<Arc<AgentFactory>>,
+    ) -> Result<Self, ArchitectSessionError> {
         // 1. Resolve path to architect.md
         let agent_path =
             PathBuf::from(&config.bmad_paths.project_root).join("_bmad/bmm/agents/architect.md");
@@ -213,30 +165,68 @@ impl ArchitectSession {
             }
         })?;
 
-        // 3. Read supervisor LLM config
-        let provider = config.llm.supervisor.provider.clone();
-        let model = config.llm.supervisor.model.clone();
+        // 3. Create or use provided AgentFactory
+        let agent_factory = match factory {
+            Some(f) => f,
+            None => {
+                // Legacy path: create a factory from environment secrets.
+                // The env_var_for_provider() helper validates the provider name
+                // and the factory will resolve the key when build() is called.
+                let provider = &config.llm.supervisor.provider;
+                let env_var = match provider.as_str() {
+                    "anthropic" => "ANTHROPIC_API_KEY",
+                    "openai" => "OPENAI_API_KEY",
+                    "github-copilot" => "GITHUB_COPILOT_OAUTH_TOKEN",
+                    other => {
+                        return Err(ArchitectSessionError::UnsupportedProvider {
+                            provider: other.to_string(),
+                        });
+                    }
+                };
 
-        // 4. Resolve the API key from environment
-        let env_var = env_var_for_provider(&provider)?;
-        let api_key = std::env::var(env_var).map_err(|_| ArchitectSessionError::ApiKeyMissing {
-            env_var: env_var.to_string(),
-        })?;
+                // Validate the key exists (fail-fast at construction time)
+                let api_key =
+                    std::env::var(env_var).map_err(|_| ArchitectSessionError::ApiKeyMissing {
+                        env_var: env_var.to_string(),
+                    })?;
+                if api_key.is_empty() {
+                    return Err(ArchitectSessionError::ApiKeyMissing {
+                        env_var: env_var.to_string(),
+                    });
+                }
 
-        if api_key.is_empty() {
-            return Err(ArchitectSessionError::ApiKeyMissing {
-                env_var: env_var.to_string(),
-            });
-        }
+                let secrets = Arc::new(crate::config::BotSecrets {
+                    anthropic_api_key: if provider == "anthropic" {
+                        Some(api_key.clone())
+                    } else {
+                        std::env::var("ANTHROPIC_API_KEY").ok()
+                    },
+                    openai_api_key: if provider == "openai" {
+                        Some(api_key.clone())
+                    } else {
+                        std::env::var("OPENAI_API_KEY").ok()
+                    },
+                    github_copilot_oauth_token: if provider == "github-copilot" {
+                        Some(api_key)
+                    } else {
+                        std::env::var("GITHUB_COPILOT_OAUTH_TOKEN").ok()
+                    },
+                    github_token: std::env::var("GITHUB_TOKEN").ok(),
+                    gitlab_token: std::env::var("GITLAB_TOKEN").ok(),
+                    telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+                });
 
-        // 5. Resolve project root
+                // Build a temporary BotConfig-compatible Arc for the factory
+                Arc::new(AgentFactory::new(Arc::new((*config).clone()), secrets))
+            }
+        };
+
+        // 4. Resolve project root
         let project_root = PathBuf::from(&config.bmad_paths.project_root);
 
         Ok(Self {
             agent_file_content,
-            provider,
-            model,
-            api_key,
+            agent_factory,
             project_root,
         })
     }
@@ -258,16 +248,11 @@ impl ArchitectSession {
     ///
     /// Sends 3 turns: "CH" → "Load the project context" → question.
     /// Returns the Architect's response from Turn 3.
-    async fn drive_conversation<A, M>(
-        agent: &A,
+    async fn drive_conversation(
+        agent: &BuiltAgent,
         question: &str,
         context: Option<&str>,
-    ) -> Result<String, ArchitectSessionError>
-    where
-        A: Chat + StreamingChat<M, M::StreamingResponse>,
-        M: CompletionModel + 'static,
-        M::StreamingResponse: Clone + Unpin + GetTokenUsage,
-    {
+    ) -> Result<String, ArchitectSessionError> {
         let mut chat_history: Vec<Message> = vec![];
 
         // Turn 1: Enter free chat mode
@@ -277,7 +262,8 @@ impl ArchitectSession {
             "Architect session turn — entering CH mode"
         );
         log_llm_request("supervisor", 1, "CH", chat_history.len());
-        let response = streaming_architect_chat(agent, "CH", chat_history.clone())
+        let response = agent
+            .stream_chat("CH", chat_history.clone(), None)
             .await
             .map_err(|e| {
                 log_llm_error("supervisor", 1, &e);
@@ -302,16 +288,16 @@ impl ArchitectSession {
             "Load the project context",
             chat_history.len(),
         );
-        let response =
-            streaming_architect_chat(agent, "Load the project context", chat_history.clone())
-                .await
-                .map_err(|e| {
-                    log_llm_error("supervisor", 2, &e);
-                    ArchitectSessionError::ChatFailed {
-                        turn: 2,
-                        reason: e.to_string(),
-                    }
-                })?;
+        let response = agent
+            .stream_chat("Load the project context", chat_history.clone(), None)
+            .await
+            .map_err(|e| {
+                log_llm_error("supervisor", 2, &e);
+                ArchitectSessionError::ChatFailed {
+                    turn: 2,
+                    reason: e.to_string(),
+                }
+            })?;
         log_llm_response("supervisor", 2, &response);
         chat_history.push(Message::user("Load the project context"));
         chat_history.push(Message::assistant(&response));
@@ -325,7 +311,8 @@ impl ArchitectSession {
             "Architect session turn — asking developer question"
         );
         log_llm_request("supervisor", 3, &question_msg, chat_history.len());
-        let answer = streaming_architect_chat(agent, question_msg.as_str(), chat_history)
+        let answer = agent
+            .stream_chat(question_msg.as_str(), chat_history, None)
             .await
             .map_err(|e| {
                 log_llm_error("supervisor", 3, &e);
@@ -359,77 +346,21 @@ impl AnswerProvider for ArchitectSession {
     ) -> Result<String, ArchitectSessionError> {
         let read_tool = ReadFile::new(self.project_root.clone());
 
-        // Build the agent using the configured provider.
-        // Each provider returns a different Agent<M> type, so we use
-        // match arms that each call drive_conversation() directly —
-        // avoiding the need for a trait object over the non-object-safe Chat trait.
-        match self.provider.as_str() {
-            "anthropic" => {
-                let client: anthropic::Client = anthropic::Client::builder()
-                    .api_key(&self.api_key)
-                    .build()
-                    .map_err(|e| ArchitectSessionError::ProviderInit {
-                        reason: format!("Anthropic client init failed: {e}"),
-                    })?;
+        // Build the agent via AgentFactory — single call replaces 3-arm provider match.
+        // The architect uses only 1 tool (ReadFile) and its own preamble (architect.md content).
+        let agent = self
+            .agent_factory
+            .build(
+                LlmRole::Supervisor,
+                &self.agent_file_content,
+                crate::configure_agent_tools!(read_tool),
+            )
+            .await
+            .map_err(|e| ArchitectSessionError::ProviderInit {
+                reason: format!("Agent build failed: {e}"),
+            })?;
 
-                let agent = client
-                    .agent(&self.model)
-                    .preamble(&self.agent_file_content)
-                    .tool(read_tool)
-                    .build();
-
-                Self::drive_conversation(&agent, question, context).await
-            }
-            "openai" => {
-                let client: openai::Client = openai::Client::builder()
-                    .api_key(&self.api_key)
-                    .build()
-                    .map_err(|e| ArchitectSessionError::ProviderInit {
-                        reason: format!("OpenAI client init failed: {e}"),
-                    })?;
-
-                let agent = client
-                    .agent(&self.model)
-                    .preamble(&self.agent_file_content)
-                    .tool(read_tool)
-                    .build();
-
-                Self::drive_conversation(&agent, question, context).await
-            }
-            "github-copilot" => {
-                // Exchange the long-lived OAuth token for a short-lived Copilot session token
-                // and derive the API base URL from the session token's proxy-ep field.
-                let http_client = ReqwestCopilotHttpClient::new();
-                let mut cache = CopilotTokenCache::new();
-                let (session_token, base_url) = cache
-                    .resolve(&http_client, &self.api_key)
-                    .await
-                    .map_err(|e| ArchitectSessionError::ProviderInit {
-                        reason: format!("Copilot token exchange failed: {e}"),
-                    })?;
-
-                let client: openai::CompletionsClient = openai::Client::builder()
-                    .api_key(&session_token)
-                    .base_url(&base_url)
-                    .http_headers(copilot_headers())
-                    .build()
-                    .map_err(|e| ArchitectSessionError::ProviderInit {
-                        reason: format!("GitHub Copilot client init failed: {e}"),
-                    })?
-                    .completions_api();
-
-                let agent = client
-                    .agent(&self.model)
-                    .preamble(&self.agent_file_content)
-                    .tool(read_tool)
-                    .build();
-
-                Self::drive_conversation(&agent, question, context).await
-            }
-            other => Err(ArchitectSessionError::UnsupportedProvider {
-                provider: other.to_string(),
-            }),
-        }
+        Self::drive_conversation(&agent, question, context).await
     }
 }
 
@@ -596,27 +527,6 @@ mod tests {
         assert!(msg.contains("How should I handle auth?"));
         assert!(msg.contains("Additional context"));
         assert!(msg.contains("JWT tokens"));
-    }
-
-    #[test]
-    fn test_env_var_for_provider_known() {
-        assert_eq!(
-            env_var_for_provider("anthropic").unwrap(),
-            "ANTHROPIC_API_KEY"
-        );
-        assert_eq!(env_var_for_provider("openai").unwrap(), "OPENAI_API_KEY");
-        assert_eq!(
-            env_var_for_provider("github-copilot").unwrap(),
-            "GITHUB_COPILOT_OAUTH_TOKEN"
-        );
-    }
-
-    #[test]
-    fn test_env_var_for_provider_unknown() {
-        assert!(matches!(
-            env_var_for_provider("deepseek").unwrap_err(),
-            ArchitectSessionError::UnsupportedProvider { .. }
-        ));
     }
 
     #[tokio::test]
