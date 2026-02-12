@@ -12,7 +12,7 @@
 
 use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::BotConfig;
-use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
+use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::provider::copilot_headers;
 use async_trait::async_trait;
 use futures::StreamExt;

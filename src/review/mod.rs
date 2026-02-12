@@ -26,7 +26,7 @@ use rig::tools::think::ThinkTool;
 
 use crate::auth::github_copilot::{CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
-use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
+use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::dev_agent::{self, ShutdownFlag, activate_agent, streaming_chat};
 use crate::session::provider::{ProviderError, copilot_headers, resolve_api_key};

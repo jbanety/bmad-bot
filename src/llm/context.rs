@@ -23,7 +23,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use crate::llm_context::ContextBuilder;
+//! use crate::llm::context::ContextBuilder;
 //!
 //! let msg = ContextBuilder::new()
 //!     .add_file("/path/to/agent.md", &agent_content)
