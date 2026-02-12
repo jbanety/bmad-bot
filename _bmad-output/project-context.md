@@ -107,6 +107,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - `copilot_requires_responses_api()` is the hardcoded heuristic — new OpenAI model families are a one-liner addition. No `api_format` config — the API format is a deterministic property of the provider behind the model, not a user preference.
 - API keys stored in environment variables, never in config files
 - `AgentFactory` owns the `CopilotTokenCache` — Copilot token exchange is handled internally, not passed around
+- **Optional `reasoning_effort` per role:** `LlmRoleConfig` supports an optional `reasoning_effort` field (`"low"`, `"medium"`, `"high"`, `"xhigh"`). When set, `AgentFactory` injects it as `additional_params({"reasoning": {"effort": "<value>"}})` on the rig `AgentBuilder`. Only effective for Responses API paths (OpenAI direct, GitHub Copilot with OpenAI models). Ignored with a tracing warning for Anthropic and Copilot Completions API models. Validated at config load time.
 
 ### Testing Rules
 

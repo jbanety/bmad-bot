@@ -22,10 +22,16 @@ git_provider:
 # LLM provider configuration — one provider+model per role
 # Supported providers: "anthropic", "openai", "github-copilot"
 # API keys are loaded from .env (see .env.example), never from this file.
+#
+# reasoning_effort (optional): controls reasoning depth for OpenAI-compatible models.
+#   Values: "low", "medium", "high", "xhigh"
+#   Only effective for OpenAI and GitHub Copilot providers using the Responses API.
+#   Ignored for Anthropic and Copilot models routed through Chat Completions API.
 llm:
   dev:
     provider: anthropic
     model: claude-sonnet-4-20250514
+    # reasoning_effort: high  # uncomment for OpenAI/Copilot models
   review:
     provider: anthropic
     model: claude-sonnet-4-20250514

@@ -259,6 +259,7 @@ llm:
   review:
     provider: anthropic
     model: claude-sonnet-4-20250514
+    reasoning_effort: high    # optional: "low", "medium", "high", "xhigh" (OpenAI/Copilot only)
   supervisor:
     provider: anthropic
     model: claude-sonnet-4-20250514
