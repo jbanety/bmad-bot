@@ -103,6 +103,9 @@ pub struct RunSummary {
     pub blocked: usize,
     /// Count of stories that errored.
     pub errored: usize,
+    /// When `true`, a fatal error occurred (e.g. auth failure) and the daemon
+    /// should halt immediately — continuing would produce the same failure.
+    pub fatal: bool,
 }
 
 /// Internal representation of the Telegram `sendMessage` API response.
@@ -573,6 +576,7 @@ mod tests {
             completed: 2,
             blocked: 0,
             errored: 1,
+            fatal: false,
         };
         let msg = format_run_summary(&summary);
         assert!(msg.contains("🏁 BMAD Bot Run Complete"));
@@ -596,6 +600,7 @@ mod tests {
             completed: 1,
             blocked: 0,
             errored: 0,
+            fatal: false,
         };
         let msg = format_run_summary(&summary);
         assert!(msg.contains("✅ 1 | ⚠️ 0 | ❌ 0"));
@@ -620,6 +625,7 @@ mod tests {
             completed: 200,
             blocked: 0,
             errored: 0,
+            fatal: false,
         };
         let msg = format_run_summary(&summary);
         let truncated = truncate_message(&msg);
@@ -642,6 +648,7 @@ mod tests {
             completed: 0,
             blocked: 0,
             errored: 0,
+            fatal: false,
         };
         let result = notifier.notify_run_summary(&summary).await;
         assert!(result.is_ok());

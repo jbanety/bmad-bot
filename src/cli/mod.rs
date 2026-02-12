@@ -1412,10 +1412,19 @@ async fn run_polling_loop(
                             completed = summary.completed,
                             blocked = summary.blocked,
                             errored = summary.errored,
+                            fatal = summary.fatal,
                             "Pipeline run complete"
                         );
                         for _ in 0..summary.total_processed {
                             daemon_state.record_story_processed();
+                        }
+
+                        if summary.fatal {
+                            tracing::error!(
+                                "Fatal error detected (likely invalid credentials) — halting daemon. \
+                                 Fix credentials and restart with `bmad-bot start`."
+                            );
+                            break;
                         }
                     }
                     Err(crate::watcher::WatcherError::NoEligibleStories) => {

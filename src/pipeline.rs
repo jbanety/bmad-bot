@@ -103,6 +103,11 @@ pub struct PipelineResult {
     pub pr_url: Option<String>,
     /// Error or context detail, if applicable.
     pub error_detail: Option<String>,
+    /// When `true`, this error is fatal — the daemon should halt immediately.
+    ///
+    /// Set for authentication failures and other infrastructure errors where
+    /// continuing to process stories would be pointless (same creds, same result).
+    pub fatal: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +229,7 @@ impl StoryPipeline {
                         error_detail: Some(format!(
                             "Push failed — work preserved on local branch: {branch}"
                         )),
+                        fatal: false,
                     };
                     self.notify_story_result(&result).await;
                     return result;
@@ -270,6 +276,7 @@ impl StoryPipeline {
                             error_detail: Some(format!(
                                 "PR creation failed: {e}. Branch: {branch}"
                             )),
+                            fatal: false,
                         };
                         self.notify_story_result(&result).await;
                         return result;
@@ -422,6 +429,7 @@ impl StoryPipeline {
                     status: StoryStatus::Completed,
                     pr_url: Some(pr_info.url.clone()),
                     error_detail: None,
+                    fatal: false,
                 };
                 self.notify_story_result(&result).await;
                 result
@@ -506,6 +514,7 @@ impl StoryPipeline {
                         "Escalated: {} — {}",
                         report.question, report.reason
                     )),
+                    fatal: false,
                 };
                 self.notify_story_result(&result).await;
                 result
@@ -516,73 +525,108 @@ impl StoryPipeline {
                 error,
                 decisions,
             } => {
-                tracing::error!(
-                    action = "session_failed",
-                    story_key = %story_key,
-                    error = %error,
-                    "Dev session failed — creating failure PR"
-                );
+                let fatal = is_auth_error(&error);
+                let infra = is_infra_error(&error);
 
-                // Phase 3 — Failure PR (push partial work first)
-                let branch = format!("story/{story_key}");
-
-                if let Err(e) = self.push_branch(&branch).await {
-                    tracing::warn!(
-                        action = "failure_push_failed",
-                        story_key = %story_key,
-                        branch = %branch,
-                        error = %e,
-                        "Git push failed for failure branch — attempting PR anyway"
-                    );
-                }
-
-                let decisions_section = format_pr_decisions_section(&decisions);
-                let pr_title = build_pr_title(&story_key, &story_title, true);
-                let pr_body = build_pr_description(&PrDescriptionParams {
-                    story_key: story_key.clone(),
-                    story_title: story_title.clone(),
-                    outcome_summary: "failed".to_string(),
-                    decisions_section,
-                    failure_details: Some(error.clone()),
-                    pr_summary: None,
-                });
-                let pr_params = CreatePrParams {
-                    title: pr_title,
-                    body: pr_body,
-                    source_branch: branch.clone(),
-                    target_branch: self.config.git_provider.target_branch.clone(),
-                };
-
-                match self.git_provider.create_pr(pr_params).await {
-                    Ok(pr_info) => {
-                        let result = PipelineResult {
-                            story_key: story_key.clone(),
-                            status: StoryStatus::Error,
-                            pr_url: Some(pr_info.url.clone()),
-                            error_detail: Some(error),
-                        };
-                        self.notify_story_result(&result).await;
-                        result
-                    }
-                    Err(pr_err) => {
+                if infra {
+                    // Infrastructure failure — session never started, no partial work.
+                    // Skip PR creation entirely (there's nothing on the branch).
+                    if fatal {
                         tracing::error!(
-                            action = "failure_pr_creation_failed",
+                            action = "session_failed_fatal",
+                            story_key = %story_key,
+                            error = %error,
+                            "Fatal infrastructure error — daemon should halt"
+                        );
+                    } else {
+                        tracing::error!(
+                            action = "session_failed_infra",
+                            story_key = %story_key,
+                            error = %error,
+                            "Infrastructure error — no partial work, skipping failure PR"
+                        );
+                    }
+
+                    let result = PipelineResult {
+                        story_key: story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(error),
+                        fatal,
+                    };
+                    self.notify_story_result(&result).await;
+                    result
+                } else {
+                    tracing::error!(
+                        action = "session_failed",
+                        story_key = %story_key,
+                        error = %error,
+                        "Dev session failed mid-work — creating failure PR to preserve partial work"
+                    );
+
+                    // Session crashed mid-work — failure PR preserves partial code
+                    let branch = format!("story/{story_key}");
+
+                    if let Err(e) = self.push_branch(&branch).await {
+                        tracing::warn!(
+                            action = "failure_push_failed",
                             story_key = %story_key,
                             branch = %branch,
-                            error = %pr_err,
-                            "Failed to create failure PR — notifying human with branch name only"
+                            error = %e,
+                            "Git push failed for failure branch — attempting PR anyway"
                         );
+                    }
 
-                        let result = PipelineResult {
-                            story_key: story_key.clone(),
-                            status: StoryStatus::Error,
-                            pr_url: None,
-                            error_detail: Some(format!(
-                                "Session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
-                            )),
-                        };
-                        self.notify_story_result(&result).await;
-                        result
+                    let decisions_section = format_pr_decisions_section(&decisions);
+                    let pr_title = build_pr_title(&story_key, &story_title, true);
+                    let pr_body = build_pr_description(&PrDescriptionParams {
+                        story_key: story_key.clone(),
+                        story_title: story_title.clone(),
+                        outcome_summary: "failed".to_string(),
+                        decisions_section,
+                        failure_details: Some(error.clone()),
+                        pr_summary: None,
+                    });
+                    let pr_params = CreatePrParams {
+                        title: pr_title,
+                        body: pr_body,
+                        source_branch: branch.clone(),
+                        target_branch: self.config.git_provider.target_branch.clone(),
+                    };
+
+                    match self.git_provider.create_pr(pr_params).await {
+                        Ok(pr_info) => {
+                            let result = PipelineResult {
+                                story_key: story_key.clone(),
+                                status: StoryStatus::Error,
+                                pr_url: Some(pr_info.url.clone()),
+                                error_detail: Some(error),
+                                fatal: false,
+                            };
+                            self.notify_story_result(&result).await;
+                            result
+                        }
+                        Err(pr_err) => {
+                            tracing::error!(
+                                action = "failure_pr_creation_failed",
+                                story_key = %story_key,
+                                branch = %branch,
+                                error = %pr_err,
+                                "Failed to create failure PR — notifying human with branch name only"
+                            );
+
+                            let result = PipelineResult {
+                                story_key: story_key.clone(),
+                                status: StoryStatus::Error,
+                                pr_url: None,
+                                error_detail: Some(format!(
+                                    "Session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
+                                )),
+                                fatal: false,
+                            };
+                            self.notify_story_result(&result).await;
+                            result
+                        }
                     }
                 }
             }
@@ -593,12 +637,26 @@ impl StoryPipeline {
     ///
     /// Stories are processed in the order received from the watcher (dependency-sorted).
     /// After all stories are processed, a run summary notification is sent.
+    ///
+    /// If any story returns a fatal error (e.g. auth failure), processing stops
+    /// immediately — remaining stories are skipped. The [`RunSummary::fatal`] flag
+    /// is set so the caller can halt the daemon.
     pub async fn process_eligible_stories(&self, stories: Vec<StoryInfo>) -> RunSummary {
         let mut results: Vec<PipelineResult> = Vec::with_capacity(stories.len());
 
         for story in &stories {
             let result = self.process_story(story).await;
+            let is_fatal = result.fatal;
             results.push(result);
+
+            if is_fatal {
+                tracing::error!(
+                    action = "pipeline_halt",
+                    story_key = %story.story_key,
+                    "Fatal error detected — stopping pipeline, skipping remaining stories"
+                );
+                break;
+            }
         }
 
         let summary = build_run_summary(&results);
@@ -822,6 +880,7 @@ impl StoryPipeline {
                         error_detail: Some(format!(
                             "Git push failed after recovery: {e}. Branch: {branch}"
                         )),
+                        fatal: false,
                     };
                 }
 
@@ -866,6 +925,7 @@ impl StoryPipeline {
                             status: StoryStatus::Completed,
                             pr_url: Some(pr_info.url.clone()),
                             error_detail: None,
+                            fatal: false,
                         }
                     }
                     Err(e) => {
@@ -883,6 +943,7 @@ impl StoryPipeline {
                             error_detail: Some(format!(
                                 "PR creation failed after recovery: {e}. Branch: {branch}"
                             )),
+                            fatal: false,
                         }
                     }
                 }
@@ -967,6 +1028,7 @@ impl StoryPipeline {
                         "Escalated after recovery: {} — {}",
                         report.question, report.reason
                     )),
+                    fatal: false,
                 }
             }
 
@@ -975,65 +1037,96 @@ impl StoryPipeline {
                 error,
                 decisions,
             } => {
-                tracing::error!(
-                    action = "recovery_session_failed",
-                    story_key = %story_key,
-                    error = %error,
-                    "Recovered session failed — creating failure PR"
-                );
+                let fatal = is_auth_error(&error);
+                let infra = is_infra_error(&error);
 
-                // Failure PR (push partial work first)
-                let branch = format!("story/{story_key}");
+                if infra {
+                    if fatal {
+                        tracing::error!(
+                            action = "recovery_session_failed_fatal",
+                            story_key = %story_key,
+                            error = %error,
+                            "Fatal infrastructure error during recovery — daemon should halt"
+                        );
+                    } else {
+                        tracing::error!(
+                            action = "recovery_session_failed_infra",
+                            story_key = %story_key,
+                            error = %error,
+                            "Infrastructure error during recovery — no partial work, skipping failure PR"
+                        );
+                    }
 
-                if let Err(e) = self.push_branch(&branch).await {
-                    tracing::warn!(
-                        action = "recovery_failure_push_failed",
-                        story_key = %story_key,
-                        branch = %branch,
-                        error = %e,
-                        "Git push failed for recovery failure branch — attempting PR anyway"
-                    );
-                }
-
-                let decisions_section = format_pr_decisions_section(&decisions);
-                let pr_title = build_pr_title(&story_key, &story_title, true);
-                let pr_body = build_pr_description(&PrDescriptionParams {
-                    story_key: story_key.clone(),
-                    story_title: story_title.clone(),
-                    outcome_summary: "failed (crash recovery attempted)".to_string(),
-                    decisions_section,
-                    failure_details: Some(error.clone()),
-                    pr_summary: None,
-                });
-                let pr_params = CreatePrParams {
-                    title: pr_title,
-                    body: pr_body,
-                    source_branch: branch.clone(),
-                    target_branch: self.config.git_provider.target_branch.clone(),
-                };
-
-                match self.git_provider.create_pr(pr_params).await {
-                    Ok(pr_info) => PipelineResult {
+                    PipelineResult {
                         story_key: story_key.clone(),
                         status: StoryStatus::Error,
-                        pr_url: Some(pr_info.url.clone()),
+                        pr_url: None,
                         error_detail: Some(error),
-                    },
-                    Err(pr_err) => {
-                        tracing::error!(
-                            action = "recovery_failure_pr_creation_failed",
+                        fatal,
+                    }
+                } else {
+                    tracing::error!(
+                        action = "recovery_session_failed",
+                        story_key = %story_key,
+                        error = %error,
+                        "Recovered session failed mid-work — creating failure PR"
+                    );
+
+                    // Failure PR (push partial work first)
+                    let branch = format!("story/{story_key}");
+
+                    if let Err(e) = self.push_branch(&branch).await {
+                        tracing::warn!(
+                            action = "recovery_failure_push_failed",
                             story_key = %story_key,
                             branch = %branch,
-                            error = %pr_err,
-                            "Failed to create failure PR after recovery"
+                            error = %e,
+                            "Git push failed for recovery failure branch — attempting PR anyway"
                         );
-                        PipelineResult {
+                    }
+
+                    let decisions_section = format_pr_decisions_section(&decisions);
+                    let pr_title = build_pr_title(&story_key, &story_title, true);
+                    let pr_body = build_pr_description(&PrDescriptionParams {
+                        story_key: story_key.clone(),
+                        story_title: story_title.clone(),
+                        outcome_summary: "failed (crash recovery attempted)".to_string(),
+                        decisions_section,
+                        failure_details: Some(error.clone()),
+                        pr_summary: None,
+                    });
+                    let pr_params = CreatePrParams {
+                        title: pr_title,
+                        body: pr_body,
+                        source_branch: branch.clone(),
+                        target_branch: self.config.git_provider.target_branch.clone(),
+                    };
+
+                    match self.git_provider.create_pr(pr_params).await {
+                        Ok(pr_info) => PipelineResult {
                             story_key: story_key.clone(),
                             status: StoryStatus::Error,
-                            pr_url: None,
-                            error_detail: Some(format!(
-                                "Recovery session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
-                            )),
+                            pr_url: Some(pr_info.url.clone()),
+                            error_detail: Some(error),
+                            fatal: false,
+                        },
+                        Err(pr_err) => {
+                            tracing::error!(
+                                action = "recovery_failure_pr_creation_failed",
+                                story_key = %story_key,
+                                branch = %branch,
+                                error = %pr_err,
+                                "Failed to create failure PR after recovery"
+                            );
+                            PipelineResult {
+                                story_key: story_key.clone(),
+                                status: StoryStatus::Error,
+                                pr_url: None,
+                                error_detail: Some(format!(
+                                    "Recovery session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
+                                )),
+                                fatal: false,
+                            }
                         }
                     }
                 }
@@ -1045,6 +1138,41 @@ impl StoryPipeline {
 // ---------------------------------------------------------------------------
 // Helper Functions
 // ---------------------------------------------------------------------------
+
+/// Detect infrastructure errors where the session never started.
+///
+/// These errors mean no partial work exists on the branch — creating a failure
+/// PR would be pointless noise. Covers auth failures, config errors, branch setup
+/// failures, and provider setup issues.
+fn is_infra_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("token exchange failed")
+        || lower.contains("authentication failed")
+        || lower.contains("bad credentials")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("provider setup failed")
+        || lower.contains("agent build failed")
+        || lower.contains("recovery agent build failed")
+        || lower.contains("branch setup failed")
+        || lower.contains("branch setup panicked")
+        || lower.contains("failed to resolve api key")
+        || lower.contains("unsupported provider")
+}
+
+/// Detect authentication errors that should halt the daemon entirely.
+///
+/// If credentials are invalid, every subsequent story will fail the same way.
+/// The daemon should stop, notify the human, and wait for creds to be fixed.
+fn is_auth_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("token exchange failed")
+        || lower.contains("authentication failed")
+        || lower.contains("bad credentials")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("failed to resolve api key")
+}
 
 /// Convert a kebab-case label to a human-readable title.
 ///
@@ -1073,6 +1201,7 @@ fn build_run_summary(results: &[PipelineResult]) -> RunSummary {
     let mut completed = 0usize;
     let mut blocked = 0usize;
     let mut errored = 0usize;
+    let fatal = results.iter().any(|r| r.fatal);
 
     let stories: Vec<StoryNotification> = results
         .iter()
@@ -1099,6 +1228,7 @@ fn build_run_summary(results: &[PipelineResult]) -> RunSummary {
         completed,
         blocked,
         errored,
+        fatal,
     }
 }
 
@@ -1117,15 +1247,17 @@ mod tests {
     #[test]
     fn test_pipeline_result_completed_fields() {
         let result = PipelineResult {
-            story_key: "6-1-telegram-notifications".to_string(),
+            story_key: "1-1-scaffolding".to_string(),
             status: StoryStatus::Completed,
-            pr_url: Some("https://github.com/org/repo/pull/42".to_string()),
+            pr_url: Some("https://github.com/test/repo/pull/1".to_string()),
             error_detail: None,
+            fatal: false,
         };
-        assert_eq!(result.story_key, "6-1-telegram-notifications");
+        assert_eq!(result.story_key, "1-1-scaffolding");
         assert_eq!(result.status, StoryStatus::Completed);
         assert!(result.pr_url.is_some());
         assert!(result.error_detail.is_none());
+        assert!(!result.fatal);
     }
 
     #[test]
@@ -1135,10 +1267,12 @@ mod tests {
             status: StoryStatus::Error,
             pr_url: None,
             error_detail: Some("LLM provider down".to_string()),
+            fatal: false,
         };
         assert_eq!(result.status, StoryStatus::Error);
         assert!(result.pr_url.is_none());
         assert_eq!(result.error_detail.as_deref(), Some("LLM provider down"));
+        assert!(!result.fatal);
     }
 
     #[test]
@@ -1147,7 +1281,8 @@ mod tests {
             story_key: "3-3-escalation".to_string(),
             status: StoryStatus::Blocked,
             pr_url: None,
-            error_detail: Some("Needs human input on DB schema".to_string()),
+            error_detail: Some("Escalated: question — reason".to_string()),
+            fatal: false,
         };
         assert_eq!(result.status, StoryStatus::Blocked);
         assert!(
@@ -1155,8 +1290,97 @@ mod tests {
                 .error_detail
                 .as_deref()
                 .unwrap()
-                .contains("DB schema")
+                .contains("Escalated")
         );
+        assert!(!result.fatal);
+    }
+
+    #[test]
+    fn test_pipeline_result_fatal_auth_error() {
+        let result = PipelineResult {
+            story_key: "7-1-integration-tests".to_string(),
+            status: StoryStatus::Error,
+            pr_url: None,
+            error_detail: Some("Copilot token exchange failed: HTTP 401".to_string()),
+            fatal: true,
+        };
+        assert_eq!(result.status, StoryStatus::Error);
+        assert!(result.fatal);
+        assert!(result.pr_url.is_none());
+    }
+
+    #[test]
+    fn test_is_infra_error_auth_patterns() {
+        assert!(is_infra_error("Copilot token exchange failed: HTTP 401"));
+        assert!(is_infra_error("Authentication failed: bad token"));
+        assert!(is_infra_error("Bad credentials"));
+        assert!(is_infra_error("HTTP 401"));
+        assert!(is_infra_error("HTTP 403"));
+        assert!(is_infra_error("Provider setup failed: missing key"));
+        assert!(is_infra_error("Agent build failed: connection refused"));
+        assert!(is_infra_error("Branch setup failed: git error"));
+        assert!(is_infra_error("Branch setup panicked: thread panic"));
+        assert!(is_infra_error("Failed to resolve API key"));
+        assert!(is_infra_error("Unsupported provider in WAL: foobar"));
+    }
+
+    #[test]
+    fn test_is_infra_error_false_for_session_crashes() {
+        assert!(!is_infra_error("Maximum turn limit exceeded (300)"));
+        assert!(!is_infra_error("Chat loop failed: connection lost"));
+        assert!(!is_infra_error("context_length_exceeded"));
+        assert!(!is_infra_error("OOM killed"));
+    }
+
+    #[test]
+    fn test_is_auth_error_subset_of_infra() {
+        assert!(is_auth_error("Copilot token exchange failed: HTTP 401"));
+        assert!(is_auth_error("Authentication failed: expired"));
+        assert!(is_auth_error("Bad credentials"));
+        assert!(is_auth_error("HTTP 401"));
+        assert!(is_auth_error("HTTP 403"));
+        assert!(is_auth_error("Failed to resolve API key"));
+        // infra but NOT auth:
+        assert!(!is_auth_error("Agent build failed: timeout"));
+        assert!(!is_auth_error("Branch setup failed: conflict"));
+        assert!(!is_auth_error("Unsupported provider in WAL: xyz"));
+    }
+
+    #[test]
+    fn test_run_summary_fatal_flag_propagated() {
+        let results = vec![
+            PipelineResult {
+                story_key: "a".to_string(),
+                status: StoryStatus::Completed,
+                pr_url: Some("url".to_string()),
+                error_detail: None,
+                fatal: false,
+            },
+            PipelineResult {
+                story_key: "b".to_string(),
+                status: StoryStatus::Error,
+                pr_url: None,
+                error_detail: Some("token exchange failed: HTTP 401".to_string()),
+                fatal: true,
+            },
+        ];
+        let summary = build_run_summary(&results);
+        assert!(summary.fatal, "RunSummary should propagate fatal flag");
+        assert_eq!(summary.total_processed, 2);
+        assert_eq!(summary.errored, 1);
+    }
+
+    #[test]
+    fn test_run_summary_no_fatal_when_all_ok() {
+        let results = vec![PipelineResult {
+            story_key: "a".to_string(),
+            status: StoryStatus::Completed,
+            pr_url: Some("url".to_string()),
+            error_detail: None,
+            fatal: false,
+        }];
+        let summary = build_run_summary(&results);
+        assert!(!summary.fatal);
     }
 
     // -----------------------------------------------------------------------
@@ -1283,22 +1507,25 @@ mod tests {
     fn test_run_summary_from_pipeline_results() {
         let results = vec![
             PipelineResult {
-                story_key: "6-1-telegram-notifications".to_string(),
+                story_key: "1-1-scaffolding".to_string(),
                 status: StoryStatus::Completed,
-                pr_url: Some("https://github.com/org/repo/pull/42".to_string()),
+                pr_url: Some("https://github.com/test/repo/pull/1".to_string()),
                 error_detail: None,
+                fatal: false,
             },
             PipelineResult {
-                story_key: "6-2-http-retry".to_string(),
+                story_key: "2-1-polling".to_string(),
                 status: StoryStatus::Error,
                 pr_url: None,
-                error_detail: Some("LLM down".to_string()),
+                error_detail: Some("timeout".to_string()),
+                fatal: false,
             },
             PipelineResult {
-                story_key: "6-3-crash-recovery".to_string(),
+                story_key: "3-3-escalation".to_string(),
                 status: StoryStatus::Blocked,
                 pr_url: None,
-                error_detail: Some("Needs clarification".to_string()),
+                error_detail: Some("Escalated".to_string()),
+                fatal: false,
             },
         ];
 
@@ -1308,7 +1535,8 @@ mod tests {
         assert_eq!(summary.errored, 1);
         assert_eq!(summary.blocked, 1);
         assert_eq!(summary.stories.len(), 3);
-        assert_eq!(summary.stories[0].story_key, "6-1-telegram-notifications");
+        assert!(!summary.fatal);
+        assert_eq!(summary.stories[0].story_key, "1-1-scaffolding");
         assert_eq!(summary.stories[0].status, StoryStatus::Completed);
         assert_eq!(summary.stories[1].status, StoryStatus::Error);
         assert_eq!(summary.stories[2].status, StoryStatus::Blocked);
@@ -1318,16 +1546,18 @@ mod tests {
     fn test_run_summary_all_completed() {
         let results = vec![
             PipelineResult {
-                story_key: "1-1-scaffolding".to_string(),
+                story_key: "a".to_string(),
                 status: StoryStatus::Completed,
                 pr_url: Some("url1".to_string()),
                 error_detail: None,
+                fatal: false,
             },
             PipelineResult {
-                story_key: "1-2-cli".to_string(),
+                story_key: "b".to_string(),
                 status: StoryStatus::Completed,
                 pr_url: Some("url2".to_string()),
                 error_detail: None,
+                fatal: false,
             },
         ];
 
@@ -1356,6 +1586,7 @@ mod tests {
             status: StoryStatus::Completed,
             pr_url: None,
             error_detail: None,
+            fatal: false,
         }];
 
         let summary = build_run_summary(&results);
