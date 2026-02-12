@@ -15,8 +15,8 @@
 //! same activation flow. The only difference is the menu command sent after activation.
 //! Extracting the common logic avoids duplication and ensures both flows stay in sync.
 
-use crate::llm_context::ContextBuilder;
-use crate::llm_logging::{log_llm_error, log_llm_request, log_llm_response};
+use crate::llm::context::ContextBuilder;
+use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::state::ChatMessage;
 
 use futures::StreamExt;
@@ -58,6 +58,23 @@ You have access to these tools: edit_file, read_file, grep, find_path, list_dire
 - **Use `ask_supervisor`** when you need clarification on requirements, architecture decisions, or are uncertain about the correct approach.
 - When `edit_file` fails (ambiguous match), use `read_file` with a line range to get more context, then retry with a larger `old_text` fragment.
 - When making multiple related changes in one file, batch them in a single `edit_file` call with multiple edit operations.
+
+## Post-Completion PR Summary
+When asked for a PR summary after completing the dev-story workflow, produce a structured summary using the following XML format exactly:
+
+<pr-summary>
+<context>
+(Summarize what was built and why, referencing the story requirements. Be specific about modules, functions, and patterns used.)
+</context>
+<how-to-test>
+(Provide concrete commands and steps: `cargo test`, specific test names to run, manual verification steps if applicable.)
+</how-to-test>
+<additional-info>
+(Note design decisions made, dependencies added or removed, tech debt created, migration notes, caveats, or concerns.)
+</additional-info>
+</pr-summary>
+
+Each section must contain meaningful content — do not leave any section empty.
 
 ## Communication
 OVERRIDE: communication_language = English

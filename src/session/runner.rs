@@ -14,7 +14,7 @@
 
 use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets};
-use crate::llm_logging::{
+use crate::llm::logging::{
     log_llm_error, log_llm_history, log_llm_history_summary, log_llm_request, log_llm_response,
 };
 use crate::session::SessionOutcome;
@@ -112,8 +112,52 @@ pub fn story_info_from_wal(state: &SessionState, config: &BotConfig) -> StoryInf
 /// Each provider returns different error messages. This function checks for
 /// known patterns across Anthropic, OpenAI, and GitHub Copilot. The check is
 /// case-insensitive to handle inconsistent casing across provider SDKs.
-fn is_context_limit_error(error: &str) -> bool {
-    let lower = error.to_lowercase();
+/// Parse a structured PR summary from the agent's response.
+///
+/// Expects XML-style tags: `<pr-summary>`, `<context>`, `<how-to-test>`, `<additional-info>`.
+/// Returns `Some((context, how_to_test, additional_info))` if all three sections are found,
+/// or `None` if any section is missing or the input doesn't contain the expected format.
+///
+/// Uses regex with dotall mode (`(?s)`) so `.` matches newlines within tag content.
+pub fn parse_pr_summary(response: &str) -> Option<(String, String, String)> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static RE_CONTEXT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?si)<context>(.*?)</context>").unwrap());
+    static RE_HOW_TO_TEST: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?si)<how-to-test>(.*?)</how-to-test>").unwrap());
+    static RE_ADDITIONAL_INFO: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?si)<additional-info>(.*?)</additional-info>").unwrap());
+
+    let context = RE_CONTEXT
+        .captures(response)?
+        .get(1)?
+        .as_str()
+        .trim()
+        .to_string();
+    let how_to_test = RE_HOW_TO_TEST
+        .captures(response)?
+        .get(1)?
+        .as_str()
+        .trim()
+        .to_string();
+    let additional_info = RE_ADDITIONAL_INFO
+        .captures(response)?
+        .get(1)?
+        .as_str()
+        .trim()
+        .to_string();
+
+    if context.is_empty() || how_to_test.is_empty() || additional_info.is_empty() {
+        return None;
+    }
+
+    Some((context, how_to_test, additional_info))
+}
+
+fn is_context_limit_error(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
     // Anthropic patterns
     lower.contains("context_length_exceeded")
         || lower.contains("prompt is too long")
@@ -2011,6 +2055,76 @@ impl SessionRunner {
                         }
                     }
 
+                    // Ask the agent for a structured PR summary (non-blocking).
+                    // This comes AFTER the commit prompt so the PR reflects final state.
+                    let pr_summary_prompt = "Now provide a PR summary for the work you just completed. \
+                        Use the following XML format exactly:\n\n\
+                        <pr-summary>\n\
+                        <context>\n\
+                        (Summarize what was built and why, referencing the story requirements)\n\
+                        </context>\n\
+                        <how-to-test>\n\
+                        (Concrete commands and steps to verify: cargo test, specific test names, manual checks)\n\
+                        </how-to-test>\n\
+                        <additional-info>\n\
+                        (Notable design decisions, dependencies added, tech debt, caveats)\n\
+                        </additional-info>\n\
+                        </pr-summary>";
+
+                    let (pr_context, pr_how_to_test, pr_additional_info) = {
+                        state.add_user_message(pr_summary_prompt);
+                        let history = state.to_rig_messages();
+
+                        log_llm_request(
+                            "dev-session",
+                            turn + 1,
+                            "[pr-summary-prompt]",
+                            history.len(),
+                        );
+                        match streaming_chat(
+                            agent,
+                            pr_summary_prompt,
+                            history,
+                            Some(&self.shutdown),
+                        )
+                        .await
+                        {
+                            Ok(r) => {
+                                log_llm_response("dev-session", turn + 1, &r);
+                                state.add_assistant_message(&r);
+                                let _ = state.save(&self.state_file_path).await;
+                                match parse_pr_summary(&r) {
+                                    Some((ctx, test, info)) => {
+                                        tracing::info!(
+                                            action = "pr_summary_parsed",
+                                            story_key = %story.story_key,
+                                            "PR summary extracted successfully"
+                                        );
+                                        (Some(ctx), Some(test), Some(info))
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            action = "pr_summary_parse_failed",
+                                            story_key = %story.story_key,
+                                            "Could not parse PR summary from agent response — using fallback"
+                                        );
+                                        (None, None, None)
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log_llm_error("dev-session", turn + 1, &e);
+                                tracing::warn!(
+                                    action = "pr_summary_prompt_failed",
+                                    error = %e,
+                                    story_key = %story.story_key,
+                                    "PR summary prompt failed — using fallback"
+                                );
+                                (None, None, None)
+                            }
+                        }
+                    };
+
                     // Write decisions file (best-effort)
                     self.write_decisions(story, &decision_log).await;
 
@@ -2021,6 +2135,9 @@ impl SessionRunner {
                         story_key: story.story_key.clone(),
                         branch: story.branch_name.clone(),
                         decisions: decision_log.records(),
+                        pr_context,
+                        pr_how_to_test,
+                        pr_additional_info,
                     };
                 }
 
@@ -3031,6 +3148,85 @@ mod tests {
         // Load context is the third turn
         assert_eq!(compressed_history[4].role, "user");
         assert_eq!(compressed_history[4].content, "Load the project context");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_pr_summary tests (Task 9)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_pr_summary_valid() {
+        let input = r#"Here is the PR summary:
+
+<pr-summary>
+<context>
+Implemented the integration test infrastructure including shared test fixtures,
+mock providers, and helper utilities.
+</context>
+<how-to-test>
+1. Run `cargo test --test integration` to execute all integration tests
+2. Verify fixture files are created in the temp directory
+</how-to-test>
+<additional-info>
+- Added `tempfile` as a dev dependency for test directory management
+- Mock LLM provider reuses patterns from unit tests
+</additional-info>
+</pr-summary>"#;
+        let result = parse_pr_summary(input);
+        assert!(result.is_some(), "Should parse valid PR summary");
+        let (ctx, test, info) = result.unwrap();
+        assert!(ctx.contains("integration test infrastructure"));
+        assert!(test.contains("cargo test --test integration"));
+        assert!(info.contains("tempfile"));
+    }
+
+    #[test]
+    fn test_parse_pr_summary_missing_sections() {
+        let input = r#"<pr-summary>
+<context>
+Only context is present.
+</context>
+</pr-summary>"#;
+        let result = parse_pr_summary(input);
+        assert!(
+            result.is_none(),
+            "Should return None when sections are missing"
+        );
+    }
+
+    #[test]
+    fn test_parse_pr_summary_garbage_input() {
+        let result = parse_pr_summary("This is just random text with no XML tags at all.");
+        assert!(result.is_none(), "Should return None for garbage input");
+    }
+
+    #[test]
+    fn test_parse_pr_summary_empty_input() {
+        let result = parse_pr_summary("");
+        assert!(result.is_none(), "Should return None for empty input");
+    }
+
+    #[test]
+    fn test_parse_pr_summary_special_characters() {
+        let input = r#"<pr-summary>
+<context>
+Added support for `HashMap<String, Vec<u8>>` and angle brackets < > in descriptions.
+Also handles **bold** and _italic_ markdown.
+</context>
+<how-to-test>
+1. Run `cargo test -- --test-threads=1`
+2. Check that `<script>` tags are handled correctly
+</how-to-test>
+<additional-info>
+Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotall mode.
+</additional-info>
+</pr-summary>"#;
+        let result = parse_pr_summary(input);
+        assert!(result.is_some(), "Should handle special characters");
+        let (ctx, test, info) = result.unwrap();
+        assert!(ctx.contains("HashMap<String, Vec<u8>>"));
+        assert!(test.contains("<script>"));
+        assert!(info.contains("regex::Regex"));
     }
 
     #[test]

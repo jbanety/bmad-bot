@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use crate::config::{BotConfig, BotSecrets};
 use crate::git_provider::{
-    CreatePrParams, GitProvider, PrDescriptionParams, build_pr_description, build_pr_title,
-    create_provider,
+    CreatePrParams, GitProvider, PrDescriptionParams, PrSummary, build_pr_description,
+    build_pr_title, create_provider,
 };
 use crate::notifier::{Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier};
 use crate::review::ReviewOutcome;
@@ -196,6 +196,9 @@ impl StoryPipeline {
                 story_key,
                 branch,
                 decisions,
+                pr_context,
+                pr_how_to_test,
+                pr_additional_info,
             } => {
                 // Phase 2 — Push branch to remote before PR creation (non-blocking)
                 let push_ok = match self.push_branch(&branch).await {
@@ -228,6 +231,11 @@ impl StoryPipeline {
 
                 // Phase 3 — Create PR (before review so it's visible immediately)
                 let decisions_section = format_pr_decisions_section(&decisions);
+                let pr_summary = pr_context.map(|ctx| PrSummary {
+                    context: ctx,
+                    how_to_test: pr_how_to_test.unwrap_or_default(),
+                    additional_info: pr_additional_info.unwrap_or_default(),
+                });
                 let pr_title = build_pr_title(&story_key, &story_title, false);
                 let pr_body = build_pr_description(&PrDescriptionParams {
                     story_key: story_key.clone(),
@@ -235,6 +243,7 @@ impl StoryPipeline {
                     outcome_summary: "completed successfully".to_string(),
                     decisions_section,
                     failure_details: None,
+                    pr_summary,
                 });
                 let pr_params = CreatePrParams {
                     title: pr_title,
@@ -424,19 +433,80 @@ impl StoryPipeline {
                     story_key = %report.story_key,
                     question = %report.question,
                     reason = %report.reason,
-                    "Story escalated — needs human clarification"
+                    "Story escalated — needs human clarification, creating escalation PR"
                 );
+
+                // Push branch to remote (best-effort, same pattern as Failed branch)
+                let branch = report.branch_name.clone();
+                if let Err(e) = self.push_branch(&branch).await {
+                    tracing::warn!(
+                        action = "escalation_push_failed",
+                        story_key = %report.story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Git push failed for escalation branch — attempting PR anyway"
+                    );
+                }
+
+                // Build PrSummary from EscalationReport fields
+                let partial_work = if report.partial_work_summary.is_empty() {
+                    "No partial work summary available.".to_string()
+                } else {
+                    format!("Partial work summary: {}", report.partial_work_summary)
+                };
+                let pr_summary = PrSummary {
+                    context: format!(
+                        "Session escalated to human. Question: {}. Reason: {}",
+                        report.question, report.reason
+                    ),
+                    how_to_test: "N/A — session was escalated and requires human clarification."
+                        .to_string(),
+                    additional_info: partial_work,
+                };
+
+                let decisions_section = format_pr_decisions_section(&decisions);
+                let pr_title = build_pr_title(&report.story_key, &story_title, true);
+                let pr_body = build_pr_description(&PrDescriptionParams {
+                    story_key: report.story_key.clone(),
+                    story_title: story_title.clone(),
+                    outcome_summary: "escalated — needs clarification".to_string(),
+                    decisions_section,
+                    failure_details: Some(format!(
+                        "**Question:** {}\n**Reason:** {}",
+                        report.question, report.reason
+                    )),
+                    pr_summary: Some(pr_summary),
+                });
+                let pr_params = CreatePrParams {
+                    title: pr_title,
+                    body: pr_body,
+                    source_branch: branch.clone(),
+                    target_branch: self.config.git_provider.target_branch.clone(),
+                };
+
+                let pr_url = match self.git_provider.create_pr(pr_params).await {
+                    Ok(pr_info) => Some(pr_info.url.clone()),
+                    Err(e) => {
+                        tracing::error!(
+                            action = "escalation_pr_creation_failed",
+                            story_key = %report.story_key,
+                            branch = %branch,
+                            error = %e,
+                            "Failed to create escalation PR — notifying human with branch name only"
+                        );
+                        None
+                    }
+                };
 
                 let result = PipelineResult {
                     story_key: report.story_key.clone(),
                     status: StoryStatus::Blocked,
-                    pr_url: None,
+                    pr_url,
                     error_detail: Some(format!(
                         "Escalated: {} — {}",
                         report.question, report.reason
                     )),
                 };
-                let _ = &decisions; // decisions tracked by SessionRunner
                 self.notify_story_result(&result).await;
                 result
             }
@@ -474,6 +544,7 @@ impl StoryPipeline {
                     outcome_summary: "failed".to_string(),
                     decisions_section,
                     failure_details: Some(error.clone()),
+                    pr_summary: None,
                 });
                 let pr_params = CreatePrParams {
                     title: pr_title,
@@ -702,6 +773,9 @@ impl StoryPipeline {
                 story_key,
                 branch,
                 decisions,
+                pr_context,
+                pr_how_to_test,
+                pr_additional_info,
             } => {
                 // Optional code review
                 let review_report = if self.config.code_review_enabled {
@@ -753,6 +827,11 @@ impl StoryPipeline {
 
                 // Success PR
                 let decisions_section = format_pr_decisions_section(&decisions);
+                let pr_summary = pr_context.map(|ctx| PrSummary {
+                    context: ctx,
+                    how_to_test: pr_how_to_test.unwrap_or_default(),
+                    additional_info: pr_additional_info.unwrap_or_default(),
+                });
                 let pr_title = build_pr_title(&story_key, &story_title, false);
                 let pr_body = build_pr_description(&PrDescriptionParams {
                     story_key: story_key.clone(),
@@ -760,6 +839,7 @@ impl StoryPipeline {
                     outcome_summary: "completed successfully (recovered from crash)".to_string(),
                     decisions_section,
                     failure_details: None,
+                    pr_summary,
                 });
                 let pr_params = CreatePrParams {
                     title: pr_title,
@@ -813,13 +893,76 @@ impl StoryPipeline {
                     action = "recovery_session_escalated",
                     story_key = %report.story_key,
                     question = %report.question,
-                    "Recovered session escalated — needs human clarification"
+                    "Recovered session escalated — needs human clarification, creating escalation PR"
                 );
-                let _ = &decisions;
+
+                // Push branch to remote (best-effort)
+                let branch = report.branch_name.clone();
+                if let Err(e) = self.push_branch(&branch).await {
+                    tracing::warn!(
+                        action = "recovery_escalation_push_failed",
+                        story_key = %report.story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Git push failed for recovery escalation branch — attempting PR anyway"
+                    );
+                }
+
+                // Build PrSummary from EscalationReport fields
+                let partial_work = if report.partial_work_summary.is_empty() {
+                    "No partial work summary available.".to_string()
+                } else {
+                    format!("Partial work summary: {}", report.partial_work_summary)
+                };
+                let pr_summary = PrSummary {
+                    context: format!(
+                        "Session escalated to human. Question: {}. Reason: {}",
+                        report.question, report.reason
+                    ),
+                    how_to_test: "N/A — session was escalated and requires human clarification."
+                        .to_string(),
+                    additional_info: partial_work,
+                };
+
+                let decisions_section = format_pr_decisions_section(&decisions);
+                let pr_title = build_pr_title(&report.story_key, &story_title, true);
+                let pr_body = build_pr_description(&PrDescriptionParams {
+                    story_key: report.story_key.clone(),
+                    story_title: story_title.clone(),
+                    outcome_summary: "escalated — needs clarification (recovered from crash)"
+                        .to_string(),
+                    decisions_section,
+                    failure_details: Some(format!(
+                        "**Question:** {}\n**Reason:** {}",
+                        report.question, report.reason
+                    )),
+                    pr_summary: Some(pr_summary),
+                });
+                let pr_params = CreatePrParams {
+                    title: pr_title,
+                    body: pr_body,
+                    source_branch: branch.clone(),
+                    target_branch: self.config.git_provider.target_branch.clone(),
+                };
+
+                let pr_url = match self.git_provider.create_pr(pr_params).await {
+                    Ok(pr_info) => Some(pr_info.url.clone()),
+                    Err(e) => {
+                        tracing::error!(
+                            action = "recovery_escalation_pr_creation_failed",
+                            story_key = %report.story_key,
+                            branch = %branch,
+                            error = %e,
+                            "Failed to create escalation PR after recovery"
+                        );
+                        None
+                    }
+                };
+
                 PipelineResult {
                     story_key: report.story_key.clone(),
                     status: StoryStatus::Blocked,
-                    pr_url: None,
+                    pr_url,
                     error_detail: Some(format!(
                         "Escalated after recovery: {} — {}",
                         report.question, report.reason
@@ -860,6 +1003,7 @@ impl StoryPipeline {
                     outcome_summary: "failed (crash recovery attempted)".to_string(),
                     decisions_section,
                     failure_details: Some(error.clone()),
+                    pr_summary: None,
                 });
                 let pr_params = CreatePrParams {
                     title: pr_title,

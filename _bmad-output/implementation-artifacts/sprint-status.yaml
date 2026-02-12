@@ -84,7 +84,7 @@ development_status:
   5-1-git-provider-trait-github-pr-creation: done
   5-2-automated-code-review-session: done
   5-3-gitlab-merge-request-support: done
-  5-4-enriched-pr-description-agent-generated-context: ready-for-dev
+  5-4-enriched-pr-description-agent-generated-context: review
   epic-5-retrospective: optional
 
   epic-6: in-progress

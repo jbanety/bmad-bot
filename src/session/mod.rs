@@ -106,6 +106,13 @@ pub enum SessionOutcome {
         branch: String,
         /// All supervisor decisions made during the session.
         decisions: Vec<DecisionRecord>,
+        /// Agent-generated context paragraph for the PR description (raw text).
+        /// `None` if the agent didn't produce a summary (crash, timeout, parse failure).
+        pr_context: Option<String>,
+        /// Agent-generated testing instructions for the PR description (raw text).
+        pr_how_to_test: Option<String>,
+        /// Agent-generated additional info for the PR description (raw text).
+        pr_additional_info: Option<String>,
     },
     /// Session escalated to human — needs clarification.
     Escalated {
@@ -199,17 +206,26 @@ mod tests {
             story_key: "1-1-scaffolding".to_string(),
             branch: "story/1-1-scaffolding".to_string(),
             decisions: vec![],
+            pr_context: None,
+            pr_how_to_test: None,
+            pr_additional_info: None,
         };
         match outcome {
             SessionOutcome::Completed {
                 story_key,
                 branch,
                 decisions,
+                pr_context,
+                pr_how_to_test,
+                pr_additional_info,
                 ..
             } => {
                 assert_eq!(story_key, "1-1-scaffolding");
                 assert_eq!(branch, "story/1-1-scaffolding");
                 assert!(decisions.is_empty());
+                assert!(pr_context.is_none());
+                assert!(pr_how_to_test.is_none());
+                assert!(pr_additional_info.is_none());
             }
             _ => panic!("Expected Completed variant"),
         }
@@ -232,6 +248,9 @@ mod tests {
             story_key: "1-1-scaffolding".to_string(),
             branch: "story/1-1".to_string(),
             decisions,
+            pr_context: None,
+            pr_how_to_test: None,
+            pr_additional_info: None,
         };
         match outcome {
             SessionOutcome::Completed { decisions, .. } => {
@@ -334,11 +353,42 @@ mod tests {
     }
 
     #[test]
+    fn test_session_outcome_completed_with_pr_summary_fields() {
+        let outcome = SessionOutcome::Completed {
+            story_key: "5-4-enriched-pr".to_string(),
+            branch: "story/5-4-enriched-pr".to_string(),
+            decisions: vec![],
+            pr_context: Some("Implemented enriched PR descriptions.".to_string()),
+            pr_how_to_test: Some("Run cargo test.".to_string()),
+            pr_additional_info: Some("Added regex dep.".to_string()),
+        };
+        match outcome {
+            SessionOutcome::Completed {
+                pr_context,
+                pr_how_to_test,
+                pr_additional_info,
+                ..
+            } => {
+                assert_eq!(
+                    pr_context.as_deref(),
+                    Some("Implemented enriched PR descriptions.")
+                );
+                assert_eq!(pr_how_to_test.as_deref(), Some("Run cargo test."));
+                assert_eq!(pr_additional_info.as_deref(), Some("Added regex dep."));
+            }
+            _ => panic!("Expected Completed variant"),
+        }
+    }
+
+    #[test]
     fn test_session_outcome_debug() {
         let outcome = SessionOutcome::Completed {
             story_key: "key".to_string(),
             branch: "b".to_string(),
             decisions: vec![],
+            pr_context: None,
+            pr_how_to_test: None,
+            pr_additional_info: None,
         };
         let debug = format!("{outcome:?}");
         assert!(debug.contains("Completed"));
