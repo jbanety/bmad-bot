@@ -176,9 +176,10 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR36: Epic 1 — Validate configuration at startup and report issues
 - FR37: Epic 6 — Detect interrupted session at startup (WAL file) and resume
 - FR38: Epic 6 — Detect context window limit error and bootstrap fresh session with compressed context
-- FR39: Epic 1 — Authenticate with GitHub Copilot via OAuth Device Flow and exchange tokens at runtime (Completions API with IDE-specific headers)
+- FR39: Epic 1 — Authenticate with GitHub Copilot via OAuth Device Flow and exchange tokens at runtime. API format hardcoded per model: OpenAI model families use Responses API, all others fallback to Completions API. IDE-specific headers included
 - FR40: Epic 1/6 — Log all LLM requests and responses via dedicated llm_logging module for debugging and operations visibility
 - FR41: Epic 4 (Story 4.4) — Validate git CLI availability at startup and fail fast if missing
+- FR42: Epic 4 (Story 4.5) — Centralize LLM provider construction via AgentFactory with BuiltAgent enum dispatch. Hardcoded API format per provider/model. Fixes Copilot Responses API bug for OpenAI models
 
 ## Epic List
 
@@ -859,6 +860,77 @@ So that the daemon inherits the user's full git configuration (credential manage
 - Estimated reduction: ~600 lines of git2 boilerplate → ~250 lines of CLI calls
 - Follows the "Git CLI Subprocess Pattern" defined in the Architecture Decision Document
 - Cross-cutting: touches `tools/git.rs` (Epic 4), `session/branch.rs` (Epic 4), `pipeline.rs` (Epic 5 area), `cli/mod.rs` (Epic 1 area)
+
+---
+
+### Story 4.5: LLM Provider Abstraction Layer (AgentFactory + BuiltAgent)
+
+> **Triggered by:** Production incident (2026-02-12) — `gpt-5.2-codex` via GitHub Copilot proxy rejects `/chat/completions` endpoint (requires Responses API). See `architect-brief-llm-provider-abstraction.md` for full rationale.
+
+As a daemon operator,
+I want all LLM provider construction centralized behind an `AgentFactory` with a `BuiltAgent` enum,
+So that provider selection, API format detection, and Copilot token exchange happen in one place, eliminating duplication and fixing the Copilot Responses API bug.
+
+**Acceptance Criteria:**
+
+**Given** the `llm` module exists with `context.rs` and `logging.rs`
+**When** the `agent_factory.rs` module is created
+**Then** it defines a `BuiltAgent` enum with variants: `Anthropic(Agent<anthropic::CompletionModel>)`, `OpenAiResponses(Agent<openai::responses_api::ResponsesCompletionModel>)`, `OpenAiCompletions(Agent<openai::completion::CompletionModel>)`
+**And** `BuiltAgent` implements a `stream_chat()` method that delegates to `streaming_chat()` via match dispatch
+
+**Given** the `AgentFactory` struct is initialized with `BotConfig`, `BotSecrets`, and `CopilotTokenCache`
+**When** `AgentFactory::build(role, preamble, tools)` is called
+**Then** it resolves the provider and model for the given `LlmRole` (Dev, Review, Supervisor)
+**And** it resolves the API key from secrets
+**And** it constructs the appropriate `BuiltAgent` variant based on provider:
+  - `"anthropic"` → `BuiltAgent::Anthropic`
+  - `"openai"` → `BuiltAgent::OpenAiResponses`
+  - `"github-copilot"` → exchanges OAuth token for session token, then selects API format per model
+
+**Given** the provider is `"github-copilot"`
+**When** `AgentFactory::build()` determines the API format
+**Then** `copilot_requires_responses_api(model)` is called — a hardcoded heuristic that matches known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`)
+**And** matched models use the Responses API (`BuiltAgent::OpenAiResponses`)
+**And** all other models (Claude, Mistral, unknown) **fallback to Completions API** (`BuiltAgent::OpenAiCompletions`) — the safe default
+**And** this logic is not configurable — API format is a deterministic property of the provider behind the model
+
+**Given** the `AgentFactory` is created
+**When** `session/runner.rs` is refactored
+**Then** the 3 `build_*_agent()` methods (`build_anthropic_agent`, `build_openai_agent`, `build_copilot_agent`) are removed
+**And** all provider match arms in `run()` and `resume_session()` are replaced with a single `agent_factory.build(LlmRole::Dev, ..)` call
+**And** `run_session()` accepts `&BuiltAgent` directly and uses `BuiltAgent::stream_chat()` instead of the generic `streaming_chat()`
+
+**Given** the `AgentFactory` is created
+**When** `review/mod.rs` is refactored
+**Then** the provider match in `run_inner()` is replaced with `agent_factory.build(LlmRole::Review, ..)`
+
+**Given** the `AgentFactory` is created
+**When** `supervisor/architect.rs` is refactored
+**Then** the provider match is replaced with `agent_factory.build(LlmRole::Supervisor, ..)`
+
+**Given** the `AgentFactory` is created
+**When** `pipeline.rs` is updated
+**Then** `StoryPipeline` receives an `AgentFactory` instance instead of individual provider configs
+**And** it passes the factory to `SessionRunner` and `ReviewRunner`
+
+**Given** the refactoring is complete
+**When** unit tests are written
+**Then** `copilot_requires_responses_api()` is tested with known model names (gpt-4o, o1-mini, o3-pro, gpt-5.2-codex, claude-sonnet-4-20250514, mistral-large) verifying correct API format selection
+**And** `AgentFactory::build()` error handling is tested (missing API key, invalid provider name)
+**And** `BuiltAgent::stream_chat()` dispatch is verified for each variant
+
+**Given** all changes are complete
+**When** validation runs
+**Then** `cargo build`, `cargo test`, `cargo clippy`, and `cargo fmt` all pass with zero errors and zero warnings
+
+**Technical Notes:**
+- Follows the same pattern as Story 4.4 (git CLI migration): production incident → architect brief → cross-cutting refactoring story
+- `session/provider.rs` functions (`resolve_api_key`, `copilot_headers`) are absorbed into `AgentFactory` — `provider.rs` may be removed or reduced to re-exports
+- `streaming_chat()` may be moved from `session/dev_agent.rs` to `llm/` or re-exported, since `BuiltAgent::stream_chat()` delegates to it
+- The `BuiltAgent` enum must be updated if rig adds new provider types — acceptable trade-off (rare, compile-time concern)
+- See `architect-brief-llm-provider-abstraction.md` for full technical rationale and before/after code examples
+- Architecture Decision 8 in `architecture.md` documents this pattern
+- Cross-cutting: touches `llm/agent_factory.rs` (new), `session/runner.rs` (Epic 4), `review/mod.rs` (Epic 5), `supervisor/architect.rs` (Epic 3), `pipeline.rs` (Epic 5 area)
 
 ---
 

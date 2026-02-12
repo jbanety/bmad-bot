@@ -298,8 +298,9 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 - **FR30:** The user can run `bmad-bot logs` to view structured daemon logs
 - **FR31:** The daemon can load configuration from a YAML file with secrets separated in a gitignored file
 - **FR32:** The daemon can auto-discover BMAD version and installed modules from the project repo
-- **FR39:** The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime. The Copilot provider uses the Completions API (distinct from OpenAI's Responses API) with required IDE-specific headers
+- **FR39:** The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime. The Copilot provider is a proxy to multiple backends — API format is hardcoded per model: known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) use the Responses API, all other models fallback to the Completions API (safe default for non-OpenAI backends). Required IDE-specific headers are included in all Copilot requests
 - **FR40:** The daemon logs all LLM requests and responses via a dedicated `llm_logging` module for debugging and operational visibility
+- **FR42:** The daemon centralizes all LLM provider construction via an `AgentFactory` that returns a `BuiltAgent` with unified `stream_chat()` dispatch. API format selection is hardcoded per provider and model — not configurable. GitHub Copilot API format is determined by model name heuristic with Completions API as the safe fallback
 
 ### Error Handling & Resilience
 
