@@ -1158,6 +1158,9 @@ fn is_infra_error(error: &str) -> bool {
         || lower.contains("branch setup panicked")
         || lower.contains("failed to resolve api key")
         || lower.contains("unsupported provider")
+        || lower.contains("initial chat failed")
+        || lower.contains("agent activation failed")
+        || lower.contains("wal creation failed")
 }
 
 /// Detect authentication errors that should halt the daemon entirely.
@@ -1322,6 +1325,11 @@ mod tests {
         assert!(is_infra_error("Branch setup panicked: thread panic"));
         assert!(is_infra_error("Failed to resolve API key"));
         assert!(is_infra_error("Unsupported provider in WAL: foobar"));
+        assert!(is_infra_error(
+            "Initial chat failed: CompletionError: 503 Service Unavailable"
+        ));
+        assert!(is_infra_error("Agent activation failed: connection reset"));
+        assert!(is_infra_error("WAL creation failed: permission denied"));
     }
 
     #[test]

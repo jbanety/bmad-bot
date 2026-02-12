@@ -109,6 +109,32 @@ pub fn story_info_from_wal(state: &SessionState, config: &BotConfig) -> StoryInf
 
 /// Detect context window / token limit errors from LLM provider error strings.
 ///
+/// Detect transient LLM errors that should be retried with backoff.
+///
+/// Covers HTTP 429 (rate limit), 500 (internal server error), 503 (service
+/// unavailable / high demand), and timeout patterns. These are temporary
+/// failures — the same request may succeed after a short delay.
+fn is_transient_llm_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("503")
+        || lower.contains("service unavailable")
+        || lower.contains("high demand")
+        || lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("500 internal server error")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("try again later")
+}
+
+/// Maximum number of retries for transient LLM errors during activation.
+const ACTIVATION_MAX_RETRIES: usize = 3;
+
+/// Initial backoff delay in seconds for transient error retries.
+const ACTIVATION_BACKOFF_BASE_SECS: u64 = 5;
+
 /// Each provider returns different error messages. This function checks for
 /// known patterns across Anthropic, OpenAI, and GitHub Copilot. The check is
 /// case-insensitive to handle inconsistent casing across provider SDKs.
@@ -1729,24 +1755,45 @@ impl SessionRunner {
                 }
 
                 // Activate agent: send dev.md as user message so the LLM
-                // processes activation steps (load config via tools, show menu)
-                let (activation_rig_history, activation_chat_history) = match activate_agent(
-                    agent,
-                    &self.config.bmad_paths.project_root,
-                    "dev-session",
-                    Some(&self.shutdown),
-                )
-                .await
-                {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        tracing::error!(action = "activation_failed", error = %e, "Agent activation failed");
-                        let _ = self.handle_failure(story).await;
-                        return SessionOutcome::Failed {
-                            story_key: story.story_key.clone(),
-                            error: format!("Agent activation failed: {e}"),
-                            decisions: decision_log.records(),
-                        };
+                // processes activation steps (load config via tools, show menu).
+                // Retries transient errors (503, 429, timeouts) with exponential backoff.
+                let mut activation_retries = 0usize;
+                let (activation_rig_history, activation_chat_history) = loop {
+                    match activate_agent(
+                        agent,
+                        &self.config.bmad_paths.project_root,
+                        "dev-session",
+                        Some(&self.shutdown),
+                    )
+                    .await
+                    {
+                        Ok(pair) => break pair,
+                        Err(e) => {
+                            if is_transient_llm_error(&e)
+                                && activation_retries < ACTIVATION_MAX_RETRIES
+                            {
+                                activation_retries += 1;
+                                let delay =
+                                    ACTIVATION_BACKOFF_BASE_SECS * (1 << (activation_retries - 1));
+                                tracing::warn!(
+                                    action = "activation_transient_retry",
+                                    retry = %activation_retries,
+                                    max_retries = %ACTIVATION_MAX_RETRIES,
+                                    delay_secs = %delay,
+                                    error = %e,
+                                    "Agent activation hit transient error — retrying after {delay}s"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                                continue;
+                            }
+                            tracing::error!(action = "activation_failed", error = %e, "Agent activation failed");
+                            let _ = self.handle_failure(story).await;
+                            return SessionOutcome::Failed {
+                                story_key: story.story_key.clone(),
+                                error: format!("Agent activation failed: {e}"),
+                                decisions: decision_log.records(),
+                            };
+                        }
                     }
                 };
 
@@ -1769,33 +1816,56 @@ impl SessionRunner {
                 state.add_user_message(initial_message);
 
                 let activation_turn = activation_chat_history.len() / 2;
-                log_llm_request(
-                    "dev-session",
-                    activation_turn,
-                    initial_message,
-                    activation_rig_history.len(),
-                );
-                let response = match streaming_chat(
-                    agent,
-                    initial_message,
-                    activation_rig_history,
-                    Some(&self.shutdown),
-                )
-                .await
-                {
-                    Ok(r) => {
-                        log_llm_response("dev-session", 0, &r);
-                        r
-                    }
-                    Err(e) => {
-                        log_llm_error("dev-session", 0, &e);
-                        tracing::error!(action = "chat_failed", turn = 0, error = %e, "Initial chat failed");
-                        let _ = self.handle_failure(story).await;
-                        return SessionOutcome::Failed {
-                            story_key: story.story_key.clone(),
-                            error: format!("Initial chat failed: {e}"),
-                            decisions: decision_log.records(),
-                        };
+
+                // Send "DS" with retry on transient errors (503, 429, timeouts).
+                let mut ds_retries = 0usize;
+                let response = loop {
+                    log_llm_request(
+                        "dev-session",
+                        activation_turn,
+                        initial_message,
+                        activation_rig_history.len(),
+                    );
+                    match streaming_chat(
+                        agent,
+                        initial_message,
+                        activation_rig_history.clone(),
+                        Some(&self.shutdown),
+                    )
+                    .await
+                    {
+                        Ok(r) => {
+                            log_llm_response("dev-session", 0, &r);
+                            break r;
+                        }
+                        Err(e) => {
+                            log_llm_error("dev-session", 0, &e);
+                            let error_str = e.to_string();
+
+                            if is_transient_llm_error(&error_str)
+                                && ds_retries < ACTIVATION_MAX_RETRIES
+                            {
+                                ds_retries += 1;
+                                let delay = ACTIVATION_BACKOFF_BASE_SECS * (1 << (ds_retries - 1));
+                                tracing::warn!(
+                                    action = "initial_chat_transient_retry",
+                                    retry = %ds_retries,
+                                    max_retries = %ACTIVATION_MAX_RETRIES,
+                                    delay_secs = %delay,
+                                    error = %error_str,
+                                    "Initial DS chat hit transient error — retrying after {delay}s"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                                continue;
+                            }
+                            tracing::error!(action = "chat_failed", turn = 0, error = %error_str, "Initial chat failed");
+                            let _ = self.handle_failure(story).await;
+                            return SessionOutcome::Failed {
+                                story_key: story.story_key.clone(),
+                                error: format!("Initial chat failed: {error_str}"),
+                                decisions: decision_log.records(),
+                            };
+                        }
                     }
                 };
 
@@ -3148,6 +3218,46 @@ mod tests {
         // Load context is the third turn
         assert_eq!(compressed_history[4].role, "user");
         assert_eq!(compressed_history[4].content, "Load the project context");
+    }
+
+    // -----------------------------------------------------------------------
+    // is_transient_llm_error tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_transient_llm_error_503() {
+        assert!(is_transient_llm_error(
+            "Invalid status code 503 Service Unavailable with message: Sorry, the upstream model provider is currently experiencing high demand."
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_llm_error_429() {
+        assert!(is_transient_llm_error("Rate limit exceeded (429)"));
+    }
+
+    #[test]
+    fn test_is_transient_llm_error_timeout() {
+        assert!(is_transient_llm_error("Request timed out after 30s"));
+        assert!(is_transient_llm_error("Connection timeout"));
+    }
+
+    #[test]
+    fn test_is_transient_llm_error_try_again() {
+        assert!(is_transient_llm_error("Please try again later"));
+    }
+
+    #[test]
+    fn test_is_transient_llm_error_false_for_auth() {
+        assert!(!is_transient_llm_error("HTTP 401 Unauthorized"));
+        assert!(!is_transient_llm_error("Bad credentials"));
+        assert!(!is_transient_llm_error("Authentication failed"));
+    }
+
+    #[test]
+    fn test_is_transient_llm_error_false_for_context_limit() {
+        assert!(!is_transient_llm_error("context_length_exceeded"));
+        assert!(!is_transient_llm_error("prompt is too long"));
     }
 
     // -----------------------------------------------------------------------
