@@ -1528,10 +1528,11 @@ impl SessionRunner {
                         "Agent signaled workflow completion — sending final commit request"
                     );
 
-                    // Safety net: ask the agent to commit any remaining uncommitted changes.
-                    // The BMAD workflow should commit after each task, but this catches
-                    // anything left over from the last task before we close the session.
-                    let commit_msg = "Commit ALL uncommitted changes now. \
+                    // ── Step 7: Final commit ──────────────────────────────
+                    // Ask the agent to commit any remaining uncommitted changes.
+                    // The BMAD workflow should commit after each task, but this
+                    // catches anything left over before we close the session.
+                    let commit_msg = "Commit ALL uncommitted changes now (git add -A, then commit). \
                         Use conventional commits with descriptive messages. Do NOT push.";
                     state.add_user_message(commit_msg);
                     let history = state.to_rig_messages();
@@ -1553,8 +1554,6 @@ impl SessionRunner {
                             );
                         }
                         Err(e) => {
-                            // Non-fatal: log and continue to completion.
-                            // The code review or human can commit later.
                             log_llm_error("dev-session", turn, &e);
                             tracing::warn!(
                                 action = "final_commit_failed",
@@ -1565,87 +1564,58 @@ impl SessionRunner {
                         }
                     }
 
-                    // Parse PR summary directly from the completion message.
-                    // The preamble instructs the agent to include <pr-summary> + <<BMAD_JOB_DONE>>
-                    // in its final message — no extra LLM turn needed.
-                    let (pr_context, pr_how_to_test, pr_additional_info) = match parse_pr_summary(
-                        &current_response,
-                    ) {
-                        Some((ctx, test, info)) => {
-                            tracing::info!(
-                                action = "pr_summary_parsed",
-                                story_key = %story.story_key,
-                                "PR summary extracted from completion message"
-                            );
-                            (Some(ctx), Some(test), Some(info))
-                        }
-                        None => {
-                            // Fallback: agent forgot the protocol (common after long contexts).
-                            // Send a short reminder — format is already in the preamble.
-                            tracing::warn!(
-                                action = "pr_summary_fallback",
-                                story_key = %story.story_key,
-                                "No PR summary in completion message — requesting via fallback turn"
-                            );
-                            let fallback_prompt = format!(
-                                "STOP. Do NOT use any tools. Do NOT start a new workflow. \
-                                Just reply with text.\n\n\
-                                You just completed story {}. Summarize your work using this exact format:\n\n\
-                                <pr-summary>\n\
-                                <context>\n(What was built and why)\n</context>\n\
-                                <how-to-test>\n(Commands to verify: cargo test, specific test names)\n</how-to-test>\n\
-                                <additional-info>\n(Design decisions, deps added, caveats)\n</additional-info>\n\
-                                </pr-summary>\n\n\
-                                <<BMAD_JOB_DONE>>",
-                                story.story_key
-                            );
-                            state.add_user_message(&fallback_prompt);
-                            let history = state.to_rig_messages();
+                    // ── Step 8: PR summary (always, dedicated turn) ──────
+                    let pr_summary_prompt = format!(
+                        "STOP. Do NOT use any tools. Do NOT start a new workflow. \
+                        Just reply with text.\n\n\
+                        You just completed story {}. Summarize your work using this exact format:\n\n\
+                        <pr-summary>\n\
+                        <context>\n(What was built and why)\n</context>\n\
+                        <how-to-test>\n(Commands to verify: cargo test, specific test names)\n</how-to-test>\n\
+                        <additional-info>\n(Design decisions, deps added, caveats)\n</additional-info>\n\
+                        </pr-summary>",
+                        story.story_key
+                    );
+                    state.add_user_message(&pr_summary_prompt);
+                    let history = state.to_rig_messages();
 
-                            log_llm_request(
-                                "dev-session",
-                                turn + 1,
-                                "[pr-summary-fallback]",
-                                history.len(),
-                            );
-                            match agent
-                                .stream_chat(&fallback_prompt, history, Some(&self.shutdown))
-                                .await
-                            {
-                                Ok(r) => {
-                                    log_llm_response("dev-session", turn + 1, &r);
-                                    state.add_assistant_message(&r);
-                                    let _ = state.save(&self.state_file_path).await;
-                                    match parse_pr_summary(&r) {
-                                        Some((ctx, test, info)) => {
-                                            tracing::info!(
-                                                action = "pr_summary_parsed",
-                                                story_key = %story.story_key,
-                                                "PR summary extracted from fallback turn"
-                                            );
-                                            (Some(ctx), Some(test), Some(info))
-                                        }
-                                        None => {
-                                            tracing::warn!(
-                                                action = "pr_summary_parse_failed",
-                                                story_key = %story.story_key,
-                                                "PR summary fallback also failed — using defaults"
-                                            );
-                                            (None, None, None)
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    log_llm_error("dev-session", turn + 1, &e);
-                                    tracing::warn!(
-                                        action = "pr_summary_fallback_failed",
-                                        error = %e,
+                    log_llm_request("dev-session", turn + 1, "[pr-summary]", history.len());
+                    let (pr_context, pr_how_to_test, pr_additional_info) = match agent
+                        .stream_chat(&pr_summary_prompt, history, Some(&self.shutdown))
+                        .await
+                    {
+                        Ok(r) => {
+                            log_llm_response("dev-session", turn + 1, &r);
+                            state.add_assistant_message(&r);
+                            let _ = state.save(&self.state_file_path).await;
+                            match parse_pr_summary(&r) {
+                                Some((ctx, test, info)) => {
+                                    tracing::info!(
+                                        action = "pr_summary_parsed",
                                         story_key = %story.story_key,
-                                        "PR summary fallback turn failed — using defaults"
+                                        "PR summary extracted successfully"
+                                    );
+                                    (Some(ctx), Some(test), Some(info))
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        action = "pr_summary_parse_failed",
+                                        story_key = %story.story_key,
+                                        "Could not parse PR summary — using defaults"
                                     );
                                     (None, None, None)
                                 }
                             }
+                        }
+                        Err(e) => {
+                            log_llm_error("dev-session", turn + 1, &e);
+                            tracing::warn!(
+                                action = "pr_summary_failed",
+                                error = %e,
+                                story_key = %story.story_key,
+                                "PR summary turn failed — using defaults"
+                            );
+                            (None, None, None)
                         }
                     };
 
