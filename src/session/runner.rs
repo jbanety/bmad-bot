@@ -1525,8 +1525,45 @@ impl SessionRunner {
                         action = "session_completed",
                         turn = %turn,
                         story_key = %story.story_key,
-                        "Agent signaled workflow completion"
+                        "Agent signaled workflow completion — sending final commit request"
                     );
+
+                    // Safety net: ask the agent to commit any remaining uncommitted changes.
+                    // The BMAD workflow should commit after each task, but this catches
+                    // anything left over from the last task before we close the session.
+                    let commit_msg = "Commit ALL uncommitted changes now. \
+                        Use conventional commits with descriptive messages. Do NOT push.";
+                    state.add_user_message(commit_msg);
+                    let history = state.to_rig_messages();
+
+                    log_llm_request("dev-session", turn, commit_msg, history.len());
+                    match agent
+                        .stream_chat(commit_msg, history, Some(&self.shutdown))
+                        .await
+                    {
+                        Ok(r) => {
+                            log_llm_response("dev-session", turn, &r);
+                            state.add_assistant_message(&r);
+                            let _ = state.save(&self.state_file_path).await;
+                            tracing::info!(
+                                action = "final_commit_done",
+                                turn = %turn,
+                                story_key = %story.story_key,
+                                "Final commit request completed"
+                            );
+                        }
+                        Err(e) => {
+                            // Non-fatal: log and continue to completion.
+                            // The code review or human can commit later.
+                            log_llm_error("dev-session", turn, &e);
+                            tracing::warn!(
+                                action = "final_commit_failed",
+                                error = %e,
+                                story_key = %story.story_key,
+                                "Final commit request failed — proceeding anyway"
+                            );
+                        }
+                    }
 
                     // Parse PR summary directly from the completion message.
                     // The preamble instructs the agent to include <pr-summary> + <<BMAD_JOB_DONE>>
