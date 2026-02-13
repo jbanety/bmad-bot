@@ -284,7 +284,7 @@ pub async fn unblock_dependents(
     // Match lines like: "  story-key: blocked  # depends-on: completed_key"
     // Captures: (1) leading whitespace + story key + colon + whitespace, (2) story key alone
     let pattern = format!(
-        r"(?m)^(\s*(\S+)\s*:\s*)blocked(\s*#\s*depends-on:\s*{}\b)",
+        r"(?m)^(\s*(\S+)\s*:\s*)blocked(\s*#\s*depends-on:\s*{})\s*$",
         regex::escape(completed_key)
     );
     let re = regex::Regex::new(&pattern).map_err(|e| SessionError::StateFileFailed {
