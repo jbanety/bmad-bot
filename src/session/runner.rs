@@ -1512,25 +1512,76 @@ impl SessionRunner {
                     // Parse PR summary directly from the completion message.
                     // The preamble instructs the agent to include <pr-summary> + <<BMAD_JOB_DONE>>
                     // in its final message — no extra LLM turn needed.
-                    let (pr_context, pr_how_to_test, pr_additional_info) =
-                        match parse_pr_summary(&current_response) {
-                            Some((ctx, test, info)) => {
-                                tracing::info!(
-                                    action = "pr_summary_parsed",
-                                    story_key = %story.story_key,
-                                    "PR summary extracted from completion message"
-                                );
-                                (Some(ctx), Some(test), Some(info))
+                    let (pr_context, pr_how_to_test, pr_additional_info) = match parse_pr_summary(
+                        &current_response,
+                    ) {
+                        Some((ctx, test, info)) => {
+                            tracing::info!(
+                                action = "pr_summary_parsed",
+                                story_key = %story.story_key,
+                                "PR summary extracted from completion message"
+                            );
+                            (Some(ctx), Some(test), Some(info))
+                        }
+                        None => {
+                            // Fallback: agent forgot the protocol (common after long contexts).
+                            // Send a short reminder — format is already in the preamble.
+                            tracing::warn!(
+                                action = "pr_summary_fallback",
+                                story_key = %story.story_key,
+                                "No PR summary in completion message — requesting via fallback turn"
+                            );
+                            let fallback_prompt = "Emit your <pr-summary> now (format is in your system prompt). \
+                                    Then emit <<BMAD_JOB_DONE>> on its own line.";
+                            state.add_user_message(fallback_prompt);
+                            let history = state.to_rig_messages();
+
+                            log_llm_request(
+                                "dev-session",
+                                turn + 1,
+                                "[pr-summary-fallback]",
+                                history.len(),
+                            );
+                            match agent
+                                .stream_chat(fallback_prompt, history, Some(&self.shutdown))
+                                .await
+                            {
+                                Ok(r) => {
+                                    log_llm_response("dev-session", turn + 1, &r);
+                                    state.add_assistant_message(&r);
+                                    let _ = state.save(&self.state_file_path).await;
+                                    match parse_pr_summary(&r) {
+                                        Some((ctx, test, info)) => {
+                                            tracing::info!(
+                                                action = "pr_summary_parsed",
+                                                story_key = %story.story_key,
+                                                "PR summary extracted from fallback turn"
+                                            );
+                                            (Some(ctx), Some(test), Some(info))
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                action = "pr_summary_parse_failed",
+                                                story_key = %story.story_key,
+                                                "PR summary fallback also failed — using defaults"
+                                            );
+                                            (None, None, None)
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log_llm_error("dev-session", turn + 1, &e);
+                                    tracing::warn!(
+                                        action = "pr_summary_fallback_failed",
+                                        error = %e,
+                                        story_key = %story.story_key,
+                                        "PR summary fallback turn failed — using defaults"
+                                    );
+                                    (None, None, None)
+                                }
                             }
-                            None => {
-                                tracing::warn!(
-                                    action = "pr_summary_parse_failed",
-                                    story_key = %story.story_key,
-                                    "No PR summary in completion message — using fallback"
-                                );
-                                (None, None, None)
-                            }
-                        };
+                        }
+                    };
 
                     // Write decisions file (best-effort)
                     self.write_decisions(story, &decision_log).await;

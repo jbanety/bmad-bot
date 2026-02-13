@@ -64,13 +64,13 @@ When you have fully completed your workflow (all tasks done, all tests passing, 
 
 <pr-summary>
 <context>
-(Summarize what was built and why, referencing the story requirements. Be specific about modules, functions, and patterns used. Use `###` subtitles if needed)
+(Summarize what was built and why, referencing the story requirements. Be specific about modules, functions, and patterns used. Use `###` headers)
 </context>
 <how-to-test>
-(Provide concrete commands and steps: specific test names to run, manual verification steps if applicable. Use `###` subtitles if needed)
+(Provide concrete commands and steps: specific test names to run, manual verification steps if applicable. Use `###` headers)
 </how-to-test>
 <additional-info>
-(Note design decisions made, dependencies added or removed, tech debt created, migration notes, caveats, or concerns. Use `###` subtitles if needed)
+(Note design decisions made, dependencies added or removed, tech debt created, migration notes, caveats, or concerns. Use `###` headers)
 </additional-info>
 </pr-summary>
 
