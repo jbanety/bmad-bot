@@ -388,6 +388,7 @@ impl ReviewRunner {
         let (activation_rig_history, _activation_chat_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
+                "_bmad/bmm/agents/dev.md",
                 "code-review",
                 Some(&self.shutdown),
             )

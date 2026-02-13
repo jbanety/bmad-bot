@@ -4,7 +4,8 @@
 //! creates a fresh BMAD Architect agent session. The daemon acts as a
 //! simulated human, driving a multi-turn conversation:
 //!
-//! 1. Send `"CH"` to enter free chat mode
+//! 0. Activate the agent by sending `architect.md` as a user message (BMAD activation)
+//! 1. Send `"Execute [CH]"` with English language override to enter free chat mode
 //! 2. Send `"Load the project context"` so the Architect loads docs via `ReadFile`
 //! 3. Send the developer's question — capture and return the Architect's answer
 //!
@@ -13,12 +14,16 @@
 use crate::config::BotConfig;
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
+use crate::session::dev_agent::build_preamble;
 use async_trait::async_trait;
 use rig::completion::Message;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::read_tool::ReadFile;
+
+/// Relative path from project root to the architect agent file.
+const ARCHITECT_AGENT_PATH: &str = "_bmad/bmm/agents/architect.md";
 
 // -----------------------------------------------------------------------
 // Error type
@@ -110,11 +115,10 @@ pub trait AnswerProvider: Send + Sync + std::fmt::Debug {
 /// Holds the configuration needed to create fresh BMAD Architect sessions on demand.
 ///
 /// Each `ask()` call creates a brand-new rig agent via [`AgentFactory`], drives a
-/// 3-turn conversation, and discards the session. No state is persisted between calls.
+/// 4-turn conversation (activation → CH → context → question), and discards the
+/// session. No state is persisted between calls.
 #[derive(Debug)]
 pub struct ArchitectSession {
-    /// Full content of `architect.md` — used as the agent preamble.
-    agent_file_content: String,
     /// Centralized agent construction factory.
     agent_factory: Arc<AgentFactory>,
     /// Project root path — for the ReadFile tool boundary.
@@ -145,27 +149,18 @@ impl ArchitectSession {
         config: &BotConfig,
         factory: Option<Arc<AgentFactory>>,
     ) -> Result<Self, ArchitectSessionError> {
-        // 1. Resolve path to architect.md
-        let agent_path =
-            PathBuf::from(&config.bmad_paths.project_root).join("_bmad/bmm/agents/architect.md");
+        // 1. Validate architect.md exists (fail-fast)
+        let agent_path = PathBuf::from(&config.bmad_paths.project_root).join(ARCHITECT_AGENT_PATH);
 
         let agent_path_str = agent_path.display().to_string();
 
-        // 2. Read the full agent file
-        let agent_file_content = std::fs::read_to_string(&agent_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                ArchitectSessionError::AgentFileNotFound {
-                    path: agent_path_str.clone(),
-                }
-            } else {
-                ArchitectSessionError::AgentFileReadFailed {
-                    path: agent_path_str.clone(),
-                    reason: e.to_string(),
-                }
-            }
-        })?;
+        if !agent_path.exists() {
+            return Err(ArchitectSessionError::AgentFileNotFound {
+                path: agent_path_str,
+            });
+        }
 
-        // 3. Create or use provided AgentFactory
+        // 2. Create or use provided AgentFactory
         let agent_factory = match factory {
             Some(f) => f,
             None => {
@@ -221,17 +216,16 @@ impl ArchitectSession {
             }
         };
 
-        // 4. Resolve project root
+        // 3. Resolve project root
         let project_root = PathBuf::from(&config.bmad_paths.project_root);
 
         Ok(Self {
-            agent_file_content,
             agent_factory,
             project_root,
         })
     }
 
-    /// Build the question message for Turn 3 of the Architect session.
+    /// Build the question message for the final turn of the Architect session.
     fn build_question_message(question: &str, context: Option<&str>) -> String {
         match context {
             Some(ctx) => format!(
@@ -244,26 +238,27 @@ impl ArchitectSession {
         }
     }
 
-    /// Drive a multi-turn chat with the given agent.
+    /// Drive a multi-turn chat with the given agent after activation.
     ///
-    /// Sends 3 turns: "CH" → "Load the project context" → question.
-    /// Returns the Architect's response from Turn 3.
+    /// Expects the agent to already be activated (activation history provided).
+    /// Sends 3 turns: "Execute [CH]" → "Load the project context" → question.
+    /// Returns the Architect's response from the question turn.
     async fn drive_conversation(
         agent: &BuiltAgent,
+        mut chat_history: Vec<Message>,
         question: &str,
         context: Option<&str>,
     ) -> Result<String, ArchitectSessionError> {
-        let mut chat_history: Vec<Message> = vec![];
-
-        // Turn 1: Enter free chat mode
+        // Turn 1: Enter free chat mode with English language override
+        let ch_msg = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [CH]";
         tracing::warn!(
             action = "supervisor_fallback",
             turn = 1,
             "Architect session turn — entering CH mode"
         );
-        log_llm_request("supervisor", 1, "CH", chat_history.len());
+        log_llm_request("supervisor", 1, ch_msg, chat_history.len());
         let response = agent
-            .stream_chat("CH", chat_history.clone(), None)
+            .stream_chat(ch_msg, chat_history.clone(), None)
             .await
             .map_err(|e| {
                 log_llm_error("supervisor", 1, &e);
@@ -273,7 +268,7 @@ impl ArchitectSession {
                 }
             })?;
         log_llm_response("supervisor", 1, &response);
-        chat_history.push(Message::user("CH"));
+        chat_history.push(Message::user(ch_msg));
         chat_history.push(Message::assistant(&response));
 
         // Turn 2: Load project context
@@ -345,14 +340,17 @@ impl AnswerProvider for ArchitectSession {
         context: Option<&str>,
     ) -> Result<String, ArchitectSessionError> {
         let read_tool = ReadFile::new(self.project_root.clone());
+        let project_root_str = self.project_root.display().to_string();
 
-        // Build the agent via AgentFactory — single call replaces 3-arm provider match.
-        // The architect uses only 1 tool (ReadFile) and its own preamble (architect.md content).
+        // Build the agent via AgentFactory with the generic preamble (tool rules,
+        // English override). The architect persona is sent as a user message during
+        // activation — same pattern as dev_agent.rs.
+        let preamble = build_preamble();
         let agent = self
             .agent_factory
             .build(
                 LlmRole::Supervisor,
-                &self.agent_file_content,
+                &preamble,
                 crate::configure_agent_tools!(read_tool),
             )
             .await
@@ -360,7 +358,17 @@ impl AnswerProvider for ArchitectSession {
                 reason: format!("Agent build failed: {e}"),
             })?;
 
-        Self::drive_conversation(&agent, question, context).await
+        // Activate: send architect.md as user message (BMAD activation flow)
+        let (activation_history, _chat_history) = agent
+            .activate_agent(&project_root_str, ARCHITECT_AGENT_PATH, "supervisor", None)
+            .await
+            .map_err(|e| ArchitectSessionError::ChatFailed {
+                turn: 0,
+                reason: format!("Agent activation failed: {e}"),
+            })?;
+
+        // Drive CH → context → question with the activated history
+        Self::drive_conversation(&agent, activation_history, question, context).await
     }
 }
 
@@ -527,6 +535,11 @@ mod tests {
         assert!(msg.contains("How should I handle auth?"));
         assert!(msg.contains("Additional context"));
         assert!(msg.contains("JWT tokens"));
+    }
+
+    #[test]
+    fn test_architect_agent_path_constant() {
+        assert_eq!(ARCHITECT_AGENT_PATH, "_bmad/bmm/agents/architect.md");
     }
 
     #[tokio::test]

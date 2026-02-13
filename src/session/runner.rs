@@ -993,6 +993,7 @@ impl SessionRunner {
         let (mut activation_history, mut compressed_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
+                "_bmad/bmm/agents/dev.md",
                 "dev-recovery",
                 Some(&self.shutdown),
             )
@@ -1175,6 +1176,7 @@ impl SessionRunner {
                     match agent
                         .activate_agent(
                             &self.config.bmad_paths.project_root,
+                            "_bmad/bmm/agents/dev.md",
                             "dev-session",
                             Some(&self.shutdown),
                         )
@@ -1318,6 +1320,7 @@ impl SessionRunner {
                     let (activation_rig_history, activation_chat_history) = match agent
                         .activate_agent(
                             &self.config.bmad_paths.project_root,
+                            "_bmad/bmm/agents/dev.md",
                             "dev-recovery",
                             Some(&self.shutdown),
                         )

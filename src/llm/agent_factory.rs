@@ -113,28 +113,54 @@ impl BuiltAgent {
         }
     }
 
-    /// Activate the BMAD dev agent by sending the agent file as the first user message.
+    /// Activate a BMAD agent by sending the agent file as the first user message.
     ///
     /// Thin wrapper around [`crate::session::dev_agent::activate_agent()`] that
     /// dispatches to the correct concrete agent type.
+    ///
+    /// # Arguments
+    /// - `project_root` — path to the project root
+    /// - `agent_relative_path` — relative path from project root to the agent file
+    ///   (e.g. `"_bmad/bmm/agents/dev.md"` or `"_bmad/bmm/agents/architect.md"`)
+    /// - `label` — logging label (e.g. `"dev-session"`, `"code-review"`, `"supervisor"`)
+    /// - `shutdown` — optional cooperative shutdown flag
     pub async fn activate_agent(
         &self,
         project_root: &str,
+        agent_relative_path: &str,
         label: &str,
         shutdown: Option<&ShutdownFlag>,
     ) -> Result<(Vec<Message>, Vec<crate::session::state::ChatMessage>), String> {
         match self {
             Self::Anthropic(agent) => {
-                crate::session::dev_agent::activate_agent(agent, project_root, label, shutdown)
-                    .await
+                crate::session::dev_agent::activate_agent(
+                    agent,
+                    project_root,
+                    agent_relative_path,
+                    label,
+                    shutdown,
+                )
+                .await
             }
             Self::OpenAiResponses(agent) => {
-                crate::session::dev_agent::activate_agent(agent, project_root, label, shutdown)
-                    .await
+                crate::session::dev_agent::activate_agent(
+                    agent,
+                    project_root,
+                    agent_relative_path,
+                    label,
+                    shutdown,
+                )
+                .await
             }
             Self::OpenAiCompletions(agent) => {
-                crate::session::dev_agent::activate_agent(agent, project_root, label, shutdown)
-                    .await
+                crate::session::dev_agent::activate_agent(
+                    agent,
+                    project_root,
+                    agent_relative_path,
+                    label,
+                    shutdown,
+                )
+                .await
             }
         }
     }

@@ -159,24 +159,27 @@ where
     Ok(acc)
 }
 
-/// Activate the BMAD dev agent by sending the agent file as the first user message.
+/// Activate a BMAD agent by sending the agent file as the first user message.
 ///
 /// Returns `(rig_history, chat_history)` — the rig `Message` vec for subsequent
 /// `streaming_chat` calls and the `ChatMessage` vec for WAL state persistence.
 ///
-/// The LLM receives the full `dev.md` content as a Zed-style XML context user
+/// The LLM receives the full agent file content as a Zed-style XML context user
 /// message, processes the activation steps (loads `config.yaml` via tools, reads
 /// the story file, shows the greeting and menu), and is then ready to accept
-/// commands like `"DS"` or `"CR"`.
+/// commands like `"DS"`, `"CR"`, or `"CH"`.
 ///
 /// # Arguments
 /// - `agent` — the built rig agent (with preamble and tools already attached)
-/// - `project_root` — path to the project root (used to locate `_bmad/bmm/agents/dev.md`)
-/// - `label` — logging label (e.g. `"dev-session"`, `"code-review"`, `"dev-recovery"`)
+/// - `project_root` — path to the project root
+/// - `agent_relative_path` — relative path from project root to the agent file
+///   (e.g. `"_bmad/bmm/agents/dev.md"` or `"_bmad/bmm/agents/architect.md"`)
+/// - `label` — logging label (e.g. `"dev-session"`, `"code-review"`, `"supervisor"`)
 /// - `shutdown` — optional shutdown flag for cooperative cancellation
 pub async fn activate_agent<A, M>(
     agent: &A,
     project_root: &str,
+    agent_relative_path: &str,
     label: &str,
     shutdown: Option<&ShutdownFlag>,
 ) -> Result<(Vec<Message>, Vec<ChatMessage>), String>
@@ -185,7 +188,7 @@ where
     M: CompletionModel + 'static,
     M::StreamingResponse: Clone + Unpin + GetTokenUsage,
 {
-    let agent_path = Path::new(project_root).join("_bmad/bmm/agents/dev.md");
+    let agent_path = Path::new(project_root).join(agent_relative_path);
 
     // Build Zed-style XML context message via ContextBuilder helper.
     // This reads the file, resolves to absolute path, and wraps in
@@ -199,11 +202,11 @@ where
     let mut rig_history: Vec<Message> = vec![];
     let mut chat_history: Vec<ChatMessage> = vec![];
 
-    // Send dev.md wrapped in XML context tags — triggers BMAD activation flow
+    // Send agent file wrapped in XML context tags — triggers BMAD activation flow
     log_llm_request(
         label,
         0,
-        "[agent activation: dev.md in context tags]",
+        &format!("[agent activation: {agent_relative_path} in context tags]"),
         rig_history.len(),
     );
     let response = streaming_chat(
