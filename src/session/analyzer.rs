@@ -897,6 +897,8 @@ mod tests {
         let analyzer = ResponseAnalyzer::new();
         let slot = empty_slot();
 
+        // When the agent mentions "run code-review", it means the dev session
+        // is done and it's time for review — this IS a completion signal.
         let responses = vec![
             "💡 **Tip:** For best results, run `code-review` using a different LLM.",
             "You should run code-review now.",

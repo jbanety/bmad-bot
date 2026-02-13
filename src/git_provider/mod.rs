@@ -38,11 +38,29 @@ pub enum GitProviderError {
         reason: String,
     },
 
-    /// Source branch doesn't exist on remote (often 422 from GitHub — likely means branch was never pushed).
+    /// Source or target branch doesn't exist on remote, or no commits between them.
     #[error("Branch not found: {branch}")]
     BranchNotFound {
-        /// The branch that was not found.
+        /// The branch that was not found or the validation message.
         branch: String,
+    },
+
+    /// A pull request already exists for this source → target branch combination.
+    #[error("PR already exists for branch '{branch}': {details}")]
+    DuplicatePr {
+        /// The source branch that already has an open PR.
+        branch: String,
+        /// Detail message from the API (e.g. "A pull request already exists for ...").
+        details: String,
+    },
+
+    /// GitHub 422 validation error that doesn't match known patterns.
+    #[error("Validation failed (HTTP 422): {message}")]
+    ValidationFailed {
+        /// The top-level message from the API.
+        message: String,
+        /// Raw error details from the API response (JSON array as string).
+        details: String,
     },
 
     /// Rate limit exceeded (429).
@@ -415,6 +433,28 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("not-a-number"));
         assert!(display.contains("Invalid PR ID"));
+    }
+
+    #[test]
+    fn test_git_provider_error_display_duplicate_pr() {
+        let err = GitProviderError::DuplicatePr {
+            branch: "story/7-1".into(),
+            details: "A pull request already exists for jbanety:story/7-1".into(),
+        };
+        let display = format!("{err}");
+        assert!(display.contains("story/7-1"));
+        assert!(display.contains("already exists"));
+    }
+
+    #[test]
+    fn test_git_provider_error_display_validation_failed() {
+        let err = GitProviderError::ValidationFailed {
+            message: "Validation Failed".into(),
+            details: r#"{"resource":"PullRequest","code":"custom","message":"some error"}"#.into(),
+        };
+        let display = format!("{err}");
+        assert!(display.contains("Validation failed"));
+        assert!(display.contains("422"));
     }
 
     #[test]

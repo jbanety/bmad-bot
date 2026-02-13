@@ -155,15 +155,23 @@ const ACTIVATION_BACKOFF_BASE_SECS: u64 = 5;
 /// case-insensitive to handle inconsistent casing across provider SDKs.
 /// Parse a structured PR summary from the agent's response.
 ///
-/// Expects XML-style tags: `<pr-summary>`, `<context>`, `<how-to-test>`, `<additional-info>`.
-/// Returns `Some((context, how_to_test, additional_info))` if all three sections are found,
-/// or `None` if any section is missing or the input doesn't contain the expected format.
+/// Preferred format uses XML sub-tags inside `<pr-summary>`:
+/// `<context>`, `<how-to-test>`, `<additional-info>`.
+///
+/// **Lenient fallback:** If `<pr-summary>` is present but the sub-tags are
+/// missing (common after long contexts where the agent forgets the exact
+/// format), the raw content between `<pr-summary>...</pr-summary>` is used
+/// as the `context` field, with empty strings for the other two fields.
+///
+/// Returns `None` only if `<pr-summary>` itself is absent.
 ///
 /// Uses regex with dotall mode (`(?s)`) so `.` matches newlines within tag content.
 pub fn parse_pr_summary(response: &str) -> Option<(String, String, String)> {
     use regex::Regex;
     use std::sync::LazyLock;
 
+    static RE_PR_SUMMARY: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?si)<pr-summary>(.*?)</pr-summary>").unwrap());
     static RE_CONTEXT: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?si)<context>(.*?)</context>").unwrap());
     static RE_HOW_TO_TEST: LazyLock<Regex> =
@@ -171,30 +179,41 @@ pub fn parse_pr_summary(response: &str) -> Option<(String, String, String)> {
     static RE_ADDITIONAL_INFO: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?si)<additional-info>(.*?)</additional-info>").unwrap());
 
-    let context = RE_CONTEXT
-        .captures(response)?
-        .get(1)?
-        .as_str()
-        .trim()
-        .to_string();
-    let how_to_test = RE_HOW_TO_TEST
-        .captures(response)?
-        .get(1)?
-        .as_str()
-        .trim()
-        .to_string();
-    let additional_info = RE_ADDITIONAL_INFO
-        .captures(response)?
-        .get(1)?
-        .as_str()
-        .trim()
-        .to_string();
+    // Outer <pr-summary> tag is mandatory
+    let summary_block = RE_PR_SUMMARY.captures(response)?.get(1)?.as_str().trim();
 
-    if context.is_empty() || how_to_test.is_empty() || additional_info.is_empty() {
+    if summary_block.is_empty() {
         return None;
     }
 
-    Some((context, how_to_test, additional_info))
+    // Try to extract structured sub-tags
+    let context = RE_CONTEXT
+        .captures(summary_block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .unwrap_or_default();
+    let how_to_test = RE_HOW_TO_TEST
+        .captures(summary_block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .unwrap_or_default();
+    let additional_info = RE_ADDITIONAL_INFO
+        .captures(summary_block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .unwrap_or_default();
+
+    // If all sub-tags are present, use them
+    if !context.is_empty() {
+        return Some((context, how_to_test, additional_info));
+    }
+
+    // Lenient fallback: no sub-tags, use raw content as context
+    tracing::debug!(
+        action = "pr_summary_lenient_parse",
+        "No sub-tags found in <pr-summary> — using raw content as context"
+    );
+    Some((summary_block.to_string(), String::new(), String::new()))
 }
 
 fn is_context_limit_error(error_msg: &str) -> bool {
@@ -1531,9 +1550,19 @@ impl SessionRunner {
                                 story_key = %story.story_key,
                                 "No PR summary in completion message — requesting via fallback turn"
                             );
-                            let fallback_prompt = "Emit your <pr-summary> now (format is in your system prompt). \
-                                    Then emit <<BMAD_JOB_DONE>> on its own line.";
-                            state.add_user_message(fallback_prompt);
+                            let fallback_prompt = format!(
+                                "STOP. Do NOT use any tools. Do NOT start a new workflow. \
+                                Just reply with text.\n\n\
+                                You just completed story {}. Summarize your work using this exact format:\n\n\
+                                <pr-summary>\n\
+                                <context>\n(What was built and why)\n</context>\n\
+                                <how-to-test>\n(Commands to verify: cargo test, specific test names)\n</how-to-test>\n\
+                                <additional-info>\n(Design decisions, deps added, caveats)\n</additional-info>\n\
+                                </pr-summary>\n\n\
+                                <<BMAD_JOB_DONE>>",
+                                story.story_key
+                            );
+                            state.add_user_message(&fallback_prompt);
                             let history = state.to_rig_messages();
 
                             log_llm_request(
@@ -1543,7 +1572,7 @@ impl SessionRunner {
                                 history.len(),
                             );
                             match agent
-                                .stream_chat(fallback_prompt, history, Some(&self.shutdown))
+                                .stream_chat(&fallback_prompt, history, Some(&self.shutdown))
                                 .await
                             {
                                 Ok(r) => {
@@ -2710,17 +2739,42 @@ mock providers, and helper utilities.
     }
 
     #[test]
-    fn test_parse_pr_summary_missing_sections() {
+    fn test_parse_pr_summary_missing_sections_uses_lenient_fallback() {
+        // With lenient parsing, <pr-summary> with only <context> is valid:
+        // context is extracted, how_to_test and additional_info default to empty.
         let input = r#"<pr-summary>
 <context>
 Only context is present.
 </context>
 </pr-summary>"#;
         let result = parse_pr_summary(input);
-        assert!(
-            result.is_none(),
-            "Should return None when sections are missing"
-        );
+        assert!(result.is_some(), "Should parse with lenient fallback");
+        let (ctx, test, info) = result.unwrap();
+        assert_eq!(ctx, "Only context is present.");
+        assert!(test.is_empty(), "how_to_test should be empty");
+        assert!(info.is_empty(), "additional_info should be empty");
+    }
+
+    #[test]
+    fn test_parse_pr_summary_no_subtags_uses_raw_content() {
+        // Agent forgot the sub-tags entirely — raw content becomes context.
+        let input = r#"<pr-summary>
+Implemented story 7-1. All tests pass. No code changes were made.
+</pr-summary>"#;
+        let result = parse_pr_summary(input);
+        assert!(result.is_some(), "Should parse raw content as context");
+        let (ctx, test, info) = result.unwrap();
+        assert!(ctx.contains("Implemented story 7-1"));
+        assert!(test.is_empty());
+        assert!(info.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pr_summary_no_outer_tag_returns_none() {
+        // No <pr-summary> at all → None
+        let input = "<context>Some context</context>";
+        let result = parse_pr_summary(input);
+        assert!(result.is_none(), "Should return None without <pr-summary>");
     }
 
     #[test]
