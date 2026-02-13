@@ -122,7 +122,7 @@ impl BuiltAgent {
         project_root: &str,
         label: &str,
         shutdown: Option<&ShutdownFlag>,
-    ) -> Result<(Vec<Message>, Vec<crate::session::state::ChatMessage>), String> {
+    ) -> Result<(Vec<Message>, Vec<crate::session::ChatMessage>), String> {
         match self {
             Self::Anthropic(agent) => {
                 crate::session::dev_agent::activate_agent(agent, project_root, label, shutdown)

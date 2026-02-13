@@ -14,7 +14,7 @@
 //! guard. When the log level is not active, the cost is a function call plus
 //! a single atomic load (~1ns) — no formatting, no allocation, no real work.
 
-use crate::session::state::ChatMessage;
+use crate::session::ChatMessage;
 
 /// Target used for all LLM payload log events.
 ///
