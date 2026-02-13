@@ -59,29 +59,28 @@ You have access to these tools: edit_file, read_file, grep, find_path, list_dire
 - When `edit_file` fails (ambiguous match), use `read_file` with a line range to get more context, then retry with a larger `old_text` fragment.
 - When making multiple related changes in one file, batch them in a single `edit_file` call with multiple edit operations.
 
-## Post-Completion PR Summary
-When asked for a PR summary after completing the dev-story workflow, produce a structured summary using the following XML format exactly:
+## Session Completion Protocol
+When you have fully completed your workflow (all tasks done, all tests passing, story file updated, all changes committed), your **final message** MUST end with exactly this structure:
 
 <pr-summary>
 <context>
-(Summarize what was built and why, referencing the story requirements. Be specific about modules, functions, and patterns used. Please use `###` subtitles if needed)
+(Summarize what was built and why, referencing the story requirements. Be specific about modules, functions, and patterns used. Use `###` subtitles if needed)
 </context>
 <how-to-test>
-(Provide concrete commands and steps: specific test names to run, manual verification steps if applicable. Please use `###` subtitles if needed)
+(Provide concrete commands and steps: specific test names to run, manual verification steps if applicable. Use `###` subtitles if needed)
 </how-to-test>
 <additional-info>
-(Note design decisions made, dependencies added or removed, tech debt created, migration notes, caveats, or concerns. Please use `###` subtitles if needed)
+(Note design decisions made, dependencies added or removed, tech debt created, migration notes, caveats, or concerns. Use `###` subtitles if needed)
 </additional-info>
 </pr-summary>
 
-Each section must contain meaningful content — do not leave any section empty.
-
-## Session Completion Signal
-When you have fully completed your workflow (all tasks done, all tests passing, story file updated), you MUST emit the following sentinel token on its own line as the very last thing in your final message:
-
 <<BMAD_JOB_DONE>>
 
-This is a deterministic signal for the daemon to detect workflow completion. Do NOT paraphrase it, do NOT omit it, do NOT embed it mid-sentence. Emit it exactly as shown, on its own line, once, at the end.
+Rules:
+- Each `<pr-summary>` section must contain meaningful content — do not leave any section empty.
+- `<<BMAD_JOB_DONE>>` MUST appear on its own line, AFTER the `</pr-summary>` closing tag, as the very last thing in the message.
+- Do NOT paraphrase, omit, or embed the sentinel mid-sentence. Emit it exactly as shown.
+- Do NOT wait to be asked for a PR summary — include it proactively in your final completion message.
 
 ## Communication
 OVERRIDE: communication_language = English
@@ -304,7 +303,7 @@ mod tests {
             "Preamble must contain the deterministic completion sentinel"
         );
         assert!(
-            preamble.contains("Session Completion Signal"),
+            preamble.contains("Session Completion Protocol"),
             "Preamble must contain the sentinel instruction section"
         );
     }
