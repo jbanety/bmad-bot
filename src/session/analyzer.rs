@@ -1,14 +1,14 @@
 //! Response analyzer — pattern-matching engine for LLM agent responses.
 //!
 //! The [`ResponseAnalyzer`] examines each agent response and determines the
-//! appropriate [`ResponseAction`] for the session chat loop. It uses simple
-//! case-insensitive substring matching (and a few regex patterns) with a strict
-//! priority order to handle workflow-level interactions (confirmations,
-//! completion signals, escalations).
+//! appropriate [`ResponseAction`] for the session chat loop. It uses a
+//! deterministic sentinel token (`<<BMAD_JOB_DONE>>`) as the primary completion
+//! signal, with case-insensitive substring matching (and a few regex patterns)
+//! as fallback, in a strict priority order.
 //!
-//! **Design principle:** The analyzer is deliberately simple — the rule engine
-//! in the supervisor handles complex pattern matching. The analyzer only needs
-//! to handle workflow-level interactions between the daemon and the BMAD agent.
+//! **Design principle:** The sentinel token is injected in the system preamble
+//! and provides a model-agnostic, deterministic completion signal. The fuzzy
+//! patterns are kept as a safety net for models that ignore the instruction.
 
 use crate::supervisor::EscalationSlot;
 use regex::Regex;
@@ -38,6 +38,14 @@ pub enum ResponseAction {
     /// forward-compatibility with rig streaming APIs.
     NoReply,
 }
+
+/// Deterministic sentinel token emitted by the agent when its workflow is done.
+///
+/// Injected in the system preamble (`dev_agent::build_preamble`). The agent is
+/// instructed to emit this exact string on its own line as the last thing in
+/// its final message. This is checked at **priority 0** — before any fuzzy
+/// pattern matching — so it works identically across all LLM providers/models.
+pub const JOB_DONE_SENTINEL: &str = "<<BMAD_JOB_DONE>>";
 
 /// Review completion patterns (case-insensitive).
 ///
@@ -163,9 +171,10 @@ const STORY_SELECTION_PATTERNS: &[&str] = &[
 /// Stateless response analyzer for the session chat loop.
 ///
 /// Examines agent responses using a strict priority order:
-/// 1. Escalation (slot check) — highest priority
+/// 0. **Sentinel** — `<<BMAD_JOB_DONE>>` deterministic token (model-agnostic)
+/// 1. Escalation (slot check)
 ///    - 1.5. Review completion detection (`REVIEW_COMPLETE_PATTERNS`)
-/// 2. Completion signals (dev-session)
+/// 2. Completion signals (dev-session) — fuzzy fallback
 /// 3. Confirmation/proceed requests
 /// 4. Step-by-step detection
 /// 5. YOLO/batch mode questions
@@ -204,6 +213,19 @@ impl ResponseAnalyzer {
         escalation_slot: &EscalationSlot,
         story_key: &str,
     ) -> ResponseAction {
+        // Priority 0: Deterministic sentinel check (model-agnostic)
+        if response.contains(JOB_DONE_SENTINEL) {
+            tracing::debug!(
+                action = "response_analysis",
+                priority = 0,
+                result = "sentinel_completed",
+                sentinel = JOB_DONE_SENTINEL,
+                "{} sentinel detected",
+                JOB_DONE_SENTINEL
+            );
+            return ResponseAction::Completed;
+        }
+
         // Priority 1: Escalation check
         {
             let guard = escalation_slot.lock().expect("escalation slot lock");
@@ -373,6 +395,98 @@ mod tests {
             question: "What ORM should we use?".to_string(),
             reason: "Architect session failed".to_string(),
         })))
+    }
+
+    #[test]
+    fn test_analyzer_detects_sentinel_completion() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // Sentinel on its own line at the end (expected usage)
+        let response = "All done.\n\n<<BMAD_JOB_DONE>>";
+        assert_eq!(
+            analyzer.analyze(response, &slot, "1-1-test"),
+            ResponseAction::Completed,
+            "Sentinel on its own line should trigger Completed"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_sentinel_embedded_in_text() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // Sentinel embedded mid-message (not ideal but still valid)
+        let response = "Story is done. <<BMAD_JOB_DONE>> That's all.";
+        assert_eq!(
+            analyzer.analyze(response, &slot, "1-1-test"),
+            ResponseAction::Completed,
+            "Sentinel embedded in text should still trigger Completed"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_sentinel_with_surrounding_whitespace() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        let response = "Summary of work done:\n\n  <<BMAD_JOB_DONE>>  \n";
+        assert_eq!(
+            analyzer.analyze(response, &slot, "1-1-test"),
+            ResponseAction::Completed,
+        );
+    }
+
+    #[test]
+    fn test_analyzer_sentinel_takes_priority_over_escalation() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = filled_slot();
+
+        // Sentinel (priority 0) should beat escalation (priority 1)
+        let response = "<<BMAD_JOB_DONE>>";
+        assert_eq!(
+            analyzer.analyze(response, &slot, "1-1-test"),
+            ResponseAction::Completed,
+            "Sentinel at priority 0 should take precedence over escalation at priority 1"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_sentinel_takes_priority_over_proceed() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // Both sentinel and proceed pattern present — sentinel wins
+        let response = "Should I proceed?\n\n<<BMAD_JOB_DONE>>";
+        assert_eq!(
+            analyzer.analyze(response, &slot, "1-1-test"),
+            ResponseAction::Completed,
+            "Sentinel should take priority over proceed patterns"
+        );
+    }
+
+    #[test]
+    fn test_analyzer_no_false_positive_sentinel() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // Partial matches should NOT trigger
+        let non_sentinels = vec![
+            "BMAD_JOB_DONE",
+            "<<BMAD_JOB_DONE",
+            "BMAD_JOB_DONE>>",
+            "<BMAD_JOB_DONE>",
+            "<<bmad_job_done>>",
+        ];
+
+        for response in non_sentinels {
+            let action = analyzer.analyze(response, &slot, "1-1-test");
+            assert_ne!(
+                action,
+                ResponseAction::Completed,
+                "Should NOT match partial/wrong-case sentinel: {response}"
+            );
+        }
     }
 
     #[test]

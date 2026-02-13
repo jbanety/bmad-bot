@@ -64,17 +64,24 @@ When asked for a PR summary after completing the dev-story workflow, produce a s
 
 <pr-summary>
 <context>
-(Summarize what was built and why, referencing the story requirements. Be specific about modules, functions, and patterns used.)
+(Summarize what was built and why, referencing the story requirements. Be specific about modules, functions, and patterns used. Please use `###` subtitles if needed)
 </context>
 <how-to-test>
-(Provide concrete commands and steps: `cargo test`, specific test names to run, manual verification steps if applicable.)
+(Provide concrete commands and steps: specific test names to run, manual verification steps if applicable. Please use `###` subtitles if needed)
 </how-to-test>
 <additional-info>
-(Note design decisions made, dependencies added or removed, tech debt created, migration notes, caveats, or concerns.)
+(Note design decisions made, dependencies added or removed, tech debt created, migration notes, caveats, or concerns. Please use `###` subtitles if needed)
 </additional-info>
 </pr-summary>
 
 Each section must contain meaningful content — do not leave any section empty.
+
+## Session Completion Signal
+When you have fully completed your workflow (all tasks done, all tests passing, story file updated), you MUST emit the following sentinel token on its own line as the very last thing in your final message:
+
+<<BMAD_JOB_DONE>>
+
+This is a deterministic signal for the daemon to detect workflow completion. Do NOT paraphrase it, do NOT omit it, do NOT embed it mid-sentence. Emit it exactly as shown, on its own line, once, at the end.
 
 ## Communication
 OVERRIDE: communication_language = English
@@ -286,6 +293,19 @@ mod tests {
         assert!(
             !preamble.contains("Amelia"),
             "Preamble should not contain agent persona name"
+        );
+    }
+
+    #[test]
+    fn test_build_preamble_contains_job_done_sentinel() {
+        let preamble = build_preamble();
+        assert!(
+            preamble.contains("<<BMAD_JOB_DONE>>"),
+            "Preamble must contain the deterministic completion sentinel"
+        );
+        assert!(
+            preamble.contains("Session Completion Signal"),
+            "Preamble must contain the sentinel instruction section"
         );
     }
 
