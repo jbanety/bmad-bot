@@ -137,6 +137,11 @@ fn is_transient_llm_error(error: &str) -> bool {
         || lower.contains("connection reset")
         || lower.contains("connection refused")
         || lower.contains("try again later")
+        || lower.contains("error decoding response body")
+        || lower.contains("unexpected eof")
+        || lower.contains("sse error")
+        || lower.contains("broken pipe")
+        || lower.contains("connection closed")
 }
 
 /// Maximum number of retries for transient LLM errors during activation.
@@ -2679,6 +2684,21 @@ mod tests {
         assert!(!is_transient_llm_error("HTTP 401 Unauthorized"));
         assert!(!is_transient_llm_error("Bad credentials"));
         assert!(!is_transient_llm_error("Authentication failed"));
+    }
+
+    #[test]
+    fn test_is_transient_llm_error_decode_and_sse_errors() {
+        assert!(is_transient_llm_error(
+            "CompletionError: ResponseError: CompletionError: ProviderError: Http client error: error decoding response body"
+        ));
+        assert!(is_transient_llm_error(
+            "unexpected EOF during chunk size line"
+        ));
+        assert!(is_transient_llm_error("SSE error: connection dropped"));
+        assert!(is_transient_llm_error("Broken pipe"));
+        assert!(is_transient_llm_error(
+            "connection closed before message completed"
+        ));
     }
 
     #[test]
