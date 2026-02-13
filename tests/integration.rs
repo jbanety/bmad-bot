@@ -9,3 +9,5 @@ mod helpers;
 mod test_fixtures;
 #[path = "integration/test_mocks.rs"]
 mod test_mocks;
+#[path = "integration/test_watcher.rs"]
+mod test_watcher;
