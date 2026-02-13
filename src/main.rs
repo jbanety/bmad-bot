@@ -1,18 +1,12 @@
 #![deny(clippy::all)]
-#![warn(dead_code)] // FIXME: Change to #![deny(dead_code)] once all modules have real implementations
+#![warn(dead_code)]
 
-mod auth;
 mod cli;
-mod config;
-mod git_provider;
-mod llm;
-mod notifier;
-mod pipeline;
-mod review;
-mod session;
-mod supervisor;
-mod tools;
-mod watcher;
+
+// All non-CLI modules are declared in lib.rs (the library crate).
+// Re-export them so `crate::config`, `crate::auth` etc. remain
+// visible to the `cli` submodule without changing its imports.
+pub use bmad_bot::*;
 
 use anyhow::Result;
 use clap::Parser;
