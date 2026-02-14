@@ -1,6 +1,6 @@
 # Story 7.1: Integration Test Infrastructure & Fixtures
 
-Status: review
+Status: done
 
 ## Story
 
@@ -80,6 +80,7 @@ So that all integration tests can be written concisely and consistently.
   - [x] 6.6 `create_test_repo(dir)` — initializes git repo with initial commit via Git CLI (`git init`, `git commit`)
 
 - [x] Task 7: Write self-verification tests (AC: #3)
+  - [x] Updated `MockSessionRunner::check_and_recover_wal` to return `Option<RecoveryInfo>` to match production signature
   - [x] 7.1 Test `MockGitProvider` returns configured values and tracks calls
   - [x] 7.2 Test `MockNotifier` captures notifications correctly
   - [x] 7.3 Test `MockSessionRunner` returns configured outcomes

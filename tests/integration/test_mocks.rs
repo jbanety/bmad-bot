@@ -1,7 +1,6 @@
 //! Self-verification tests for mock implementations.
 
 use crate::helpers::mocks::*;
-use async_trait::async_trait;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, RunSummary, StoryNotification, StoryStatus};
 use bmad_bot::review::ReviewOutcome;
