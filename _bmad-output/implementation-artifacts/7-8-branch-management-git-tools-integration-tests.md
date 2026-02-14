@@ -149,7 +149,7 @@ If `helpers/` doesn't exist yet, create a minimal `tests/integration/helpers/mod
 
 | Function | Module | Sync/Async | Signature Summary |
 |----------|--------|-----------|-------------------|
-| `determine_base_branch` | `session::branch` (L89) | **Sync** | `(story: &StoryInfo, repo: &Repository, default: &str) -> String` |
+| `determine_base_branch` | `session::branch` (L104) | **Sync** | `(story: &StoryInfo, repo_path: &Path, default_branch: &str) -> String` |
 | `ensure_story_branch` | `session::branch` (L146) | **Sync** | `(path: &Path, branch: &str, base: &str) -> Result<BranchAction, BranchError>` |
 | `preserve_partial_work` | `session::cleanup` (L38) | **Async** | `(path: &Path, key: &str, question: &str) -> String` |
 | `GitTool::new` | `tools::git` (L93) | Sync | `(repo_path: PathBuf) -> Self` |
@@ -159,7 +159,7 @@ If `helpers/` doesn't exist yet, create a minimal `tests/integration/helpers/mod
 
 #### API Behavior Notes
 
-**`determine_base_branch` takes `&Repository`, NOT `&Path`.** The test must open the repo via `git2::Repository::open(path)` before calling. In contrast, `ensure_story_branch` takes a `&Path` and opens the repo internally.
+**`determine_base_branch` takes `&Path`, NOT `&Repository`.** Post git2→CLI migration (Story 4.4), all branch functions operate on paths directly. No need to open a git2 repository object. Both `determine_base_branch` and `ensure_story_branch` take `&Path`.
 
 **`preserve_partial_work` NEVER returns an error.** It returns a `String` summary — always. On failure, it returns a fallback message like `"Preservation failed — could not open repo: ..."`. Tests must assert on string content (`summary.contains("WIP commit: yes")`) — there is no `Result` to unwrap.
 
@@ -200,26 +200,30 @@ args.branch = Some("story/1-2-cli".to_string());
 
 The public constructor `StoryInfo::from_key_and_status(key, status, story_dir)` (L96-137 in `watcher/mod.rs`) always sets `dependencies: Vec::new()`. It **cannot** specify dependencies. Using it for AC #3/#4 tests will silently produce a story with no deps, making `determine_base_branch` always return `"main"`. Use the manual `make_story` helper below instead.
 
-#### Git2 Temp Repo Setup Pattern
+#### Git CLI Temp Repo Setup Pattern
 
-All tests use this pattern (matches existing unit tests in `branch.rs`):
+> **Post Story 4.4:** `git2` has been removed from the project entirely. All git operations — including test fixtures — use Git CLI subprocess calls.
+
+All tests use this pattern (aligned with production code post Story 4.4):
 
 ```rust
-fn init_test_repo(dir: &Path) -> git2::Repository {
-    let repo = git2::Repository::init(dir).expect("git init");
-    // Create initial commit (git2 needs at least one commit for branch ops)
-    let sig = git2::Signature::now("test", "test@test.com").expect("sig");
-    let tree_id = repo.index().expect("index").write_tree().expect("write tree");
-    let tree = repo.find_tree(tree_id).expect("find tree");
-    repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[]).expect("commit");
-    // Ensure "main" branch exists (default might be "master")
-    let head_commit = repo.head().expect("head").peel_to_commit().expect("commit");
-    if repo.find_branch("main", git2::BranchType::Local).is_err() {
-        repo.branch("main", &head_commit, false).expect("create main");
-    }
-    repo.set_head("refs/heads/main").expect("set head");
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force())).expect("checkout");
-    repo
+fn init_test_repo(dir: &Path) {
+    use std::process::Command;
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed");
+        assert!(output.status.success(), "git {} failed: {}",
+            args.join(" "), String::from_utf8_lossy(&output.stderr));
+    };
+    run(&["init"]);
+    run(&["config", "user.email", "test@test.com"]);
+    run(&["config", "user.name", "Test"]);
+    run(&["commit", "--allow-empty", "-m", "initial commit"]);
+    // Ensure "main" branch exists (default might be "master" depending on git config)
+    run(&["branch", "-M", "main"]);
 }
 ```
 
@@ -259,9 +263,9 @@ All stories 7.1–7.7 have been created as `ready-for-dev` context stories but *
 
 2. **Test file naming convention:** `test_{module_name}.rs` (e.g., `test_config.rs`, `test_watcher.rs`, `test_notifier.rs`). For this story: `test_branch_git.rs`.
 
-3. **Mock infrastructure (7.1):** `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner` — these are NOT needed for Story 7.8. Branch management and git tool tests use **real git2 operations on temp repos** (no mocking needed).
+3. **Mock infrastructure (7.1):** `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner` — these are NOT needed for Story 7.8. Branch management and git tool tests use **real Git CLI operations on temp repos** (no mocking needed).
 
-4. **Story 7.6 (Git Provider)** tests PR creation via mock HTTP — different from this story which tests local git operations via git2. No overlap.
+4. **Story 7.6 (Git Provider)** tests PR creation via mock HTTP — different from this story which tests local git operations via Git CLI subprocess. No overlap.
 
 5. **Helpers pattern:** If Story 7.1 is implemented first, `tests/integration/helpers/fixtures.rs` will contain `create_test_repo()` and `make_test_story()`. If not, this story should create them inline or in a local helper.
 
@@ -286,7 +290,6 @@ e10c275 docs(stories): create story 7-2 config startup validation integration te
 ### Dependencies Required
 
 All already present in `Cargo.toml`:
-- `git2 = "0.20"` — main dependency for all git operations (branch, commit, checkout, status)
 - `tempfile = "3"` — dev-dependency for isolated temp directories
 - `tokio` with `full` features — for async tests (`preserve_partial_work`, `GitTool::call`)
 - `rig-core = "0.30"` — needed for `use rig::tool::Tool;` to call `GitTool::call()` in tests
@@ -303,6 +306,8 @@ use bmad_bot::session::cleanup::preserve_partial_work;
 use bmad_bot::tools::git::{GitTool, GitToolArgs};
 use bmad_bot::watcher::StoryInfo;
 use rig::tool::Tool; // REQUIRED — without this, GitTool::call() won't resolve
+use std::path::Path;
+use std::process::Command;
 use tempfile::TempDir;
 ```
 
@@ -332,18 +337,18 @@ tests/
 - **Isolation:** Every test creates its own `tempfile::tempdir()` — no shared state between tests
 - **Naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert, always in that order
-- **No real APIs:** All tests use real git2 on temp repos (fast, deterministic, no network)
+- **No real APIs:** All tests use real Git CLI on temp repos (fast, deterministic, no network)
 - **Tracing is a no-op in tests** — do NOT install a tracing subscriber unless explicitly debugging
 - **Assertions:** Use `assert!`, `assert_eq!`, `assert_ne!` — use `.expect("reason")` for unwraps, never bare `.unwrap()` in test assertions
 - **Cleanup:** `TempDir` Drop handles cleanup — no manual cleanup needed
-- **All tests must complete in < 5 seconds** — git2 operations on temp repos are fast
+- **All tests must complete in < 5 seconds** — Git CLI operations on temp repos are fast
 
 ### Project Structure Notes
 
 - Alignment with unified project structure: integration tests in `tests/` per `project-context.md` and `architecture.md`
 - Existing `tests/e2e/mod.rs` is reserved for live LLM E2E tests (gated behind `BMAD_E2E=1`) — do NOT modify or mix with integration tests
 - Branch naming convention from project-context.md: `story/{epic}-{story}-{label}` (e.g., `story/1-2-cli-framework`)
-- git2 is preferred over CLI git — consistent with all production code in this project
+- Git CLI is used for all git operations — consistent with production code post Story 4.4 migration (git2 removed entirely from project)
 
 ### References
 

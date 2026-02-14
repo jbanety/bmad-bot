@@ -77,7 +77,7 @@ So that all integration tests can be written concisely and consistently.
   - [ ] 6.3 `make_test_story(key, label, deps)` — parses key to build complete `StoryInfo`
   - [ ] 6.4 `write_sprint_status(dir, entries)` — writes valid YAML from `Vec<(&str, &str)>` containing ALL entry types (epics, stories, retrospectives) under `development_status:`
   - [ ] 6.5 `write_wal_file(dir, state)` — writes valid WAL YAML from `SessionState`
-  - [ ] 6.6 `create_test_repo(dir)` — initializes git repo with initial commit via `git2`
+  - [ ] 6.6 `create_test_repo(dir)` — initializes git repo with initial commit via Git CLI (`git init`, `git commit`)
 
 - [ ] Task 7: Write self-verification tests (AC: #3)
   - [ ] 7.1 Test `MockGitProvider` returns configured values and tracks calls
@@ -250,28 +250,39 @@ The `entries` parameter accepts epic entries (`"epic-1", "in-progress"`), story 
 **🚨 CRITICAL — Sprint-status YAML comments are NOT functional:**
 The real `sprint-status.yaml` has comments like `# depends-on: 7-1`. These are **YAML comments stripped by the parser** — they have ZERO effect on dependency resolution. Dependencies are computed **exclusively** by `derive_dependencies()` from story numbering: story N.M depends on N.(M-1) within the same epic. Never write tests that rely on YAML comments for dependency data.
 
-#### Git Repo Initialization (via `git2`)
+#### Git Repo Initialization (via Git CLI)
+
+> **Post Story 4.4:** `git2` has been removed from the project entirely. All git operations — including test fixtures — use Git CLI subprocess calls.
+
 ```rust
-fn create_test_repo(dir: &Path) -> git2::Repository {
-    let repo = git2::Repository::init(dir).expect("git init");
-    // Create initial commit (required for HEAD to exist)
-    let sig = git2::Signature::now("Test", "test@test.com").expect("signature");
-    let tree_id = repo.index().expect("index").write_tree().expect("write tree");
-    let tree = repo.find_tree(tree_id).expect("find tree");
-    repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[]).expect("commit");
-    repo
+fn create_test_repo(dir: &Path) {
+    use std::process::Command;
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed");
+        assert!(output.status.success(), "git {} failed: {}",
+            args.join(" "), String::from_utf8_lossy(&output.stderr));
+    };
+    run(&["init"]);
+    run(&["config", "user.email", "test@test.com"]);
+    run(&["config", "user.name", "Test"]);
+    run(&["commit", "--allow-empty", "-m", "initial commit"]);
+    // Ensure "main" branch exists (default might be "master" depending on git config)
+    run(&["branch", "-M", "main"]);
 }
 ```
 
 ### Dependencies Required
 All already present in `Cargo.toml`:
 - `tempfile = "3"` (dev-dependency) — for isolated temp directories
-- `git2 = "0.20"` — for test repo creation (already a main dependency)
 - `async-trait = "0.1"` — for trait impls in mocks (already a main dependency)
 - `tokio` with `full` features — for async test runtime (already a main dependency)
 - `serde_yml = "0.0.12"` — for YAML serialization in fixture writers
 
-No new dependencies needed.
+No new dependencies needed. Note: `git2` was removed from the project in Story 4.4 — test fixtures use Git CLI instead.
 
 ### File Structure to Create
 
@@ -351,7 +362,8 @@ tests/
 - [Source: src/config/mod.rs — BotConfig (L75-107), BotSecrets (L380-393)]
 - [Source: src/watcher/mod.rs — StoryInfo (L66-86), make_test_bot_config (L718-763)]
 - [Source: src/session/state.rs — SessionState (L82-111), ChatMessage (L23-28)]
-- [Source: Cargo.toml — dev-dependencies: tempfile, git2 already available]
+- [Source: Cargo.toml — dev-dependencies: tempfile already available]
+- [Source: Story 4.4 — git2 removed from project, all git operations now use Git CLI subprocess]
 
 ## Dev Agent Record
 

@@ -1207,7 +1207,7 @@ All 6 functional epics have been implemented and pass 573 unit tests. This epic 
 | Git Provider PR Flow | `git_provider/mod.rs`, `git_provider/github.rs`, `git_provider/gitlab.rs` | HTTP mocked |
 | Notifier Flow | `notifier/mod.rs` | HTTP mocked |
 | CLI Lifecycle | `cli/mod.rs`, `cli/state.rs` | Filesystem, process signals |
-| Branch Management | `session/branch.rs`, `tools/git.rs` | Real git2 on temp repos |
+| Branch Management | `session/branch.rs`, `tools/git.rs` | Real Git CLI on temp repos |
 
 #### Mock Strategy
 
@@ -1216,7 +1216,7 @@ All integration tests follow the architecture's **Test Mock Pattern**:
 - GitHub/GitLab API: mock HTTP server (or trait mock returning canned responses)
 - Telegram API: mock HTTP server (or NoopNotifier verification)
 - Filesystem: `tempfile` crate for isolated temp directories
-- Git repos: real `git2` operations on temp repos (fast, deterministic)
+- Git repos: real Git CLI operations on temp repos (fast, deterministic)
 
 #### Test Infrastructure Needed
 
