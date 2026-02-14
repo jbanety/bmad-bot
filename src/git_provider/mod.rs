@@ -256,7 +256,7 @@ pub fn build_pr_description(params: &PrDescriptionParams) -> String {
         .pr_summary
         .as_ref()
         .map_or(DEFAULT_CONTEXT, |s| s.context.as_str());
-    body.push_str(&format!("## 📝 Context\n\n> {context}\n\n"));
+    body.push_str(&format!("## 📝 Context\n\n{context}\n\n"));
 
     // Failure details (only if present)
     if let Some(ref details) = params.failure_details {
@@ -272,7 +272,7 @@ pub fn build_pr_description(params: &PrDescriptionParams) -> String {
         .pr_summary
         .as_ref()
         .map_or(DEFAULT_HOW_TO_TEST, |s| s.how_to_test.as_str());
-    body.push_str(&format!("## 🧪 How to test\n\n> {how_to_test}\n\n"));
+    body.push_str(&format!("## 🧪 How to test\n\n{how_to_test}\n\n"));
 
     // Additional information section
     let additional_info = params
@@ -280,7 +280,7 @@ pub fn build_pr_description(params: &PrDescriptionParams) -> String {
         .as_ref()
         .map_or(DEFAULT_ADDITIONAL_INFO, |s| s.additional_info.as_str());
     body.push_str(&format!(
-        "## ℹ️ Additional information\n\n> {additional_info}\n\n"
+        "## ℹ️ Additional information\n\n{additional_info}\n\n"
     ));
 
     // Footer

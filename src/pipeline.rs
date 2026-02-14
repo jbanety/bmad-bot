@@ -20,6 +20,7 @@ use crate::notifier::{Notifier, RunSummary, StoryNotification, StoryStatus, crea
 use crate::review::ReviewOutcome;
 use crate::review::ReviewRunner;
 use crate::session::SessionOutcome;
+use crate::session::analyzer::strip_agent_artifacts;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
@@ -335,8 +336,12 @@ impl StoryPipeline {
                 }
 
                 // Phase 6 — Post review comment on PR (non-blocking)
+                // Strip protocol artifacts (<pr-summary>, <<BMAD_JOB_DONE>>) before posting.
                 if let Some(ref report) = review_report
-                    && let Err(e) = self.git_provider.add_comment(&pr_info.id, report).await
+                    && let Err(e) = self
+                        .git_provider
+                        .add_comment(&pr_info.id, &strip_agent_artifacts(report))
+                        .await
                 {
                     tracing::error!(
                         action = "pr_comment_failed",
@@ -919,7 +924,10 @@ impl StoryPipeline {
                 match self.git_provider.create_pr(pr_params).await {
                     Ok(pr_info) => {
                         if let Some(ref report) = review_report
-                            && let Err(e) = self.git_provider.add_comment(&pr_info.id, report).await
+                            && let Err(e) = self
+                                .git_provider
+                                .add_comment(&pr_info.id, &strip_agent_artifacts(report))
+                                .await
                         {
                             tracing::error!(
                                 action = "recovery_pr_comment_failed",

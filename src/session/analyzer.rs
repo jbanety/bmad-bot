@@ -47,6 +47,30 @@ pub enum ResponseAction {
 /// pattern matching — so it works identically across all LLM providers/models.
 pub const JOB_DONE_SENTINEL: &str = "<<BMAD_JOB_DONE>>";
 
+/// Strip agent protocol artifacts from a response before posting to external systems.
+///
+/// Removes:
+/// - `<pr-summary>...</pr-summary>` blocks (including content)
+/// - `<<BMAD_JOB_DONE>>` sentinel tokens
+/// - Resulting leading/trailing whitespace and excessive blank lines
+///
+/// Use this to clean agent output before posting as PR comments, notifications,
+/// or any user-facing context where protocol markers should not be visible.
+pub fn strip_agent_artifacts(text: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static RE_PR_SUMMARY: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?si)<pr-summary>.*?</pr-summary>").unwrap());
+    static RE_EXCESSIVE_NEWLINES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+
+    let cleaned = RE_PR_SUMMARY.replace_all(text, "");
+    let cleaned = cleaned.replace(JOB_DONE_SENTINEL, "");
+    let cleaned = RE_EXCESSIVE_NEWLINES.replace_all(&cleaned, "\n\n");
+    cleaned.trim().to_string()
+}
+
 /// Review completion patterns (case-insensitive).
 ///
 /// Detects CR workflow step 5 completion output. Checked at priority 1.5
@@ -854,6 +878,54 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // strip_agent_artifacts tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strip_agent_artifacts_removes_pr_summary_block() {
+        let input = "Some review text.\n\n<pr-summary>\n<context>\nStuff\n</context>\n</pr-summary>\n\n<<BMAD_JOB_DONE>>";
+        let cleaned = strip_agent_artifacts(input);
+        assert_eq!(cleaned, "Some review text.");
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_removes_sentinel_only() {
+        let input = "All done.\n\n<<BMAD_JOB_DONE>>";
+        let cleaned = strip_agent_artifacts(input);
+        assert_eq!(cleaned, "All done.");
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_preserves_normal_text() {
+        let input = "This is a normal review comment with no artifacts.";
+        let cleaned = strip_agent_artifacts(input);
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_collapses_excessive_newlines() {
+        let input = "Before.\n\n\n\n\n<<BMAD_JOB_DONE>>\n\n\n\nAfter.";
+        let cleaned = strip_agent_artifacts(input);
+        assert_eq!(cleaned, "Before.\n\nAfter.");
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_handles_empty_input() {
+        assert_eq!(strip_agent_artifacts(""), "");
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_pr_summary_multiline() {
+        let input = "## Code Review Summary\n\nFindings listed.\n\n<pr-summary>\n<context>\nCtx\n</context>\n<how-to-test>\nTest\n</how-to-test>\n<additional-info>\nInfo\n</additional-info>\n</pr-summary>\n\n<<BMAD_JOB_DONE>>";
+        let cleaned = strip_agent_artifacts(input);
+        assert_eq!(cleaned, "## Code Review Summary\n\nFindings listed.");
+    }
+
+    // -----------------------------------------------------------------------
+    // Completion regex tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_analyzer_detects_story_complete_regex() {
