@@ -93,8 +93,14 @@ pub fn make_test_secrets() -> BotSecrets {
 pub fn make_test_story(key: &str, label: &str, deps: Vec<String>) -> StoryInfo {
     // Parse: {epic_num}-{story_num}-{slug}
     let mut parts = key.splitn(3, '-');
-    let epic_num: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
-    let story_num: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let epic_str = parts.next().unwrap_or("");
+    let story_str = parts.next().unwrap_or("");
+    let epic_num: u32 = epic_str
+        .parse()
+        .unwrap_or_else(|_| panic!("Invalid epic number in story key: {key}"));
+    let story_num: u32 = story_str
+        .parse()
+        .unwrap_or_else(|_| panic!("Invalid story number in story key: {key}"));
 
     let story_id = format!("{epic_num}.{story_num}");
     let branch_name = format!("story/{key}");

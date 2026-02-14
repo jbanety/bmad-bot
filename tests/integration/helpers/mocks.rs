@@ -10,6 +10,7 @@ use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrIn
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::watcher::StoryInfo;
 
 // ---------------------------------------------------------------------------
@@ -308,7 +309,7 @@ impl MockSessionRunner {
     }
 
     /// Simulate checking for WAL recovery (always returns None).
-    pub async fn check_and_recover_wal(&self) -> Option<()> {
+    pub async fn check_and_recover_wal(&self) -> Option<RecoveryInfo> {
         self.wal_check_calls.lock().unwrap().push(());
         None
     }
