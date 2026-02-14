@@ -1568,13 +1568,14 @@ impl SessionRunner {
                     let pr_summary_prompt = format!(
                         "STOP. Do NOT use any tools. Do NOT start a new workflow. \
                         Just reply with text.\n\n\
-                        You just completed story {}. Summarize your work using this exact format:\n\n\
+                        Project: {}. You just completed story {}. \
+                        Summarize your work using this exact format:\n\n\
                         <pr-summary>\n\
                         <context>\n(What was built and why)\n</context>\n\
                         <how-to-test>\n(Commands to verify: cargo test, specific test names)\n</how-to-test>\n\
                         <additional-info>\n(Design decisions, deps added, caveats)\n</additional-info>\n\
                         </pr-summary>",
-                        story.story_key
+                        self.config.git_provider.repo_name, story.story_key
                     );
                     state.add_user_message(&pr_summary_prompt);
                     let history = state.to_rig_messages();

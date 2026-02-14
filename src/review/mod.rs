@@ -62,23 +62,31 @@ const MAX_SESSION_RETRIES: usize = 2;
 /// Terminal tool timeout in seconds for commands executed by the review agent.
 const TERMINAL_TIMEOUT_SECS: u64 = 30;
 
-/// Post-review message sent after the CR workflow completes.
+/// Build the post-review message sent after the CR workflow completes.
 ///
 /// Asks the agent to commit review fixes with descriptive messages and produce
 /// a structured markdown review report. The format is strict to ensure clean
 /// rendering when posted as a GitHub PR comment.
-const POST_REVIEW_MESSAGE: &str = "Commit all your review fixes with descriptive commit messages \
-    that reference the findings.\n\n\
-    Then provide your review report using EXACTLY this markdown structure:\n\n\
-    ## Code Review Report\n\n\
-    ### Findings\n\
-    (numbered list with **severity** — High/Medium/Low — and description for each finding, or 'No findings.' if clean)\n\n\
-    ### Fixes Applied\n\
-    (list each fix with the commit reference, or 'No fixes needed.' if clean)\n\n\
-    ### Remaining Concerns\n\
-    (list any unresolved issues, or 'None.')\n\n\
-    Do NOT add any preamble, commentary, or meta-text before or after this structure. \
-    Start directly with '## Code Review Report'.";
+///
+/// Includes the project name and story key to anchor the agent's context and
+/// prevent hallucinated project names after long review sessions.
+fn build_post_review_message(project_name: &str, story_key: &str) -> String {
+    format!(
+        "Commit all your review fixes with descriptive commit messages \
+        that reference the findings.\n\n\
+        Then provide your review report for project '{project_name}', story '{story_key}', \
+        using EXACTLY this markdown structure:\n\n\
+        ## Code Review Report\n\n\
+        ### Findings\n\
+        (numbered list with **severity** — High/Medium/Low — and description for each finding, or 'No findings.' if clean)\n\n\
+        ### Fixes Applied\n\
+        (list each fix with the commit reference, or 'No fixes needed.' if clean)\n\n\
+        ### Remaining Concerns\n\
+        (list any unresolved issues, or 'None.')\n\n\
+        Do NOT add any preamble, commentary, or meta-text before or after this structure. \
+        Start directly with '## Code Review Report'."
+    )
+}
 
 /// Errors originating from the review module.
 ///
@@ -513,7 +521,7 @@ impl ReviewRunner {
                         "CR workflow completion detected — entering post-review phase"
                     );
                     post_review_phase = true;
-                    POST_REVIEW_MESSAGE.to_string()
+                    build_post_review_message(&self.config.git_provider.repo_name, &story.story_key)
                 }
                 ResponseAction::Escalated => {
                     tracing::warn!(
@@ -742,13 +750,24 @@ mod tests {
 
     #[test]
     fn test_post_review_message_contains_key_instructions() {
-        assert!(POST_REVIEW_MESSAGE.contains("Commit all your review fixes"));
-        assert!(POST_REVIEW_MESSAGE.contains("commit messages"));
-        assert!(POST_REVIEW_MESSAGE.contains("Findings"));
-        assert!(POST_REVIEW_MESSAGE.contains("Fixes Applied"));
-        assert!(POST_REVIEW_MESSAGE.contains("Remaining Concerns"));
-        assert!(POST_REVIEW_MESSAGE.contains("Code Review Report"));
-        assert!(POST_REVIEW_MESSAGE.contains("Do NOT add any preamble"));
+        let msg = build_post_review_message("bmad-bot", "7-1-integration-tests");
+        assert!(msg.contains("Commit all your review fixes"));
+        assert!(msg.contains("commit messages"));
+        assert!(msg.contains("Findings"));
+        assert!(msg.contains("Fixes Applied"));
+        assert!(msg.contains("Remaining Concerns"));
+        assert!(msg.contains("Code Review Report"));
+        assert!(msg.contains("Do NOT add any preamble"));
+    }
+
+    #[test]
+    fn test_post_review_message_includes_project_and_story() {
+        let msg = build_post_review_message("bmad-bot", "7-1-integration-tests");
+        assert!(msg.contains("bmad-bot"), "Should contain project name");
+        assert!(
+            msg.contains("7-1-integration-tests"),
+            "Should contain story key"
+        );
     }
 
     #[test]
