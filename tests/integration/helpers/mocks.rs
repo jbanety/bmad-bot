@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::session::SessionOutcome;
 use bmad_bot::watcher::StoryInfo;
 
@@ -262,7 +263,7 @@ pub struct SessionRunCall {
 pub struct MockSessionRunner {
     outcome_factory: Arc<Mutex<Box<dyn Fn(&StoryInfo) -> SessionOutcome + Send>>>,
     run_calls: Arc<Mutex<Vec<SessionRunCall>>>,
-    wal_recovery: Arc<Mutex<Option<()>>>,
+    wal_recovery: Arc<Mutex<Option<RecoveryInfo>>>,
 }
 
 impl MockSessionRunner {
@@ -304,8 +305,11 @@ impl MockSessionRunner {
     }
 
     /// Check for WAL recovery (always returns None in mock).
-    pub async fn check_and_recover_wal(&self) -> Option<()> {
-        *self.wal_recovery.lock().expect("lock poisoned")
+    pub async fn check_and_recover_wal(&self) -> Option<RecoveryInfo> {
+        self.wal_recovery
+            .lock()
+            .expect("lock poisoned")
+            .take()
     }
 
     /// Get all recorded run calls.
