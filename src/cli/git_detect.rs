@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// Git remote information extracted from the local repository.
 ///
-/// Contains all fields needed to populate [`crate::config::GitProviderConfig`]
+/// Contains all fields needed to populate [`bmad_bot::config::GitProviderConfig`]
 /// from auto-detected values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitRemoteInfo {
