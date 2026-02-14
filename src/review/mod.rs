@@ -65,10 +65,20 @@ const TERMINAL_TIMEOUT_SECS: u64 = 30;
 /// Post-review message sent after the CR workflow completes.
 ///
 /// Asks the agent to commit review fixes with descriptive messages and produce
-/// a markdown review report suitable for posting as a PR comment.
+/// a structured markdown review report. The format is strict to ensure clean
+/// rendering when posted as a GitHub PR comment.
 const POST_REVIEW_MESSAGE: &str = "Commit all your review fixes with descriptive commit messages \
-    that reference the findings. Then provide a complete markdown summary of your code review \
-    (findings, severity, fixes applied, remaining concerns) suitable for posting as a PR comment.";
+    that reference the findings.\n\n\
+    Then provide your review report using EXACTLY this markdown structure:\n\n\
+    ## Code Review Report\n\n\
+    ### Findings\n\
+    (numbered list with **severity** — High/Medium/Low — and description for each finding, or 'No findings.' if clean)\n\n\
+    ### Fixes Applied\n\
+    (list each fix with the commit reference, or 'No fixes needed.' if clean)\n\n\
+    ### Remaining Concerns\n\
+    (list any unresolved issues, or 'None.')\n\n\
+    Do NOT add any preamble, commentary, or meta-text before or after this structure. \
+    Start directly with '## Code Review Report'.";
 
 /// Errors originating from the review module.
 ///
@@ -732,11 +742,13 @@ mod tests {
 
     #[test]
     fn test_post_review_message_contains_key_instructions() {
-        assert!(POST_REVIEW_MESSAGE.contains("commit"));
+        assert!(POST_REVIEW_MESSAGE.contains("Commit all your review fixes"));
         assert!(POST_REVIEW_MESSAGE.contains("commit messages"));
-        assert!(POST_REVIEW_MESSAGE.contains("findings"));
-        assert!(POST_REVIEW_MESSAGE.contains("markdown summary"));
-        assert!(POST_REVIEW_MESSAGE.contains("PR comment"));
+        assert!(POST_REVIEW_MESSAGE.contains("Findings"));
+        assert!(POST_REVIEW_MESSAGE.contains("Fixes Applied"));
+        assert!(POST_REVIEW_MESSAGE.contains("Remaining Concerns"));
+        assert!(POST_REVIEW_MESSAGE.contains("Code Review Report"));
+        assert!(POST_REVIEW_MESSAGE.contains("Do NOT add any preamble"));
     }
 
     #[test]
