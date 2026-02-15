@@ -1,6 +1,6 @@
 # Story 7.4: Pipeline Orchestration Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
