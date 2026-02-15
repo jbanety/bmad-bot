@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::session::SessionOutcome;
 use bmad_bot::watcher::StoryInfo;
 
@@ -324,15 +325,18 @@ impl MockSessionRunner {
         self.calls.lock().unwrap().push(SessionRunCall {
             story_key: story.story_key.clone(),
         });
-        let stored = self.outcome.lock().unwrap().take();
-        stored.unwrap_or_else(|| SessionOutcome::Completed {
+        let stored = self.outcome.lock().unwrap();
+        if let Some(outcome) = stored.as_ref() {
+            return clone_session_outcome(outcome);
+        }
+        SessionOutcome::Completed {
             story_key: story.story_key.clone(),
             branch: story.branch_name.clone(),
             decisions: vec![],
             pr_context: None,
             pr_how_to_test: None,
             pr_additional_info: None,
-        })
+        }
     }
 
     /// Check and recover WAL — always returns `None` for the mock.
@@ -346,9 +350,38 @@ impl MockSessionRunner {
     }
 }
 
-/// Placeholder for recovery info (mock always returns None).
-#[derive(Debug)]
-pub struct RecoveryInfo;
+fn clone_session_outcome(outcome: &SessionOutcome) -> SessionOutcome {
+    match outcome {
+        SessionOutcome::Completed {
+            story_key,
+            branch,
+            decisions,
+            pr_context,
+            pr_how_to_test,
+            pr_additional_info,
+        } => SessionOutcome::Completed {
+            story_key: story_key.clone(),
+            branch: branch.clone(),
+            decisions: decisions.clone(),
+            pr_context: pr_context.clone(),
+            pr_how_to_test: pr_how_to_test.clone(),
+            pr_additional_info: pr_additional_info.clone(),
+        },
+        SessionOutcome::Escalated { report, decisions } => SessionOutcome::Escalated {
+            report: report.clone(),
+            decisions: decisions.clone(),
+        },
+        SessionOutcome::Failed {
+            story_key,
+            error,
+            decisions,
+        } => SessionOutcome::Failed {
+            story_key: story_key.clone(),
+            error: error.clone(),
+            decisions: decisions.clone(),
+        },
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MockReviewRunner
@@ -386,14 +419,39 @@ impl MockReviewRunner {
         self.calls.lock().unwrap().push(ReviewRunCall {
             story_key: story.story_key.clone(),
         });
-        let stored = self.outcome.lock().unwrap().take();
-        stored.unwrap_or(ReviewOutcome::Skipped {
-            reason: "mock default".into(),
-        })
+        let stored = self.outcome.lock().unwrap();
+        stored
+            .as_ref()
+            .map(clone_review_outcome)
+            .unwrap_or(ReviewOutcome::Skipped {
+                reason: "mock default".into(),
+            })
     }
+
 
     /// Return all recorded calls.
     pub fn calls(&self) -> Vec<ReviewRunCall> {
         self.calls.lock().unwrap().clone()
+    }
+}
+
+fn clone_review_outcome(outcome: &ReviewOutcome) -> ReviewOutcome {
+    match outcome {
+        ReviewOutcome::Completed {
+            story_key,
+            branch,
+            report,
+        } => ReviewOutcome::Completed {
+            story_key: story_key.clone(),
+            branch: branch.clone(),
+            report: report.clone(),
+        },
+        ReviewOutcome::Failed { story_key, error } => ReviewOutcome::Failed {
+            story_key: story_key.clone(),
+            error: error.clone(),
+        },
+        ReviewOutcome::Skipped { reason } => ReviewOutcome::Skipped {
+            reason: reason.clone(),
+        },
     }
 }
