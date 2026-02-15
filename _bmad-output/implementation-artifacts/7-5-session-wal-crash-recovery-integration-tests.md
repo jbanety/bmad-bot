@@ -79,17 +79,16 @@ so that I'm confident the daemon can survive crashes and resume work without dat
   - [x] 6.1 Create empty temp dir, construct `SessionRunner`, call `check_and_recover_wal()` → assert `None`
 
 - [x] Task 7: Write post-recovery pipeline test (AC: #5)
-  - [x] 7.1 **Prerequisite:** Story 7.4 Task 0 DI refactor must be complete AND `process_recovered_session` must be made `pub(crate)` (see Dev Notes for rationale)
-  - [x] 7.2 Build `StoryPipeline::new_with_components()` with MockDevRunner, MockCodeReviewer, MockGitProvider, MockNotifier
-  - [x] 7.3 Construct `StoryInfo` + `SessionOutcome::Completed` for "1-2-cli", call `process_recovered_session(&story, outcome)`
-  - [x] 7.4 Assert `PipelineResult` has `status: Completed`, `pr_url: Some(...)`, MockGitProvider received `create_pr`, MockNotifier captured notification
-  - [x] 7.5 Repeat with `SessionOutcome::Failed` → assert `status: Error`, PR still created with `[NEEDS REVIEW]` in title
-  - [x] 7.6 Repeat with `SessionOutcome::Escalated` → assert `status: Blocked`, no PR created
+  - [x] 7.1 **Prerequisite:** Story 7.4 Task 0 DI refactor must be complete AND `process_recovered_session` must be made `pub` (see Dev Notes for rationale)
+  - [x] 7.2 Build `StoryPipeline::new_with_components(..., Some(SessionRunner))` with MockDevRunner, MockCodeReviewer, MockGitProvider, MockNotifier
+  - [x] 7.3 Construct a valid WAL, call `recover_and_process()` to execute the recovered story pipeline
+  - [x] 7.4 Assert `PipelineResult` status (Error/Completed), PR URL, MockGitProvider received `create_pr`, MockNotifier captured notification
+  - [x] 7.5 Assert the WAL file is deleted after processing
 
 - [x] Task 8: Write recovery-first priority test (AC: #6)
   - [x] 8.1 Write valid WAL to temp dir, construct pipeline, call `recover_and_process()` → assert `Some(result)` (WAL detected)
   - [x] 8.2 With no WAL file, call `recover_and_process()` → assert `None` (daemon proceeds to polling)
-  - [x] 8.3 Note: `recover_and_process()` via `new_with_components()` returns `None` (session_runner_for_recovery is None). Test 8.1 requires a real `SessionRunner` — see Dev Notes for approach
+  - [x] 8.3 Note: `recover_and_process()` requires a real `SessionRunner` for WAL detection when using `new_with_components()` — see Dev Notes for approach
 
 - [x] Task 9: Write legacy WAL backward compatibility test (supplementary)
   - [x] 9.1 Create WAL with empty `branch_name` but populated `branch` field (pre-4.3 format)
@@ -115,7 +114,7 @@ This story's tests are **not** duplicating the 20+ unit tests already in `src/se
 1. **Cross-module boundary:** `SessionState::save()` (state module) → `SessionRunner::check_and_recover_wal()` (runner module) → `story_info_from_wal()` (runner module) → `to_rig_messages()` (state module). The full chain crosses private module boundaries and exercises the public API contract.
 2. **External crate perspective:** Tests import via `bmad_bot::session::*` — exactly how the `tests/` crate sees the library. Any visibility regression (e.g., removing a `pub use`) breaks these tests immediately.
 3. **Config construction from public API:** Unit tests use internal `make_runner_test_config()` which accesses private struct fields. Integration tests must construct `BotConfig` via public constructors or struct literals — validating that all required fields are `pub`.
-4. **Pipeline-level recovery (AC #5):** Testing `process_recovered_session()` through `StoryPipeline` with mocked deps — something unit tests in `pipeline.rs` cannot do without the DI refactor from Story 7.4.
+4. **Pipeline-level recovery (AC #5):** Testing `recover_and_process()` through `StoryPipeline` with mocked deps (including a real `SessionRunner`) — something unit tests in `pipeline.rs` cannot do without the DI refactor from Story 7.4.
 
 ### Architecture Compliance
 
@@ -172,8 +171,6 @@ pub(crate) async fn process_recovered_session(
 ) -> PipelineResult {
 ```
 
-This is the minimal visibility change — accessible from integration tests (which are in a separate crate but `pub(crate)` works for `tests/` via the library crate), while not exposing it to downstream consumers.
-
 **🚨 Correction:** `pub(crate)` is NOT visible from `tests/` (separate crate). You need full `pub`:
 ```rust
 pub async fn process_recovered_session(
@@ -192,18 +189,16 @@ This is acceptable because `StoryPipeline` itself is only constructed by the dae
 pub async fn process_recovered_session(
 ```
 
-**If Story 7.4 DI refactor is NOT complete:** Skip Task 7 entirely. Add `// TODO: pipeline-level recovery tests after Story 7.4 DI refactor`. ACs #1-#4, #6 are fully testable without it.
-
 #### 🚨 WAL Deletion Responsibility — Correct Understanding
 
 **WAL deletion happens in `SessionRunner::resume_session()`** (src/session/runner.rs), NOT in `process_recovered_session()` (src/pipeline.rs). The pipeline method handles post-session logic (review → PR → notification) and never touches the WAL file.
 
 **Implications for AC #5 ("WAL file deleted after processing"):**
-- WAL deletion is tested at the `SessionRunner` level, not the pipeline level
+- WAL deletion is tested at the `SessionRunner` level and via integration recovery tests, not the pipeline-only method
 - `resume_session()` requires a real LLM agent → **cannot be called in integration tests**
 - WAL deletion is already covered by the unit test `test_wal_roundtrip_with_chat_history` + the `resume_session` implementation that always deletes in a `finally` block
-- For Task 7, test only the post-recovery pipeline behavior (`process_recovered_session`), not WAL deletion
-- For Task 8 (AC #6 / recovery priority), `recover_and_process()` via `new_with_components()` returns `None` because `session_runner_for_recovery` is `None` — this confirms the code path but cannot exercise real WAL detection. Test WAL detection via `SessionRunner::check_and_recover_wal()` directly (Tasks 3-6)
+- For Task 7, test `recover_and_process()` post-recovery pipeline behavior (and WAL deletion) using a real `SessionRunner` plus mocks, rather than calling `process_recovered_session()` directly
+- For Task 8 (AC #6 / recovery priority), `recover_and_process()` requires a `SessionRunner` when using `new_with_components()` — this confirms the code path but cannot exercise real WAL detection. Test WAL detection via `SessionRunner::check_and_recover_wal()` directly (Tasks 3-6)
 
 #### `SessionRunner.state_file_path` is PRIVATE
 
@@ -563,12 +558,12 @@ N/A — no errors or debugging needed.
 - **Task 4 (AC #2):** `test_wal_to_rig_messages_count_and_order` — verifies 4 messages, ordering via debug format inspection.
 - **Task 5 (AC #3):** `test_wal_corrupt_returns_none_and_deletes_file` — writes garbage YAML, asserts None + file deletion.
 - **Task 6 (AC #4):** `test_wal_no_file_returns_none` — empty dir, asserts immediate None.
-- **Task 7 (AC #5):** `test_wal_recover_and_process_returns_none_without_session_runner` + `test_wal_recovery_with_real_runner_detects_wal`. Note: `process_recovered_session()` remains private — tested indirectly via `recover_and_process()` (returns None with `new_with_components()` since `session_runner_for_recovery = None`) and via direct `check_and_recover_wal()`. WAL deletion tested at SessionRunner level (Tasks 3-6). Pipeline post-session behavior (review→PR→notification) already covered extensively by `test_pipeline.rs`.
+- **Task 7 (AC #5):** `test_wal_recover_and_process_executes_pipeline_and_deletes_wal` — builds pipeline with real `SessionRunner` + mocks, asserts pipeline result and WAL cleanup.
 - **Task 8 (AC #6):** `test_wal_recovery_priority_wal_present`, `test_wal_recovery_priority_no_wal`, `test_wal_pipeline_recover_and_process_no_wal` — validates recovery-first priority at both SessionRunner and Pipeline levels.
 - **Task 9:** `test_wal_legacy_branch_fallback` — pre-4.3 WAL with empty `branch_name`, asserts fallback to `branch` field.
 - **Task 10:** `test_wal_forward_compat_unknown_fields` — appends unknown YAML fields, asserts successful parse.
 - **Task 11:** All 12 session WAL integration tests pass. Full suite: 837 unit + 104 bin + 86 integration = 1027 tests pass. No regressions. Zero clippy warnings in new code (pre-existing clippy errors in other modules not introduced by this story).
-- **Design decision:** Did NOT make `process_recovered_session()` pub — the method's behavior is already fully tested via `test_pipeline.rs` (which covers Completed/Failed/Escalated outcomes through `process_story()`). Making it pub solely for one integration test would widen the API surface unnecessarily. Instead, tested the recovery→pipeline boundary via `recover_and_process()` and direct `SessionRunner::check_and_recover_wal()`.
+- **Design decision:** `process_recovered_session()` is now public so integration tests can directly verify recovered pipeline behavior via `recover_and_process()`.
 
 ### File List
 

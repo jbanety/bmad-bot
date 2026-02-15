@@ -4,16 +4,17 @@
 //! test files to temporary directories.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 
 use bmad_bot::config::{
     BmadPathsConfig, BotConfig, BotSecrets, GitProviderConfig, LlmConfig, LlmRoleConfig,
     NotificationConfig, TelegramConfig,
 };
+use bmad_bot::llm::AgentFactory;
 use bmad_bot::pipeline::{CodeReviewer, DevRunner, StoryPipeline};
 use bmad_bot::review::ReviewOutcome;
-use bmad_bot::session::SessionOutcome;
-use bmad_bot::session::SessionState;
+use bmad_bot::session::{SessionOutcome, SessionState};
+use bmad_bot::session::runner::SessionRunner;
 use bmad_bot::watcher::StoryInfo;
 
 use super::mocks::{MockCodeReviewer, MockDevRunner, MockGitProvider, MockNotifier};
@@ -153,10 +154,12 @@ pub fn write_sprint_status(dir: &Path, entries: &[(&str, &str)]) {
 // ---------------------------------------------------------------------------
 
 /// Write a valid `.bmad-bot-session.yaml` WAL file to a temp directory.
-pub fn write_wal_file(dir: &Path, state: &SessionState) {
-    let yaml = serde_yml::to_string(state).expect("Failed to serialize SessionState");
+pub async fn write_wal_file(dir: &Path, state: &SessionState) {
     let path = dir.join(".bmad-bot-session.yaml");
-    std::fs::write(&path, &yaml).expect("Failed to write WAL file");
+    state
+        .save(&path)
+        .await
+        .expect("Failed to write WAL file");
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +300,9 @@ impl PipelineTestBuilder {
     }
 
     /// Build the pipeline, returning cloned mock handles for assertions.
+    ///
+    /// Deprecated: prefer `build_with_config()` to control recovery runner paths.
+    #[allow(dead_code)]
     pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider) {
         self.build_inner()
     }
@@ -340,12 +346,20 @@ impl PipelineTestBuilder {
             None => Box::new(MockCodeReviewer::never_called()),
         };
 
+        let config = Arc::new(self.config);
+        let secrets = Arc::new(make_test_secrets());
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), secrets));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let recovery_runner = SessionRunner::new(Arc::clone(&config), agent_factory, shutdown);
+
         let pipeline = StoryPipeline::new_with_components(
-            Arc::new(self.config),
+            config,
             Box::new(self.mock_git),
             Box::new(self.mock_notifier),
             dev_runner,
             code_reviewer,
+            Some(recovery_runner),
         );
 
         (pipeline, notifier_for_assertions, git_for_assertions)

@@ -5,8 +5,6 @@
 //! mutable state. Git push requires a local bare remote, set up by
 //! `create_test_repo_with_remote`.
 
-use std::sync::Arc;
-
 use bmad_bot::git_provider::{GitProviderError, PrInfo};
 use bmad_bot::notifier::{NotifierError, StoryStatus};
 use bmad_bot::review::ReviewOutcome;

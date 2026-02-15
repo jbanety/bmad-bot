@@ -9,15 +9,20 @@
 //! external crate would, validating the library contract.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bmad_bot::config::BotConfig;
+use bmad_bot::git_provider::PrInfo;
 use bmad_bot::llm::AgentFactory;
+use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification, StoryStatus};
+use bmad_bot::pipeline::StoryPipeline;
+use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::runner::{story_info_from_wal, SessionRunner};
-use bmad_bot::session::{ChatMessage, SessionState};
-
+use bmad_bot::session::{ChatMessage, SessionState, SessionOutcome};
+use bmad_bot::watcher::StoryInfo;
 use crate::helpers::fixtures::{make_test_config, make_test_secrets, write_wal_file};
+use crate::helpers::mocks::MockGitProvider;
 
 // ---------------------------------------------------------------------------
 // Fixture helpers (local to WAL tests)
@@ -69,7 +74,7 @@ fn wal_path(dir: &Path) -> PathBuf {
 
 /// Build a `SessionRunner` from a config and test secrets.
 ///
-/// Constructs `AgentFactory` + `ShutdownFlag` internally.
+/// Constructs `AgentFactory` + shutdown flag internally.
 fn make_test_runner(config: Arc<BotConfig>) -> SessionRunner {
     let secrets = Arc::new(make_test_secrets());
     let factory = Arc::new(AgentFactory::new(Arc::clone(&config), secrets));
@@ -87,6 +92,92 @@ fn ensure_artifacts_dir(config: &BotConfig) -> PathBuf {
     artifacts_dir
 }
 
+/// Build a recovery runner for pipeline tests.
+fn make_recovery_runner(config: Arc<BotConfig>) -> SessionRunner {
+    let secrets = Arc::new(make_test_secrets());
+    let factory = Arc::new(AgentFactory::new(Arc::clone(&config), secrets));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    SessionRunner::new(config, factory, shutdown)
+}
+
+#[derive(Clone)]
+struct CaptureNotifier {
+    calls: Arc<std::sync::Mutex<Vec<StoryNotification>>>,
+}
+
+impl CaptureNotifier {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn story_calls(&self) -> Vec<StoryNotification> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Notifier for CaptureNotifier {
+    async fn notify_story(&self, notification: &StoryNotification) -> Result<(), NotifierError> {
+        self.calls.lock().unwrap().push(notification.clone());
+        Ok(())
+    }
+
+    async fn notify_run_summary(&self, _summary: &RunSummary) -> Result<(), NotifierError> {
+        Ok(())
+    }
+}
+
+struct StaticDevRunner {
+    outcome: std::sync::Mutex<Option<SessionOutcome>>,
+    calls: AtomicUsize,
+}
+
+impl StaticDevRunner {
+    fn new(outcome: SessionOutcome) -> Self {
+        Self {
+            outcome: std::sync::Mutex::new(Some(outcome)),
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl bmad_bot::pipeline::DevRunner for StaticDevRunner {
+    async fn run_dev_session(&self, _story: &StoryInfo) -> SessionOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.outcome
+            .lock()
+            .unwrap()
+            .take()
+            .expect("StaticDevRunner outcome already consumed")
+    }
+}
+
+struct CaptureReviewer {
+    outcome: std::sync::Mutex<Option<ReviewOutcome>>,
+}
+
+impl CaptureReviewer {
+    fn new(outcome: ReviewOutcome) -> Self {
+        Self {
+            outcome: std::sync::Mutex::new(Some(outcome)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl bmad_bot::pipeline::CodeReviewer for CaptureReviewer {
+    async fn run_review(&self, _story: &StoryInfo) -> ReviewOutcome {
+        self.outcome
+            .lock()
+            .unwrap()
+            .take()
+            .expect("CaptureReviewer outcome already consumed")
+    }
+}
+
 // ===========================================================================
 // Task 3: Full save→recover→parse integration test (AC #1)
 // ===========================================================================
@@ -98,7 +189,7 @@ async fn test_wal_recovery_valid_returns_recovery_info() {
     let config = make_test_config(dir.path());
     let artifacts_dir = ensure_artifacts_dir(&config);
     let state = make_valid_wal_state();
-    write_wal_file(&artifacts_dir, &state);
+    write_wal_file(&artifacts_dir, &state).await;
 
     // Act: construct runner, check for WAL
     let config = Arc::new(config);
@@ -165,6 +256,19 @@ fn test_wal_to_rig_messages_count_and_order() {
             || debug_second.contains("Starting story"),
         "Second message should be assistant type, got: {debug_second}"
     );
+
+    let debug_third = format!("{:?}", messages[2]);
+    assert!(
+        debug_third.to_lowercase().contains("user") || debug_third.contains("Continue"),
+        "Third message should be user type or contain 'Continue.', got: {debug_third}"
+    );
+
+    let debug_fourth = format!("{:?}", messages[3]);
+    assert!(
+        debug_fourth.to_lowercase().contains("assistant")
+            || debug_fourth.contains("Implementation complete"),
+        "Fourth message should be assistant type, got: {debug_fourth}"
+    );
 }
 
 // ===========================================================================
@@ -227,47 +331,76 @@ async fn test_wal_no_file_returns_none() {
 // Task 7: Post-recovery pipeline test (AC #5)
 // ===========================================================================
 
-// AC #5 tests require `process_recovered_session()` to be pub and
-// StoryPipeline::new_with_components() — both from Story 7.4 DI refactor.
-// The `recover_and_process()` method on StoryPipeline delegates to
-// SessionRunner (which is None in new_with_components), so we test the
-// pipeline-level behavior via process_story (already covered in test_pipeline.rs).
-//
-// WAL deletion happens in SessionRunner::resume_session() (requires real LLM),
-// not in process_recovered_session(). The pipeline method only handles
-// post-session logic: review → PR → notification.
-//
-// Direct process_recovered_session() tests would duplicate test_pipeline.rs
-// coverage. Instead, we validate the recovery→pipeline boundary:
+// AC #5: Exercise recover_and_process with a real SessionRunner and mocked pipeline dependencies.
 
 #[tokio::test]
-async fn test_wal_recover_and_process_returns_none_without_session_runner() {
-    // new_with_components() sets session_runner_for_recovery = None
-    // → recover_and_process() should return None immediately
-    use bmad_bot::review::ReviewOutcome;
-    use bmad_bot::session::SessionOutcome;
+async fn test_wal_recover_and_process_executes_pipeline_and_deletes_wal() {
+    // AC #5: When WAL exists, recover_and_process executes the pipeline and deletes WAL.
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let config = make_test_config(dir.path());
+    let artifacts_dir = ensure_artifacts_dir(&config);
+    let state = make_valid_wal_state();
+    write_wal_file(&artifacts_dir, &state).await;
 
-    use crate::helpers::fixtures::PipelineTestBuilder;
+    let config = Arc::new(config);
+    let runner = make_recovery_runner(Arc::clone(&config));
 
-    let (pipeline, _notifier, _git) = PipelineTestBuilder::new()
-        .with_session(SessionOutcome::Completed {
-            story_key: "1-2-cli".into(),
-            branch: "story/1-2-cli".into(),
-            decisions: vec![],
-            pr_context: None,
-            pr_how_to_test: None,
-            pr_additional_info: None,
-        })
-        .with_review(ReviewOutcome::Skipped {
-            reason: "test".into(),
-        })
-        .build();
+    let outcome_story_key = "1-2-cli".to_string();
+    let result_story_key = outcome_story_key.clone();
 
-    // recover_and_process() returns None because no SessionRunner is present
-    let result = pipeline.recover_and_process().await;
+    let outcome = SessionOutcome::Failed {
+        story_key: outcome_story_key,
+        error: "Recovery failure for testing".into(),
+        decisions: vec![],
+    };
+
+    let dev_runner = StaticDevRunner::new(outcome);
+
+    let mock_git = MockGitProvider::new().with_create_pr(Ok(PrInfo {
+        id: "42".to_string(),
+        url: "https://github.com/test/test/pull/42".to_string(),
+        number: 42,
+    }));
+
+    let notifier = CaptureNotifier::new();
+    let notifier_handle = notifier.clone();
+    let git_handle = mock_git.clone();
+
+    let pipeline = StoryPipeline::new_with_components(
+        Arc::clone(&config),
+        Box::new(mock_git),
+        Box::new(notifier),
+        Box::new(dev_runner),
+        Box::new(CaptureReviewer::new(ReviewOutcome::Skipped {
+            reason: "skip".into(),
+        })),
+        Some(runner),
+    );
+
+    let recovery_result = pipeline.recover_and_process().await;
+    assert!(recovery_result.is_some(), "Recovery should be processed");
+    let result = recovery_result.unwrap();
+    assert_eq!(result.status, StoryStatus::Error);
+    assert_eq!(result.story_key, result_story_key);
+    assert_eq!(result.pr_url, Some("https://github.com/test/test/pull/42".to_string()));
+
+    let pr_params = git_handle.captured_create_pr_params();
+    assert_eq!(pr_params.len(), 1);
     assert!(
-        result.is_none(),
-        "recover_and_process should return None when built via new_with_components (no SessionRunner)"
+        pr_params[0].title.contains("[NEEDS REVIEW]"),
+        "Expected failure PR title, got: {}",
+        pr_params[0].title
+    );
+
+    let story_notifications = notifier_handle.story_calls();
+    assert_eq!(story_notifications.len(), 1);
+    assert_eq!(story_notifications[0].status, StoryStatus::Error);
+    assert_eq!(story_notifications[0].story_key, result_story_key);
+    assert!(story_notifications[0].pr_url.is_some());
+
+    assert!(
+        !wal_path(&artifacts_dir).exists(),
+        "WAL file should be deleted after recovery processing"
     );
 }
 
@@ -281,7 +414,7 @@ async fn test_wal_recovery_with_real_runner_detects_wal() {
     let config = make_test_config(dir.path());
     let artifacts_dir = ensure_artifacts_dir(&config);
     let state = make_valid_wal_state();
-    write_wal_file(&artifacts_dir, &state);
+    write_wal_file(&artifacts_dir, &state).await;
 
     let config = Arc::new(config);
     let runner = make_test_runner(Arc::clone(&config));
@@ -304,7 +437,7 @@ async fn test_wal_recovery_priority_wal_present() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let config = make_test_config(dir.path());
     let artifacts_dir = ensure_artifacts_dir(&config);
-    write_wal_file(&artifacts_dir, &make_valid_wal_state());
+    write_wal_file(&artifacts_dir, &make_valid_wal_state()).await;
 
     let config = Arc::new(config);
     let runner = make_test_runner(config);
@@ -335,11 +468,15 @@ async fn test_wal_recovery_priority_no_wal() {
 
 #[tokio::test]
 async fn test_wal_pipeline_recover_and_process_no_wal() {
-    // Pipeline-level: recover_and_process() returns None when no SessionRunner
-    // (confirms daemon proceeds to polling when built with new_with_components).
+    // Pipeline-level: recover_and_process() returns None when no WAL is present
+    // (confirms daemon proceeds to polling when there is no recovery work).
     use bmad_bot::session::SessionOutcome;
 
     use crate::helpers::fixtures::PipelineTestBuilder;
+
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let config = make_test_config(dir.path());
+    let _artifacts_dir = ensure_artifacts_dir(&config);
 
     let (pipeline, _notifier, _git) = PipelineTestBuilder::new()
         .with_session(SessionOutcome::Completed {
@@ -350,10 +487,10 @@ async fn test_wal_pipeline_recover_and_process_no_wal() {
             pr_how_to_test: None,
             pr_additional_info: None,
         })
-        .build();
+        .build_with_config(config);
 
     let result = pipeline.recover_and_process().await;
-    assert!(result.is_none(), "No SessionRunner → None → proceed to poll");
+    assert!(result.is_none(), "No WAL → None → proceed to poll");
 }
 
 // ===========================================================================
@@ -383,7 +520,7 @@ async fn test_wal_legacy_branch_fallback() {
             content: "DS".to_string(),
         }],
     };
-    write_wal_file(&artifacts_dir, &state);
+    write_wal_file(&artifacts_dir, &state).await;
 
     let config = Arc::new(config);
     let runner = make_test_runner(Arc::clone(&config));

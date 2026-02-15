@@ -3,9 +3,7 @@
 use crate::helpers::fixtures::*;
 use bmad_bot::session::SessionState;
 use bmad_bot::watcher::SprintStatusFile;
-use std::path::Path;
 
-// ---------------------------------------------------------------------------
 // make_test_config tests (Task 7.5 partial)
 // ---------------------------------------------------------------------------
 
@@ -165,13 +163,13 @@ fn test_write_sprint_status_stories_filtered_correctly() {
 // write_wal_file tests (Task 7.7)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_write_wal_file_creates_parseable_yaml() {
+#[tokio::test]
+async fn test_write_wal_file_creates_parseable_yaml() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let story = make_test_story("4-2-agent-session", "agent session", vec![]);
     let state = SessionState::new(&story, "anthropic", "claude-sonnet-4-20250514");
 
-    write_wal_file(dir.path(), &state);
+    write_wal_file(dir.path(), &state).await;
 
     let path = dir.path().join(".bmad-bot-session.yaml");
     assert!(path.exists(), "WAL file should exist");
@@ -184,15 +182,15 @@ fn test_write_wal_file_creates_parseable_yaml() {
     assert_eq!(parsed.model, "claude-sonnet-4-20250514");
 }
 
-#[test]
-fn test_write_wal_file_preserves_chat_history() {
+#[tokio::test]
+async fn test_write_wal_file_preserves_chat_history() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let story = make_test_story("1-1-test", "test", vec![]);
     let mut state = SessionState::new(&story, "openai", "gpt-4o");
     state.add_user_message("hello");
     state.add_assistant_message("world");
 
-    write_wal_file(dir.path(), &state);
+    write_wal_file(dir.path(), &state).await;
 
     let content = std::fs::read_to_string(dir.path().join(".bmad-bot-session.yaml"))
         .expect("read WAL file");

@@ -24,8 +24,7 @@ use crate::review::ReviewRunner;
 use crate::session::SessionOutcome;
 use crate::session::analyzer::strip_agent_artifacts;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
-use crate::session::runner::SessionRunner;
-use crate::session::runner::ShutdownFlag;
+use crate::session::runner::{SessionRunner, ShutdownFlag};
 use crate::supervisor::decisions::format_pr_decisions_section;
 use crate::watcher::StoryInfo;
 
@@ -234,12 +233,17 @@ impl StoryPipeline {
     }
 
     /// Construct a pipeline with pre-built dependencies (for integration tests).
+    ///
+    /// The `session_runner_for_recovery` can be provided to exercise
+    /// `recover_and_process()` in tests (e.g., WAL recovery). Pass `None` to
+    /// preserve the current behavior of `new_with_components()`.
     pub fn new_with_components(
         config: Arc<BotConfig>,
         git_provider: Box<dyn GitProvider>,
         notifier: Box<dyn Notifier>,
         dev_runner: Box<dyn DevRunner>,
         code_reviewer: Box<dyn CodeReviewer>,
+        session_runner_for_recovery: Option<SessionRunner>,
     ) -> Self {
         Self {
             config,
@@ -247,7 +251,7 @@ impl StoryPipeline {
             notifier,
             dev_runner,
             code_reviewer,
-            session_runner_for_recovery: None,
+            session_runner_for_recovery,
         }
     }
 
@@ -896,7 +900,8 @@ impl StoryPipeline {
     /// Process the outcome of a recovered session through the post-session pipeline.
     ///
     /// Reuses the same post-session logic as [`process_story()`]: code review → PR → notification.
-    async fn process_recovered_session(
+    /// Public for integration tests; production code should call via [`recover_and_process()`].
+    pub async fn process_recovered_session(
         &self,
         story: &StoryInfo,
         outcome: SessionOutcome,
