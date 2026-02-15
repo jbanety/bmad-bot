@@ -23,3 +23,5 @@ mod test_notifier;
 mod test_branch_git;
 #[path = "integration/test_cli_lifecycle.rs"]
 mod test_cli_lifecycle;
+#[path = "integration/test_response_analyzer_supervisor.rs"]
+mod test_response_analyzer_supervisor;
