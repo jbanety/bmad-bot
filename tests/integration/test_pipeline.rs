@@ -304,11 +304,6 @@ async fn test_pipeline_pr_creation_failure() {
 
     let (pipeline, notifier, git) = PipelineTestBuilder::new()
         .with_session(completed_outcome(story_key, branch))
-        .with_review(ReviewOutcome::Completed {
-            story_key: story_key.to_string(),
-            branch: branch.to_string(),
-            report: "Should never see this".to_string(),
-        })
         .with_git_provider(mock_git)
         .build_with_config(config);
 
@@ -427,11 +422,17 @@ async fn test_pipeline_process_eligible_stories_batch() {
         use std::process::Command;
         let repo_dir = std::path::Path::new(&config.bmad_paths.project_root);
         let run = |args: &[&str]| {
-            Command::new("git")
+            let output = Command::new("git")
                 .args(args)
                 .current_dir(repo_dir)
                 .output()
-                .unwrap();
+                .expect("git command failed");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
         };
         // Create branches for stories 2 and 3
         run(&["checkout", "-b", "story/4-2-agent-session"]);
