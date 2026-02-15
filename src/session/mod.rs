@@ -34,6 +34,9 @@ pub mod runner;
 /// WAL state file — session persistence for crash recovery.
 pub(crate) mod state;
 
+// Re-export types needed by integration tests
+pub use state::{SessionState, ChatMessage};
+
 use crate::supervisor::decisions::DecisionRecord;
 use escalation::EscalationReport;
 
