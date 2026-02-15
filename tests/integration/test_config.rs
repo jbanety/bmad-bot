@@ -226,10 +226,11 @@ fn test_config_invalid_yaml_syntax_rejected() {
 #[test]
 fn test_config_load_nonexistent_file_rejected() {
     // Arrange
-    let path = Path::new("/tmp/does-not-exist-bmad-bot-test-7-2.yaml");
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("does-not-exist-bmad-bot-test-7-2.yaml");
 
     // Act
-    let err = BotConfig::load(path).unwrap_err();
+    let err = BotConfig::load(&path).unwrap_err();
 
     // Assert
     assert!(
@@ -240,11 +241,12 @@ fn test_config_load_nonexistent_file_rejected() {
 
 #[test]
 fn test_config_invalid_errors_contain_field_name() {
-    // Verify that each error message contains the offending field name.
+    // Verify that invalid-config errors include the offending field names.
     let tmp = tempfile::tempdir().unwrap();
 
-    // Zero polling
-    let yaml = r#"
+    let cases = [
+        (
+            r#"
 polling_interval_secs: 0
 git_provider: { provider: github, repo_owner: t, repo_name: t }
 llm:
@@ -253,16 +255,50 @@ llm:
   supervisor: { provider: anthropic, model: t }
 notifications: { telegram: { enabled: false } }
 bmad_paths: { project_root: ".", output_folder: "o", planning_artifacts: "p", implementation_artifacts: "i" }
-"#;
-    let path = tmp.path().join("bmad-bot.yaml");
-    std::fs::write(&path, yaml).expect("write");
-    let config = BotConfig::load(&path).expect("load");
-    let err = config.validate().unwrap_err();
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("polling_interval_secs"),
-        "error message should contain field name, got: {msg}"
-    );
+"#,
+            "polling_interval_secs",
+        ),
+        (
+            r#"
+polling_interval_secs: 60
+git_provider: { provider: bitbucket, repo_owner: t, repo_name: t }
+llm:
+  dev: { provider: anthropic, model: t }
+  review: { provider: anthropic, model: t }
+  supervisor: { provider: anthropic, model: t }
+notifications: { telegram: { enabled: false } }
+bmad_paths: { project_root: ".", output_folder: "o", planning_artifacts: "p", implementation_artifacts: "i" }
+"#,
+            "git_provider.provider",
+        ),
+        (
+            r#"
+polling_interval_secs: 60
+git_provider: { provider: github, repo_owner: t, repo_name: t }
+llm:
+  dev: { provider: anthropic, model: t }
+  review: { provider: anthropic, model: t }
+  supervisor: { provider: anthropic, model: t }
+notifications: { telegram: { enabled: false } }
+bmad_paths: { project_root: "", output_folder: "o", planning_artifacts: "p", implementation_artifacts: "i" }
+"#,
+            "bmad_paths.project_root",
+        ),
+    ];
+
+    for (index, (yaml, expected_field)) in cases.iter().enumerate() {
+        let path = tmp.path().join(format!("bmad-bot-{index}.yaml"));
+        std::fs::write(&path, yaml).expect("write");
+
+        let config = BotConfig::load(&path).expect("load");
+        let err = config.validate().unwrap_err();
+        let msg = format!("{err}");
+
+        assert!(
+            msg.contains(expected_field),
+            "error message should contain field `{expected_field}`, got: {msg}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -333,19 +369,49 @@ fn test_secrets_missing_telegram_token_when_enabled() {
 
 #[test]
 fn test_secrets_error_contains_env_var_name() {
-    // Verify that each missing-secret error message contains the expected env var name.
+    // Verify that missing-secret errors include the expected env var names.
     let tmp = tempfile::tempdir().unwrap();
-    let config = make_test_config(tmp.path());
-    let secrets = BotSecrets {
+
+    // Anthropic key missing
+    let anthropic_config = make_test_config(tmp.path());
+    let anthropic_secrets = BotSecrets {
         anthropic_api_key: None,
         ..make_test_secrets()
     };
-
-    let err = secrets.validate_for_config(&config).unwrap_err();
-    let msg = format!("{err}");
+    let anthropic_err = anthropic_secrets
+        .validate_for_config(&anthropic_config)
+        .unwrap_err();
     assert!(
-        msg.contains("ANTHROPIC_API_KEY"),
-        "error message should contain env var name, got: {msg}"
+        format!("{anthropic_err}").contains("ANTHROPIC_API_KEY"),
+        "error message should contain ANTHROPIC_API_KEY"
+    );
+
+    // Git provider token missing
+    let github_config = make_test_config(tmp.path());
+    let github_secrets = BotSecrets {
+        github_token: None,
+        ..make_test_secrets()
+    };
+    let github_err = github_secrets.validate_for_config(&github_config).unwrap_err();
+    assert!(
+        format!("{github_err}").contains("GITHUB_TOKEN"),
+        "error message should contain GITHUB_TOKEN"
+    );
+
+    // Telegram token missing when notifications enabled
+    let mut telegram_config = make_test_config(tmp.path());
+    telegram_config.notifications.telegram.enabled = true;
+    telegram_config.notifications.telegram.chat_id = "12345".to_string();
+    let telegram_secrets = BotSecrets {
+        telegram_bot_token: None,
+        ..make_test_secrets()
+    };
+    let telegram_err = telegram_secrets
+        .validate_for_config(&telegram_config)
+        .unwrap_err();
+    assert!(
+        format!("{telegram_err}").contains("TELEGRAM_BOT_TOKEN"),
+        "error message should contain TELEGRAM_BOT_TOKEN"
     );
 }
 

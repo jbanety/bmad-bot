@@ -1,6 +1,6 @@
 # Story 7.2: Config → Startup Validation Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -284,6 +284,7 @@ Claude claude-sonnet-4-20250514
 ### Debug Log References
 - All 20 integration tests pass: `cargo test --test integration test_config`
 - Full regression suite (849 unit + 20 integration) passes: `cargo test`
+- Code-review regression after fixes passes: `cargo test --test integration test_config`
 
 ### Completion Notes List
 - Task 1: Created `tests/integration/test_config.rs`, added `#[path = "integration/test_config.rs"] mod test_config;` to `tests/integration.rs`. Imports: `BotConfig`, `BotSecrets`, `ConfigError`, `build_http_client`, `BmadDiscovery`, fixture helpers.
@@ -293,9 +294,14 @@ Claude claude-sonnet-4-20250514
 - Task 5: 3 tests — full `_bmad/` with version extraction, empty dir (no `_bmad/`), partial `_bmad/` without config.yaml.
 - Task 6: 1 test — `build_http_client()` returns `ClientWithMiddleware` without panic.
 - Decision: Used actual codebase LLM provider value `"github-copilot"` (not `"github-models"` from story Dev Notes reference) since that's what `VALID_LLM_PROVIDERS` contains.
+- Code Review Fixes (CR):
+  - Improved `test_config_load_nonexistent_file_rejected` to use a tempdir-local missing path instead of hardcoded `/tmp`, removing host-environment coupling.
+  - Expanded `test_config_invalid_errors_contain_field_name` to validate multiple field-level failures (`polling_interval_secs`, `git_provider.provider`, `bmad_paths.project_root`) instead of a single case.
+  - Expanded `test_secrets_error_contains_env_var_name` to assert provider-specific env-var names across Anthropic, GitHub git provider, and Telegram-enabled notification scenarios.
 
 ### Change Log
 - Story 7.2 implemented — 20 integration tests for config→startup validation pipeline (2026-02-11)
+- Code review fixes applied — strengthened test isolation and error-message coverage for config/secrets validation (2026-02-15)
 
 ### File List
 - tests/integration.rs (modified — added `mod test_config` declaration)
