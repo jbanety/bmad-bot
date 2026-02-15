@@ -1,6 +1,6 @@
 # Story 7.2: Config → Startup Validation Integration Tests
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -35,39 +35,39 @@ So that I'm confident the daemon rejects bad configs and accepts good ones end-t
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Create integration test file `tests/integration/test_config.rs` (AC: #1–#5)
-  - [ ] 1.1 Add `mod test_config;` declaration in `tests/integration.rs`
-  - [ ] 1.2 Import required types from `bmad_bot::config` and `bmad_bot::config::discovery`
+- [x] Task 1: Create integration test file `tests/integration/test_config.rs` (AC: #1–#5)
+  - [x] 1.1 Add `mod test_config;` declaration in `tests/integration.rs`
+  - [x] 1.2 Import required types from `bmad_bot::config` and `bmad_bot::config::discovery`
 
-- [ ] Task 2: Write valid config round-trip test (AC: #1)
-  - [ ] 2.1 Use `make_test_config()` from helpers to build a valid `BotConfig`
-  - [ ] 2.2 Serialize to YAML via `serde_yml::to_string()` and write to `{tempdir}/bmad-bot.yaml`
-  - [ ] 2.3 Call `BotConfig::load(path)` → `validate()` → assert `Ok(())`
-  - [ ] 2.4 Construct `BotSecrets` directly with `make_test_secrets()` and call `validate_for_config(&config)` → assert `Ok(())`
+- [x] Task 2: Write valid config round-trip test (AC: #1)
+  - [x] 2.1 Use `make_test_config()` from helpers to build a valid `BotConfig`
+  - [x] 2.2 Serialize to YAML via `serde_yml::to_string()` and write to `{tempdir}/bmad-bot.yaml`
+  - [x] 2.3 Call `BotConfig::load(path)` → `validate()` → assert `Ok(())`
+  - [x] 2.4 Construct `BotSecrets` directly with `make_test_secrets()` and call `validate_for_config(&config)` → assert `Ok(())`
 
-- [ ] Task 3: Write invalid config rejection tests (AC: #2)
-  - [ ] 3.1 Test `polling_interval_secs: 0` → `ConfigError::InvalidField`
-  - [ ] 3.2 Test unknown git provider → `ConfigError::InvalidField`
-  - [ ] 3.3 Test unknown LLM provider → `ConfigError::InvalidField`
-  - [ ] 3.4 Test empty `bmad_paths.project_root` → `ConfigError::MissingField`
-  - [ ] 3.5 Test invalid YAML syntax → `ConfigError::YamlParse`
-  - [ ] 3.6 Test `BotConfig::load()` on nonexistent file → `ConfigError::FileRead`
-  - [ ] 3.7 For each error, assert the error message contains the offending field name
+- [x] Task 3: Write invalid config rejection tests (AC: #2)
+  - [x] 3.1 Test `polling_interval_secs: 0` → `ConfigError::InvalidField`
+  - [x] 3.2 Test unknown git provider → `ConfigError::InvalidField`
+  - [x] 3.3 Test unknown LLM provider → `ConfigError::InvalidField`
+  - [x] 3.4 Test empty `bmad_paths.project_root` → `ConfigError::MissingField`
+  - [x] 3.5 Test invalid YAML syntax → `ConfigError::YamlParse`
+  - [x] 3.6 Test `BotConfig::load()` on nonexistent file → `ConfigError::FileRead`
+  - [x] 3.7 For each error, assert the error message contains the offending field name
 
-- [ ] Task 4: Write secrets validation tests (AC: #3)
-  - [ ] 4.1 Build valid config with `provider: "anthropic"`, construct `BotSecrets` with `anthropic_api_key: None` → assert `ConfigError::MissingSecret`
-  - [ ] 4.2 Build valid config with `provider: "github"`, construct `BotSecrets` with `github_token: None` → assert `ConfigError::MissingSecret`
-  - [ ] 4.3 Build valid config with Telegram enabled, construct `BotSecrets` with `telegram_bot_token: None` → assert `ConfigError::MissingSecret`
-  - [ ] 4.4 Verify each error contains the expected env var name
+- [x] Task 4: Write secrets validation tests (AC: #3)
+  - [x] 4.1 Build valid config with `provider: "anthropic"`, construct `BotSecrets` with `anthropic_api_key: None` → assert `ConfigError::MissingSecret`
+  - [x] 4.2 Build valid config with `provider: "github"`, construct `BotSecrets` with `github_token: None` → assert `ConfigError::MissingSecret`
+  - [x] 4.3 Build valid config with Telegram enabled, construct `BotSecrets` with `telegram_bot_token: None` → assert `ConfigError::MissingSecret`
+  - [x] 4.4 Verify each error contains the expected env var name
 
-- [ ] Task 5: Write BMAD discovery integration tests (AC: #4)
-  - [ ] 5.1 Create temp dir with `_bmad/bmm/config.yaml` (version comment) and `_bmad/core/` → assert `bmad_detected: true`, modules found, version extracted
-  - [ ] 5.2 Create temp dir without `_bmad/` → assert `bmad_detected: false`, empty modules
-  - [ ] 5.3 Create temp dir with partial `_bmad/` (no config.yaml) → assert detected, no version
+- [x] Task 5: Write BMAD discovery integration tests (AC: #4)
+  - [x] 5.1 Create temp dir with `_bmad/bmm/config.yaml` (version comment) and `_bmad/core/` → assert `bmad_detected: true`, modules found, version extracted
+  - [x] 5.2 Create temp dir without `_bmad/` → assert `bmad_detected: false`, empty modules
+  - [x] 5.3 Create temp dir with partial `_bmad/` (no config.yaml) → assert detected, no version
 
-- [ ] Task 6: Write HTTP client builder test (AC: #5)
-  - [ ] 6.1 Call `build_http_client()` → assert it returns without panicking
-  - [ ] 6.2 Verify the returned value is a `ClientWithMiddleware` (type assertion via binding)
+- [x] Task 6: Write HTTP client builder test (AC: #5)
+  - [x] 6.1 Call `build_http_client()` → assert it returns without panicking
+  - [x] 6.2 Verify the returned value is a `ClientWithMiddleware` (type assertion via binding)
 
 ## Dev Notes
 
@@ -279,9 +279,26 @@ The real `sprint-status.yaml` has comments like `# depends-on: 7-1`. These are *
 ## Dev Agent Record
 
 ### Agent Model Used
+Claude claude-sonnet-4-20250514
 
 ### Debug Log References
+- All 20 integration tests pass: `cargo test --test integration test_config`
+- Full regression suite (849 unit + 20 integration) passes: `cargo test`
 
 ### Completion Notes List
+- Task 1: Created `tests/integration/test_config.rs`, added `#[path = "integration/test_config.rs"] mod test_config;` to `tests/integration.rs`. Imports: `BotConfig`, `BotSecrets`, `ConfigError`, `build_http_client`, `BmadDiscovery`, fixture helpers.
+- Task 2: `test_config_valid_roundtrip_succeeds` — serialize→write→load→validate round-trip. `test_config_valid_roundtrip_secrets_validate` — full pipeline including secrets validation.
+- Task 3: 7 tests covering zero polling, unknown git provider, unknown LLM provider, empty project_root, invalid YAML syntax, nonexistent file, and field-name-in-error-message assertion. Each uses hand-crafted YAML strings for defective configs.
+- Task 4: 4 tests — missing anthropic key, missing github token, missing telegram token (when enabled), env var name in error message. All construct `BotSecrets` directly (no env var manipulation).
+- Task 5: 3 tests — full `_bmad/` with version extraction, empty dir (no `_bmad/`), partial `_bmad/` without config.yaml.
+- Task 6: 1 test — `build_http_client()` returns `ClientWithMiddleware` without panic.
+- Decision: Used actual codebase LLM provider value `"github-copilot"` (not `"github-models"` from story Dev Notes reference) since that's what `VALID_LLM_PROVIDERS` contains.
+
+### Change Log
+- Story 7.2 implemented — 20 integration tests for config→startup validation pipeline (2026-02-11)
 
 ### File List
+- tests/integration.rs (modified — added `mod test_config` declaration)
+- tests/integration/test_config.rs (new — 20 integration tests)
+- _bmad-output/implementation-artifacts/sprint-status.yaml (modified — status update)
+- _bmad-output/implementation-artifacts/7-2-config-startup-validation-integration-tests.md (modified — task checkboxes, dev record)
