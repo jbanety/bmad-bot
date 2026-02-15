@@ -121,7 +121,7 @@ fn test_daemon_state_mark_stopped_persists() {
     let dir = TempDir::new().expect("tempdir");
     let state_path = dir.path().join(STATE_FILE_NAME);
 
-    let mut state = DaemonState::new_running(PathBuf::from("test.log"), make_test_discovery());
+    let state = DaemonState::new_running(PathBuf::from("test.log"), make_test_discovery());
     state.write(&state_path).expect("write");
 
     let mut loaded = DaemonState::read(&state_path)
