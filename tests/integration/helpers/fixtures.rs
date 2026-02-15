@@ -17,7 +17,9 @@ use bmad_bot::session::SessionOutcome;
 use bmad_bot::session::SessionState;
 use bmad_bot::watcher::StoryInfo;
 
-use super::mocks::{MockCodeReviewer, MockDevRunner, MockGitProvider, MockNotifier};
+use super::mocks::{
+    MockCodeReviewer, MockDevRunner, MockGitProvider, MockNotifier, PipelineCallRecorder,
+};
 
 /// Build a valid `BotConfig` using the provided temp directory for paths.
 ///
@@ -58,7 +60,10 @@ pub fn make_test_config(dir: &Path) -> BotConfig {
         bmad_paths: BmadPathsConfig {
             project_root: dir.display().to_string(),
             output_folder: dir.join("_bmad-output").display().to_string(),
-            planning_artifacts: dir.join("_bmad-output/planning-artifacts").display().to_string(),
+            planning_artifacts: dir
+                .join("_bmad-output/planning-artifacts")
+                .display()
+                .to_string(),
             implementation_artifacts: dir
                 .join("_bmad-output/implementation-artifacts")
                 .display()
@@ -199,10 +204,7 @@ pub fn create_test_repo_with_remote(work_dir: &Path, bare_dir: &Path, branch_nam
 
     // 3. Create story branch with a commit
     run_in(work_dir, &["checkout", "-b", branch_name]);
-    run_in(
-        work_dir,
-        &["commit", "--allow-empty", "-m", "story work"],
-    );
+    run_in(work_dir, &["commit", "--allow-empty", "-m", "story work"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -271,41 +273,64 @@ impl PipelineTestBuilder {
 
     /// Build the pipeline and return assertion handles.
     ///
-    /// Returns `(StoryPipeline, MockNotifier, MockGitProvider)` where the mock
+    /// Returns `(StoryPipeline, MockNotifier, MockGitProvider, MockCodeReviewer)` where the mock
     /// handles share internal state with the pipeline's copies.
-    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider) {
-        let notifier_for_assertions = self.mock_notifier.clone();
-        let git_for_assertions = self.mock_git.clone();
+    pub fn build(
+        self,
+    ) -> (
+        StoryPipeline,
+        MockNotifier,
+        MockGitProvider,
+        MockCodeReviewer,
+    ) {
+        let call_recorder = PipelineCallRecorder::new();
+
+        let mock_notifier = self.mock_notifier;
+        let notifier_for_assertions = mock_notifier.clone();
+
+        let mock_git = self.mock_git.with_call_recorder(call_recorder.clone());
+        let git_for_assertions = mock_git.clone();
+
+        let code_reviewer_mock = match self.review_outcome {
+            Some(o) => MockCodeReviewer::with_outcome(o),
+            None => MockCodeReviewer::never_called(),
+        }
+        .with_call_recorder(call_recorder);
+        let code_reviewer_for_assertions = code_reviewer_mock.clone();
 
         let dev_runner: Box<dyn DevRunner> = if self.session_outcomes.len() <= 1 {
-            let outcome = self.session_outcomes.into_iter().next().unwrap_or(
-                SessionOutcome::Completed {
-                    story_key: "test".into(),
-                    branch: "story/test".into(),
-                    decisions: vec![],
-                    pr_context: None,
-                    pr_how_to_test: None,
-                    pr_additional_info: None,
-                },
-            );
+            let outcome =
+                self.session_outcomes
+                    .into_iter()
+                    .next()
+                    .unwrap_or(SessionOutcome::Completed {
+                        story_key: "test".into(),
+                        branch: "story/test".into(),
+                        decisions: vec![],
+                        pr_context: None,
+                        pr_how_to_test: None,
+                        pr_additional_info: None,
+                    });
             Box::new(MockDevRunner::with_outcome(outcome))
         } else {
             Box::new(MockDevRunner::with_outcomes(self.session_outcomes))
         };
 
-        let code_reviewer: Box<dyn CodeReviewer> = match self.review_outcome {
-            Some(o) => Box::new(MockCodeReviewer::with_outcome(o)),
-            None => Box::new(MockCodeReviewer::never_called()),
-        };
+        let code_reviewer: Box<dyn CodeReviewer> = Box::new(code_reviewer_mock);
 
         let pipeline = StoryPipeline::new_with_components(
             Arc::new(self.config),
-            Box::new(self.mock_git),
-            Box::new(self.mock_notifier),
+            Box::new(mock_git),
+            Box::new(mock_notifier),
             dev_runner,
             code_reviewer,
         );
 
-        (pipeline, notifier_for_assertions, git_for_assertions)
+        (
+            pipeline,
+            notifier_for_assertions,
+            git_for_assertions,
+            code_reviewer_for_assertions,
+        )
     }
 }

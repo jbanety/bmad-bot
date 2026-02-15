@@ -11,9 +11,9 @@ use bmad_bot::session::SessionOutcome;
 use bmad_bot::session::escalation::EscalationReport;
 
 use crate::helpers::fixtures::{
-    create_test_repo_with_remote, make_test_config, make_test_story, PipelineTestBuilder,
+    PipelineTestBuilder, create_test_repo_with_remote, make_test_config, make_test_story,
 };
-use crate::helpers::mocks::{GitProviderCall, MockGitProvider, MockNotifier};
+use crate::helpers::mocks::{GitProviderCall, MockGitProvider, MockNotifier, PipelineCallEvent};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,7 +99,7 @@ async fn test_pipeline_happy_path_completed_with_pr_and_review() {
         number: 42,
     };
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, git, reviewer) = PipelineTestBuilder::new()
         .with_config(config)
         .with_session(completed_outcome(story_key, &branch))
         .with_review(completed_review(story_key))
@@ -133,12 +133,40 @@ async fn test_pipeline_happy_path_completed_with_pr_and_review() {
         "expected create_pr to be called"
     );
     if let GitProviderCall::CreatePr(params) = &create_pr_calls[0] {
-        assert!(
-            params.title.starts_with("feat("),
-            "expected title starting with 'feat(', got: {}",
-            params.title
+        assert_eq!(
+            params.title,
+            format!("feat({story_key}): Rig Tools Implementation"),
+            "expected canonical feat title"
         );
     }
+
+    // Assert create_pr happened before code review
+    let events = git.pipeline_events();
+    let create_pr_seq = events
+        .iter()
+        .find_map(|(seq, event)| {
+            if *event == PipelineCallEvent::GitCreatePr {
+                Some(*seq)
+            } else {
+                None
+            }
+        })
+        .expect("expected GitCreatePr event");
+    let review_seq = events
+        .iter()
+        .find_map(|(seq, event)| {
+            if *event == PipelineCallEvent::CodeReviewRun {
+                Some(*seq)
+            } else {
+                None
+            }
+        })
+        .expect("expected CodeReviewRun event");
+    assert!(
+        create_pr_seq < review_seq,
+        "expected create_pr before run_review; events={events:?}"
+    );
+    assert_eq!(reviewer.call_count(), 1, "expected exactly one review run");
 
     // Assert add_comment was called (review report posted)
     let comment_calls: Vec<_> = calls
@@ -182,7 +210,7 @@ async fn test_pipeline_session_failure_creates_failure_pr() {
         number: 99,
     };
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, git, _reviewer) = PipelineTestBuilder::new()
         .with_config(config)
         .with_session(failed_outcome(story_key, "LLM timeout"))
         .with_git_provider(MockGitProvider::new().with_create_pr(Ok(pr_info)))
@@ -238,7 +266,7 @@ async fn test_pipeline_escalation_returns_blocked() {
     let branch = format!("story/{story_key}");
     let (_work, _bare, config) = setup_git_env(&branch);
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, git, reviewer) = PipelineTestBuilder::new()
         .with_config(config)
         .with_session(escalated_outcome(story_key))
         .build();
@@ -259,14 +287,24 @@ async fn test_pipeline_escalation_returns_blocked() {
     assert_eq!(story_notifications.len(), 1);
     assert_eq!(story_notifications[0].status, StoryStatus::Blocked);
 
-    // Note: actual code DOES create an escalation PR (pushes branch + creates PR).
-    // This diverges from AC #3 which says "NO PR is created", but tests must match real code.
+    // Escalation path creates a PR in actual code.
     let calls = git.calls();
-    let _create_pr_calls: Vec<_> = calls
+    let create_pr_calls: Vec<_> = calls
         .iter()
         .filter(|c| matches!(c, GitProviderCall::CreatePr(_)))
         .collect();
-    // Escalation path creates a PR in the actual code, so we don't assert it's empty.
+    assert_eq!(
+        create_pr_calls.len(),
+        1,
+        "expected one escalation create_pr call"
+    );
+    assert!(
+        result.pr_url.is_some(),
+        "expected escalation PR URL when create_pr succeeds"
+    );
+
+    // Review should not run for escalated sessions.
+    assert_eq!(reviewer.call_count(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +317,7 @@ async fn test_pipeline_review_disabled_skips_code_review() {
     let branch = format!("story/{story_key}");
     let (_work, _bare, config) = setup_git_env(&branch);
 
-    let (pipeline, _notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, _notifier, git, reviewer) = PipelineTestBuilder::new()
         .with_config(config)
         .with_code_review(false)
         .with_session(completed_outcome(story_key, &branch))
@@ -291,6 +329,13 @@ async fn test_pipeline_review_disabled_skips_code_review() {
 
     assert_eq!(result.status, StoryStatus::Completed);
     assert!(result.pr_url.is_some());
+
+    // Reviewer was not called when code review is disabled.
+    assert_eq!(
+        reviewer.call_count(),
+        0,
+        "expected code reviewer call_count == 0 when review disabled"
+    );
 
     // Assert add_comment NOT called (no review report to post)
     let comment_count = git
@@ -319,7 +364,7 @@ async fn test_pipeline_pr_creation_failure_returns_error() {
         message: "Validation Failed".to_string(),
     }));
 
-    let (pipeline, notifier, _git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, _git, reviewer) = PipelineTestBuilder::new()
         .with_config(config)
         .with_session(completed_outcome(story_key, &branch))
         .with_git_provider(mock_git)
@@ -332,7 +377,11 @@ async fn test_pipeline_pr_creation_failure_returns_error() {
     assert_eq!(result.status, StoryStatus::Error);
     assert!(result.pr_url.is_none());
     assert!(
-        result.error_detail.as_ref().unwrap().contains("PR creation"),
+        result
+            .error_detail
+            .as_ref()
+            .unwrap()
+            .contains("PR creation"),
         "expected error_detail about PR creation failure, got: {:?}",
         result.error_detail
     );
@@ -340,6 +389,9 @@ async fn test_pipeline_pr_creation_failure_returns_error() {
     // Assert notification still captured (best-effort)
     let story_notifications = notifier.story_calls();
     assert_eq!(story_notifications.len(), 1);
+
+    // No PR means reviewer should not run.
+    assert_eq!(reviewer.call_count(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +404,7 @@ async fn test_pipeline_review_failure_still_completes() {
     let branch = format!("story/{story_key}");
     let (_work, _bare, config) = setup_git_env(&branch);
 
-    let (pipeline, _notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, _notifier, git, _reviewer) = PipelineTestBuilder::new()
         .with_config(config)
         .with_session(completed_outcome(story_key, &branch))
         .with_review(failed_review(story_key))
@@ -400,7 +452,7 @@ async fn test_pipeline_notification_failure_does_not_block() {
         number: 42,
     };
 
-    let (pipeline, _notifier, _git) = PipelineTestBuilder::new()
+    let (pipeline, _notifier, _git, _reviewer) = PipelineTestBuilder::new()
         .with_config(config)
         .with_code_review(false)
         .with_session(completed_outcome(story_key, &branch))
@@ -465,7 +517,7 @@ async fn test_pipeline_process_eligible_stories_batch() {
         failed_outcome("4-3-pre-dev", "Agent crashed"),
     ];
 
-    let (pipeline, notifier, _git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, _git, _reviewer) = PipelineTestBuilder::new()
         .with_config(config)
         .with_sessions(outcomes)
         .build();

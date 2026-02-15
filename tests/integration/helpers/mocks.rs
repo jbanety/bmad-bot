@@ -2,17 +2,17 @@
 //!
 //! All mocks are `Send + Sync` and use `Arc<Mutex<...>>` for interior mutability.
 
-use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::pipeline::{CodeReviewer, DevRunner};
 use bmad_bot::review::ReviewOutcome;
-use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::session::SessionOutcome;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::watcher::StoryInfo;
 
 // ---------------------------------------------------------------------------
@@ -23,11 +23,46 @@ use bmad_bot::watcher::StoryInfo;
 #[derive(Debug, Clone)]
 pub enum GitProviderCall {
     CreatePr(CreatePrParams),
-    AddComment {
-        pr_id: String,
-        body: String,
-    },
+    AddComment { pr_id: String, body: String },
     GetPrUrl(String),
+}
+
+/// Cross-mock call event for asserting orchestration order in integration tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineCallEvent {
+    GitCreatePr,
+    GitAddComment,
+    GitGetPrUrl,
+    CodeReviewRun,
+}
+
+/// Shared recorder for cross-component call ordering assertions.
+#[derive(Debug, Clone)]
+pub struct PipelineCallRecorder {
+    sequence: Arc<AtomicUsize>,
+    events: Arc<Mutex<Vec<(usize, PipelineCallEvent)>>>,
+}
+
+impl PipelineCallRecorder {
+    /// Create an empty recorder.
+    pub fn new() -> Self {
+        Self {
+            sequence: Arc::new(AtomicUsize::new(0)),
+            events: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Record one event and return its sequence number.
+    pub fn record(&self, event: PipelineCallEvent) -> usize {
+        let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
+        self.events.lock().unwrap().push((seq, event));
+        seq
+    }
+
+    /// Return all recorded events in sequence order.
+    pub fn events(&self) -> Vec<(usize, PipelineCallEvent)> {
+        self.events.lock().unwrap().clone()
+    }
 }
 
 /// Mock implementation of [`GitProvider`] for integration tests.
@@ -41,6 +76,7 @@ pub struct MockGitProvider {
     add_comment_result: Arc<Mutex<Result<(), GitProviderError>>>,
     get_pr_url_result: Arc<Mutex<Result<String, GitProviderError>>>,
     calls: Arc<Mutex<Vec<GitProviderCall>>>,
+    call_recorder: Arc<Mutex<Option<PipelineCallRecorder>>>,
 }
 
 impl Clone for MockGitProvider {
@@ -50,6 +86,7 @@ impl Clone for MockGitProvider {
             add_comment_result: Arc::clone(&self.add_comment_result),
             get_pr_url_result: Arc::clone(&self.get_pr_url_result),
             calls: Arc::clone(&self.calls),
+            call_recorder: Arc::clone(&self.call_recorder),
         }
     }
 }
@@ -65,9 +102,10 @@ impl MockGitProvider {
             }))),
             add_comment_result: Arc::new(Mutex::new(Ok(()))),
             get_pr_url_result: Arc::new(Mutex::new(Ok(
-                "https://github.com/test/test/pull/1".into(),
+                "https://github.com/test/test/pull/1".into()
             ))),
             calls: Arc::new(Mutex::new(Vec::new())),
+            call_recorder: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -89,6 +127,22 @@ impl MockGitProvider {
         self
     }
 
+    /// Attach a shared pipeline call-order recorder.
+    pub fn with_call_recorder(self, recorder: PipelineCallRecorder) -> Self {
+        *self.call_recorder.lock().unwrap() = Some(recorder);
+        self
+    }
+
+    /// Return recorded cross-component pipeline events.
+    pub fn pipeline_events(&self) -> Vec<(usize, PipelineCallEvent)> {
+        self.call_recorder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(PipelineCallRecorder::events)
+            .unwrap_or_default()
+    }
+
     /// Return all captured calls.
     pub fn calls(&self) -> Vec<GitProviderCall> {
         self.calls.lock().unwrap().clone()
@@ -102,6 +156,9 @@ impl GitProvider for MockGitProvider {
             .lock()
             .unwrap()
             .push(GitProviderCall::CreatePr(params));
+        if let Some(recorder) = self.call_recorder.lock().unwrap().as_ref() {
+            recorder.record(PipelineCallEvent::GitCreatePr);
+        }
         let guard = self.create_pr_result.lock().unwrap();
         match &*guard {
             Ok(info) => Ok(info.clone()),
@@ -117,6 +174,9 @@ impl GitProvider for MockGitProvider {
                 pr_id: pr_id.to_string(),
                 body: body.to_string(),
             });
+        if let Some(recorder) = self.call_recorder.lock().unwrap().as_ref() {
+            recorder.record(PipelineCallEvent::GitAddComment);
+        }
         let guard = self.add_comment_result.lock().unwrap();
         match &*guard {
             Ok(()) => Ok(()),
@@ -129,6 +189,9 @@ impl GitProvider for MockGitProvider {
             .lock()
             .unwrap()
             .push(GitProviderCall::GetPrUrl(pr_id.to_string()));
+        if let Some(recorder) = self.call_recorder.lock().unwrap().as_ref() {
+            recorder.record(PipelineCallEvent::GitGetPrUrl);
+        }
         let guard = self.get_pr_url_result.lock().unwrap();
         match &*guard {
             Ok(url) => Ok(url.clone()),
@@ -264,10 +327,7 @@ impl MockNotifier {
 
 #[async_trait]
 impl Notifier for MockNotifier {
-    async fn notify_story(
-        &self,
-        notification: &StoryNotification,
-    ) -> Result<(), NotifierError> {
+    async fn notify_story(&self, notification: &StoryNotification) -> Result<(), NotifierError> {
         self.calls
             .lock()
             .unwrap()
@@ -346,12 +406,10 @@ impl MockSessionRunner {
                 pr_how_to_test: pr_how_to_test.clone(),
                 pr_additional_info: pr_additional_info.clone(),
             },
-            Some(SessionOutcome::Escalated { report, decisions }) => {
-                SessionOutcome::Escalated {
-                    report: report.clone(),
-                    decisions: decisions.clone(),
-                }
-            }
+            Some(SessionOutcome::Escalated { report, decisions }) => SessionOutcome::Escalated {
+                report: report.clone(),
+                decisions: decisions.clone(),
+            },
             Some(SessionOutcome::Failed {
                 story_key,
                 error,
@@ -508,8 +566,19 @@ impl DevRunner for MockDevRunner {
 
 /// Mock implementation of [`CodeReviewer`] for pipeline integration tests.
 pub struct MockCodeReviewer {
-    outcomes: Mutex<VecDeque<ReviewOutcome>>,
-    call_count: AtomicUsize,
+    outcomes: Arc<Mutex<VecDeque<ReviewOutcome>>>,
+    call_count: Arc<AtomicUsize>,
+    call_recorder: Arc<Mutex<Option<PipelineCallRecorder>>>,
+}
+
+impl Clone for MockCodeReviewer {
+    fn clone(&self) -> Self {
+        Self {
+            outcomes: Arc::clone(&self.outcomes),
+            call_count: Arc::clone(&self.call_count),
+            call_recorder: Arc::clone(&self.call_recorder),
+        }
+    }
 }
 
 impl MockCodeReviewer {
@@ -517,16 +586,34 @@ impl MockCodeReviewer {
         let mut q = VecDeque::new();
         q.push_back(outcome);
         Self {
-            outcomes: Mutex::new(q),
-            call_count: AtomicUsize::new(0),
+            outcomes: Arc::new(Mutex::new(q)),
+            call_count: Arc::new(AtomicUsize::new(0)),
+            call_recorder: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn never_called() -> Self {
         Self {
-            outcomes: Mutex::new(VecDeque::new()),
-            call_count: AtomicUsize::new(0),
+            outcomes: Arc::new(Mutex::new(VecDeque::new())),
+            call_count: Arc::new(AtomicUsize::new(0)),
+            call_recorder: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Attach a shared pipeline call-order recorder.
+    pub fn with_call_recorder(self, recorder: PipelineCallRecorder) -> Self {
+        *self.call_recorder.lock().unwrap() = Some(recorder);
+        self
+    }
+
+    /// Return recorded cross-component pipeline events.
+    pub fn pipeline_events(&self) -> Vec<(usize, PipelineCallEvent)> {
+        self.call_recorder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(PipelineCallRecorder::events)
+            .unwrap_or_default()
     }
 
     pub fn call_count(&self) -> usize {
@@ -538,6 +625,9 @@ impl MockCodeReviewer {
 impl CodeReviewer for MockCodeReviewer {
     async fn run_review(&self, _story: &StoryInfo) -> ReviewOutcome {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(recorder) = self.call_recorder.lock().unwrap().as_ref() {
+            recorder.record(PipelineCallEvent::CodeReviewRun);
+        }
         self.outcomes
             .lock()
             .unwrap()
