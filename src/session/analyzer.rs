@@ -64,9 +64,19 @@ pub fn strip_agent_artifacts(text: &str) -> String {
         LazyLock::new(|| Regex::new(r"(?si)<pr-summary>.*?</pr-summary>").unwrap());
     static RE_EXCESSIVE_NEWLINES: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+    // Escape bare `#N` references that GitHub would auto-link to issues/PRs.
+    // Uses a capture group for the preceding character instead of lookbehind
+    // (Rust regex crate does not support look-around).
+    // Group 1 = char before `#` (or empty at start), Group 2 = digit sequence.
+    // Preserves HTML entities (&#123;) and URL fragments (/path#1) by only
+    // matching when preceded by whitespace, line-start, or common punctuation.
+    static RE_GITHUB_ISSUE_REF: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(^|[\s(,:\[])#(\d+)").unwrap());
 
     let cleaned = RE_PR_SUMMARY.replace_all(text, "");
     let cleaned = cleaned.replace(JOB_DONE_SENTINEL, "");
+    // Escape #N → \#N to prevent GitHub auto-linking to issues/PRs
+    let cleaned = RE_GITHUB_ISSUE_REF.replace_all(&cleaned, r"$1\#$2");
     let cleaned = RE_EXCESSIVE_NEWLINES.replace_all(&cleaned, "\n\n");
     cleaned.trim().to_string()
 }
@@ -902,6 +912,61 @@ mod tests {
         let input = "This is a normal review comment with no artifacts.";
         let cleaned = strip_agent_artifacts(input);
         assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_escapes_github_issue_refs() {
+        // AC #3 style references must be escaped to prevent GitHub auto-linking
+        let input = "AC #3 is met. See AC #12 for details.";
+        let cleaned = strip_agent_artifacts(input);
+        assert_eq!(cleaned, r"AC \#3 is met. See AC \#12 for details.");
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_escapes_bare_hash_refs() {
+        let input = "Finding #1: missing error handling\nFinding #2: dead code";
+        let cleaned = strip_agent_artifacts(input);
+        assert!(cleaned.contains(r"\#1"), "Should escape #1, got: {cleaned}");
+        assert!(cleaned.contains(r"\#2"), "Should escape #2, got: {cleaned}");
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_preserves_html_entities_and_url_fragments() {
+        // &#123; and /path#section should NOT be escaped
+        let input = "See &#123; and https://example.com/page#section";
+        let cleaned = strip_agent_artifacts(input);
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_escapes_markdown_heading_hash_number() {
+        // Headings like "### Findings" should NOT be affected (no digit after #)
+        // But "task #5" in text should be escaped
+        let input = "### Findings\n- task #5 incomplete";
+        let cleaned = strip_agent_artifacts(input);
+        assert!(
+            cleaned.contains("### Findings"),
+            "Markdown headings should be preserved, got: {cleaned}"
+        );
+        assert!(cleaned.contains(r"\#5"), "Should escape #5, got: {cleaned}");
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_escapes_hash_at_line_start() {
+        // #42 at the very start of the text should be escaped
+        let input = "#42 is the main issue";
+        let cleaned = strip_agent_artifacts(input);
+        assert_eq!(cleaned, r"\#42 is the main issue");
+    }
+
+    #[test]
+    fn test_strip_agent_artifacts_escapes_hash_after_open_paren() {
+        let input = "see (#7 and #8)";
+        let cleaned = strip_agent_artifacts(input);
+        assert!(
+            cleaned.contains(r"\#7"),
+            "Should escape #7 after '(', got: {cleaned}"
+        );
     }
 
     #[test]
