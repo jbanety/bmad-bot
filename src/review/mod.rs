@@ -434,7 +434,7 @@ impl ReviewRunner {
             initial_message,
             activation_rig_history.len(),
         );
-        let response = agent
+        let (response, _) = agent
             .stream_chat(
                 initial_message,
                 activation_rig_history,
@@ -559,7 +559,7 @@ impl ReviewRunner {
                 .stream_chat(reply.as_str(), history, Some(&self.shutdown))
                 .await
             {
-                Ok(r) => {
+                Ok((r, _)) => {
                     log_llm_response("code-review", turn, &r);
                     retries = 0;
                     chat_history.push((reply, r.clone()));

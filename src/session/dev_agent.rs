@@ -20,13 +20,13 @@ use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::state::ChatMessage;
 
 use futures::StreamExt;
-use rig::agent::MultiTurnStreamItem;
+use rig::agent::{MultiTurnStreamItem, StreamingPromptHook};
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
 use rig::message::Text;
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Shared shutdown flag — set to `true` when Ctrl+C or SIGTERM is received.
 ///
@@ -36,6 +36,71 @@ pub type ShutdownFlag = Arc<AtomicBool>;
 
 /// Maximum tool-call rounds allowed per single prompt in the streaming loop.
 const STREAMING_MAX_TURNS: usize = 300;
+
+// ---------------------------------------------------------------------------
+// ChatHistoryHook — captures full conversation history (including tool calls)
+// ---------------------------------------------------------------------------
+
+/// Hook that captures the full conversation history during streaming multi-turn.
+///
+/// Rig's `on_completion_call` hook is invoked before each LLM call with the
+/// current prompt and the accumulated history (including tool calls and tool
+/// results from previous turns). By storing the latest snapshot, we can
+/// reconstruct the complete conversation after the stream finishes.
+///
+/// ## Reconstruction formula
+///
+/// ```text
+/// full_history = last_captured_history + [last_captured_prompt, Message::assistant(text)]
+/// ```
+/// Snapshot captured by [`ChatHistoryHook::on_completion_call`]: `(history, prompt)`.
+type HistorySnapshot = Option<(Vec<Message>, Message)>;
+
+#[derive(Clone)]
+pub struct ChatHistoryHook {
+    /// Latest `(history, prompt)` snapshot from `on_completion_call`.
+    /// `None` until the first hook invocation.
+    inner: Arc<Mutex<HistorySnapshot>>,
+}
+
+impl ChatHistoryHook {
+    /// Create a new hook with no captured state.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Extract the full conversation history after the stream completes.
+    ///
+    /// Combines the last captured `(history, prompt)` with the final assistant
+    /// text response to produce the complete message sequence including all
+    /// tool calls and tool results.
+    ///
+    /// Returns `None` if the hook was never invoked (e.g. stream errored
+    /// before the first LLM call).
+    pub fn take_full_history(&self, final_text: &str) -> Option<Vec<Message>> {
+        let guard = self.inner.lock().expect("ChatHistoryHook lock");
+        let (history, prompt) = guard.as_ref()?;
+        let mut full = history.clone();
+        full.push(prompt.clone());
+        full.push(Message::assistant(final_text));
+        Some(full)
+    }
+}
+
+impl<M: CompletionModel> StreamingPromptHook<M> for ChatHistoryHook {
+    fn on_completion_call(
+        &self,
+        prompt: &Message,
+        history: &[Message],
+    ) -> impl std::future::Future<Output = rig::agent::HookAction> + Send {
+        // Capture the latest snapshot synchronously (lock is brief).
+        let mut guard = self.inner.lock().expect("ChatHistoryHook lock");
+        *guard = Some((history.to_vec(), prompt.clone()));
+        async { rig::agent::HookAction::cont() }
+    }
+}
 
 /// Build the generic agent preamble with tool usage rules and English override.
 ///
@@ -105,19 +170,33 @@ OVERRIDE: communication_language = English
 /// When `shutdown` is `Some` and the flag is set to `true`, the stream is
 /// abandoned and a `ShutdownRequested` error is returned. This allows Ctrl+C
 /// to interrupt even deep multi-turn tool-calling loops.
+/// Send a prompt via streaming, collect the text response, and return the
+/// **full conversation history** including all tool calls and tool results.
+///
+/// Returns `(accumulated_text, full_history)` where `full_history` contains
+/// every message exchanged during the multi-turn loop — user prompts,
+/// assistant tool calls, user tool results, and the final assistant text.
+///
+/// If the history hook fails to capture (e.g. stream errors before the first
+/// LLM call), `full_history` falls back to the input `history` plus the
+/// prompt and accumulated text as plain messages.
 pub async fn streaming_chat<A, M>(
     agent: &A,
     prompt: impl Into<Message> + Send,
     history: Vec<Message>,
     shutdown: Option<&ShutdownFlag>,
-) -> Result<String, rig::completion::PromptError>
+) -> Result<(String, Vec<Message>), rig::completion::PromptError>
 where
     A: StreamingChat<M, M::StreamingResponse>,
     M: CompletionModel + 'static,
     M::StreamingResponse: Clone + Unpin + GetTokenUsage,
 {
+    let hook = ChatHistoryHook::new();
+    let prompt_msg: Message = prompt.into();
+
     let mut stream = agent
-        .stream_chat(prompt, history)
+        .stream_chat(prompt_msg.clone(), history.clone())
+        .with_hook(hook.clone())
         .multi_turn(STREAMING_MAX_TURNS)
         .await;
 
@@ -163,7 +242,16 @@ where
         }
     }
 
-    Ok(acc)
+    // Reconstruct full history from the hook capture.
+    // Fallback: if hook never fired, build a text-only history.
+    let full_history = hook.take_full_history(&acc).unwrap_or_else(|| {
+        let mut fallback = history;
+        fallback.push(prompt_msg);
+        fallback.push(Message::assistant(&acc));
+        fallback
+    });
+
+    Ok((acc, full_history))
 }
 
 /// Activate a BMAD agent by sending the agent file as the first user message.
@@ -216,21 +304,16 @@ where
         &format!("[agent activation: {agent_relative_path} in context tags]"),
         rig_history.len(),
     );
-    let response = streaming_chat(
-        agent,
-        activation_msg.as_str(),
-        rig_history.clone(),
-        shutdown,
-    )
-    .await
-    .map_err(|e| {
-        log_llm_error(label, 0, &e);
-        format!("Agent activation failed: {e}")
-    })?;
+    let (response, new_history) =
+        streaming_chat(agent, activation_msg.as_str(), rig_history, shutdown)
+            .await
+            .map_err(|e| {
+                log_llm_error(label, 0, &e);
+                format!("Agent activation failed: {e}")
+            })?;
     log_llm_response(label, 0, &response);
 
-    rig_history.push(Message::user(&activation_msg));
-    rig_history.push(Message::assistant(&response));
+    rig_history = new_history;
     chat_history.push(ChatMessage {
         role: "user".to_string(),
         content: activation_msg,
@@ -380,5 +463,106 @@ mod tests {
         assert!(preamble.contains("ask_supervisor"));
         assert!(preamble.contains("<<BMAD_JOB_DONE>>"));
         assert!(preamble.contains("communication_language = English"));
+    }
+
+    // -----------------------------------------------------------------------
+    // ChatHistoryHook tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_chat_history_hook_new_returns_none() {
+        let hook = ChatHistoryHook::new();
+        assert!(
+            hook.take_full_history("hello").is_none(),
+            "Hook should return None when never invoked"
+        );
+    }
+
+    #[test]
+    fn test_chat_history_hook_captures_snapshot() {
+        let hook = ChatHistoryHook::new();
+        // Simulate on_completion_call by writing directly to inner
+        {
+            let mut guard = hook.inner.lock().unwrap();
+            *guard = Some((
+                vec![Message::user("msg1"), Message::assistant("resp1")],
+                Message::user("msg2"),
+            ));
+        }
+        let full = hook.take_full_history("final response").unwrap();
+        assert_eq!(full.len(), 4); // msg1, resp1, msg2, assistant("final response")
+    }
+
+    #[test]
+    fn test_chat_history_hook_keeps_latest_snapshot() {
+        let hook = ChatHistoryHook::new();
+        // First snapshot
+        {
+            let mut guard = hook.inner.lock().unwrap();
+            *guard = Some((vec![Message::user("old")], Message::user("old_prompt")));
+        }
+        // Second snapshot overwrites
+        {
+            let mut guard = hook.inner.lock().unwrap();
+            *guard = Some((
+                vec![
+                    Message::user("old"),
+                    Message::assistant("old_resp"),
+                    Message::user("old_prompt"),
+                    Message::assistant("tool_call_resp"),
+                ],
+                Message::user("tool_result"),
+            ));
+        }
+        let full = hook.take_full_history("done").unwrap();
+        // Should be: old, old_resp, old_prompt, tool_call_resp, tool_result, assistant("done")
+        assert_eq!(full.len(), 6);
+    }
+
+    #[test]
+    fn test_chat_history_hook_reconstructs_complete_history() {
+        let hook = ChatHistoryHook::new();
+        // Simulate a multi-turn: initial prompt → tool call → tool result → text response
+        // on_completion_call for turn 2 gives us:
+        //   history = [user_prompt, assistant_tool_call]
+        //   prompt  = user_tool_result
+        {
+            let mut guard = hook.inner.lock().unwrap();
+            *guard = Some((
+                vec![
+                    Message::user("implement feature X"),
+                    Message::assistant("I'll read the file first"),
+                ],
+                Message::user("tool result: file contents here"),
+            ));
+        }
+        let full = hook
+            .take_full_history("Feature X implemented. All tests pass.")
+            .unwrap();
+
+        // Full history should be:
+        // [0] user: "implement feature X"
+        // [1] assistant: "I'll read the file first"
+        // [2] user: "tool result: file contents here"
+        // [3] assistant: "Feature X implemented. All tests pass."
+        assert_eq!(full.len(), 4);
+    }
+
+    #[test]
+    fn test_chat_history_hook_is_clone_send_sync() {
+        fn assert_clone_send_sync<T: Clone + Send + Sync>() {}
+        assert_clone_send_sync::<ChatHistoryHook>();
+    }
+
+    #[test]
+    fn test_chat_history_hook_empty_history_with_prompt() {
+        let hook = ChatHistoryHook::new();
+        // First turn: no prior history, just the initial prompt
+        {
+            let mut guard = hook.inner.lock().unwrap();
+            *guard = Some((vec![], Message::user("hello")));
+        }
+        let full = hook.take_full_history("hi there").unwrap();
+        assert_eq!(full.len(), 2); // user("hello"), assistant("hi there")
     }
 }

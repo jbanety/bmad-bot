@@ -261,7 +261,7 @@ impl ArchitectSession {
             "Architect session turn — entering CH mode"
         );
         log_llm_request("supervisor", 1, ch_msg, chat_history.len());
-        let response = agent
+        let (response, _) = agent
             .stream_chat(ch_msg, chat_history.clone(), None)
             .await
             .map_err(|e| {
@@ -287,7 +287,7 @@ impl ArchitectSession {
             "Load the project context",
             chat_history.len(),
         );
-        let response = agent
+        let (response, _) = agent
             .stream_chat("Load the project context", chat_history.clone(), None)
             .await
             .map_err(|e| {
@@ -310,7 +310,7 @@ impl ArchitectSession {
             "Architect session turn — asking developer question"
         );
         log_llm_request("supervisor", 3, &question_msg, chat_history.len());
-        let answer = agent
+        let (answer, _) = agent
             .stream_chat(question_msg.as_str(), chat_history, None)
             .await
             .map_err(|e| {

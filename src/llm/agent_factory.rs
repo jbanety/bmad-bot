@@ -105,7 +105,7 @@ impl BuiltAgent {
         prompt: impl Into<Message> + Send,
         history: Vec<Message>,
         shutdown: Option<&ShutdownFlag>,
-    ) -> Result<String, rig::completion::PromptError> {
+    ) -> Result<(String, Vec<Message>), rig::completion::PromptError> {
         match self {
             Self::Anthropic(agent) => streaming_chat(agent, prompt, history, shutdown).await,
             Self::OpenAiResponses(agent) => streaming_chat(agent, prompt, history, shutdown).await,

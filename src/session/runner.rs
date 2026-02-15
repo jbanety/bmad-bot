@@ -886,10 +886,10 @@ impl SessionRunner {
                     .stream_chat(prompt.as_str(), vec![], Some(&flag))
                     .await;
                 match &result {
-                    Ok(r) => log_llm_response("dev-summarize", 0, r),
+                    Ok((r, _)) => log_llm_response("dev-summarize", 0, r),
                     Err(e) => log_llm_error("dev-summarize", 0, e),
                 }
-                result.map_err(|e| e.to_string())
+                result.map(|(text, _)| text).map_err(|e| e.to_string())
             }
         };
 
@@ -1089,7 +1089,7 @@ impl SessionRunner {
         let ch_msg = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CH";
         let ch_turn = compressed_history.len() / 2;
         log_llm_request("dev-recovery", ch_turn, ch_msg, activation_history.len());
-        let ch_response = agent
+        let (ch_response, _) = agent
             .stream_chat(ch_msg, activation_history.clone(), Some(&self.shutdown))
             .await
             .map_err(|e| {
@@ -1121,7 +1121,7 @@ impl SessionRunner {
             "Load the project context",
             activation_history.len(),
         );
-        let ctx_response = agent
+        let (ctx_response, _) = agent
             .stream_chat(
                 "Load the project context",
                 activation_history.clone(),
@@ -1229,7 +1229,10 @@ impl SessionRunner {
         const MAX_RETRIES: usize = 3;
 
         // --- Initialization: normal vs recovery path ---
-        let (mut state, mut current_response, mut turn) = match recovered_state {
+        // full_history tracks the complete conversation including tool calls.
+        // During normal operation it is populated from stream_chat hook captures.
+        // During crash recovery it falls back to text-only WAL reconstruction.
+        let (mut state, mut current_response, mut turn, mut full_history) = match recovered_state {
             None => {
                 // Normal path — create new WAL, send "DS"
                 let mut state = SessionState::new(story, provider, model);
@@ -1310,7 +1313,7 @@ impl SessionRunner {
 
                 // Send "DS" with retry on transient errors (503, 429, timeouts).
                 let mut ds_retries = 0usize;
-                let response = loop {
+                let (response, ds_full_history) = loop {
                     log_llm_request(
                         "dev-session",
                         activation_turn,
@@ -1325,9 +1328,9 @@ impl SessionRunner {
                         )
                         .await
                     {
-                        Ok(r) => {
+                        Ok((r, hist)) => {
                             log_llm_response("dev-session", 0, &r);
-                            break r;
+                            break (r, hist);
                         }
                         Err(e) => {
                             log_llm_error("dev-session", 0, &e);
@@ -1370,7 +1373,7 @@ impl SessionRunner {
                     "Initial chat turn completed"
                 );
 
-                (state, response, 1usize)
+                (state, response, 1usize, ds_full_history)
             }
 
             Some(mut state) => {
@@ -1435,7 +1438,7 @@ impl SessionRunner {
                         initial_message,
                         activation_rig_history.len(),
                     );
-                    let response = match agent
+                    let (response, ds_full_history) = match agent
                         .stream_chat(
                             initial_message,
                             activation_rig_history,
@@ -1443,9 +1446,9 @@ impl SessionRunner {
                         )
                         .await
                     {
-                        Ok(r) => {
+                        Ok((r, hist)) => {
                             log_llm_response("dev-recovery", 0, &r);
-                            r
+                            (r, hist)
                         }
                         Err(e) => {
                             log_llm_error("dev-recovery", 0, &e);
@@ -1462,7 +1465,7 @@ impl SessionRunner {
                     state.add_assistant_message(&response);
                     let _ = state.save(&self.state_file_path).await;
 
-                    (state, response, turn_offset + 1)
+                    (state, response, turn_offset + 1, ds_full_history)
                 } else {
                     let last_msg = state.chat_history.last().expect("non-empty history");
 
@@ -1473,7 +1476,9 @@ impl SessionRunner {
                             action = "crash_recovery_last_assistant",
                             "Last message is assistant — entering analyze loop"
                         );
-                        (state, response, turn_offset)
+                        // Recovery: bootstrap full_history from text-only WAL (degraded)
+                        let recovery_full_history = state.to_rig_messages();
+                        (state, response, turn_offset, recovery_full_history)
                     } else {
                         // Sub-case B — Last message is user (crash between send and receive)
                         // Re-send the last user message
@@ -1501,13 +1506,13 @@ impl SessionRunner {
                             turn_offset,
                             &state.chat_history[..state.chat_history.len() - 1],
                         );
-                        let response = match agent
+                        let (response, resend_full_history) = match agent
                             .stream_chat(last_user_msg.as_str(), history, Some(&self.shutdown))
                             .await
                         {
-                            Ok(r) => {
+                            Ok((r, hist)) => {
                                 log_llm_response("dev-recovery", turn_offset, &r);
-                                r
+                                (r, hist)
                             }
                             Err(e) => {
                                 log_llm_error("dev-recovery", turn_offset, &e);
@@ -1528,7 +1533,7 @@ impl SessionRunner {
                         state.add_assistant_message(&response);
                         let _ = state.save(&self.state_file_path).await;
 
-                        (state, response, turn_offset)
+                        (state, response, turn_offset, resend_full_history)
                     }
                 }
             }
@@ -1587,15 +1592,15 @@ impl SessionRunner {
                     let commit_msg = "Commit ALL uncommitted changes now (git add -A, then commit). \
                         Use conventional commits with descriptive messages. Do NOT push.";
                     state.add_user_message(commit_msg);
-                    let history = state.to_rig_messages();
 
-                    log_llm_request("dev-session", turn, commit_msg, history.len());
+                    log_llm_request("dev-session", turn, commit_msg, full_history.len());
                     match agent
-                        .stream_chat(commit_msg, history, Some(&self.shutdown))
+                        .stream_chat(commit_msg, full_history.clone(), Some(&self.shutdown))
                         .await
                     {
-                        Ok(r) => {
+                        Ok((r, new_hist)) => {
                             log_llm_response("dev-session", turn, &r);
+                            full_history = new_hist;
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             tracing::info!(
@@ -1626,15 +1631,20 @@ impl SessionRunner {
                         &self.config.bmad_paths.planning_artifacts,
                     );
                     state.add_user_message(&impact_prompt);
-                    let history = state.to_rig_messages();
 
-                    log_llm_request("dev-session", turn + 1, "[impact-analysis]", history.len());
+                    log_llm_request(
+                        "dev-session",
+                        turn + 1,
+                        "[impact-analysis]",
+                        full_history.len(),
+                    );
                     match agent
-                        .stream_chat(&impact_prompt, history, Some(&self.shutdown))
+                        .stream_chat(&impact_prompt, full_history.clone(), Some(&self.shutdown))
                         .await
                     {
-                        Ok(r) => {
+                        Ok((r, new_hist)) => {
                             log_llm_response("dev-session", turn + 1, &r);
+                            full_history = new_hist;
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             tracing::info!(
@@ -1698,14 +1708,17 @@ impl SessionRunner {
                         branch = story.branch_name,
                     );
                     state.add_user_message(&pr_summary_prompt);
-                    let history = state.to_rig_messages();
 
-                    log_llm_request("dev-session", turn + 2, "[pr-summary]", history.len());
+                    log_llm_request("dev-session", turn + 2, "[pr-summary]", full_history.len());
                     let (pr_context, pr_how_to_test, pr_additional_info) = match agent
-                        .stream_chat(&pr_summary_prompt, history, Some(&self.shutdown))
+                        .stream_chat(
+                            &pr_summary_prompt,
+                            full_history.clone(),
+                            Some(&self.shutdown),
+                        )
                         .await
                     {
-                        Ok(r) => {
+                        Ok((r, _)) => {
                             log_llm_response("dev-session", turn + 2, &r);
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
@@ -1819,17 +1832,17 @@ impl SessionRunner {
                         _ => "Continue.".to_string(),
                     };
                     state.add_user_message(&reply);
-                    let history = state.to_rig_messages();
 
-                    log_llm_request("dev-session", turn, &reply, history.len());
+                    log_llm_request("dev-session", turn, &reply, full_history.len());
                     log_llm_history_summary("dev-session", turn, &state.chat_history);
                     match agent
-                        .stream_chat(reply.as_str(), history, Some(&self.shutdown))
+                        .stream_chat(reply.as_str(), full_history.clone(), Some(&self.shutdown))
                         .await
                     {
-                        Ok(r) => {
+                        Ok((r, new_hist)) => {
                             log_llm_response("dev-session", turn, &r);
                             retries = 0;
+                            full_history = new_hist;
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             current_response = r;

@@ -2256,7 +2256,7 @@ dependencies = [
 [[package]]
 name = "rig-core"
 version = "0.30.0"
-source = "git+https://github.com/jbanety/rig.git?branch=fix%2Fcopilot-streaming-compat#0c524f384e1e15c9476273d3233c65099321b1d1"
+source = "git+https://github.com/jbanety/rig.git?branch=fix%2Fcopilot-streaming-compat#31b65989bc2899ce299b4b0e3d027a3d1673cf48"
 dependencies = [
  "as-any",
  "async-stream",
