@@ -668,12 +668,20 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. New test modules MUST use `#[path]` attributes (edition 2024 does not auto-resolve submodule paths for integration test crate roots):
+  ```rust
+  #[path = "integration/test_pipeline.rs"]
+  mod test_pipeline;
+  ```
+- **`src/lib.rs` exists** with 11 `pub mod` declarations (including `pipeline`). No Task 0 blocker needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
 - **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
+- **MockGitProvider actual API** (from 7.1 implementation): Uses `calls() -> Vec<GitProviderCall>` enum with variants `CreatePr(CreatePrParams)`, `AddComment { pr_id, body }`, `GetPrUrl(String)`. Does NOT expose `captured_create_pr_params()` or `create_pr_call_count()` — filter `calls()` by variant instead. If convenience accessors are needed, extend the mock in this story.
+- **MockNotifier actual API** (from 7.1 implementation): Uses `story_calls() -> Vec<StoryNotification>` and `summary_calls() -> Vec<RunSummary>`. Does NOT expose `captured_story_notifications()` or `story_notification_count()` — use `story_calls().len()` instead. For error-returning mode (AC #7), the mock needs extending — current impl always returns `Ok(())`.
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one
+- **`make_test_config(dir)` path note:** Sets `bmad_paths.implementation_artifacts` to `dir/_bmad-output/implementation-artifacts` (not bare `dir`).
 
 ### Git Intelligence
 

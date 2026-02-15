@@ -77,7 +77,7 @@ cargo init bmad-bot
 **Language & Runtime:**
 - Rust edition 2024, single binary target
 - Full async tokio runtime (`features = ["full"]`)
-- Single crate with modular directory structure (not a Cargo workspace for MVP)
+- Single crate with library + binary targets (not a Cargo workspace for MVP). `src/lib.rs` exposes all modules; `src/main.rs` owns `cli` and delegates to library crate.
 
 **CLI Framework:**
 - clap with derive API — handles `init`, `start`, `status`, `logs` subcommands
@@ -113,6 +113,7 @@ bmad-bot/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs
+│   ├── lib.rs                            # Library crate root — pub mod for all non-CLI modules
 │   ├── auth/
 │   │   ├── mod.rs
 │   │   └── github_copilot.rs         # Device flow + token exchange + cache
@@ -158,6 +159,8 @@ bmad-bot/
 │   ├── llm_logging.rs                 # LLM request/response debug logging
 │   └── pipeline.rs                    # Pipeline orchestration (watcher → session → review → PR → notify)
 └── tests/
+    ├── integration.rs                # Integration test entry point
+    ├── integration/                  # Integration test modules + helpers
     └── e2e/
 ```
 
@@ -946,7 +949,8 @@ bmad-bot/
 ├── .env.example                      # Template secrets (API keys)
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
-│   ├── main.rs                       # Entry point, CLI dispatch, rustls init
+│   ├── main.rs                       # Entry point, CLI dispatch, rustls init (binary crate; only `mod cli;`)
+│   ├── lib.rs                        # Library crate root — `pub mod` for all non-CLI modules (enables integration test imports)
 │   ├── auth/
 │   │   ├── mod.rs                    # Auth module root
 │   │   └── github_copilot.rs         # OAuth Device Flow, token exchange, CopilotTokenCache
@@ -999,6 +1003,14 @@ bmad-bot/
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
+    ├── integration.rs                # Integration test entry point (`cargo test --test integration`)
+    ├── integration/
+    │   ├── helpers/
+    │   │   ├── mod.rs                # pub mod mocks; pub mod fixtures;
+    │   │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+    │   │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+    │   ├── test_mocks.rs             # Mock self-verification tests
+    │   └── test_fixtures.rs          # Fixture self-verification tests
     └── e2e/
         └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
 ```

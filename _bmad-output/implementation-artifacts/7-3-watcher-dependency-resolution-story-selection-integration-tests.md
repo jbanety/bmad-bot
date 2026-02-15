@@ -240,12 +240,17 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. New test modules MUST use `#[path]` attributes (edition 2024 does not auto-resolve submodule paths for integration test crate roots):
+  ```rust
+  #[path = "integration/test_watcher.rs"]
+  mod test_watcher;
+  ```
+- **`src/lib.rs` exists** with 11 `pub mod` declarations (including `watcher`). No Task 0 blocker needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
-- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
+- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.join("_bmad-output/implementation-artifacts").display().to_string()` — NOT bare `dir`. For `Watcher` tests that need `sprint-status.yaml` in the implementation_artifacts path, write files into `dir.join("_bmad-output/implementation-artifacts/")` or create a config with overridden paths.
 
 ### Dependencies Required
 

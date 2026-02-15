@@ -442,13 +442,19 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 
 ### Previous Story Intelligence (Stories 7.1, 7.4, 6.3)
 
-**Story 7.1 (Integration Test Infrastructure):**
-- Defines `tests/integration.rs` entry point with `mod helpers;` + individual test modules
-- Defines `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, etc.)
-- Defines `lib.rs` creation and session::state re-export as Task 0
-- All mock implementations must be `Send + Sync`
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point uses `#[path]` attributes (NOT `mod helpers;`). New test modules must be registered as:
+  ```rust
+  #[path = "integration/test_session_wal.rs"]
+  mod test_session_wal;
+  ```
+- `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner) and fixture builders (make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo)
+- `src/lib.rs` exists with 11 pub mod declarations. `pub use state::{SessionState, ChatMessage};` re-export in `src/session/mod.rs` — no Task 0 blocker needed.
+- All mock implementations are `Send + Sync`
 - Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
 - Uses `tempfile::tempdir()` for filesystem isolation
+- `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir/_bmad-output/implementation-artifacts` (not bare `dir`)
+- `write_wal_file(dir, state)` writes `.bmad-bot-session.yaml` to given dir
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `DevRunner` and `CodeReviewer` traits for DI
