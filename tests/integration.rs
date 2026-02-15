@@ -11,3 +11,5 @@ mod test_mocks;
 mod test_config;
 #[path = "integration/test_watcher.rs"]
 mod test_watcher;
+#[path = "integration/test_pipeline.rs"]
+mod test_pipeline;
