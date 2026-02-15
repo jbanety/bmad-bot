@@ -909,7 +909,8 @@ mod tests {
 - Structure: Arrange → Act → Assert, always in that order
 - LLM responses mocked with static data — never call real providers
 - Each new module must include at least basic unit tests before being considered complete
-- E2E tests in `tests/` directory, gated behind `BMAD_E2E=1` env var
+- E2E tests in `tests/e2e/` directory, gated behind `BMAD_E2E=1` env var
+- Integration tests in `tests/integration/` using `#[path]` attributes in `tests/integration.rs` entry point. Use shared mocks (`tests/integration/helpers/mocks.rs`) and fixtures (`tests/integration/helpers/fixtures.rs`) from Story 7.1.
 
 ### Enforcement Guidelines
 
@@ -947,6 +948,7 @@ bmad-bot/
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
 │   ├── main.rs                       # Entry point, CLI dispatch, rustls init
+│   ├── lib.rs                        # Library crate entry point — exposes all modules except cli for integration tests
 │   ├── auth/
 │   │   ├── mod.rs                    # Auth module root
 │   │   └── github_copilot.rs         # OAuth Device Flow, token exchange, CopilotTokenCache
@@ -999,6 +1001,14 @@ bmad-bot/
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
+    ├── integration.rs                 # Integration test binary entry point (uses #[path] attributes)
+    ├── integration/
+    │   ├── helpers/
+    │   │   ├── mod.rs                 # Re-exports mocks and fixtures modules
+    │   │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+    │   │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+    │   ├── test_mocks.rs             # Self-verification tests for mock implementations
+    │   └── test_fixtures.rs          # Self-verification tests for fixture builders
     └── e2e/
         └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
 ```

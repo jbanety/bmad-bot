@@ -668,12 +668,14 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` uses `#[path]` attributes for module resolution. To add a new test module: `#[path = "integration/test_pipeline.rs"] mod test_pipeline;` — do NOT use bare `mod test_pipeline;`.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
 - **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one
+- **MockSessionRunner and MockReviewRunner** exist in `helpers/mocks.rs` as standalone structs (not trait impls — `SessionRunner`/`ReviewRunner` are concrete structs in the codebase). Story 7.4 will add `DevRunner`/`CodeReviewer` traits for DI.
+- **`src/lib.rs` exists** — Created by 7.1. Exposes all library modules.
 
 ### Git Intelligence
 

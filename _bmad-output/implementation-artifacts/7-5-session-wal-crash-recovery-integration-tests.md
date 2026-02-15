@@ -442,13 +442,15 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 
 ### Previous Story Intelligence (Stories 7.1, 7.4, 6.3)
 
-**Story 7.1 (Integration Test Infrastructure):**
-- Defines `tests/integration.rs` entry point with `mod helpers;` + individual test modules
-- Defines `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, etc.)
-- Defines `lib.rs` creation and session::state re-export as Task 0
-- All mock implementations must be `Send + Sync`
-- Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
-- Uses `tempfile::tempdir()` for filesystem isolation
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` uses `#[path]` attributes for module resolution. To add a new test module: `#[path = "integration/test_session_wal.rs"] mod test_session_wal;` — do NOT use bare `mod` declarations.
+- `tests/integration/helpers/mod.rs` re-exports `mocks` and `fixtures` submodules.
+- Mocks in `helpers/mocks.rs`: `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner`.
+- Fixtures in `helpers/fixtures.rs`: `make_test_config(dir)`, `make_test_secrets()`, `make_test_story(key, label, deps)`, `write_sprint_status(dir, entries)`, `write_wal_file(dir, state)`, `create_test_repo(dir)`.
+- `src/lib.rs` exists with all library modules exposed. `src/session/mod.rs` has `pub use state::{SessionState, ChatMessage};` re-export.
+- All mock implementations are `Send + Sync` and use `Arc<Mutex<Vec<...>>>` for interior mutability.
+- Uses `tempfile::tempdir()` for filesystem isolation.
+- **Fallback structure (lines 505-513 in original) is obsolete** — 7.1 infrastructure is fully built.
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `DevRunner` and `CodeReviewer` traits for DI

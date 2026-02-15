@@ -216,11 +216,12 @@ Known modules scanned by discovery: `bmm`, `core`, `_config`, `_memory`.
 
 ### Previous Story Intelligence (Story 7.1)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. All test modules are declared in `tests/integration.rs` via `mod test_config;` etc.
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point using `#[path]` attributes for module resolution (Rust crate roots don't support companion directory module resolution). To add a new test module, add `#[path = "integration/test_config.rs"] mod test_config;` in `tests/integration.rs` — do NOT use bare `mod test_config;`.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_secrets};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
+- **`src/lib.rs` exists** — Created by 7.1 Task 0. Exposes: `auth`, `config`, `git_provider`, `llm`, `notifier`, `pipeline`, `review`, `session`, `supervisor`, `tools`, `watcher`. Does NOT expose `cli` (intentional — cli is binary-only).
 
 ### Dependencies Required
 

@@ -303,15 +303,19 @@ Since `create_notifier()` returns `Box<dyn Notifier>` (trait object), we cannot 
 
 ### Previous Story Intelligence (Story 7.6)
 
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `src/lib.rs` exists with all library modules exposed. `tests/integration/` directory structure exists.
+- `tests/integration.rs` uses `#[path]` attributes. To add a new module: `#[path = "integration/test_notifier.rs"] mod test_notifier;`.
+- `MockNotifier` is defined in `tests/integration/helpers/mocks.rs` (from Story 7.1, NOT Story 7.4). Import: `use crate::helpers::mocks::{MockNotifier, NotifierCall};`. API: `MockNotifier::new()`, `.calls() -> Vec<NotifierCall>`, `.story_calls() -> Vec<StoryNotification>`, `.summary_calls() -> Vec<RunSummary>`. Uses single `Arc<Mutex<Vec<NotifierCall>>>` internally with `NotifierCall::NotifyStory` / `NotifierCall::NotifyRunSummary` enum variants.
+- **Discard: MockNotifier fallback code** — The fallback MockNotifier in Dependencies Required section is obsolete. Use `crate::helpers::mocks::MockNotifier` directly.
+
 **Story 7.6 (Git Provider & PR Creation Integration Tests):**
-- Established the `lib.rs` BLOCKER pattern — copy same prerequisite check
 - Established the "Cross-Module Integration Value" section pattern — used here
 - Used `tests/integration/test_git_provider.rs` location convention — follow same for `test_notifier.rs`
 - Rustls crypto provider was needed for GitHub provider — **NOT needed for notifier tests** (notifier uses `reqwest_middleware`, no crypto init required)
 - Module visibility already verified pattern — followed here
 
 **Story 7.4 (Pipeline Orchestration):**
-- Defines `MockNotifier` with `Arc<Mutex<Vec<...>>>` for captured notifications — Task 6 depends on this
 - `build_run_summary()` is tested in pipeline unit tests (3 tests: mixed, all-completed, empty) — integration tests complement by testing `RunSummary` construction from external crate
 
 **Existing unit tests in `src/notifier/mod.rs` (18 tests):**
