@@ -1,6 +1,6 @@
 # Story 4.6: Post-Implementation Impact Analysis on Downstream Stories
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -30,25 +30,25 @@ so that the next agent picking up a dependent story works from accurate assumpti
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add impact analysis prompt and chat turn in `run_session()` (AC: #1, #2, #3, #4, #5, #6)
-  - [ ] 1.1: Construct the impact analysis prompt string with story key, sprint-status path, planning artifacts path, and scope guard instructions
-  - [ ] 1.2: Insert the `stream_chat()` call between the final commit block (current Step 7) and the PR summary block (current Step 8, renumbered to Step 9)
-  - [ ] 1.3: Add `state.add_user_message()` and `state.add_assistant_message()` calls for WAL persistence
-  - [ ] 1.4: Increment the turn counter for LLM logging consistency
+- [x] Task 1: Add impact analysis prompt and chat turn in `run_session()` (AC: #1, #2, #3, #4, #5, #6)
+  - [x] 1.1: Construct the impact analysis prompt string with story key, sprint-status path, planning artifacts path, and scope guard instructions
+  - [x] 1.2: Insert the `stream_chat()` call between the final commit block (current Step 7) and the PR summary block (current Step 8, renumbered to Step 9)
+  - [x] 1.3: Add `state.add_user_message()` and `state.add_assistant_message()` calls for WAL persistence
+  - [x] 1.4: Increment the turn counter for LLM logging consistency
 
-- [ ] Task 2: Implement best-effort error handling for impact analysis turn (AC: #7)
-  - [ ] 2.1: Wrap the `stream_chat()` call in a match with `Ok(r)` / `Err(e)` arms
-  - [ ] 2.2: On `Err`: log `tracing::warn!(action = "impact_analysis_failed", ...)` and proceed to PR summary
-  - [ ] 2.3: On `Ok`: log `tracing::info!(action = "impact_analysis_done", ...)` and proceed to PR summary
+- [x] Task 2: Implement best-effort error handling for impact analysis turn (AC: #7)
+  - [x] 2.1: Wrap the `stream_chat()` call in a match with `Ok(r)` / `Err(e)` arms
+  - [x] 2.2: On `Err`: log `tracing::warn!(action = "impact_analysis_failed", ...)` and proceed to PR summary
+  - [x] 2.3: On `Ok`: log `tracing::info!(action = "impact_analysis_done", ...)` and proceed to PR summary
 
-- [ ] Task 3: Renumber PR summary to Step 9 (AC: #8)
-  - [ ] 3.1: Update the inline comment from `Step 8` to `Step 9`
-  - [ ] 3.2: No functional change to PR summary logic — only comment renumbering
+- [x] Task 3: Renumber PR summary to Step 9 (AC: #8)
+  - [x] 3.1: Update the inline comment from `Step 8` to `Step 9`
+  - [x] 3.2: No functional change to PR summary logic — only comment renumbering
 
-- [ ] Task 4: Update existing tests and add new test (AC: #9)
-  - [ ] 4.1: Add `test_impact_analysis_prompt_construction` — verify prompt contains story key, sprint-status path, planning artifacts path, and scope guard language
-  - [ ] 4.2: Verify existing `parse_pr_summary` tests still pass unchanged
-  - [ ] 4.3: Run full `cargo test`, `cargo clippy`, `cargo fmt --check`
+- [x] Task 4: Update existing tests and add new test (AC: #9)
+  - [x] 4.1: Add `test_impact_analysis_prompt_construction` — verify prompt contains story key, sprint-status path, planning artifacts path, and scope guard language
+  - [x] 4.2: Verify existing `parse_pr_summary` tests still pass unchanged
+  - [x] 4.3: Run full `cargo test`, `cargo clippy`, `cargo fmt --check`
 
 ## Dev Notes
 
@@ -229,10 +229,31 @@ Alignment with project structure is perfect — this touches only `runner.rs` wh
 
 ### Agent Model Used
 
+Claude Opus 4.6
+
 ### Debug Log References
+
+- `cargo test` — 947 passed, 0 failed
+- `cargo fmt --check` — clean
+- `cargo clippy` — 0 new errors/warnings (1 pre-existing `collapsible_if` error in `src/config/mod.rs`, not related to this story)
 
 ### Completion Notes List
 
+- Extracted `build_impact_analysis_prompt()` as a public helper for testability while keeping the `stream_chat()` call inline in the `ResponseAction::Completed` arm per Dev Notes guidance.
+- Impact analysis prompt includes: story key, sprint-status.yaml path, implementation artifacts path, planning artifacts path (architecture.md), scope guard, idempotent replacement instructions, commit prefix `docs(stories): update downstream specs after {story_key}`, and "do not invent changes" guard.
+- Follows the exact pattern of Step 7 (final commit): `state.add_user_message()` → `to_rig_messages()` → `log_llm_request()` → `stream_chat()` match → Ok: log + persist WAL / Err: warn + proceed.
+- Agent retains full tool access during impact analysis (unlike PR summary which is text-only).
+- Turn counter updated: Step 7 = `turn`, Step 8 (impact analysis) = `turn + 1`, Step 9 (PR summary) = `turn + 2`.
+- Removed an orphan doc comment (stale `is_transient_llm_error` description) that became visible as a clippy `empty_line_after_doc_comments` error after insertion.
+- 6 new unit tests added covering prompt content validation (story key, sprint-status path, planning artifacts path, scope guard, commit prefix, idempotent language).
+- All 7 existing `parse_pr_summary` tests pass unchanged.
+
 ### Change Log
 
+- Implemented post-implementation impact analysis step (Step 8) in `run_session()` — inserts between final commit (Step 7) and PR summary (renumbered to Step 9). (2026-02-15)
+
 ### File List
+
+- `src/session/runner.rs` — Added `build_impact_analysis_prompt()` helper, inserted Step 8 impact analysis block in `ResponseAction::Completed` arm, renumbered Step 8 → Step 9 for PR summary, adjusted turn counters from `turn + 1` to `turn + 2`, removed orphan doc comment, added 6 unit tests.
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — Updated `4-6-post-implementation-impact-analysis` status: `ready-for-dev` → `in-progress` → `review`.
+- `_bmad-output/implementation-artifacts/4-6-post-implementation-impact-analysis.md` — Marked all tasks/subtasks complete, updated Dev Agent Record and status.

@@ -150,9 +150,49 @@ const ACTIVATION_MAX_RETRIES: usize = 3;
 /// Initial backoff delay in seconds for transient error retries.
 const ACTIVATION_BACKOFF_BASE_SECS: u64 = 5;
 
-/// Each provider returns different error messages. This function checks for
-/// known patterns across Anthropic, OpenAI, and GitHub Copilot. The check is
-/// case-insensitive to handle inconsistent casing across provider SDKs.
+/// Build the impact analysis prompt sent to the agent after story completion.
+///
+/// The prompt instructs the agent to read `sprint-status.yaml`, identify
+/// downstream dependent stories, compare their "Previous Story Intelligence"
+/// sections against actual implementation, and update only where deviations
+/// exist. Architecture references are updated only when new modules or changed
+/// interfaces were introduced and `architecture.md` exists.
+///
+/// This is a pure string builder extracted for testability — the call site
+/// remains inline in the `ResponseAction::Completed` arm of `run_session()`.
+pub fn build_impact_analysis_prompt(
+    story_key: &str,
+    impl_artifacts: &str,
+    planning_artifacts: &str,
+) -> String {
+    format!(
+        "You have just completed story {story_key}. Perform a post-implementation \
+        impact analysis on downstream dependent stories.\n\n\
+        INSTRUCTIONS:\n\
+        1. Read `{impl_artifacts}/sprint-status.yaml` and identify stories whose \
+           `depends-on` references `{story_key}` (full key or short key). \
+           Also check subsequent stories in the same epic (document order) as a \
+           secondary criterion.\n\
+        2. For each downstream story file found in `{impl_artifacts}/`, read its \
+           Dev Notes and compare the \"Previous Story Intelligence\" sections against \
+           what was actually implemented.\n\
+        3. Update ONLY \"Previous Story Intelligence\" sections where actual \
+           implementation deviates from planned assumptions. Include: what changed \
+           vs the original plan, new APIs/patterns/modules to use, obsolete \
+           assumptions to discard. Sections must be REPLACED (idempotent), not \
+           appended.\n\
+        4. Check if `{planning_artifacts}/architecture.md` exists. If it does AND \
+           this story introduced new modules or changed interfaces, update the \
+           relevant architecture references. If the file does not exist, skip.\n\
+        5. If ANY story files or architecture were updated, commit with message: \
+           `docs(stories): update downstream specs after {story_key}`\n\
+        6. If nothing needs updating, report that and move on — do NOT invent changes.\n\n\
+        SCOPE GUARD: Only modify \"Previous Story Intelligence\" sections in \
+        downstream story Dev Notes and architecture references. Do NOT modify any \
+        other sections of any story file.",
+    )
+}
+
 /// Parse a structured PR summary from the agent's response.
 ///
 /// Preferred format uses XML sub-tags inside `<pr-summary>`:
@@ -1564,7 +1604,46 @@ impl SessionRunner {
                         }
                     }
 
-                    // ── Step 8: PR summary (always, dedicated turn) ──────
+                    // ── Step 8: Impact analysis (best-effort) ─────────────
+                    // Ask the agent to analyze downstream dependent stories
+                    // and update their "Previous Story Intelligence" sections
+                    // if the actual implementation deviates from planned specs.
+                    let impact_prompt = build_impact_analysis_prompt(
+                        &story.story_key,
+                        &self.config.bmad_paths.implementation_artifacts,
+                        &self.config.bmad_paths.planning_artifacts,
+                    );
+                    state.add_user_message(&impact_prompt);
+                    let history = state.to_rig_messages();
+
+                    log_llm_request("dev-session", turn + 1, "[impact-analysis]", history.len());
+                    match agent
+                        .stream_chat(&impact_prompt, history, Some(&self.shutdown))
+                        .await
+                    {
+                        Ok(r) => {
+                            log_llm_response("dev-session", turn + 1, &r);
+                            state.add_assistant_message(&r);
+                            let _ = state.save(&self.state_file_path).await;
+                            tracing::info!(
+                                action = "impact_analysis_done",
+                                turn = %(turn + 1),
+                                story_key = %story.story_key,
+                                "Impact analysis completed"
+                            );
+                        }
+                        Err(e) => {
+                            log_llm_error("dev-session", turn + 1, &e);
+                            tracing::warn!(
+                                action = "impact_analysis_failed",
+                                error = %e,
+                                story_key = %story.story_key,
+                                "Impact analysis failed — proceeding to PR summary"
+                            );
+                        }
+                    }
+
+                    // ── Step 9: PR summary (always, dedicated turn) ──────
                     let story_title = story
                         .label
                         .split('-')
@@ -1609,13 +1688,13 @@ impl SessionRunner {
                     state.add_user_message(&pr_summary_prompt);
                     let history = state.to_rig_messages();
 
-                    log_llm_request("dev-session", turn + 1, "[pr-summary]", history.len());
+                    log_llm_request("dev-session", turn + 2, "[pr-summary]", history.len());
                     let (pr_context, pr_how_to_test, pr_additional_info) = match agent
                         .stream_chat(&pr_summary_prompt, history, Some(&self.shutdown))
                         .await
                     {
                         Ok(r) => {
-                            log_llm_response("dev-session", turn + 1, &r);
+                            log_llm_response("dev-session", turn + 2, &r);
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             match parse_pr_summary(&r) {
@@ -1638,7 +1717,7 @@ impl SessionRunner {
                             }
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", turn + 1, &e);
+                            log_llm_error("dev-session", turn + 2, &e);
                             tracing::warn!(
                                 action = "pr_summary_failed",
                                 error = %e,
@@ -2939,6 +3018,85 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
         assert_ne!(
             original_activity, &new_activity,
             "last_activity should be refreshed"
+        );
+    }
+
+    #[test]
+    fn test_impact_analysis_prompt_contains_story_key() {
+        let prompt = build_impact_analysis_prompt(
+            "4-6-post-implementation-impact-analysis",
+            "_bmad-output/implementation-artifacts",
+            "_bmad-output/planning-artifacts",
+        );
+        assert!(
+            prompt.contains("4-6-post-implementation-impact-analysis"),
+            "Prompt must contain the story key"
+        );
+    }
+
+    #[test]
+    fn test_impact_analysis_prompt_contains_sprint_status_path() {
+        let prompt = build_impact_analysis_prompt(
+            "4-6-post-implementation-impact-analysis",
+            "_bmad-output/implementation-artifacts",
+            "_bmad-output/planning-artifacts",
+        );
+        assert!(
+            prompt.contains("_bmad-output/implementation-artifacts/sprint-status.yaml"),
+            "Prompt must reference sprint-status.yaml with full path"
+        );
+    }
+
+    #[test]
+    fn test_impact_analysis_prompt_contains_planning_artifacts_path() {
+        let prompt = build_impact_analysis_prompt(
+            "4-6-post-implementation-impact-analysis",
+            "_bmad-output/implementation-artifacts",
+            "_bmad-output/planning-artifacts",
+        );
+        assert!(
+            prompt.contains("_bmad-output/planning-artifacts/architecture.md"),
+            "Prompt must reference architecture.md with full planning artifacts path"
+        );
+    }
+
+    #[test]
+    fn test_impact_analysis_prompt_contains_scope_guard() {
+        let prompt =
+            build_impact_analysis_prompt("1-1-some-story", "/artifacts/impl", "/artifacts/plan");
+        assert!(
+            prompt.contains("SCOPE GUARD"),
+            "Prompt must contain scope guard language"
+        );
+        assert!(
+            prompt.contains("Previous Story Intelligence"),
+            "Prompt must reference Previous Story Intelligence sections"
+        );
+        assert!(
+            prompt.contains("do NOT invent changes"),
+            "Prompt must include do-not-invent guard"
+        );
+    }
+
+    #[test]
+    fn test_impact_analysis_prompt_contains_commit_prefix() {
+        let prompt = build_impact_analysis_prompt(
+            "4-6-post-implementation-impact-analysis",
+            "/impl",
+            "/plan",
+        );
+        assert!(
+            prompt.contains("docs(stories): update downstream specs after 4-6-post-implementation-impact-analysis"),
+            "Prompt must contain the commit message prefix with story key"
+        );
+    }
+
+    #[test]
+    fn test_impact_analysis_prompt_idempotent_language() {
+        let prompt = build_impact_analysis_prompt("x", "/i", "/p");
+        assert!(
+            prompt.contains("REPLACED (idempotent), not appended"),
+            "Prompt must instruct idempotent replacement"
         );
     }
 
