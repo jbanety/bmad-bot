@@ -78,7 +78,7 @@ development_status:
   4-2-agent-session-setup-chat-loop: done # depends-on: 4-1
   4-3-pre-development-preparation-branch-management: done # depends-on: 4-2
   4-4-migrate-git-operations-to-cli: done
-  4-5-llm-provider-abstraction-agent-factory: review # depends-on: 4-2
+  4-5-llm-provider-abstraction-agent-factory: done # depends-on: 4-2
   4-6-post-implementation-impact-analysis: ready-for-dev # depends-on: 4-5
   epic-4-retrospective: optional
 
