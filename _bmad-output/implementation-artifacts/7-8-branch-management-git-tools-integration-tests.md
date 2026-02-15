@@ -273,7 +273,11 @@ fn make_story(key: &str, deps: Vec<&str>) -> bmad_bot::watcher::StoryInfo {
 
 5. **Story 7.6 (Git Provider)** tests PR creation via mock HTTP — different from this story which tests local git operations via Git CLI subprocess. No overlap.
 
-6. **Helpers available from 7.1:** `tests/integration/helpers/fixtures.rs` contains `create_test_repo(dir)` and `make_test_story(key, label, deps)`. Import as `use crate::helpers::fixtures::{create_test_repo, make_test_story};`.
+6. **Helpers available from 7.1 + 7.4:** `tests/integration/helpers/fixtures.rs` contains:
+   - `create_test_repo(dir)` — initializes a git repo with `main` branch and one commit (no remote)
+   - `create_test_repo_with_remote(work_dir, bare_dir, branch_name)` — **(added by Story 7.4)** creates a bare repo as local `origin`, initializes work repo with that remote, creates and checks out the named story branch with a commit. Use this when tests need `git push` to succeed.
+   - `make_test_story(key, label, deps)` — builds a `StoryInfo` with parsed epic/story nums
+   - Import as `use crate::helpers::fixtures::{create_test_repo, create_test_repo_with_remote, make_test_story};`
 
 ### Git Intelligence
 

@@ -1007,10 +1007,11 @@ bmad-bot/
     ├── integration/
     │   ├── helpers/
     │   │   ├── mod.rs                # pub mod mocks; pub mod fixtures;
-    │   │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
-    │   │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+    │   │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner, MockDevRunner, MockCodeReviewer
+    │   │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo, create_test_repo_with_remote, PipelineTestBuilder
     │   ├── test_mocks.rs             # Mock self-verification tests
-    │   └── test_fixtures.rs          # Fixture self-verification tests
+    │   ├── test_fixtures.rs          # Fixture self-verification tests
+    │   └── test_pipeline.rs          # Pipeline orchestration integration tests (Story 7.4)
     └── e2e/
         └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
 ```
