@@ -5,7 +5,7 @@
 //! and graceful shutdown via signal handling.
 //! Also provides the interactive `init` wizard for first-time setup.
 
-use bmad_bot::auth::github_copilot::{self, ReqwestCopilotHttpClient};
+use crate::auth::github_copilot::{self, ReqwestCopilotHttpClient};
 
 pub mod git_detect;
 pub mod state;
@@ -21,7 +21,7 @@ use clap::{Parser, Subcommand};
 use tokio::time::Duration;
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use bmad_bot::config::{
+use crate::config::{
     BmadPathsConfig, BotConfig, ConfigError, GitProviderConfig, LlmConfig, LlmRoleConfig,
     NotificationConfig, TelegramConfig,
 };
@@ -1009,7 +1009,7 @@ pub async fn run_status(config_path: &Path) -> Result<(), CliError> {
 
             // Run fresh BMAD discovery
             if let Some(ref cfg) = config {
-                let discovery = bmad_bot::config::discovery::BmadDiscovery::discover(Path::new(
+                let discovery = crate::config::discovery::BmadDiscovery::discover(Path::new(
                     &cfg.bmad_paths.project_root,
                 ));
                 println!("{discovery}");
@@ -1256,11 +1256,11 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     // Validate git is installed and >= 2.30 before proceeding
     validate_git_version()?;
 
-    let secrets = bmad_bot::config::BotSecrets::load()?;
+    let secrets = crate::config::BotSecrets::load()?;
     secrets.validate_for_config(&config)?;
 
     // BMAD auto-discovery
-    let discovery = bmad_bot::config::discovery::BmadDiscovery::discover(Path::new(
+    let discovery = crate::config::discovery::BmadDiscovery::discover(Path::new(
         &config.bmad_paths.project_root,
     ));
     if discovery.bmad_detected {
@@ -1288,7 +1288,7 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     // Create cooperative shutdown flag — shared with pipeline/session layers.
     // A dedicated task below listens for Ctrl+C / SIGTERM and flips this flag
     // so that streaming chat loops and tool-calling rounds can exit cleanly.
-    let shutdown: bmad_bot::session::runner::ShutdownFlag =
+    let shutdown: crate::session::runner::ShutdownFlag =
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Spawn signal handler task that sets the shutdown flag
@@ -1313,10 +1313,10 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     }
 
     // Create watcher (Story 2.1)
-    let watcher = bmad_bot::watcher::Watcher::new(Arc::clone(&config));
+    let watcher = crate::watcher::Watcher::new(Arc::clone(&config));
 
     // Create story pipeline (Story 6.2)
-    let pipeline = bmad_bot::pipeline::StoryPipeline::new(
+    let pipeline = crate::pipeline::StoryPipeline::new(
         Arc::clone(&config),
         Arc::clone(&secrets),
         std::sync::Arc::clone(&shutdown),
@@ -1377,11 +1377,11 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
 /// execution (streaming chat loops check it between chunks/turns).
 async fn run_polling_loop(
     config: &Arc<BotConfig>,
-    watcher: &bmad_bot::watcher::Watcher,
-    pipeline: &bmad_bot::pipeline::StoryPipeline,
+    watcher: &crate::watcher::Watcher,
+    pipeline: &crate::pipeline::StoryPipeline,
     daemon_state: &mut state::DaemonState,
     state_path: &Path,
-    shutdown: &bmad_bot::session::runner::ShutdownFlag,
+    shutdown: &crate::session::runner::ShutdownFlag,
 ) -> Result<(), CliError> {
     let mut interval_timer =
         tokio::time::interval(Duration::from_secs(config.polling_interval_secs));
@@ -1430,16 +1430,16 @@ async fn run_polling_loop(
                             break;
                         }
                     }
-                    Err(bmad_bot::watcher::WatcherError::NoEligibleStories) => {
+                    Err(crate::watcher::WatcherError::NoEligibleStories) => {
                         tracing::info!("No eligible stories in this cycle — waiting for next poll");
                     }
-                    Err(bmad_bot::watcher::WatcherError::SprintStatusNotFound { ref path }) => {
+                    Err(crate::watcher::WatcherError::SprintStatusNotFound { ref path }) => {
                         tracing::warn!(
                             path = %path,
                             "Sprint status file not found — has sprint-planning been run?"
                         );
                     }
-                    Err(bmad_bot::watcher::WatcherError::CyclicDependency { ref cycle }) => {
+                    Err(crate::watcher::WatcherError::CyclicDependency { ref cycle }) => {
                         tracing::error!(
                             cycle = ?cycle,
                             "Cyclic dependency detected in sprint-status — affected stories skipped, will retry next cycle"

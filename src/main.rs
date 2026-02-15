@@ -1,7 +1,7 @@
 #![deny(clippy::all)]
 #![warn(dead_code)] // FIXME: Change to #![deny(dead_code)] once all modules have real implementations
 
-mod cli;
+use bmad_bot::cli;
 
 use anyhow::Result;
 use clap::Parser;
