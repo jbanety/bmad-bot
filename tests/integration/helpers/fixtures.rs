@@ -5,13 +5,19 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use bmad_bot::config::{
     BmadPathsConfig, BotConfig, BotSecrets, GitProviderConfig, LlmConfig, LlmRoleConfig,
     NotificationConfig, TelegramConfig,
 };
+use bmad_bot::pipeline::{CodeReviewer, DevRunner, StoryPipeline};
+use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::SessionOutcome;
 use bmad_bot::session::SessionState;
 use bmad_bot::watcher::StoryInfo;
+
+use super::mocks::{MockCodeReviewer, MockDevRunner, MockGitProvider, MockNotifier};
 
 /// Build a valid `BotConfig` using the provided temp directory for paths.
 ///
@@ -151,4 +157,155 @@ pub fn create_test_repo(dir: &Path) {
     run(&["commit", "--allow-empty", "-m", "initial commit"]);
     // Ensure "main" branch exists (default might be "master" depending on git config)
     run(&["branch", "-M", "main"]);
+}
+
+/// Create a git repo with a local bare "remote" that supports push.
+///
+/// Returns `(work_dir, bare_dir)` where `work_dir` has `origin` pointing to `bare_dir`.
+/// A story branch is created and a dummy commit pushed so that `git push origin {branch}` works.
+pub fn create_test_repo_with_remote(work_dir: &Path, bare_dir: &Path, branch_name: &str) {
+    let run_in = |dir: &Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed");
+        assert!(
+            output.status.success(),
+            "git {} in {} failed: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // 1. Init bare repo
+    run_in(bare_dir, &["init", "--bare"]);
+
+    // 2. Init work repo
+    run_in(work_dir, &["init"]);
+    run_in(work_dir, &["config", "user.email", "test@test.com"]);
+    run_in(work_dir, &["config", "user.name", "Test"]);
+    run_in(
+        work_dir,
+        &["remote", "add", "origin", bare_dir.to_str().unwrap()],
+    );
+    run_in(
+        work_dir,
+        &["commit", "--allow-empty", "-m", "initial commit"],
+    );
+    run_in(work_dir, &["branch", "-M", "main"]);
+    run_in(work_dir, &["push", "-u", "origin", "main"]);
+
+    // 3. Create story branch with a commit
+    run_in(work_dir, &["checkout", "-b", branch_name]);
+    run_in(
+        work_dir,
+        &["commit", "--allow-empty", "-m", "story work"],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PipelineTestBuilder
+// ---------------------------------------------------------------------------
+
+/// Builder for constructing `StoryPipeline` instances with mock dependencies.
+///
+/// `build()` returns the pipeline plus cloned mock handles that share
+/// internal `Arc` state with the pipeline's copies — enabling post-run assertions.
+pub struct PipelineTestBuilder {
+    config: BotConfig,
+    session_outcomes: Vec<SessionOutcome>,
+    review_outcome: Option<ReviewOutcome>,
+    mock_git: MockGitProvider,
+    mock_notifier: MockNotifier,
+}
+
+impl PipelineTestBuilder {
+    /// Create builder with sensible defaults: review enabled, default mocks.
+    pub fn new() -> Self {
+        let tmp = std::env::temp_dir().join("pipeline-test-default");
+        Self {
+            config: make_test_config(&tmp),
+            session_outcomes: vec![],
+            review_outcome: None,
+            mock_git: MockGitProvider::new(),
+            mock_notifier: MockNotifier::new(),
+        }
+    }
+
+    pub fn with_config(mut self, config: BotConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn with_code_review(mut self, enabled: bool) -> Self {
+        self.config.code_review_enabled = enabled;
+        self
+    }
+
+    pub fn with_session(mut self, outcome: SessionOutcome) -> Self {
+        self.session_outcomes = vec![outcome];
+        self
+    }
+
+    pub fn with_sessions(mut self, outcomes: Vec<SessionOutcome>) -> Self {
+        self.session_outcomes = outcomes;
+        self
+    }
+
+    pub fn with_review(mut self, outcome: ReviewOutcome) -> Self {
+        self.review_outcome = Some(outcome);
+        self
+    }
+
+    pub fn with_git_provider(mut self, mock: MockGitProvider) -> Self {
+        self.mock_git = mock;
+        self
+    }
+
+    pub fn with_notifier(mut self, mock: MockNotifier) -> Self {
+        self.mock_notifier = mock;
+        self
+    }
+
+    /// Build the pipeline and return assertion handles.
+    ///
+    /// Returns `(StoryPipeline, MockNotifier, MockGitProvider)` where the mock
+    /// handles share internal state with the pipeline's copies.
+    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider) {
+        let notifier_for_assertions = self.mock_notifier.clone();
+        let git_for_assertions = self.mock_git.clone();
+
+        let dev_runner: Box<dyn DevRunner> = if self.session_outcomes.len() <= 1 {
+            let outcome = self.session_outcomes.into_iter().next().unwrap_or(
+                SessionOutcome::Completed {
+                    story_key: "test".into(),
+                    branch: "story/test".into(),
+                    decisions: vec![],
+                    pr_context: None,
+                    pr_how_to_test: None,
+                    pr_additional_info: None,
+                },
+            );
+            Box::new(MockDevRunner::with_outcome(outcome))
+        } else {
+            Box::new(MockDevRunner::with_outcomes(self.session_outcomes))
+        };
+
+        let code_reviewer: Box<dyn CodeReviewer> = match self.review_outcome {
+            Some(o) => Box::new(MockCodeReviewer::with_outcome(o)),
+            None => Box::new(MockCodeReviewer::never_called()),
+        };
+
+        let pipeline = StoryPipeline::new_with_components(
+            Arc::new(self.config),
+            Box::new(self.mock_git),
+            Box::new(self.mock_notifier),
+            dev_runner,
+            code_reviewer,
+        );
+
+        (pipeline, notifier_for_assertions, git_for_assertions)
+    }
 }
