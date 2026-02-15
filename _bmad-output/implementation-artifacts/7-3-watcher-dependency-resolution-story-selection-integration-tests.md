@@ -1,6 +1,6 @@
 # Story 7.3: Watcher → Dependency Resolution → Story Selection Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
