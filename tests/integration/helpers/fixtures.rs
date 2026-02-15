@@ -22,6 +22,9 @@ use bmad_bot::watcher::StoryInfo;
 /// in isolated temp directories.
 pub fn make_test_config(dir: &Path) -> BotConfig {
     let dir_str = dir.display().to_string();
+
+    let planning_path = Path::new(&dir_str).join("planning-artifacts");
+    let implementation_path = Path::new(&dir_str).join("implementation-artifacts");
     BotConfig {
         polling_interval_secs: 60,
         git_provider: GitProviderConfig {
@@ -56,8 +59,8 @@ pub fn make_test_config(dir: &Path) -> BotConfig {
         bmad_paths: BmadPathsConfig {
             project_root: dir_str.clone(),
             output_folder: dir_str.clone(),
-            planning_artifacts: format!("{dir_str}/planning-artifacts"),
-            implementation_artifacts: format!("{dir_str}/implementation-artifacts"),
+            planning_artifacts: planning_path.display().to_string(),
+            implementation_artifacts: implementation_path.display().to_string(),
         },
         log_format: "pretty".to_string(),
         log_level: "info".to_string(),

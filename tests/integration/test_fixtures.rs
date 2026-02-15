@@ -11,7 +11,7 @@ use std::path::Path;
 
 #[test]
 fn test_make_test_config_has_sensible_defaults() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     let config = make_test_config(dir.path());
 
     assert_eq!(config.polling_interval_secs, 60);
@@ -24,7 +24,7 @@ fn test_make_test_config_has_sensible_defaults() {
 
 #[test]
 fn test_make_test_config_uses_provided_dir_for_paths() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     let config = make_test_config(dir.path());
 
     assert!(config.bmad_paths.project_root.contains(&dir.path().display().to_string()));
@@ -53,12 +53,12 @@ fn test_make_test_secrets_has_all_dummy_tokens() {
     assert!(secrets
         .anthropic_api_key
         .as_ref()
-        .unwrap()
+        .expect("anthropic api key should be present")
         .contains("DO-NOT-USE"));
     assert!(secrets
         .github_token
         .as_ref()
-        .unwrap()
+        .expect("github token should be present")
         .contains("DO-NOT-USE"));
 }
 
@@ -106,7 +106,7 @@ fn test_make_test_story_specs_path() {
 
 #[test]
 fn test_write_sprint_status_creates_parseable_yaml() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     let entries = vec![
         ("epic-1", "in-progress"),
         ("1-1-scaffolding", "done"),
@@ -125,7 +125,7 @@ fn test_write_sprint_status_creates_parseable_yaml() {
 
 #[test]
 fn test_write_sprint_status_contains_all_entries() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     let entries = vec![
         ("epic-1", "in-progress"),
         ("1-1-test-story", "ready-for-dev"),
@@ -133,7 +133,8 @@ fn test_write_sprint_status_contains_all_entries() {
     ];
     write_sprint_status(dir.path(), &entries);
 
-    let content = std::fs::read_to_string(dir.path().join("sprint-status.yaml")).unwrap();
+    let content = std::fs::read_to_string(dir.path().join("sprint-status.yaml"))
+        .expect("read sprint-status.yaml");
     assert!(content.contains("1-1-test-story: ready-for-dev"));
     assert!(content.contains("1-2-another: done"));
     assert!(content.contains("epic-1: in-progress"));
@@ -141,7 +142,7 @@ fn test_write_sprint_status_contains_all_entries() {
 
 #[test]
 fn test_write_sprint_status_stories_filtered_correctly() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     let entries = vec![
         ("epic-1", "in-progress"),
         ("1-1-story-a", "ready-for-dev"),
@@ -151,7 +152,7 @@ fn test_write_sprint_status_stories_filtered_correctly() {
     write_sprint_status(dir.path(), &entries);
 
     let path = dir.path().join("sprint-status.yaml");
-    let status = SprintStatusFile::load(&path, dir.path()).unwrap();
+    let status = SprintStatusFile::load(&path, dir.path()).expect("load sprint-status.yaml");
     let stories = status.stories();
 
     // Only actual stories, not epics or retrospectives
@@ -166,7 +167,7 @@ fn test_write_sprint_status_stories_filtered_correctly() {
 
 #[test]
 fn test_write_wal_file_creates_parseable_yaml() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     let story = make_test_story("4-2-agent-session", "agent session", vec![]);
     let state = SessionState::new(&story, "anthropic", "claude-sonnet-4-20250514");
 
@@ -176,7 +177,7 @@ fn test_write_wal_file_creates_parseable_yaml() {
     assert!(path.exists(), "WAL file should exist");
 
     // Verify it's parseable
-    let content = std::fs::read_to_string(&path).unwrap();
+    let content = std::fs::read_to_string(&path).expect("read WAL file");
     let parsed: SessionState = serde_yml::from_str(&content).expect("should parse WAL YAML");
     assert_eq!(parsed.story_key, "4-2-agent-session");
     assert_eq!(parsed.provider, "anthropic");
@@ -185,7 +186,7 @@ fn test_write_wal_file_creates_parseable_yaml() {
 
 #[test]
 fn test_write_wal_file_preserves_chat_history() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     let story = make_test_story("1-1-test", "test", vec![]);
     let mut state = SessionState::new(&story, "openai", "gpt-4o");
     state.add_user_message("hello");
@@ -193,8 +194,9 @@ fn test_write_wal_file_preserves_chat_history() {
 
     write_wal_file(dir.path(), &state);
 
-    let content = std::fs::read_to_string(dir.path().join(".bmad-bot-session.yaml")).unwrap();
-    let parsed: SessionState = serde_yml::from_str(&content).unwrap();
+    let content = std::fs::read_to_string(dir.path().join(".bmad-bot-session.yaml"))
+        .expect("read WAL file");
+    let parsed: SessionState = serde_yml::from_str(&content).expect("parse WAL YAML");
     assert_eq!(parsed.chat_history.len(), 2);
     assert_eq!(parsed.chat_history[0].role, "user");
     assert_eq!(parsed.chat_history[0].content, "hello");
@@ -208,7 +210,7 @@ fn test_write_wal_file_preserves_chat_history() {
 
 #[test]
 fn test_create_test_repo_creates_valid_git_repo() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     create_test_repo(dir.path());
 
     // Verify .git directory exists
@@ -217,7 +219,7 @@ fn test_create_test_repo_creates_valid_git_repo() {
 
 #[test]
 fn test_create_test_repo_has_initial_commit() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     create_test_repo(dir.path());
 
     // Verify HEAD exists by running git log
@@ -233,7 +235,7 @@ fn test_create_test_repo_has_initial_commit() {
 
 #[test]
 fn test_create_test_repo_main_branch_exists() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     create_test_repo(dir.path());
 
     let output = std::process::Command::new("git")
