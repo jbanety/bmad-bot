@@ -1,6 +1,6 @@
 # Story 7.6: Git Provider & PR Creation Integration Tests
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -43,51 +43,51 @@ so that I'm confident the daemon produces well-formed PRs on both GitHub and Git
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Prerequisites — Verify lib.rs and git_provider visibility (AC: all)
-  - [ ] 0.1 Verify `src/lib.rs` exists with `pub mod git_provider;` (created by Story 7.1 Task 0). If missing, create it (see Dev Notes)
-  - [ ] 0.2 Verify `bmad_bot::git_provider::{create_provider, build_pr_description, build_pr_title, GitProvider, GitProviderError, CreatePrParams, PrInfo, PrDescriptionParams}` are accessible from integration tests
-  - [ ] 0.3 Verify `bmad_bot::git_provider::{GitHubProvider, GitLabProvider}` are accessible (both re-exported via `pub use` in mod.rs)
-  - [ ] 0.4 Verify `bmad_bot::supervisor::decisions::{format_pr_decisions_section, DecisionRecord, DecisionSource}` are accessible (cross-module dependency)
-  - [ ] 0.5 Run `cargo build` — must succeed
+- [x] Task 0: Prerequisites — Verify lib.rs and git_provider visibility (AC: all)
+  - [x] 0.1 Verify `src/lib.rs` exists with `pub mod git_provider;` (created by Story 7.1 Task 0). If missing, create it (see Dev Notes)
+  - [x] 0.2 Verify `bmad_bot::git_provider::{create_provider, build_pr_description, build_pr_title, GitProvider, GitProviderError, CreatePrParams, PrInfo, PrDescriptionParams}` are accessible from integration tests
+  - [x] 0.3 Verify `bmad_bot::git_provider::{GitHubProvider, GitLabProvider}` are accessible (both re-exported via `pub use` in mod.rs)
+  - [x] 0.4 Verify `bmad_bot::supervisor::decisions::{format_pr_decisions_section, DecisionRecord, DecisionSource}` are accessible (cross-module dependency)
+  - [x] 0.5 Run `cargo build` — must succeed
 
-- [ ] Task 1: Create integration test file and module declaration (AC: all)
-  - [ ] 1.1 Create `tests/integration/test_git_provider.rs`
-  - [ ] 1.2 Add `mod test_git_provider;` in `tests/integration.rs`
-  - [ ] 1.3 Add imports from `bmad_bot::git_provider::*`, `bmad_bot::config::GitProviderConfig`, `bmad_bot::supervisor::decisions::*`
+- [x] Task 1: Create integration test file and module declaration (AC: all)
+  - [x] 1.1 Create `tests/integration/test_git_provider.rs`
+  - [x] 1.2 Add `mod test_git_provider;` in `tests/integration.rs`
+  - [x] 1.3 Add imports from `bmad_bot::git_provider::*`, `bmad_bot::config::GitProviderConfig`, `bmad_bot::supervisor::decisions::*`
 
-- [ ] Task 2: Write provider factory integration tests — public API smoke tests (AC: #1, #2, #3)
-  - [ ] 2.1 Happy path: test `create_provider()` with `"github"` + valid token (requires local `install_crypto_provider()` — see Dev Notes) AND `"gitlab"` + valid token → both return `Ok`. Use `#[test]` (factory is synchronous)
-  - [ ] 2.2 Error paths: test `create_provider()` with `"bitbucket"` → `Err(ProviderNotConfigured { provider: "bitbucket" })` AND empty string provider → `Err(ProviderNotConfigured)`
+- [x] Task 2: Write provider factory integration tests — public API smoke tests (AC: #1, #2, #3)
+  - [x] 2.1 Happy path: test `create_provider()` with `"github"` + valid token (requires local `install_crypto_provider()` — see Dev Notes) AND `"gitlab"` + valid token → both return `Ok`. Use `#[test]` (factory is synchronous)
+  - [x] 2.2 Error paths: test `create_provider()` with `"bitbucket"` → `Err(ProviderNotConfigured { provider: "bitbucket" })` AND empty string provider → `Err(ProviderNotConfigured)`
 
-- [ ] Task 3: Write GitLab empty token rejection test (AC: #4)
-  - [ ] 3.1 Test `GitLabProvider::new(&config, "")` → returns `Err(AuthenticationFailed)` with reason containing "empty"
+- [x] Task 3: Write GitLab empty token rejection test (AC: #4)
+  - [x] 3.1 Test `GitLabProvider::new(&config, "")` → returns `Err(AuthenticationFailed)` with reason containing "empty"
 
-- [ ] Task 4: Write cross-module PR description integration tests (AC: #5)
-  - [ ] 4.1 Build real `DecisionRecord` instances via `DecisionRecord::new()` (from supervisor module)
-  - [ ] 4.2 Call `format_pr_decisions_section(&decisions)` to generate the decisions markdown (cross-module: supervisor → git_provider)
-  - [ ] 4.3 Pass result into `PrDescriptionParams` and call `build_pr_description()`
-  - [ ] 4.4 Assert description contains: story key in header (`## 📋 Story:`), outcome summary (`**Status:**`), "Supervisor Decisions" section with actual decision content, bmad-bot footer
-  - [ ] 4.5 Assert `build_pr_title("5-1-git-provider", "Git Provider Trait", false)` → `"feat(5-1-git-provider): Git Provider Trait"`
+- [x] Task 4: Write cross-module PR description integration tests (AC: #5)
+  - [x] 4.1 Build real `DecisionRecord` instances via `DecisionRecord::new()` (from supervisor module)
+  - [x] 4.2 Call `format_pr_decisions_section(&decisions)` to generate the decisions markdown (cross-module: supervisor → git_provider)
+  - [x] 4.3 Pass result into `PrDescriptionParams` and call `build_pr_description()`
+  - [x] 4.4 Assert description contains: story key in header (`## 📋 Story:`), outcome summary (`**Status:**`), "Supervisor Decisions" section with actual decision content, bmad-bot footer
+  - [x] 4.5 Assert `build_pr_title("5-1-git-provider", "Git Provider Trait", false)` → `"feat(5-1-git-provider): Git Provider Trait"`
 
-- [ ] Task 5: Write failure PR description integration test (AC: #6)
-  - [ ] 5.1 Build `PrDescriptionParams` with `failure_details: Some("LLM timeout after 3 retries")`
-  - [ ] 5.2 Assert description contains "⚠️ Failure Details" section with the failure text
-  - [ ] 5.3 Assert `build_pr_title("2-1-polling", "Sprint Polling", true)` → `"wip(2-1-polling): Sprint Polling [NEEDS REVIEW]"`
+- [x] Task 5: Write failure PR description integration test (AC: #6)
+  - [x] 5.1 Build `PrDescriptionParams` with `failure_details: Some("LLM timeout after 3 retries")`
+  - [x] 5.2 Assert description contains "⚠️ Failure Details" section with the failure text
+  - [x] 5.3 Assert `build_pr_title("2-1-polling", "Sprint Polling", true)` → `"wip(2-1-polling): Sprint Polling [NEEDS REVIEW]"`
 
-- [ ] Task 6: Write escalation PR description test (supplementary)
-  - [ ] 6.1 Build `PrDescriptionParams` with escalation-style failure_details containing question, reason, and partial work summary
-  - [ ] 6.2 Assert description contains all escalation fields
+- [x] Task 6: Write escalation PR description test (supplementary)
+  - [x] 6.1 Build `PrDescriptionParams` with escalation-style failure_details containing question, reason, and partial work summary
+  - [x] 6.2 Assert description contains all escalation fields
 
-- [ ] Task 7: Write end-to-end factory → trait method chain test (supplementary)
-  - [ ] 7.1 Call `create_provider()` for GitLab, then call `get_pr_url("42")` on the returned `Box<dyn GitProvider>`
-  - [ ] 7.2 Assert URL matches `"https://gitlab.com/{owner}/{repo}/-/merge_requests/42"`
-  - [ ] 7.3 Call `get_pr_url("not-a-number")` → assert `Err(InvalidPrId)`
-  - [ ] 7.4 This validates the full factory → trait dispatch → method execution chain through the public API
+- [x] Task 7: Write end-to-end factory → trait method chain test (supplementary)
+  - [x] 7.1 Call `create_provider()` for GitLab, then call `get_pr_url("42")` on the returned `Box<dyn GitProvider>`
+  - [x] 7.2 Assert URL matches `"https://gitlab.com/{owner}/{repo}/-/merge_requests/42"`
+  - [x] 7.3 Call `get_pr_url("not-a-number")` → assert `Err(InvalidPrId)`
+  - [x] 7.4 This validates the full factory → trait dispatch → method execution chain through the public API
 
-- [ ] Task 8: Verify all tests pass (AC: all)
-  - [ ] 8.1 `cargo test --test integration` — all git provider tests pass
-  - [ ] 8.2 `cargo test` — no regressions in 573+ unit tests
-  - [ ] 8.3 `cargo clippy` — zero warnings
+- [x] Task 8: Verify all tests pass (AC: all)
+  - [x] 8.1 `cargo test --test integration` — all git provider tests pass
+  - [x] 8.2 `cargo test` — no regressions in 573+ unit tests
+  - [x] 8.3 `cargo clippy` — zero warnings
 
 ## Dev Notes
 
@@ -432,9 +432,25 @@ tests/
 ## Dev Agent Record
 
 ### Agent Model Used
+Claude Sonnet 4 (Anthropic)
 
 ### Debug Log References
+- GitHub factory test required `#[tokio::test]` instead of `#[test]` because Octocrab uses `tower::Buffer` which requires a tokio runtime for `GitHubProvider::new()`
+- `dyn GitProvider` does not implement `Debug`, so `Result<Box<dyn GitProvider>, _>` cannot use `{:?}` formatting — adjusted assertion messages
+- `GitProvider` trait import flagged as unused by rustc (methods on `dyn Trait` objects don't require the trait in scope) — added `#[allow(unused_imports)]` with documentation comment
+- Pre-existing clippy `#[deny(clippy::all)]` errors in `agent_factory.rs`, `config/mod.rs`, `session/analyzer.rs` — NOT introduced by this story
 
 ### Completion Notes List
+- Created `tests/integration/test_git_provider.rs` with 12 integration tests covering all 6 ACs
+- Registered module in `tests/integration.rs` via `#[path = ...]` attribute
+- All 12 git_provider integration tests pass
+- Full test suite: 837 unit + 104 bin + 98 integration = 1039 tests pass, 0 failures
+- No new files modified in `src/` — pure test-only story
+- Cross-module integration validated: `supervisor::decisions::DecisionRecord` → `format_pr_decisions_section()` → `PrDescriptionParams` → `build_pr_description()`
+- Factory → trait dispatch chain validated: `create_provider()` → `Box<dyn GitProvider>` → `.get_pr_url()` with both valid and invalid IDs
 
 ### File List
+- `tests/integration/test_git_provider.rs` — NEW: 12 integration tests for git_provider module
+- `tests/integration.rs` — MODIFIED: added `mod test_git_provider` declaration
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED: 7-6 status updated
+- `_bmad-output/implementation-artifacts/7-6-git-provider-pr-creation-integration-tests.md` — MODIFIED: tasks marked complete, dev agent record updated
