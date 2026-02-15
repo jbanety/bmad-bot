@@ -897,7 +897,10 @@ impl StoryPipeline {
     /// Process the outcome of a recovered session through the post-session pipeline.
     ///
     /// Reuses the same post-session logic as [`process_story()`]: code review → PR → notification.
-    async fn process_recovered_session(
+    ///
+    /// Public for integration test access. Production code calls this via
+    /// [`recover_and_process()`](Self::recover_and_process).
+    pub async fn process_recovered_session(
         &self,
         story: &StoryInfo,
         outcome: SessionOutcome,
