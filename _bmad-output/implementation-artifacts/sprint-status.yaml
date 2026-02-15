@@ -96,16 +96,16 @@ development_status:
   epic-6-retrospective: optional
 
   epic-7: in-progress # was blocked by epic-8 — epic-8 now in review, tooling surface finalized
-  7-1-integration-test-infrastructure-fixtures: review # depends-on: epic-8 (resolved)
-  7-2-config-startup-validation-integration-tests: blocked # depends-on: 7-1
-  7-3-watcher-dependency-resolution-story-selection-integration-tests: blocked # depends-on: 7-1
-  7-4-pipeline-orchestration-integration-tests: blocked # depends-on: 7-1
-  7-5-session-wal-crash-recovery-integration-tests: blocked # depends-on: 7-1
-  7-6-git-provider-pr-creation-integration-tests: blocked # depends-on: 7-1
-  7-7-notification-flow-integration-tests: blocked # depends-on: 7-1
-  7-8-branch-management-git-surgical-development-tools-integration-tests: blocked # depends-on: 7-1
-  7-9-cli-lifecycle-integration-tests: blocked # depends-on: 7-1
-  7-10-response-analyzer-supervisor-rules-integration-tests: blocked # depends-on: 7-1
+  7-1-integration-test-infrastructure-fixtures: done # depends-on: epic-8 (resolved)
+  7-2-config-startup-validation-integration-tests: ready-for-dev # depends-on: 7-1
+  7-3-watcher-dependency-resolution-story-selection-integration-tests: ready-for-dev # depends-on: 7-1
+  7-4-pipeline-orchestration-integration-tests: ready-for-dev # depends-on: 7-1
+  7-5-session-wal-crash-recovery-integration-tests: ready-for-dev # depends-on: 7-1
+  7-6-git-provider-pr-creation-integration-tests: ready-for-dev # depends-on: 7-1
+  7-7-notification-flow-integration-tests: ready-for-dev # depends-on: 7-1
+  7-8-branch-management-git-surgical-development-tools-integration-tests: ready-for-dev # depends-on: 7-1
+  7-9-cli-lifecycle-integration-tests: ready-for-dev # depends-on: 7-1
+  7-10-response-analyzer-supervisor-rules-integration-tests: ready-for-dev # depends-on: 7-1
   epic-7-retrospective: optional
 
   epic-8: in-progress # depends-on: epic-4 (Story 4.1 as baseline)
