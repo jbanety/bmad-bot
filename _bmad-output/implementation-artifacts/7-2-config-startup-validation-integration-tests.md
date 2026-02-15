@@ -216,11 +216,13 @@ Known modules scanned by discovery: `bmm`, `core`, `_config`, `_memory`.
 
 ### Previous Story Intelligence (Story 7.1)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. All test modules are declared in `tests/integration.rs` via `mod test_config;` etc.
+- **✅ Story 7.1 is IMPLEMENTED.** `src/lib.rs` exists with all 11 non-CLI modules (auth, config, git_provider, llm, notifier, pipeline, review, session, supervisor, tools, watcher). `tests/integration/` directory exists with helpers, mocks, and fixtures. 34 integration tests pass.
+- **⚠️ Module declaration pattern CHANGED:** `tests/integration.rs` uses `#[path]` attributes, NOT plain `mod` declarations. Test crate roots don't auto-resolve companion directories. To add a new test module: `#[path = "integration/test_config.rs"] mod test_config;`
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_secrets};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
+- **`cli` is NOT in lib.rs** — stays as `mod cli;` in `main.rs` (binary-only). CLI references to lib modules use `bmad_bot::` not `crate::`
 
 ### Dependencies Required
 

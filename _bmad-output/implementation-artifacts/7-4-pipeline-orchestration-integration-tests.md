@@ -668,9 +668,11 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **✅ Story 7.1 is IMPLEMENTED.** `src/lib.rs` exists with all modules. `tests/integration/` directory exists with `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner`, `make_test_config()`, `make_test_story()`, and other fixtures. 34 integration tests pass. The `lib.rs` blocker (Task 0) is RESOLVED — skip any Task 0 equivalent.
+- **⚠️ Module declaration pattern CHANGED:** `tests/integration.rs` uses `#[path]` attributes, NOT plain `mod` declarations. To add a new test module: `#[path = "integration/test_pipeline.rs"] mod test_pipeline;`
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
 - **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
+- **Mock builder API:** `MockGitProvider::new().with_create_pr(Ok(...))`, `MockNotifier::new().with_story_result(...)`, `MockSessionRunner::new().with_outcome(|story| ...)`, `MockReviewRunner::new().with_outcome(|story| ...)`
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one

@@ -240,7 +240,8 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **✅ Story 7.1 is IMPLEMENTED.** `src/lib.rs` exists with `pub mod watcher;` and all other modules. `tests/integration/` directory exists with helpers, mocks, and fixtures. The `lib.rs` blocker (Task 0) is RESOLVED — skip any Task 0 equivalent.
+- **⚠️ Module declaration pattern CHANGED:** `tests/integration.rs` uses `#[path]` attributes, NOT plain `mod` declarations. To add a new test module: `#[path = "integration/test_watcher.rs"] mod test_watcher;`
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case

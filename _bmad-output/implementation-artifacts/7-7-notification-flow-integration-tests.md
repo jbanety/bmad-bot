@@ -303,8 +303,13 @@ Since `create_notifier()` returns `Box<dyn Notifier>` (trait object), we cannot 
 
 ### Previous Story Intelligence (Story 7.6)
 
+**Story 7.1 (Integration Test Infrastructure) — ✅ IMPLEMENTED:**
+- `src/lib.rs` exists with all modules. `tests/integration/` directory exists.
+- `tests/integration.rs` uses `#[path]` attributes. To add: `#[path = "integration/test_notifier.rs"] mod test_notifier;`
+- `MockNotifier` exists in `tests/integration/helpers/mocks.rs` with builder pattern: `MockNotifier::new().with_story_result(...)`, accessors: `calls()`, `story_calls()`, `summary_calls()`. No need for fallback MockNotifier.
+- Fixture builders available: `make_test_config(dir)`, `make_test_secrets()`
+
 **Story 7.6 (Git Provider & PR Creation Integration Tests):**
-- Established the `lib.rs` BLOCKER pattern — copy same prerequisite check
 - Established the "Cross-Module Integration Value" section pattern — used here
 - Used `tests/integration/test_git_provider.rs` location convention — follow same for `test_notifier.rs`
 - Rustls crypto provider was needed for GitHub provider — **NOT needed for notifier tests** (notifier uses `reqwest_middleware`, no crypto init required)

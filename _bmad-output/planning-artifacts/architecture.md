@@ -946,7 +946,8 @@ bmad-bot/
 ├── .env.example                      # Template secrets (API keys)
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
-│   ├── main.rs                       # Entry point, CLI dispatch, rustls init
+│   ├── lib.rs                         # Library crate root — exposes all non-CLI modules for integration tests
+│   ├── main.rs                       # Binary crate entry point, CLI dispatch, rustls init (only `mod cli;`)
 │   ├── auth/
 │   │   ├── mod.rs                    # Auth module root
 │   │   └── github_copilot.rs         # OAuth Device Flow, token exchange, CopilotTokenCache
@@ -999,8 +1000,16 @@ bmad-bot/
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
-    └── e2e/
-        └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+    ├── e2e/
+    │   └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+    ├── integration.rs                # Integration test binary entry point (`cargo test --test integration`)
+    └── integration/
+        ├── helpers/
+        │   ├── mod.rs                # Re-exports: pub mod mocks; pub mod fixtures;
+        │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+        │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+        ├── test_mocks.rs             # Self-verification tests for mock implementations
+        └── test_fixtures.rs          # Self-verification tests for fixture builders
 ```
 
 ### Requirements to Structure Mapping

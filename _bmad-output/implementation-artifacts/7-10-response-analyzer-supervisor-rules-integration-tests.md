@@ -385,9 +385,9 @@ let slot: EscalationSlot = Arc::new(Mutex::new(Some(EscalationInfo {
 
 ### Previous Story Intelligence (Stories 7.1 through 7.9)
 
-1. **`lib.rs` blocker is universal** — every integration test story needs it. Story 7.1 defines the creation; all subsequent stories assume it exists. If Task 0 finds it missing, follow the exact spec from Story 7.1.
+1. **✅ Story 7.1 is IMPLEMENTED.** `src/lib.rs` exists with all 11 non-CLI modules. `tests/integration/` directory exists with mocks and fixtures. The `lib.rs` blocker is RESOLVED — skip any Task 0 equivalent.
 
-2. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_response_analyzer_supervisor.rs`.
+2. **Module declaration pattern:** `tests/integration.rs` uses `#[path]` attributes. To add: `#[path = "integration/test_response_analyzer_supervisor.rs"] mod test_response_analyzer_supervisor;`
 
 3. **No mocks needed for ResponseAnalyzer or RuleEngine tests.** Both operate on in-memory data only (strings, pattern matching). No filesystem, HTTP, or git mocking required.
 

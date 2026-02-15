@@ -329,6 +329,12 @@ URL pattern: `https://github.com/{owner}/{repo}/pull/{number}`
 
 ### Previous Story Intelligence (Stories 7.4, 7.5)
 
+**Story 7.1 (Integration Test Infrastructure) — ✅ IMPLEMENTED:**
+- The `lib.rs` blocker is RESOLVED. `src/lib.rs` exists with all modules.
+- `tests/integration.rs` uses `#[path]` attributes for module declarations. To add: `#[path = "integration/test_git_provider.rs"] mod test_git_provider;`
+- `tests/integration/helpers/mocks.rs` has `MockGitProvider` with builder pattern (`with_create_pr`, `with_add_comment`, `with_get_pr_url`)
+- `tests/integration/helpers/fixtures.rs` has `make_test_config`, `make_test_secrets`, `make_test_story`
+
 **Story 7.5 (Session WAL Crash Recovery):**
 - Established the "Cross-Module Integration Value" section pattern — use it here
 - Used full struct literal for `BotConfig` instead of `_test_minimal()` — follow same pattern if config needed
