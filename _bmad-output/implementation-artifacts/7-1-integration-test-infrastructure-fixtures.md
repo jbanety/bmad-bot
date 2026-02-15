@@ -1,6 +1,6 @@
 # Story 7.1: Integration Test Infrastructure & Fixtures
 
-Status: review
+Status: done
 
 ## Story
 
@@ -385,6 +385,7 @@ No debug issues encountered.
 - **Decision:** Included `auth` and `llm` modules in `lib.rs` (not listed in story template) because `pipeline`, `review`, `supervisor`, and `session` all depend on `crate::llm`, and `llm` depends on `crate::auth`. Without them, compilation fails.
 - **Decision:** Used `#[path]` attributes in `tests/integration.rs` because edition 2024 module path resolution doesn't apply to integration test crate roots in the current compiler.
 - **Decision:** `BotSecrets.github_copilot_oauth_token` used instead of story's `github_models_api_key` to match actual codebase field name.
+- **Code Review Fixes (CR):** Aligned `MockSessionRunner::check_and_recover_wal()` signature with real API (`Option<RecoveryInfo>` instead of `Option<()>`), removed unused `ChatMessage` import in fixtures helper, and made `write_sprint_status()` write `story_location` from the provided temp directory instead of hardcoded `"."`.
 
 ### File List
 - `src/lib.rs` — NEW (library crate exposing all modules)
@@ -394,9 +395,9 @@ No debug issues encountered.
 - `src/cli/state.rs` — MODIFIED (changed `crate::` to `bmad_bot::` for library modules)
 - `tests/integration.rs` — NEW (integration test entry point)
 - `tests/integration/helpers/mod.rs` — NEW (re-exports mocks + fixtures)
-- `tests/integration/helpers/mocks.rs` — NEW (MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner)
-- `tests/integration/helpers/fixtures.rs` — NEW (make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo)
+- `tests/integration/helpers/mocks.rs` — NEW (MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner; CR fix: `check_and_recover_wal` returns `Option<RecoveryInfo>`)
+- `tests/integration/helpers/fixtures.rs` — NEW (make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo; CR fix: dynamic `story_location`, removed unused import)
 - `tests/integration/test_mocks.rs` — NEW (21 mock self-verification tests)
 - `tests/integration/test_fixtures.rs` — NEW (12 fixture self-verification tests)
-- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED (7-1 status: ready-for-dev → review)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED (7-1 status: ready-for-dev → done)
 - `_bmad-output/implementation-artifacts/7-1-integration-test-infrastructure-fixtures.md` — MODIFIED (tasks checked, status, dev agent record)
