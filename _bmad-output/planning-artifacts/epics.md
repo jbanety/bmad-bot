@@ -180,6 +180,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR40: Epic 1/6 — Log all LLM requests and responses via dedicated llm_logging module for debugging and operations visibility
 - FR41: Epic 4 (Story 4.4) — Validate git CLI availability at startup and fail fast if missing
 - FR42: Epic 4 (Story 4.5) — Centralize LLM provider construction via AgentFactory with BuiltAgent enum dispatch. Hardcoded API format per provider/model. Fixes Copilot Responses API bug for OpenAI models
+- FR43: Epic 4 (Story 4.6) — Post-implementation impact analysis: agent analyzes downstream dependent stories after completion and updates their Previous Story Intelligence sections. Best-effort, non-blocking
 
 ## Epic List
 
@@ -196,8 +197,8 @@ The supervisor can intercept agent questions and answer them via a deterministic
 **FRs covered:** FR12, FR13, FR14, FR15, FR16, FR17
 
 ### Epic 4: Autonomous Development Session
-The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After this epic, stories are developed end-to-end by the agent. *(Note: Story 4.1's monolithic FsTool is refactored into surgical tools in Epic 8. Story 4.4 migrates all git operations from git2 to Git CLI.)*
-**FRs covered:** FR5, FR6, FR7, FR8, FR9, FR10, FR11, FR41
+The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After story completion, the agent propagates implementation reality forward to downstream dependent stories via post-implementation impact analysis. After this epic, stories are developed end-to-end by the agent. *(Note: Story 4.1's monolithic FsTool is refactored into surgical tools in Epic 8. Story 4.4 migrates all git operations from git2 to Git CLI. Story 4.6 adds the post-impl impact analysis step.)*
+**FRs covered:** FR5, FR6, FR7, FR8, FR9, FR10, FR11, FR41, FR43
 
 ### Epic 5: Code Review & Pull Request Delivery [L201-205]
 
@@ -931,6 +932,71 @@ So that provider selection, API format detection, and Copilot token exchange hap
 - See `architect-brief-llm-provider-abstraction.md` for full technical rationale and before/after code examples
 - Architecture Decision 8 in `architecture.md` documents this pattern
 - Cross-cutting: touches `llm/agent_factory.rs` (new), `session/runner.rs` (Epic 4), `review/mod.rs` (Epic 5), `supervisor/architect.rs` (Epic 3), `pipeline.rs` (Epic 5 area)
+
+---
+
+### Story 4.6: Post-Implementation Impact Analysis on Downstream Stories
+
+> **Triggered by:** Story 7-1 completed without updating downstream stories 7-2 through 7-10 — their Dev Notes still reference assumptions invalidated by actual implementation. See `architect-brief-post-impl-impact-analysis.md` for full rationale.
+
+As a daemon operator,
+I want the agent to analyze and update downstream dependent stories after completing a story,
+So that the next agent picking up a dependent story works from accurate assumptions instead of stale specs, reducing wasted tokens, wrong patterns, and rework.
+
+**Acceptance Criteria:**
+
+**Given** the agent has signaled `<<BMAD_JOB_DONE>>` and the final commit (Step 7) has completed
+**When** the session runner executes the impact analysis step (Step 8)
+**Then** it sends an impact analysis prompt to the agent in a dedicated chat turn with full tool access
+
+**Given** the impact analysis prompt is sent
+**When** the agent processes it
+**Then** it reads `sprint-status.yaml` and identifies stories whose `depends-on` references the completed story (by full key or short key `{epic}-{story}`)
+**And** it checks subsequent stories in the same epic (document order) as a secondary criterion
+
+**Given** downstream dependent stories are identified
+**When** the agent reads their Dev Notes
+**Then** it compares the "Previous Story Intelligence" sections against what was actually implemented
+**And** it updates only "Previous Story Intelligence" sections where actual implementation deviates from planned assumptions
+**And** updates include: what changed vs the original plan, new APIs/patterns/modules to use, obsolete assumptions to discard
+**And** updates are idempotent — sections are replaced, not appended
+
+**Given** the completed story introduced new modules or changed interfaces
+**When** the agent checks for `architecture.md`
+**Then** it verifies the file exists before attempting to read or update it (not all projects have one)
+**And** it updates architecture references only if new modules or changed interfaces were introduced
+
+**Given** downstream stories or architecture have been updated
+**When** the agent commits the changes
+**Then** the commit message uses the prefix `docs(stories): update downstream specs after {story_key}`
+
+**Given** no downstream stories need updating
+**When** the agent evaluates the impact
+**Then** it reports that nothing needs updating and moves on without making changes — it does not invent changes
+
+**Given** the impact analysis chat turn fails (LLM error, timeout, context window exhaustion)
+**When** the session runner handles the failure
+**Then** it proceeds to the PR summary step (Step 9) without error
+**And** the story completion is not blocked or marked as failed
+**And** the failure is logged via `tracing::warn!`
+
+**Given** the impact analysis step completes (success or skip)
+**When** the PR summary step (Step 9) executes
+**Then** it is aware that an impact analysis commit may have been added to the branch
+**And** the PR description reflects both the implementation work and any downstream spec updates
+
+**Given** all changes are complete
+**When** validation runs
+**Then** `cargo build`, `cargo test`, `cargo clippy`, and `cargo fmt` all pass with zero errors and zero warnings
+
+**Technical Notes:**
+- Single file change: `src/session/runner.rs` — add impact analysis chat turn after Step 7 (final commit), renumber PR summary to Step 9. ~40-50 lines of new code following the same pattern as existing post-completion steps
+- Agent-driven, not daemon-driven: the daemon sends the prompt, the agent uses existing tools (`read_file`, `edit_file`, `git`) to do the work. No new tools or daemon logic required beyond the prompt and chat turn
+- Scope guard: the agent must only update "Previous Story Intelligence" in Dev Notes and architecture references — not rewrite tasks, ACs, or other story sections
+- Estimated token cost: 2-8k tokens per story (reads 2-5 files, updates or skips)
+- Symmetric counterpart to the pre-dev spec update (FR5-6): pre-dev reads prior stories' output, post-impl propagates forward to downstream stories
+- See `architect-brief-post-impl-impact-analysis.md` for the full architect brief with the proposed prompt design and sequence diagrams
+- Architecture Data Flow step 8 documents this feature
 
 ---
 
