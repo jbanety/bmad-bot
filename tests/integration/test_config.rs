@@ -4,6 +4,14 @@
 //! Story 7.2 — Config → Startup Validation Integration Tests
 
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::time::{Duration, timeout};
 
 use bmad_bot::config::discovery::BmadDiscovery;
 use bmad_bot::config::{build_http_client, BotConfig, BotSecrets, ConfigError};
@@ -386,3 +394,41 @@ fn test_http_client_returns_client_with_middleware() {
     // Type assertion via binding — if this compiles, the type is correct.
     drop(client);
 }
+
+#[tokio::test]
+async fn test_http_client_retries_on_transient_errors() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_server = Arc::clone(&attempts);
+
+    let mut server_handle = tokio::spawn(async move {
+        for _ in 0..4 {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = [0u8; 1024];
+                let _ = socket.read(&mut buffer).await;
+                let _ = attempts_for_server.fetch_add(1, Ordering::SeqCst);
+                let response = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(response).await;
+            }
+        }
+    });
+
+    let client = build_http_client();
+    let url = format!("http://{addr}/");
+    let _ = client.get(url).send().await;
+
+    if timeout(Duration::from_secs(5), &mut server_handle)
+        .await
+        .is_err()
+    {
+        server_handle.abort();
+    }
+
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        4,
+        "expected initial request plus three retries"
+    );
+}
+
