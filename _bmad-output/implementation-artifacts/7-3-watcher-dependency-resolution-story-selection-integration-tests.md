@@ -310,6 +310,7 @@ Claude claude-sonnet-4-20250514
 
 ### Debug Log References
 All 66 tests pass (16 new integration tests + 50 existing). Zero regressions.
+Re-validation after review follow-up fixes: `cargo test --test integration` → 66 passed, 0 failed.
 
 ### Completion Notes List
 - Task 1: Created `tests/integration/test_watcher.rs`, added `#[path]` mod declaration in `tests/integration.rs`
@@ -320,6 +321,11 @@ All 66 tests pass (16 new integration tests + 50 existing). Zero regressions.
 - Task 6: 2 tests — `test_watcher_poll_missing_file_returns_error` (variant) + `test_watcher_poll_missing_file_error_contains_path` (message)
 - Task 7: 4 tests — load/order preservation, stories filter, eligible filter, malformed YAML parse error
 - All tests use `tempfile::tempdir()` for filesystem isolation
+- Review follow-up fixes applied in `tests/integration/test_watcher.rs`:
+  - AC #1 test now asserts exact ordered eligible vector `["1-2-cli-framework", "2-1-polling"]`
+  - `review` negative-cascade case now directly asserts `cascade_count_review == 0`
+  - Cycle test now requires both involved keys in `WatcherError::CyclicDependency`
+- Follow-up commit: `b6edde5` (`test(watcher): strengthen dependency eligibility and cycle assertions`)
 - No new dependencies added; used existing `tempfile`, `std::sync::Arc`
 - Pattern: `write_sprint_status` → `make_test_config` → `Watcher::new(Arc::new(config))` → `poll()` → assert
 
