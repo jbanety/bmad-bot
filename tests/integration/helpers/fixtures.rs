@@ -4,13 +4,19 @@
 //! test files to temporary directories.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use bmad_bot::config::{
     BmadPathsConfig, BotConfig, BotSecrets, GitProviderConfig, LlmConfig, LlmRoleConfig,
     NotificationConfig, TelegramConfig,
 };
+use bmad_bot::pipeline::{CodeReviewer, DevRunner, StoryPipeline};
+use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::SessionOutcome;
 use bmad_bot::session::SessionState;
 use bmad_bot::watcher::StoryInfo;
+
+use super::mocks::{MockCodeReviewer, MockDevRunner, MockGitProvider, MockNotifier};
 
 // ---------------------------------------------------------------------------
 // make_test_config
@@ -181,4 +187,167 @@ pub fn create_test_repo(dir: &Path) {
     run(&["commit", "--allow-empty", "-m", "initial commit"]);
     // Ensure "main" branch exists (default might be "master" depending on git config)
     run(&["branch", "-M", "main"]);
+}
+
+/// Initialize a git repo with a local bare remote so `git push` works.
+///
+/// Creates the git repo in `repo_dir`, and a bare remote at `repo_dir/../origin.git`.
+/// The branch specified by `story_branch` is created with an empty commit.
+pub fn create_test_repo_with_remote(repo_dir: &Path, story_branch: &str) {
+    use std::process::Command;
+    let run_in = |dir: &Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed");
+        assert!(
+            output.status.success(),
+            "git {} in {} failed: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // Create a bare "remote" repository
+    let remote_dir = repo_dir.parent().unwrap().join("origin.git");
+    std::fs::create_dir_all(&remote_dir).unwrap();
+    run_in(&remote_dir, &["init", "--bare"]);
+
+    // Initialize the working repo
+    run_in(repo_dir, &["init"]);
+    run_in(repo_dir, &["config", "user.email", "test@test.com"]);
+    run_in(repo_dir, &["config", "user.name", "Test"]);
+    run_in(repo_dir, &["commit", "--allow-empty", "-m", "initial commit"]);
+    run_in(repo_dir, &["branch", "-M", "main"]);
+
+    // Add the bare repo as "origin"
+    run_in(
+        repo_dir,
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    // Push main to origin so the remote has a branch
+    run_in(repo_dir, &["push", "origin", "main"]);
+
+    // Create the story branch with an empty commit
+    run_in(repo_dir, &["checkout", "-b", story_branch]);
+    run_in(
+        repo_dir,
+        &["commit", "--allow-empty", "-m", "story work"],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PipelineTestBuilder
+// ---------------------------------------------------------------------------
+
+/// Builder for constructing a `StoryPipeline` with mock dependencies.
+///
+/// After `build()`, returns the pipeline plus cloned mock handles for assertions.
+pub struct PipelineTestBuilder {
+    config: BotConfig,
+    session_outcomes: Vec<SessionOutcome>,
+    review_outcome: Option<ReviewOutcome>,
+    mock_git: MockGitProvider,
+    mock_notifier: MockNotifier,
+}
+
+impl PipelineTestBuilder {
+    /// Create a builder with sensible defaults: code_review_enabled = true.
+    pub fn new() -> Self {
+        let tmp = std::env::temp_dir().join("pipeline-test-default");
+        Self {
+            config: make_test_config(&tmp),
+            session_outcomes: vec![],
+            review_outcome: None,
+            mock_git: MockGitProvider::new(),
+            mock_notifier: MockNotifier::new(),
+        }
+    }
+
+    pub fn with_code_review(mut self, enabled: bool) -> Self {
+        self.config.code_review_enabled = enabled;
+        self
+    }
+
+    pub fn with_session(mut self, outcome: SessionOutcome) -> Self {
+        self.session_outcomes = vec![outcome];
+        self
+    }
+
+    pub fn with_sessions(mut self, outcomes: Vec<SessionOutcome>) -> Self {
+        self.session_outcomes = outcomes;
+        self
+    }
+
+    pub fn with_review(mut self, outcome: ReviewOutcome) -> Self {
+        self.review_outcome = Some(outcome);
+        self
+    }
+
+    pub fn with_git_provider(mut self, mock: MockGitProvider) -> Self {
+        self.mock_git = mock;
+        self
+    }
+
+    pub fn with_notifier(mut self, mock: MockNotifier) -> Self {
+        self.mock_notifier = mock;
+        self
+    }
+
+    /// Build the pipeline, returning cloned mock handles for assertions.
+    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider) {
+        self.build_inner()
+    }
+
+    /// Build the pipeline with a custom config (overrides the builder's config).
+    /// Preserves `code_review_enabled` from the builder if it was explicitly set.
+    pub fn build_with_config(
+        mut self,
+        mut config: BotConfig,
+    ) -> (StoryPipeline, MockNotifier, MockGitProvider) {
+        // Preserve builder's code_review_enabled override
+        config.code_review_enabled = self.config.code_review_enabled;
+        self.config = config;
+        self.build_inner()
+    }
+
+    fn build_inner(self) -> (StoryPipeline, MockNotifier, MockGitProvider) {
+        let notifier_for_assertions = self.mock_notifier.clone();
+        let git_for_assertions = self.mock_git.clone();
+
+        let dev_runner: Box<dyn DevRunner> = if self.session_outcomes.len() <= 1 {
+            Box::new(MockDevRunner::with_outcome(
+                self.session_outcomes
+                    .into_iter()
+                    .next()
+                    .unwrap_or(SessionOutcome::Completed {
+                        story_key: "test-story".into(),
+                        branch: "story/test-story".into(),
+                        decisions: vec![],
+                        pr_context: None,
+                        pr_how_to_test: None,
+                        pr_additional_info: None,
+                    }),
+            ))
+        } else {
+            Box::new(MockDevRunner::with_outcomes(self.session_outcomes))
+        };
+
+        let code_reviewer: Box<dyn CodeReviewer> = match self.review_outcome {
+            Some(o) => Box::new(MockCodeReviewer::with_outcome(o)),
+            None => Box::new(MockCodeReviewer::never_called()),
+        };
+
+        let pipeline = StoryPipeline::new_with_components(
+            Arc::new(self.config),
+            Box::new(self.mock_git),
+            Box::new(self.mock_notifier),
+            dev_runner,
+            code_reviewer,
+        );
+
+        (pipeline, notifier_for_assertions, git_for_assertions)
+    }
 }
