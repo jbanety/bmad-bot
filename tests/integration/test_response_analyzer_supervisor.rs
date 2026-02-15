@@ -10,7 +10,7 @@
 use bmad_bot::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use bmad_bot::session::escalation::EscalationInfo;
 use bmad_bot::supervisor::architect::MockAnswerProvider;
-use bmad_bot::supervisor::decisions::{DecisionLog, DecisionSource};
+use bmad_bot::supervisor::decisions::DecisionSource;
 use bmad_bot::supervisor::rules::{RuleEngine, RuleResult};
 use bmad_bot::supervisor::{AskSupervisor, AskSupervisorArgs, EscalationSlot, SupervisorError};
 
