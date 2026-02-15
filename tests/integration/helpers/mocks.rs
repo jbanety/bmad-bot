@@ -3,11 +3,13 @@
 //! All mocks are `Send + Sync` and use `Arc<Mutex<...>>` for interior mutability.
 
 use async_trait::async_trait;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::session::SessionOutcome;
 use bmad_bot::watcher::StoryInfo;
 
@@ -31,9 +33,9 @@ pub enum GitProviderCall {
 /// Mock implementation of [`GitProvider`] that returns configurable values
 /// and tracks all calls for assertion.
 pub struct MockGitProvider {
-    create_pr_result: Arc<Mutex<Option<Result<PrInfo, GitProviderError>>>>,
-    add_comment_result: Arc<Mutex<Option<Result<(), GitProviderError>>>>,
-    get_pr_url_result: Arc<Mutex<Option<Result<String, GitProviderError>>>>,
+    create_pr_results: Arc<Mutex<VecDeque<Result<PrInfo, GitProviderError>>>>,
+    add_comment_results: Arc<Mutex<VecDeque<Result<(), GitProviderError>>>>,
+    get_pr_url_results: Arc<Mutex<VecDeque<Result<String, GitProviderError>>>>,
     calls: Arc<Mutex<Vec<GitProviderCall>>>,
 }
 
@@ -42,28 +44,28 @@ impl MockGitProvider {
     /// Each method will panic if called without a configured result.
     pub fn new() -> Self {
         Self {
-            create_pr_result: Arc::new(Mutex::new(None)),
-            add_comment_result: Arc::new(Mutex::new(None)),
-            get_pr_url_result: Arc::new(Mutex::new(None)),
+            create_pr_results: Arc::new(Mutex::new(VecDeque::new())),
+            add_comment_results: Arc::new(Mutex::new(VecDeque::new())),
+            get_pr_url_results: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Configure the return value for `create_pr`.
     pub fn with_create_pr(self, result: Result<PrInfo, GitProviderError>) -> Self {
-        *self.create_pr_result.lock().unwrap() = Some(result);
+        self.create_pr_results.lock().unwrap().push_back(result);
         self
     }
 
     /// Configure the return value for `add_comment`.
     pub fn with_add_comment(self, result: Result<(), GitProviderError>) -> Self {
-        *self.add_comment_result.lock().unwrap() = Some(result);
+        self.add_comment_results.lock().unwrap().push_back(result);
         self
     }
 
     /// Configure the return value for `get_pr_url`.
     pub fn with_get_pr_url(self, result: Result<String, GitProviderError>) -> Self {
-        *self.get_pr_url_result.lock().unwrap() = Some(result);
+        self.get_pr_url_results.lock().unwrap().push_back(result);
         self
     }
 
@@ -80,10 +82,10 @@ impl GitProvider for MockGitProvider {
             .lock()
             .unwrap()
             .push(GitProviderCall::CreatePr(params));
-        self.create_pr_result
+        self.create_pr_results
             .lock()
             .unwrap()
-            .take()
+            .pop_front()
             .expect("MockGitProvider::create_pr called without configured result")
     }
 
@@ -95,10 +97,10 @@ impl GitProvider for MockGitProvider {
                 pr_id: pr_id.to_string(),
                 body: body.to_string(),
             });
-        self.add_comment_result
+        self.add_comment_results
             .lock()
             .unwrap()
-            .take()
+            .pop_front()
             .expect("MockGitProvider::add_comment called without configured result")
     }
 
@@ -109,10 +111,10 @@ impl GitProvider for MockGitProvider {
             .push(GitProviderCall::GetPrUrl {
                 pr_id: pr_id.to_string(),
             });
-        self.get_pr_url_result
+        self.get_pr_url_results
             .lock()
             .unwrap()
-            .take()
+            .pop_front()
             .expect("MockGitProvider::get_pr_url called without configured result")
     }
 }
@@ -207,7 +209,7 @@ pub struct SessionRunnerCall {
 /// Note: This is a standalone mock struct — `SessionRunner` in the codebase
 /// is a concrete struct, not a trait. Story 7.4 will address injection.
 pub struct MockSessionRunner {
-    outcome: Arc<Mutex<Option<SessionOutcome>>>,
+    outcomes: Arc<Mutex<VecDeque<SessionOutcome>>>,
     calls: Arc<Mutex<Vec<SessionRunnerCall>>>,
 }
 
@@ -215,7 +217,7 @@ impl MockSessionRunner {
     /// Create a new mock with a configured outcome.
     pub fn new(outcome: SessionOutcome) -> Self {
         Self {
-            outcome: Arc::new(Mutex::new(Some(outcome))),
+            outcomes: Arc::new(Mutex::new(VecDeque::from([outcome]))),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -225,15 +227,15 @@ impl MockSessionRunner {
         self.calls.lock().unwrap().push(SessionRunnerCall {
             story_key: story.story_key.clone(),
         });
-        self.outcome
+        self.outcomes
             .lock()
             .unwrap()
-            .take()
+            .pop_front()
             .expect("MockSessionRunner::run called without configured outcome")
     }
 
     /// Check and recover WAL — always returns None for mock.
-    pub async fn check_and_recover_wal(&self) -> Option<()> {
+    pub async fn check_and_recover_wal(&self) -> Option<RecoveryInfo> {
         None
     }
 
@@ -258,7 +260,7 @@ pub struct ReviewRunnerCall {
 /// Note: This is a standalone mock struct — `ReviewRunner` in the codebase
 /// is a concrete struct, not a trait. Story 7.4 will address injection.
 pub struct MockReviewRunner {
-    outcome: Arc<Mutex<Option<ReviewOutcome>>>,
+    outcomes: Arc<Mutex<VecDeque<ReviewOutcome>>>,
     calls: Arc<Mutex<Vec<ReviewRunnerCall>>>,
 }
 
@@ -266,7 +268,7 @@ impl MockReviewRunner {
     /// Create a new mock with a configured outcome.
     pub fn new(outcome: ReviewOutcome) -> Self {
         Self {
-            outcome: Arc::new(Mutex::new(Some(outcome))),
+            outcomes: Arc::new(Mutex::new(VecDeque::from([outcome]))),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -276,10 +278,10 @@ impl MockReviewRunner {
         self.calls.lock().unwrap().push(ReviewRunnerCall {
             story_key: story.story_key.clone(),
         });
-        self.outcome
+        self.outcomes
             .lock()
             .unwrap()
-            .take()
+            .pop_front()
             .expect("MockReviewRunner::run called without configured outcome")
     }
 
