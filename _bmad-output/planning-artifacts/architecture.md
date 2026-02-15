@@ -8,8 +8,8 @@ date: '2026-02-10'
 lastStep: 8
 status: 'complete'
 completedAt: '2026-02-07'
-revisedAt: '2026-02-11'
-revisionNote: 'git2 (libgit2) replaced by Git CLI (>= 2.30) across all components — GitTool, session/branch.rs, pipeline.rs. Motivated by daemon SSH agent unavailability, inconsistent auth paths, and missing user git config (commit signing, credential managers). Removes git2 crate dependency entirely. Git version validation added to daemon startup.'
+revisedAt: '2026-02-15'
+revisionNote: 'Post-Implementation Impact Analysis step added to session runner post-completion sequence. New Step 8 between final commit and PR summary — agent evaluates downstream dependent stories and updates their Previous Story Intelligence sections with actual implementation details. Best-effort, non-blocking, agent-driven. Single file change in runner.rs (~50 lines). Triggered by story 7-1 completing without propagating implementation reality to dependent stories 7-2 through 7-10.'
 ---
 
 # Architecture Decision Document
@@ -967,7 +967,7 @@ bmad-bot/
 │   │   ├── cleanup.rs                # Session cleanup — partial work preservation, needs-clarification marking
 │   │   ├── escalation.rs             # EscalationReport — structured escalation handling
 │   │   ├── provider.rs               # LLM provider construction, resolve_api_key(), copilot_headers()
-│   │   ├── runner.rs                 # SessionRunner — agent build, XML context activation, streaming chat loop, crash/context-limit recovery
+│   │   ├── runner.rs                 # SessionRunner — agent build, XML context activation, streaming chat loop, post-impl impact analysis, crash/context-limit recovery
 │   │   └── state.rs                  # Session WAL file persistence (ChatMessage, SessionState)
 │   ├── supervisor/
 │   │   ├── mod.rs                    # ask_supervisor Tool implementation, EscalationSlot
@@ -1008,8 +1008,8 @@ bmad-bot/
 | FRs | Domain | Module | Key Files |
 |-----|--------|--------|-----------|
 | FR1-4 | Story Management | `watcher/` | `mod.rs` (polling), `deps.rs` (pre-gate, topological sort) |
-| FR5-7 | Pre-Dev Preparation | *BMAD Agent* | Handled by agent via tools — no daemon code |
-| FR8-11 | Development Session | `session/`, `llm/` | `runner.rs` (streaming chat loop, XML context activation, context-limit recovery), `analyzer.rs` (response analysis), `llm/agent_factory.rs` (AgentFactory + BuiltAgent — centralized provider construction), `branch.rs` (branch management), `cleanup.rs` (partial work), `escalation.rs` (escalation handling), `state.rs` (WAL persistence) |
+| FR5-7 | Pre-Dev Preparation | *BMAD Agent* | Handled by agent via tools — no daemon code. Symmetric post-implementation impact analysis handled by session runner Step 8 (see Data Flow) |
+| FR8-11 | Development Session | `session/`, `llm/` | `runner.rs` (streaming chat loop, XML context activation, post-implementation impact analysis, context-limit recovery), `analyzer.rs` (response analysis), `llm/agent_factory.rs` (AgentFactory + BuiltAgent — centralized provider construction), `branch.rs` (branch management), `cleanup.rs` (partial work), `escalation.rs` (escalation handling), `state.rs` (WAL persistence) |
 | FR12-17 | Supervision | `supervisor/`, `llm/` | `mod.rs` (ask_supervisor tool), `rules.rs` (rule engine), `architect.rs` (LLM fallback via AgentFactory), `read_tool.rs` (read-only fs for architect — uses ReadFileTool), `decisions.rs` (decision logging) |
 | FR18-20 | Code Review | `review/` | `mod.rs` |
 | FR21-24 | PR Management | `git_provider/` | `mod.rs` (trait), `github.rs`, `gitlab.rs` |
@@ -1107,10 +1107,11 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 5. **Agent activation:** `activate_agent()` sends the BMAD dev agent file (`dev.md`) as the first user message wrapped in Zed-style XML context tags (via `ContextBuilder`). The agent processes activation steps via tools (loads `config.yaml`, displays greeting/menu). Returns `(rig_history, chat_history)` for subsequent turns.
 6. **Chat loop:** Sends `"DS"` via `streaming_chat()` → agent works autonomously via tools → `state.rs` persists chat history (WAL) after each turn. **All LLM calls use streaming** — `streaming_chat()` consumes SSE stream, collects text, handles tool calls via rig's multi-turn stream. ShutdownFlag checked between every chunk. `llm_logging` records request/response payloads.
 7. **During session:** Agent calls `ask_supervisor` tool as needed → rule engine → LLM fallback (architect session) → or escalation (stops session)
-8. **Push & PR creation:** `pipeline.rs` pushes the story branch to remote via `git push`, then `git_provider/` creates PR (GitHub or GitLab) with agent-written description + Supervisor Decisions section. The PR is immediately visible for human review even if automated code review is disabled.
-9. **Code review (optional):** If `code_review_enabled`, `review/ReviewRunner` launches a new rig agent session with the review LLM config, loads the same BMAD dev persona (`dev.md`), and sends `"CR"` as the initial command. The agent drives the full CR workflow autonomously (diff analysis, adversarial review, fix application). `ResponseAnalyzer` handles all interaction patterns (story selection replies, fix decisions, completion detection). On CR completion, the daemon sends a post-review message asking the agent to commit fixes with descriptive messages and produce a markdown review report. The report is captured in `ReviewOutcome::Completed { report }`. The pipeline then pushes any review fix commits to update the PR, and posts the review report as a comment via `GitProvider::add_comment()`. Review failures are non-blocking — the PR already exists regardless of review outcome.
-10. **Notification:** `notifier/` sends Telegram message with story status + PR link (run summary for batch)
-11. **Cleanup:** `session/state.rs` deletes WAL file → return to step 3
+8. **Post-completion — Impact analysis:** After the agent signals `<<BMAD_JOB_DONE>>`, the session runner executes a three-step post-completion sequence: **(a) Final commit** — commit any uncommitted changes (tool access: yes). **(b) Impact analysis** — a dedicated chat turn where the agent retains full tool access and evaluates downstream impact (tool access: yes). The agent reads `sprint-status.yaml`, identifies stories whose `depends-on` references the completed story, reads their Dev Notes ("Previous Story Intelligence" sections), compares actual implementation against assumptions, and updates stale sections with what was actually built. Optionally updates `architecture.md` if new modules or changed interfaces were introduced (checks existence first). Commits changes with `docs(stories): update downstream specs after {story_key}` prefix. **Design constraints:** best-effort and non-blocking — if this turn fails (LLM error, timeout, context exhaustion), the session proceeds to PR summary without error. Agent-driven — the daemon sends the prompt, the agent uses existing tools (`read_file`, `edit_file`, `git`). Scope-guarded — only "Previous Story Intelligence" in Dev Notes and architecture references are updated, never tasks, ACs, or other story sections. Updates are idempotent — sections are replaced, not appended. Dependency resolution uses `depends-on` as primary criterion, same-epic document order as secondary. **(c) PR summary** — agent generates `<pr-summary>` for PR description (tool access: no, text only). The PR summary prompt is aware that an impact analysis commit may have been added.
+9. **Push & PR creation:** `pipeline.rs` pushes the story branch to remote via `git push`, then `git_provider/` creates PR (GitHub or GitLab) with agent-written description + Supervisor Decisions section. The PR is immediately visible for human review even if automated code review is disabled.
+10. **Code review (optional):** If `code_review_enabled`, `review/ReviewRunner` launches a new rig agent session with the review LLM config, loads the same BMAD dev persona (`dev.md`), and sends `"CR"` as the initial command. The agent drives the full CR workflow autonomously (diff analysis, adversarial review, fix application). `ResponseAnalyzer` handles all interaction patterns (story selection replies, fix decisions, completion detection). On CR completion, the daemon sends a post-review message asking the agent to commit fixes with descriptive messages and produce a markdown review report. The report is captured in `ReviewOutcome::Completed { report }`. The pipeline then pushes any review fix commits to update the PR, and posts the review report as a comment via `GitProvider::add_comment()`. Review failures are non-blocking — the PR already exists regardless of review outcome.
+11. **Notification:** `notifier/` sends Telegram message with story status + PR link (run summary for batch)
+12. **Cleanup:** `session/state.rs` deletes WAL file → return to step 3
 
 ### External Integration Points
 
@@ -1153,6 +1154,8 @@ All architectural decisions work together without conflicts:
 - Agent prompt composition (minimal preamble + XML context activation) is consistent with "daemon has an explicit activation phase" and clean separation of concerns
 - Cooperative ShutdownFlag propagation is consistent with streaming-first architecture — every LLM call can be interrupted
 - Pipeline module (`pipeline.rs`) cleanly separates orchestration from execution (session/review)
+- Post-implementation impact analysis (session runner Step 8b) is the symmetric counterpart to the pre-dev spec update (FR5-7) — together they form a closed loop: pre-dev reads prior stories' output, post-impl propagates forward to downstream stories. Both are agent-driven with existing tools, no new daemon logic required.
+- Impact analysis step follows the same best-effort, non-blocking pattern as the enriched PR summary (commit `6450450`) — a dedicated post-completion chat turn with grounded context, graceful degradation on failure
 
 **Pattern Consistency:**
 - All patterns use thiserror per module, anyhow only in binary — consistent error handling across all modules
@@ -1174,8 +1177,8 @@ All architectural decisions work together without conflicts:
 | FR Range | Domain | Architectural Support |
 |----------|--------|----------------------|
 | FR1-4 | Story Management | `watcher/` (polling + pre-gate dependency check with topological sort). Agent handles status mutations via tools. |
-| FR5-7 | Pre-Dev Preparation | BMAD agent autonomously reads prior stories and updates specs via filesystem tool. No daemon code needed. |
-| FR8-11 | Development Session | `session/runner.rs` builds rig agent with expanded preamble (tool usage rules + language override), activates BMAD agent via XML context (`llm_context.rs`), registers 9 tools (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool), manages streaming chat loop. Agent file sent as user message, not system prompt. |
+| FR5-7 | Pre-Dev Preparation | BMAD agent autonomously reads prior stories and updates specs via filesystem tool. No daemon code needed. Symmetric post-implementation impact analysis in session runner Step 8b propagates implementation reality forward to downstream stories. |
+| FR8-11 | Development Session | `session/runner.rs` builds rig agent with expanded preamble (tool usage rules + language override), activates BMAD agent via XML context (`llm_context.rs`), registers 9 tools (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool), manages streaming chat loop, executes post-completion sequence (final commit → impact analysis → PR summary). Agent file sent as user message, not system prompt. |
 | FR12-17 | Supervision | `supervisor/` implements ask_supervisor as rig Tool. Rule engine in `rules.rs`, LLM fallback via architect session in `architect.rs` (with read-only `read_tool.rs`), decision logging in `decisions.rs`. Escalation returns tool error → stops rig loop. |
 | FR18-20 | Code Review | `review/` launches separate LLM session. Configurable (enabled/disabled). Fixes in separate commits, review posted as PR comment. |
 | FR21-24 | PR Management | `git_provider/` trait with GitHub (octocrab) and GitLab (reqwest) implementations. PR created even for failed/blocked stories with failure description. |

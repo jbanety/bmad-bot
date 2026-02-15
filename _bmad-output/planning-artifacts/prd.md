@@ -39,7 +39,7 @@ classification:
 - Developer wakes up to notifications summarizing completed work: stories developed, PRs ready for review
 - Human code review is smooth — generated code is clean, understandable, tests pass, merges without friction
 - Zero babysitting: the daemon runs autonomously overnight without intervention
-- Story specs are always current — the agent updates specs based on previous implementations before starting development
+- Story specs are always current — the agent updates specs based on previous implementations before starting development (pre-dev), and propagates implementation reality forward to downstream dependent stories after completing each story (post-impl)
 
 ### Business Success
 
@@ -70,6 +70,7 @@ classification:
 - Daemon polls `sprint-status.yaml` for `ready-for-dev` stories (configurable interval, default 5 min)
 - Dependency resolution: respects execution order, skips blocked stories, cascades `blocked` status to dependents
 - Pre-dev spec update: agent reviews completed stories and refreshes current story specs/AC based on actual implementation
+- Post-impl impact analysis: after story completion, agent evaluates downstream dependent stories and updates their "Previous Story Intelligence" sections when actual implementation deviates from planned assumptions. Optionally updates architecture documentation. Best-effort — failures do not block story completion or PR creation
 - Streaming rig agent session with BMAD dev agent persona activated via Zed-style XML context + tools (git, filesystem, terminal, think)
 - Supervisor hybrid: deterministic rule engine → LLM fallback (project docs context) → human escalation (`needs-clarification` + notification)
 - Supervisor decision logging: decisions file committed at `_bmad-output/implementation-artifacts/{epic}-{story}-{label}-DECISIONS.md` + dedicated section in PR description with reasoning and alternatives
@@ -121,7 +122,7 @@ classification:
 
 **Opening Scene:** End of the day. JB has refined 4 stories to `ready-for-dev` in the sprint. He closes his laptop. The BMAD Bot daemon is running.
 
-**Rising Action:** At 10pm, the daemon detects ready stories. It picks the first, checks dependencies, reviews previously completed stories, and updates the current story's specs. It creates branch `story/1-2-account-management`, launches a rig session with Amelia. The supervisor answers routine questions — each decision logged with reasoning and alternatives. Amelia codes, tests, completes. The bot commits, creates a PR with a detailed description including a **"🤖 Supervisor Decisions"** section. A decisions file is committed at `_bmad-output/implementation-artifacts/1-2-account-management-DECISIONS.md`. The bot launches code review with an alternate LLM. The reviewer finds two issues — fixes committed separately. The reviewer posts its full review as a PR comment. On to the next story.
+**Rising Action:** At 10pm, the daemon detects ready stories. It picks the first, checks dependencies, reviews previously completed stories, and updates the current story's specs. It creates branch `story/1-2-account-management`, launches a rig session with Amelia. The supervisor answers routine questions — each decision logged with reasoning and alternatives. Amelia codes, tests, completes. The bot commits, then Amelia analyzes downstream stories — stories 1-3 and 1-4 depend on 1-2, so she reads their Dev Notes, compares what was planned against what she actually built, and updates their "Previous Story Intelligence" sections with the real module structure and API patterns. She commits those spec updates with a `docs(stories):` prefix. The bot creates a PR with a detailed description including a **"🤖 Supervisor Decisions"** section. A decisions file is committed at `_bmad-output/implementation-artifacts/1-2-account-management-DECISIONS.md`. The bot launches code review with an alternate LLM. The reviewer finds two issues — fixes committed separately. The reviewer posts its full review as a PR comment. On to the next story.
 
 **Climax:** 7am. JB opens Telegram. Three notifications: "✅ story/1-2 — PR #12 ready", "✅ story/1-3 — PR #13 ready", "⚠️ story/1-4 — blocked, see PR #14".
 
@@ -262,6 +263,10 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 - **FR9:** The daemon can expose surgical development tools to the agent via rig tool calling: `read_file` (partial reading & outline mode), `edit_file` (search-replace surgical editing), `grep` (regex codebase search), `find_path` (glob-based file discovery), `list_directory` (directory listing), `git` (version control operations), `terminal` (shell command execution), `ask_supervisor` (supervision escalation), and `think` (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern, for structured reasoning without consuming real tool calls). Tools follow the Claude Code / Zed agent-mode pattern for optimal token efficiency and code safety
 - **FR10:** The agent can execute the full BMAD `dev-story` workflow autonomously
 - **FR11:** The daemon can inject a session language override (English) via a minimal system preamble without modifying repo files
+
+### Post-Development Propagation
+
+- **FR43:** The agent can analyze downstream dependent stories after completing a story by reading `sprint-status.yaml` to identify stories whose `depends-on` references the completed story, and update their "Previous Story Intelligence" sections when actual implementation deviates from planned assumptions. Optionally updates `architecture.md` if new modules or interfaces were introduced (checks existence first). Changes committed with `docs(stories):` prefix. Best-effort and non-blocking — failures do not block story completion or PR creation
 
 ### Supervision
 
