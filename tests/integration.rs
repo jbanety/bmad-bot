@@ -19,3 +19,5 @@ mod test_session_wal;
 mod test_git_provider;
 #[path = "integration/test_notifier.rs"]
 mod test_notifier;
+#[path = "integration/test_branch_git.rs"]
+mod test_branch_git;
