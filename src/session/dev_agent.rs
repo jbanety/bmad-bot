@@ -60,27 +60,13 @@ You have access to these tools: edit_file, read_file, grep, find_path, list_dire
 - When making multiple related changes in one file, batch them in a single `edit_file` call with multiple edit operations.
 
 ## Session Completion Protocol
-When you have fully completed your workflow (all tasks done, all tests passing, story file updated, all changes committed), your **final message** MUST end with exactly this structure:
-
-<pr-summary>
-<context>
-(Summarize what was built and why, referencing the story requirements. Be specific about modules, functions, and patterns used. Use `###` headers)
-</context>
-<how-to-test>
-(Provide concrete commands and steps: specific test names to run, manual verification steps if applicable. Use `###` headers)
-</how-to-test>
-<additional-info>
-(Note design decisions made, dependencies added or removed, tech debt created, migration notes, caveats, or concerns. Use `###` headers)
-</additional-info>
-</pr-summary>
+When you have fully completed your workflow (all tasks done, all tests passing, story file updated, all changes committed), your **final message** MUST end with exactly:
 
 <<BMAD_JOB_DONE>>
 
 Rules:
-- Each `<pr-summary>` section must contain meaningful content — do not leave any section empty.
-- `<<BMAD_JOB_DONE>>` MUST appear on its own line, AFTER the `</pr-summary>` closing tag, as the very last thing in the message.
+- `<<BMAD_JOB_DONE>>` MUST appear on its own line as the very last thing in your final message.
 - Do NOT paraphrase, omit, or embed the sentinel mid-sentence. Emit it exactly as shown.
-- Do NOT wait to be asked for a PR summary — include it proactively in your final completion message.
 
 ## Communication
 OVERRIDE: communication_language = English

@@ -258,6 +258,23 @@ pub async fn mark_story_needs_clarification(
     update_story_status(sprint_status_path, story_key, "needs-clarification").await
 }
 
+/// Extract the short `"{epic}-{story}"` prefix from a full story key.
+///
+/// For `"7-1-integration-test-infrastructure-fixtures"` returns `"7-1"`.
+/// For a key that is already short (e.g., `"7-1"`) returns it unchanged.
+fn extract_short_key(full_key: &str) -> String {
+    let mut parts = full_key.splitn(3, '-');
+    match (parts.next(), parts.next()) {
+        (Some(epic), Some(story))
+            if epic.chars().all(|c| c.is_ascii_digit())
+                && story.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            format!("{epic}-{story}")
+        }
+        _ => full_key.to_string(),
+    }
+}
+
 /// Transitions `blocked` stories that depend on `completed_key` to `ready-for-dev`.
 ///
 /// Scans sprint-status.yaml for lines matching the pattern:
@@ -281,12 +298,21 @@ pub async fn unblock_dependents(
             reason: format!("Failed to read sprint-status: {e}"),
         })?;
 
-    // Match lines like: "  story-key: blocked  # depends-on: completed_key"
+    // Match lines like: "  story-key: blocked  # depends-on: 7-1"
+    // The depends-on comment may use a short key (e.g., "7-1") or the full key
+    // (e.g., "7-1-integration-test-infrastructure-fixtures"). We extract the
+    // short prefix "{epic}-{story}" from completed_key and match on either form.
     // Captures: (1) leading whitespace + story key + colon + whitespace, (2) story key alone
-    let pattern = format!(
-        r"(?m)^(\s*(\S+)\s*:\s*)blocked(\s*#\s*depends-on:\s*{}(?:\s|$))",
-        regex::escape(completed_key)
-    );
+    let short_key = extract_short_key(completed_key);
+    let escaped_full = regex::escape(completed_key);
+    let escaped_short = regex::escape(&short_key);
+    let dep_pattern = if escaped_short == escaped_full {
+        escaped_full
+    } else {
+        format!("(?:{escaped_full}|{escaped_short})")
+    };
+    let pattern =
+        format!(r"(?m)^(\s*(\S+)\s*:\s*)blocked(\s*#\s*depends-on:\s*{dep_pattern}(?:\s|$))");
     let re = regex::Regex::new(&pattern).map_err(|e| SessionError::StateFileFailed {
         reason: format!("Invalid regex for dependency pattern: {e}"),
     })?;
@@ -941,5 +967,111 @@ development_status:
         assert_eq!(report.story_key, "3-3-human-escalation");
         assert_eq!(report.question, "What DB schema?");
         assert!(!report.escalated_at.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_short_key tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_short_key_full_key() {
+        assert_eq!(
+            extract_short_key("7-1-integration-test-infrastructure-fixtures"),
+            "7-1"
+        );
+    }
+
+    #[test]
+    fn test_extract_short_key_already_short() {
+        assert_eq!(extract_short_key("7-1"), "7-1");
+    }
+
+    #[test]
+    fn test_extract_short_key_two_digit_epic_and_story() {
+        assert_eq!(extract_short_key("12-34-some-feature"), "12-34");
+    }
+
+    #[test]
+    fn test_extract_short_key_non_numeric_prefix() {
+        // Not a valid epic-story pattern — returns unchanged
+        assert_eq!(extract_short_key("epic-1-something"), "epic-1-something");
+    }
+
+    // -----------------------------------------------------------------------
+    // unblock_dependents with short dependency keys (real-world format)
+    // -----------------------------------------------------------------------
+
+    fn sample_sprint_status_with_short_deps() -> String {
+        r#"# STATUS DEFINITIONS:
+# ==================
+development_status:
+  epic-7: in-progress
+  7-1-integration-test-infrastructure-fixtures: done
+  7-2-config-startup-validation-integration-tests: blocked # depends-on: 7-1
+  7-3-watcher-dependency-resolution-story-selection-integration-tests: blocked # depends-on: 7-1
+  7-4-pipeline-orchestration-integration-tests: blocked # depends-on: 7-1
+  7-5-session-wal-crash-recovery-integration-tests: blocked # depends-on: 7-1
+  epic-8: in-progress
+  8-1-read-file-tool: done
+  8-2-edit-file-tool: blocked # depends-on: 8-1
+"#
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_short_key_format() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        tokio::fs::write(&path, sample_sprint_status_with_short_deps())
+            .await
+            .expect("write");
+
+        let unblocked = unblock_dependents(&path, "7-1-integration-test-infrastructure-fixtures")
+            .await
+            .expect("should succeed");
+
+        assert_eq!(unblocked.len(), 4);
+        assert!(unblocked.contains(&"7-2-config-startup-validation-integration-tests".to_string()));
+        assert!(unblocked.contains(
+            &"7-3-watcher-dependency-resolution-story-selection-integration-tests".to_string()
+        ));
+        assert!(unblocked.contains(&"7-4-pipeline-orchestration-integration-tests".to_string()));
+        assert!(
+            unblocked.contains(&"7-5-session-wal-crash-recovery-integration-tests".to_string())
+        );
+
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains(
+            "7-2-config-startup-validation-integration-tests: ready-for-dev # depends-on: 7-1"
+        ));
+        assert!(content.contains("7-3-watcher-dependency-resolution-story-selection-integration-tests: ready-for-dev # depends-on: 7-1"));
+        // 8-2 should remain blocked (different dependency)
+        assert!(content.contains("8-2-edit-file-tool: blocked # depends-on: 8-1"));
+    }
+
+    #[tokio::test]
+    async fn test_unblock_dependents_short_key_no_false_positive() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("sprint-status.yaml");
+        let content = r#"development_status:
+  7-1-infra: done
+  7-10-extra: blocked # depends-on: 7-10-other
+  7-11-thing: blocked # depends-on: 7-1
+  7-2-config: blocked # depends-on: 7-1
+"#;
+        tokio::fs::write(&path, content).await.expect("write");
+
+        let unblocked = unblock_dependents(&path, "7-1-infra")
+            .await
+            .expect("should succeed");
+
+        // 7-11 and 7-2 depend on short key 7-1, should be unblocked
+        // 7-10-extra depends on 7-10-other, should NOT be unblocked
+        assert_eq!(unblocked.len(), 2);
+        assert!(unblocked.contains(&"7-11-thing".to_string()));
+        assert!(unblocked.contains(&"7-2-config".to_string()));
+
+        let updated = tokio::fs::read_to_string(&path).await.expect("read");
+        assert!(updated.contains("7-10-extra: blocked # depends-on: 7-10-other"));
     }
 }

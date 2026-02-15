@@ -1565,17 +1565,46 @@ impl SessionRunner {
                     }
 
                     // ── Step 8: PR summary (always, dedicated turn) ──────
+                    let story_title = story
+                        .label
+                        .split('-')
+                        .map(|w| {
+                            let mut c = w.chars();
+                            match c.next() {
+                                Some(ch) => ch.to_uppercase().to_string() + c.as_str(),
+                                None => String::new(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     let pr_summary_prompt = format!(
                         "STOP. Do NOT use any tools. Do NOT start a new workflow. \
                         Just reply with text.\n\n\
-                        Project: {}. You just completed story {}. \
-                        Summarize your work using this exact format:\n\n\
+                        CONTEXT REMINDER:\n\
+                        - Project: {owner}/{repo}\n\
+                        - Story: {key} — {title}\n\
+                        - Branch: {branch}\n\n\
+                        Based ONLY on the work you actually performed in this session \
+                        (files created, modified, tests written), \
+                        summarize using this exact format:\n\n\
                         <pr-summary>\n\
-                        <context>\n(What was built and why)\n</context>\n\
-                        <how-to-test>\n(Commands to verify: cargo test, specific test names)\n</how-to-test>\n\
-                        <additional-info>\n(Design decisions, deps added, caveats)\n</additional-info>\n\
-                        </pr-summary>",
-                        self.config.git_provider.repo_name, story.story_key
+                        <context>\n\
+                        (What was built and why — reference actual files and modules you touched)\n\
+                        </context>\n\
+                        <how-to-test>\n\
+                        (Concrete commands: cargo test, specific test names you created)\n\
+                        </how-to-test>\n\
+                        <additional-info>\n\
+                        (Design decisions, deps added, caveats)\n\
+                        </additional-info>\n\
+                        </pr-summary>\n\n\
+                        DO NOT invent project names, module names, or features. \
+                        Only describe what you actually implemented.",
+                        owner = self.config.git_provider.repo_owner,
+                        repo = self.config.git_provider.repo_name,
+                        key = story.story_key,
+                        title = story_title,
+                        branch = story.branch_name,
                     );
                     state.add_user_message(&pr_summary_prompt);
                     let history = state.to_rig_messages();
