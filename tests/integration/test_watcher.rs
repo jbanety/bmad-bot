@@ -45,9 +45,11 @@ fn test_watcher_poll_returns_eligible_with_deps_satisfied() {
 
     // 1-2 eligible (dep 1-1 done), 2-1 eligible (first in epic, no dep)
     // 1-3 skipped (dep 1-2 not done), 2-2 not ready-for-dev
-    assert_eq!(keys.len(), 2);
-    assert!(keys.contains(&"1-2-cli-framework"));
-    assert!(keys.contains(&"2-1-polling"));
+    assert_eq!(
+        keys,
+        vec!["1-2-cli-framework", "2-1-polling"],
+        "Expected exact eligible set and dependency-valid order"
+    );
 }
 
 /// AC #1 ordering: 1-2 must appear before any story depending on it.
@@ -203,6 +205,21 @@ fn test_watcher_no_cascade_on_review() {
     // 1-2 dep not done (review != done), so skipped. 2-1 eligible.
     assert_eq!(keys.len(), 1);
     assert!(keys.contains(&"2-1-polling"));
+
+    // Prove review is NON-blocking for cascade behavior (only dep-unsatisfied skip).
+    let entries_review: Vec<(String, String)> = vec![
+        ("epic-1".into(), "in-progress".into()),
+        ("1-1-scaffolding".into(), "review".into()),
+        ("1-2-cli-framework".into(), "ready-for-dev".into()),
+    ];
+    let ssf = build_sprint_status_from_entries(&artifacts, &entries_review);
+    let eligible_review = ssf.eligible_stories();
+    let (_, cascade_count_review) =
+        filter_eligible(eligible_review, ssf.entries()).expect("filter should succeed");
+    assert_eq!(
+        cascade_count_review, 0,
+        "review should NOT trigger cascade blocking"
+    );
 }
 
 /// Verify cascade blocking vs non-blocking directly using filter_eligible
@@ -340,8 +357,8 @@ fn test_dependency_graph_cycle_contains_keys() {
         WatcherError::CyclicDependency { cycle } => {
             assert!(
                 cycle.contains(&"1-1-alpha".to_string())
-                    || cycle.contains(&"1-2-beta".to_string()),
-                "Cycle should contain at least one of the involved keys: {cycle:?}"
+                    && cycle.contains(&"1-2-beta".to_string()),
+                "Cycle should contain both involved keys: {cycle:?}"
             );
         }
         other => panic!("Expected CyclicDependency, got: {other}"),
