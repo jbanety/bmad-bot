@@ -63,8 +63,20 @@ fn test_pr_description_params(
 async fn test_git_provider_factory_github_returns_ok() {
     install_crypto_provider();
     let config = test_config("github");
-    let result = create_provider(&config, "ghp_test_token_12345");
-    assert!(result.is_ok(), "create_provider(github) should succeed");
+    let provider = create_provider(&config, "ghp_test_token_12345")
+        .expect("create_provider(github) should succeed");
+
+    // AC #1 behavioral assertion: provider returned by factory behaves like GitHub
+    // (`/pull/{number}` URL pattern, not GitLab `/-/merge_requests/{id}`).
+    let url = provider
+        .get_pr_url("42")
+        .await
+        .expect("get_pr_url should succeed for valid numeric ID");
+    assert_eq!(
+        url,
+        "https://github.com/test-owner/test-repo/pull/42",
+        "factory should return a provider with GitHub PR URL behavior"
+    );
 }
 
 #[test]
@@ -336,12 +348,12 @@ async fn test_git_provider_factory_to_trait_dispatch_gitlab_invalid_pr_id() {
         create_provider(&config, "glpat-test-token-12345").expect("factory should succeed");
 
     let result = provider.get_pr_url("not-a-number").await;
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        GitProviderError::InvalidPrId { pr_id } => {
+    match result {
+        Err(GitProviderError::InvalidPrId { pr_id }) => {
             assert_eq!(pr_id, "not-a-number");
         }
-        other => panic!("Expected InvalidPrId, got: {other:?}"),
+        Err(other) => panic!("Expected InvalidPrId, got: {other:?}"),
+        Ok(url) => panic!("Expected InvalidPrId, got Ok({url})"),
     }
 }
 
