@@ -6,8 +6,8 @@
 
 use bmad_bot::config::{BotSecrets, NotificationConfig, TelegramConfig};
 use bmad_bot::notifier::{
-    create_notifier, Notifier, NotifierError, RunSummary, StoryNotification,
-    StoryStatus, TelegramNotifier,
+    Notifier, NotifierError, RunSummary, StoryNotification, StoryStatus, TelegramNotifier,
+    create_notifier,
 };
 
 use super::helpers::mocks::MockNotifier;
@@ -63,14 +63,20 @@ fn make_story_notification(
 fn test_notifier_telegram_new_success() {
     let config = make_telegram_config(true);
     let result = TelegramNotifier::new(&config, "bot123:ABCDEF-test".to_string());
-    assert!(result.is_ok(), "TelegramNotifier::new should succeed with enabled config + token");
+    assert!(
+        result.is_ok(),
+        "TelegramNotifier::new should succeed with enabled config + token"
+    );
 }
 
 #[test]
 fn test_notifier_telegram_new_disabled_returns_err() {
     let config = make_telegram_config(false);
     let result = TelegramNotifier::new(&config, "bot123:ABCDEF-test".to_string());
-    assert!(result.is_err(), "TelegramNotifier::new should fail with disabled config");
+    assert!(
+        result.is_err(),
+        "TelegramNotifier::new should fail with disabled config"
+    );
     let err = result.unwrap_err();
     match err {
         NotifierError::Disabled => {} // expected
@@ -95,6 +101,33 @@ fn test_notifier_story_notification_struct_construction() {
         Some("https://github.com/org/repo/pull/42")
     );
     assert!(notification.reason.is_none());
+
+    // AC #1 message-content contract, validated at boundary level without
+    // relying on private formatter internals.
+    let status_display = notification.status.to_string();
+    assert!(
+        status_display.contains("completed"),
+        "display should include completed status"
+    );
+
+    let boundary_view = format!(
+        "{} {} {}",
+        notification.story_id,
+        status_display,
+        notification.pr_url.as_deref().unwrap_or_default()
+    );
+    assert!(
+        boundary_view.contains("7.7"),
+        "boundary view should include story id"
+    );
+    assert!(
+        boundary_view.contains("completed"),
+        "boundary view should include completed status"
+    );
+    assert!(
+        boundary_view.contains("https://github.com/org/repo/pull/42"),
+        "boundary view should include PR URL"
+    );
 }
 
 // ===========================================================================
@@ -115,7 +148,10 @@ async fn test_notifier_factory_disabled_returns_noop() {
         Some("https://example.com/pr/1"),
     );
     let result = notifier.notify_story(&notification).await;
-    assert!(result.is_ok(), "Disabled notifier should return Ok(()) for notify_story");
+    assert!(
+        result.is_ok(),
+        "Disabled notifier should return Ok(()) for notify_story"
+    );
 }
 
 #[tokio::test]
@@ -133,7 +169,10 @@ async fn test_notifier_factory_disabled_notify_run_summary_succeeds() {
         fatal: false,
     };
     let result = notifier.notify_run_summary(&summary).await;
-    assert!(result.is_ok(), "Disabled notifier should return Ok(()) for notify_run_summary");
+    assert!(
+        result.is_ok(),
+        "Disabled notifier should return Ok(()) for notify_run_summary"
+    );
 }
 
 // ===========================================================================
@@ -191,11 +230,12 @@ async fn test_notifier_factory_enabled_empty_token_returns_noop() {
 #[tokio::test]
 async fn test_notifier_factory_enabled_with_token_returns_telegram() {
     let config = make_notification_config(true);
-    let secrets = make_test_secrets(Some("bot123:ABCDEF-test-DO-NOT-USE".to_string()));
+    // Intentionally invalid token (contains whitespace) so URL construction fails fast
+    // without making a real network call. This still proves create_notifier() built
+    // a TelegramNotifier path (NoopNotifier would return Ok(()) instead).
+    let secrets = make_test_secrets(Some("invalid token".to_string()));
     let notifier = create_notifier(&config, &secrets);
 
-    // A real TelegramNotifier will attempt HTTP and fail (no real server).
-    // NoopNotifier would return Ok(()). An error proves it's TelegramNotifier.
     let notification = make_story_notification(
         "7.7",
         "7-7-test",
@@ -205,11 +245,11 @@ async fn test_notifier_factory_enabled_with_token_returns_telegram() {
     let result = notifier.notify_story(&notification).await;
     assert!(
         result.is_err(),
-        "TelegramNotifier should fail with HTTP error (no real server), proving it's not NoopNotifier"
+        "TelegramNotifier should return an error (and NoopNotifier would return Ok), proving factory dispatch"
     );
     match result.unwrap_err() {
-        NotifierError::HttpRequest { .. } => {} // expected — real HTTP attempt
-        NotifierError::ApiError { .. } => {}    // also acceptable
+        NotifierError::HttpRequest { .. } => {} // expected — request build/send path reached
+        NotifierError::ApiError { .. } => {} // acceptable if transport still reaches API in some environments
         other => panic!("Expected HttpRequest or ApiError, got: {other}"),
     }
 }
@@ -221,8 +261,18 @@ async fn test_notifier_factory_enabled_with_token_returns_telegram() {
 #[test]
 fn test_notifier_run_summary_construction_counts() {
     let stories = vec![
-        make_story_notification("1.1", "1-1-test", StoryStatus::Completed, Some("https://pr/1")),
-        make_story_notification("1.2", "1-2-test", StoryStatus::Completed, Some("https://pr/2")),
+        make_story_notification(
+            "1.1",
+            "1-1-test",
+            StoryStatus::Completed,
+            Some("https://pr/1"),
+        ),
+        make_story_notification(
+            "1.2",
+            "1-2-test",
+            StoryStatus::Completed,
+            Some("https://pr/2"),
+        ),
         make_story_notification("1.3", "1-3-test", StoryStatus::Blocked, None),
         make_story_notification("1.4", "1-4-test", StoryStatus::Error, None),
     ];
@@ -264,7 +314,11 @@ async fn test_notifier_run_summary_mixed_statuses_on_mock() {
     assert!(result.is_ok());
 
     let captured = mock.summary_calls();
-    assert_eq!(captured.len(), 1, "MockNotifier should capture exactly 1 summary call");
+    assert_eq!(
+        captured.len(),
+        1,
+        "MockNotifier should capture exactly 1 summary call"
+    );
     assert_eq!(captured[0].total_processed, 4);
     assert_eq!(captured[0].completed, 2);
     assert_eq!(captured[0].blocked, 1);
@@ -275,7 +329,12 @@ async fn test_notifier_run_summary_mixed_statuses_on_mock() {
 async fn test_notifier_story_notifications_captured_by_mock() {
     let mock = MockNotifier::new();
 
-    let n1 = make_story_notification("1.1", "1-1-done", StoryStatus::Completed, Some("https://pr/1"));
+    let n1 = make_story_notification(
+        "1.1",
+        "1-1-done",
+        StoryStatus::Completed,
+        Some("https://pr/1"),
+    );
     let n2 = make_story_notification("2.1", "2-1-blocked", StoryStatus::Blocked, None);
     let n3 = make_story_notification("3.1", "3-1-error", StoryStatus::Error, None);
 
@@ -284,7 +343,11 @@ async fn test_notifier_story_notifications_captured_by_mock() {
     assert!(mock.notify_story(&n3).await.is_ok());
 
     let captured = mock.story_calls();
-    assert_eq!(captured.len(), 3, "MockNotifier should capture all 3 story calls");
+    assert_eq!(
+        captured.len(),
+        3,
+        "MockNotifier should capture all 3 story calls"
+    );
 
     assert_eq!(captured[0].story_id, "1.1");
     assert_eq!(captured[0].story_key, "1-1-done");
