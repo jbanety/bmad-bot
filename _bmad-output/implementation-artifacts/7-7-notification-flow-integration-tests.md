@@ -303,12 +303,16 @@ Since `create_notifier()` returns `Box<dyn Notifier>` (trait object), we cannot 
 
 ### Previous Story Intelligence (Story 7.6)
 
-**Story 7.6 (Git Provider & PR Creation Integration Tests):**
-- Established the `lib.rs` BLOCKER pattern — copy same prerequisite check
-- Established the "Cross-Module Integration Value" section pattern — used here
-- Used `tests/integration/test_git_provider.rs` location convention — follow same for `test_notifier.rs`
-- Rustls crypto provider was needed for GitHub provider — **NOT needed for notifier tests** (notifier uses `reqwest_middleware`, no crypto init required)
-- Module visibility already verified pattern — followed here
+**Story 7.6 is IMPLEMENTED.** Key facts from implementation:
+
+1. **`lib.rs` blocker did NOT apply** — `src/lib.rs` already existed from Story 7.1 with all `pub mod` declarations. No creation step was needed. Story 7-7 can skip any lib.rs prerequisite check.
+2. **Test file convention confirmed:** `tests/integration/test_git_provider.rs` (364 lines, 13 tests). Follow same for `test_notifier.rs`.
+3. **GitHub factory test required `#[tokio::test]`** — octocrab client construction needs a Tokio runtime (tower::Buffer spawns a task). If any notifier test constructs async clients, use `#[tokio::test]`.
+4. **Types without `Debug` can't use `unwrap_err()`** — `Box<dyn GitProvider>` and `GitLabProvider` don't impl `Debug`. Story 7-6 used `match` on `Result` directly. If notifier types lack `Debug`, follow same pattern.
+5. **`rustls` from regular `[dependencies]` sufficed** — no `[dev-dependencies]` entry was needed for integration tests.
+6. **Rustls crypto provider NOT needed for notifier tests** (notifier uses `reqwest_middleware`, no crypto init required) — this assumption remains correct.
+7. **Pre-existing clippy errors exist** in library code (auth/github_copilot.rs, config/mod.rs, session/analyzer.rs) — 3 errors not from 7-6. `cargo clippy --test integration` will fail due to these library issues, not test code.
+8. **Test count after 7-6:** 849 unit + 104 bin + 103 integration = 1056 total tests.
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `MockNotifier` with `Arc<Mutex<Vec<...>>>` for captured notifications — Task 6 depends on this
