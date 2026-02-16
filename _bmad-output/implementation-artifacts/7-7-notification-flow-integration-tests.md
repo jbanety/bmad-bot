@@ -1,6 +1,6 @@
 # Story 7.7: Notification Flow Integration Tests
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -33,45 +33,45 @@ So that I'm confident the daemon sends correct, well-formatted notifications.
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Verify `src/lib.rs` prerequisite (AC: ALL — BLOCKER)
-  - [ ] 0.1 If Story 7.1 Task 0 is NOT yet implemented, create `src/lib.rs` with `pub mod` declarations for all modules: `config`, `git_provider`, `notifier`, `pipeline`, `review`, `session`, `supervisor`, `tools`, `watcher`
-  - [ ] 0.2 Update `src/main.rs` — remove corresponding `mod X;` lines (keep `mod cli;` binary-only) and replace with `use bmad_bot::*;` or selective imports
-  - [ ] 0.3 Verify `cargo build` compiles and `cargo test` passes all existing 573+ unit tests
+- [x] Task 0: Verify `src/lib.rs` prerequisite (AC: ALL — BLOCKER)
+  - [x] 0.1 If Story 7.1 Task 0 is NOT yet implemented, create `src/lib.rs` with `pub mod` declarations for all modules: `config`, `git_provider`, `notifier`, `pipeline`, `review`, `session`, `supervisor`, `tools`, `watcher`
+  - [x] 0.2 Update `src/main.rs` — remove corresponding `mod X;` lines (keep `mod cli;` binary-only) and replace with `use bmad_bot::*;` or selective imports
+  - [x] 0.3 Verify `cargo build` compiles and `cargo test` passes all existing 573+ unit tests
 
-- [ ] Task 1: Create integration test file structure (AC: ALL)
-  - [ ] 1.1 Create `tests/integration/test_notifier.rs` for all notification tests
-  - [ ] 1.2 Register as `mod test_notifier;` in `tests/integration.rs` (create if doesn't exist)
-  - [ ] 1.3 Add required imports: `bmad_bot::notifier::*`, `bmad_bot::config::*`
+- [x] Task 1: Create integration test file structure (AC: ALL)
+  - [x] 1.1 Create `tests/integration/test_notifier.rs` for all notification tests
+  - [x] 1.2 Register as `mod test_notifier;` in `tests/integration.rs` (create if doesn't exist)
+  - [x] 1.3 Add required imports: `bmad_bot::notifier::*`, `bmad_bot::config::*`
 
-- [ ] Task 2: Test `TelegramNotifier` construction and type dispatch (AC: #1)
-  - [ ] 2.1 `test_notifier_telegram_new_success` — construct `TelegramNotifier::new()` with `enabled: true` config and dummy bot token, verify `Ok` returned
-  - [ ] 2.2 `test_notifier_telegram_new_disabled_returns_err` — construct with `enabled: false`, verify `Err(NotifierError::Disabled)` returned
-  - [ ] 2.3 `test_notifier_story_notification_struct_construction` — construct `StoryNotification` with completed status and PR URL, verify all fields are accessible and correct from the external crate perspective
+- [x] Task 2: Test `TelegramNotifier` construction and type dispatch (AC: #1)
+  - [x] 2.1 `test_notifier_telegram_new_success` — construct `TelegramNotifier::new()` with `enabled: true` config and dummy bot token, verify `Ok` returned
+  - [x] 2.2 `test_notifier_telegram_new_disabled_returns_err` — construct with `enabled: false`, verify `Err(NotifierError::Disabled)` returned
+  - [x] 2.3 `test_notifier_story_notification_struct_construction` — construct `StoryNotification` with completed status and PR URL, verify all fields are accessible and correct from the external crate perspective
 
-- [ ] Task 3: Test `create_notifier()` factory — disabled path (AC: #2)
-  - [ ] 3.1 `test_notifier_factory_disabled_returns_noop` — construct `NotificationConfig` with `telegram.enabled: false`, call `create_notifier()`, call `notify_story()` on returned notifier, verify `Ok(())` returned (NoopNotifier behavior)
-  - [ ] 3.2 `test_notifier_factory_disabled_notify_run_summary_succeeds` — same setup, call `notify_run_summary()` with a `RunSummary`, verify `Ok(())`
+- [x] Task 3: Test `create_notifier()` factory — disabled path (AC: #2)
+  - [x] 3.1 `test_notifier_factory_disabled_returns_noop` — construct `NotificationConfig` with `telegram.enabled: false`, call `create_notifier()`, call `notify_story()` on returned notifier, verify `Ok(())` returned (NoopNotifier behavior)
+  - [x] 3.2 `test_notifier_factory_disabled_notify_run_summary_succeeds` — same setup, call `notify_run_summary()` with a `RunSummary`, verify `Ok(())`
 
-- [ ] Task 4: Test `create_notifier()` factory — graceful fallback path (AC: #3)
-  - [ ] 4.1 `test_notifier_factory_enabled_no_token_returns_noop` — construct `NotificationConfig` with `telegram.enabled: true`, `BotSecrets` with `telegram_bot_token: None`, call `create_notifier()`, verify returned notifier behaves as NoopNotifier (returns `Ok(())` for both methods)
-  - [ ] 4.2 `test_notifier_factory_enabled_empty_token_returns_noop` — same but with `telegram_bot_token: Some("")`, verify NoopNotifier fallback
+- [x] Task 4: Test `create_notifier()` factory — graceful fallback path (AC: #3)
+  - [x] 4.1 `test_notifier_factory_enabled_no_token_returns_noop` — construct `NotificationConfig` with `telegram.enabled: true`, `BotSecrets` with `telegram_bot_token: None`, call `create_notifier()`, verify returned notifier behaves as NoopNotifier (returns `Ok(())` for both methods)
+  - [x] 4.2 `test_notifier_factory_enabled_empty_token_returns_noop` — same but with `telegram_bot_token: Some("")`, verify NoopNotifier fallback
 
-- [ ] Task 5: Test `create_notifier()` factory — enabled + valid token path (AC: #1)
-  - [ ] 5.1 `test_notifier_factory_enabled_with_token_returns_telegram` — construct with `enabled: true` and valid dummy token, call `create_notifier()`, verify returned notifier is NOT a NoopNotifier (call `notify_story()` — it will fail with HTTP error since no real Telegram server, but the error type confirms it's a TelegramNotifier attempting real send, not a NoopNotifier returning Ok)
+- [x] Task 5: Test `create_notifier()` factory — enabled + valid token path (AC: #1)
+  - [x] 5.1 `test_notifier_factory_enabled_with_token_returns_telegram` — construct with `enabled: true` and valid dummy token, call `create_notifier()`, verify returned notifier is NOT a NoopNotifier (call `notify_story()` — it will fail with HTTP error since no real Telegram server, but the error type confirms it's a TelegramNotifier attempting real send, not a NoopNotifier returning Ok)
 
-- [ ] Task 6: Test `RunSummary` construction and `MockNotifier` capture (AC: #4)
-  - [ ] 6.1 `test_notifier_run_summary_construction_counts` — construct `RunSummary` manually with 4 stories (2 completed, 1 blocked, 1 errored), verify field counts are correct
-  - [ ] 6.2 `test_notifier_run_summary_mixed_statuses_on_mock` — construct `RunSummary`, call `notify_run_summary()` on a MockNotifier (from Story 7.1 helpers), verify the MockNotifier captured exactly 1 summary call with correct total/completed/blocked/errored counts
-  - [ ] 6.3 `test_notifier_story_notifications_captured_by_mock` — send 3 `notify_story()` calls to MockNotifier with different statuses, verify all 3 captured with correct story_id, story_key, status, pr_url
+- [x] Task 6: Test `RunSummary` construction and `MockNotifier` capture (AC: #4)
+  - [x] 6.1 `test_notifier_run_summary_construction_counts` — construct `RunSummary` manually with 4 stories (2 completed, 1 blocked, 1 errored), verify field counts are correct
+  - [x] 6.2 `test_notifier_run_summary_mixed_statuses_on_mock` — construct `RunSummary`, call `notify_run_summary()` on a MockNotifier (from Story 7.1 helpers), verify the MockNotifier captured exactly 1 summary call with correct total/completed/blocked/errored counts
+  - [x] 6.3 `test_notifier_story_notifications_captured_by_mock` — send 3 `notify_story()` calls to MockNotifier with different statuses, verify all 3 captured with correct story_id, story_key, status, pr_url
 
-- [ ] Task 7: Test `StoryStatus` display and data integrity from external crate (AC: #1, #4)
-  - [ ] 7.1 `test_notifier_story_status_display_completed` — verify `StoryStatus::Completed.to_string()` contains "completed"
-  - [ ] 7.2 `test_notifier_story_status_display_blocked` — verify `StoryStatus::Blocked.to_string()` contains "blocked"
-  - [ ] 7.3 `test_notifier_story_status_display_error` — verify `StoryStatus::Error.to_string()` contains "error"
+- [x] Task 7: Test `StoryStatus` display and data integrity from external crate (AC: #1, #4)
+  - [x] 7.1 `test_notifier_story_status_display_completed` — verify `StoryStatus::Completed.to_string()` contains "completed"
+  - [x] 7.2 `test_notifier_story_status_display_blocked` — verify `StoryStatus::Blocked.to_string()` contains "blocked"
+  - [x] 7.3 `test_notifier_story_status_display_error` — verify `StoryStatus::Error.to_string()` contains "error"
 
-- [ ] Task 8: Test `NotifierError` variants (AC: ALL)
-  - [ ] 8.1 `test_notifier_error_disabled_display` — verify `NotifierError::Disabled` display message
-  - [ ] 8.2 `test_notifier_error_types_are_send_sync` — static assert that `NotifierError` is `Send + Sync`
+- [x] Task 8: Test `NotifierError` variants (AC: ALL)
+  - [x] 8.1 `test_notifier_error_disabled_display` — verify `NotifierError::Disabled` display message
+  - [x] 8.2 `test_notifier_error_types_are_send_sync` — static assert that `NotifierError` is `Send + Sync`
 
 ## Dev Notes
 
@@ -495,8 +495,29 @@ Define this helper at the top of `test_notifier.rs` to avoid repetition across t
 
 ### Agent Model Used
 
+Claude Sonnet 4 (via Cursor)
+
 ### Debug Log References
+
+N/A — clean implementation, no blockers encountered.
 
 ### Completion Notes List
 
+- Task 0: `src/lib.rs` already existed (Story 7.1 implemented). All 849 unit + 104 bin + 103 integration tests passing. Marked complete.
+- Task 1: Created `tests/integration/test_notifier.rs`, registered in `tests/integration.rs` with `#[path]` attribute. Imports from `bmad_bot::notifier::*` and `bmad_bot::config::*`.
+- Task 2: 3 tests — `TelegramNotifier::new()` success/disabled, `StoryNotification` struct construction from external crate.
+- Task 3: 2 tests — `create_notifier()` with disabled config returns NoopNotifier behavior for both `notify_story` and `notify_run_summary`.
+- Task 4: 2 tests — `create_notifier()` with enabled config but `None`/empty token falls back to NoopNotifier.
+- Task 5: 1 test — `create_notifier()` with enabled config + valid token returns TelegramNotifier (proven by HTTP error on `notify_story()`, not `Ok(())`).
+- Task 6: 3 tests — `RunSummary` field counts, MockNotifier (from Story 7.1 `helpers/mocks.rs`) captures summary and story calls correctly.
+- Task 7: 3 tests — `StoryStatus` Display trait outputs correct strings from external crate.
+- Task 8: 2 tests — `NotifierError::Disabled` display message, `NotifierError` is `Send + Sync`.
+- Decision: Used real `BotSecrets` struct which has `github_copilot_oauth_token` (not `github_models_api_key` as story notes suggested). Also accounted for `RunSummary.fatal` field not mentioned in story type signatures.
+- Total: 16 new integration tests, all passing. Full suite: 849 unit + 104 bin + 119 integration = 1072 tests.
+
 ### File List
+
+- `tests/integration/test_notifier.rs` — NEW — 16 integration tests for notification subsystem
+- `tests/integration.rs` — MODIFIED — added `mod test_notifier` registration
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED — story status updated
+- `_bmad-output/implementation-artifacts/7-7-notification-flow-integration-tests.md` — MODIFIED — tasks marked complete, dev record updated
