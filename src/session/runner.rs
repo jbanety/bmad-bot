@@ -193,6 +193,79 @@ pub fn build_impact_analysis_prompt(
     )
 }
 
+/// Post-completion turn allocation for Steps 7-9.
+///
+/// This keeps the turn numbering explicit and testable:
+/// - Step 7 (final commit): `base_turn`
+/// - Step 8 (impact analysis): `base_turn + 1`
+/// - Step 9 (PR summary): `base_turn + 2`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostCompletionTurns {
+    pub final_commit: usize,
+    pub impact_analysis: usize,
+    pub pr_summary: usize,
+}
+
+/// Compute turn numbers for the post-completion sequence.
+pub fn compute_post_completion_turns(base_turn: usize) -> PostCompletionTurns {
+    PostCompletionTurns {
+        final_commit: base_turn,
+        impact_analysis: base_turn + 1,
+        pr_summary: base_turn + 2,
+    }
+}
+
+/// Return the PR summary turn after impact analysis.
+///
+/// Impact analysis is best-effort and must never block Step 9. This helper
+/// intentionally ignores `impact_failed` for turn allocation and always returns
+/// the dedicated Step 9 turn.
+pub fn pr_summary_turn_after_impact(base_turn: usize, _impact_failed: bool) -> usize {
+    compute_post_completion_turns(base_turn).pr_summary
+}
+
+/// Build the PR summary prompt sent in Step 9 after completion.
+///
+/// The prompt is text-only (no tools) and explicitly asks the agent to include
+/// downstream spec/architecture updates from Step 8 when such updates occurred.
+pub fn build_pr_summary_prompt(
+    owner: &str,
+    repo: &str,
+    key: &str,
+    title: &str,
+    branch: &str,
+) -> String {
+    format!(
+        "STOP. Do NOT use any tools. Do NOT start a new workflow. \
+        Just reply with text.\n\n\
+        CONTEXT REMINDER:\n\
+        - Project: {owner}/{repo}\n\
+        - Story: {key} — {title}\n\
+        - Branch: {branch}\n\
+        - The previous impact-analysis turn may have updated downstream story \
+           specs and/or architecture references.\n\n\
+        Based ONLY on the work you actually performed in this session \
+        (files created, modified, tests written, and any downstream spec updates \
+        from impact analysis), summarize using this exact format:\n\n\
+        <pr-summary>\n\
+        <context>\n\
+        (What was built and why — reference actual files and modules you touched. \
+        If you updated downstream stories/architecture in impact analysis, include \
+        those concrete file updates here.)\n\
+        </context>\n\
+        <how-to-test>\n\
+        (Concrete commands: cargo test, specific test names you created)\n\
+        </how-to-test>\n\
+        <additional-info>\n\
+        (Design decisions, deps added, caveats. Mention downstream spec update \
+        commits if present.)\n\
+        </additional-info>\n\
+        </pr-summary>\n\n\
+        DO NOT invent project names, module names, or features. \
+        Only describe what you actually implemented.",
+    )
+}
+
 /// Parse a structured PR summary from the agent's response.
 ///
 /// Preferred format uses XML sub-tags inside `<pr-summary>`:
@@ -1568,6 +1641,8 @@ impl SessionRunner {
                         "Agent signaled workflow completion — sending final commit request"
                     );
 
+                    let post_turns = compute_post_completion_turns(turn);
+
                     // ── Step 7: Final commit ──────────────────────────────
                     // Ask the agent to commit any remaining uncommitted changes.
                     // The BMAD workflow should commit after each task, but this
@@ -1577,24 +1652,29 @@ impl SessionRunner {
                     state.add_user_message(commit_msg);
                     let history = state.to_rig_messages();
 
-                    log_llm_request("dev-session", turn, commit_msg, history.len());
+                    log_llm_request(
+                        "dev-session",
+                        post_turns.final_commit,
+                        commit_msg,
+                        history.len(),
+                    );
                     match agent
                         .stream_chat(commit_msg, history, Some(&self.shutdown))
                         .await
                     {
                         Ok(r) => {
-                            log_llm_response("dev-session", turn, &r);
+                            log_llm_response("dev-session", post_turns.final_commit, &r);
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             tracing::info!(
                                 action = "final_commit_done",
-                                turn = %turn,
+                                turn = %post_turns.final_commit,
                                 story_key = %story.story_key,
                                 "Final commit request completed"
                             );
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", turn, &e);
+                            log_llm_error("dev-session", post_turns.final_commit, &e);
                             tracing::warn!(
                                 action = "final_commit_failed",
                                 error = %e,
@@ -1616,32 +1696,39 @@ impl SessionRunner {
                     state.add_user_message(&impact_prompt);
                     let history = state.to_rig_messages();
 
-                    log_llm_request("dev-session", turn + 1, "[impact-analysis]", history.len());
-                    match agent
+                    log_llm_request(
+                        "dev-session",
+                        post_turns.impact_analysis,
+                        "[impact-analysis]",
+                        history.len(),
+                    );
+                    let impact_failed = match agent
                         .stream_chat(&impact_prompt, history, Some(&self.shutdown))
                         .await
                     {
                         Ok(r) => {
-                            log_llm_response("dev-session", turn + 1, &r);
+                            log_llm_response("dev-session", post_turns.impact_analysis, &r);
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             tracing::info!(
                                 action = "impact_analysis_done",
-                                turn = %(turn + 1),
+                                turn = %post_turns.impact_analysis,
                                 story_key = %story.story_key,
                                 "Impact analysis completed"
                             );
+                            false
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", turn + 1, &e);
+                            log_llm_error("dev-session", post_turns.impact_analysis, &e);
                             tracing::warn!(
                                 action = "impact_analysis_failed",
                                 error = %e,
                                 story_key = %story.story_key,
                                 "Impact analysis failed — proceeding to PR summary"
                             );
+                            true
                         }
-                    }
+                    };
 
                     // ── Step 9: PR summary (always, dedicated turn) ──────
                     let story_title = story
@@ -1656,45 +1743,30 @@ impl SessionRunner {
                         })
                         .collect::<Vec<_>>()
                         .join(" ");
-                    let pr_summary_prompt = format!(
-                        "STOP. Do NOT use any tools. Do NOT start a new workflow. \
-                        Just reply with text.\n\n\
-                        CONTEXT REMINDER:\n\
-                        - Project: {owner}/{repo}\n\
-                        - Story: {key} — {title}\n\
-                        - Branch: {branch}\n\n\
-                        Based ONLY on the work you actually performed in this session \
-                        (files created, modified, tests written), \
-                        summarize using this exact format:\n\n\
-                        <pr-summary>\n\
-                        <context>\n\
-                        (What was built and why — reference actual files and modules you touched)\n\
-                        </context>\n\
-                        <how-to-test>\n\
-                        (Concrete commands: cargo test, specific test names you created)\n\
-                        </how-to-test>\n\
-                        <additional-info>\n\
-                        (Design decisions, deps added, caveats)\n\
-                        </additional-info>\n\
-                        </pr-summary>\n\n\
-                        DO NOT invent project names, module names, or features. \
-                        Only describe what you actually implemented.",
-                        owner = self.config.git_provider.repo_owner,
-                        repo = self.config.git_provider.repo_name,
-                        key = story.story_key,
-                        title = story_title,
-                        branch = story.branch_name,
+                    let pr_summary_prompt = build_pr_summary_prompt(
+                        &self.config.git_provider.repo_owner,
+                        &self.config.git_provider.repo_name,
+                        &story.story_key,
+                        &story_title,
+                        &story.branch_name,
                     );
                     state.add_user_message(&pr_summary_prompt);
                     let history = state.to_rig_messages();
 
-                    log_llm_request("dev-session", turn + 2, "[pr-summary]", history.len());
+                    let pr_summary_turn =
+                        pr_summary_turn_after_impact(post_turns.final_commit, impact_failed);
+                    log_llm_request(
+                        "dev-session",
+                        pr_summary_turn,
+                        "[pr-summary]",
+                        history.len(),
+                    );
                     let (pr_context, pr_how_to_test, pr_additional_info) = match agent
                         .stream_chat(&pr_summary_prompt, history, Some(&self.shutdown))
                         .await
                     {
                         Ok(r) => {
-                            log_llm_response("dev-session", turn + 2, &r);
+                            log_llm_response("dev-session", pr_summary_turn, &r);
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             match parse_pr_summary(&r) {
@@ -1717,7 +1789,7 @@ impl SessionRunner {
                             }
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", turn + 2, &e);
+                            log_llm_error("dev-session", pr_summary_turn, &e);
                             tracing::warn!(
                                 action = "pr_summary_failed",
                                 error = %e,
@@ -3018,6 +3090,43 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
         assert_ne!(
             original_activity, &new_activity,
             "last_activity should be refreshed"
+        );
+    }
+
+    #[test]
+    fn test_compute_post_completion_turns_offsets() {
+        let turns = compute_post_completion_turns(7);
+        assert_eq!(turns.final_commit, 7);
+        assert_eq!(turns.impact_analysis, 8);
+        assert_eq!(turns.pr_summary, 9);
+    }
+
+    #[test]
+    fn test_pr_summary_turn_after_impact_failure_non_blocking() {
+        let turn = pr_summary_turn_after_impact(12, true);
+        assert_eq!(
+            turn, 14,
+            "PR summary must remain dedicated turn +2 even when impact analysis fails"
+        );
+    }
+
+    #[test]
+    fn test_build_pr_summary_prompt_mentions_downstream_updates_awareness() {
+        let prompt = build_pr_summary_prompt(
+            "acme",
+            "bmad-bot",
+            "4-6-post-implementation-impact-analysis",
+            "Post Implementation Impact Analysis",
+            "story/4-6-post-implementation-impact-analysis",
+        );
+
+        assert!(
+            prompt.contains("impact-analysis turn may have updated downstream story specs"),
+            "Prompt must explicitly mention impact-analysis downstream updates"
+        );
+        assert!(
+            prompt.contains("any downstream spec updates from impact analysis"),
+            "Prompt must require including downstream spec updates in summary"
         );
     }
 
