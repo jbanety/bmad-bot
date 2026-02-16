@@ -150,6 +150,19 @@ const ACTIVATION_MAX_RETRIES: usize = 3;
 /// Initial backoff delay in seconds for transient error retries.
 const ACTIVATION_BACKOFF_BASE_SECS: u64 = 5;
 
+/// Derive short story key format (`{epic}-{story}`) from full story key.
+///
+/// Examples:
+/// - `"4-6-post-implementation-impact-analysis"` -> `"4-6"`
+/// - `"4-6"` -> `"4-6"`
+fn derive_short_story_key(story_key: &str) -> String {
+    let mut parts = story_key.splitn(3, '-');
+    match (parts.next(), parts.next()) {
+        (Some(epic), Some(story)) => format!("{epic}-{story}"),
+        _ => story_key.to_string(),
+    }
+}
+
 /// Build the impact analysis prompt sent to the agent after story completion.
 ///
 /// The prompt instructs the agent to read `sprint-status.yaml`, identify
@@ -165,14 +178,16 @@ pub fn build_impact_analysis_prompt(
     impl_artifacts: &str,
     planning_artifacts: &str,
 ) -> String {
+    let short_story_key = derive_short_story_key(story_key);
+
     format!(
         "You have just completed story {story_key}. Perform a post-implementation \
         impact analysis on downstream dependent stories.\n\n\
         INSTRUCTIONS:\n\
         1. Read `{impl_artifacts}/sprint-status.yaml` and identify stories whose \
-           `depends-on` references `{story_key}` (full key or short key). \
-           Also check subsequent stories in the same epic (document order) as a \
-           secondary criterion.\n\
+           `depends-on` references `{story_key}` (full key) or `{short_story_key}` \
+           (short key `{{epic}}-{{story}}`). Also check subsequent stories in the same \
+           epic (document order) as a secondary criterion.\n\
         2. For each downstream story file found in `{impl_artifacts}/`, read its \
            Dev Notes and compare the \"Previous Story Intelligence\" sections against \
            what was actually implemented.\n\
@@ -1726,6 +1741,8 @@ impl SessionRunner {
                                 story_key = %story.story_key,
                                 "Impact analysis failed — proceeding to PR summary"
                             );
+                            // Persist the user prompt turn even when impact analysis fails.
+                            let _ = state.save(&self.state_file_path).await;
                             true
                         }
                     };
@@ -3140,6 +3157,23 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
         assert!(
             prompt.contains("4-6-post-implementation-impact-analysis"),
             "Prompt must contain the story key"
+        );
+    }
+
+    #[test]
+    fn test_impact_analysis_prompt_contains_explicit_short_key() {
+        let prompt = build_impact_analysis_prompt(
+            "4-6-post-implementation-impact-analysis",
+            "_bmad-output/implementation-artifacts",
+            "_bmad-output/planning-artifacts",
+        );
+        assert!(
+            prompt.contains("4-6"),
+            "Prompt must contain the explicit short key"
+        );
+        assert!(
+            prompt.contains("short key `{epic}-{story}`"),
+            "Prompt must define short-key format clearly"
         );
     }
 

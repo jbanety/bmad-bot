@@ -233,27 +233,33 @@ Claude Opus 4.6
 
 ### Debug Log References
 
-- `cargo test` — 947 passed, 0 failed
-- `cargo fmt --check` — clean
-- `cargo clippy` — 0 new errors/warnings (1 pre-existing `collapsible_if` error in `src/config/mod.rs`, not related to this story)
+- `cargo test impact_analysis_prompt_contains` — 6 passed, 0 failed (includes new short-key prompt assertion)
+- `cargo build` — passes (repository has pre-existing `dead_code` warnings outside Story 4.6 scope)
+- `cargo test` — 853 passed, 0 failed
+- `cargo clippy --all-targets --all-features -- -D warnings` — fails due pre-existing repository-wide lint debt unrelated to Story 4.6 (e.g., `src/config/mod.rs`, `src/review/mod.rs`, `src/tools/read_file.rs`, etc.)
+- `cargo fmt -- --check` — fails due pre-existing repository-wide formatting drift in unrelated files under `src/` and `tests/`
 
 ### Completion Notes List
 
 - Extracted `build_impact_analysis_prompt()` as a public helper for testability while keeping the `stream_chat()` call inline in the `ResponseAction::Completed` arm per Dev Notes guidance.
+- Added `derive_short_story_key()` and now inject an explicit short-key value in the impact prompt (`{epic}-{story}`), e.g. `4-6`, so `depends-on` matching guidance is concrete and deterministic.
 - Impact analysis prompt includes: story key, sprint-status.yaml path, implementation artifacts path, planning artifacts path (architecture.md), scope guard, idempotent replacement instructions, commit prefix `docs(stories): update downstream specs after {story_key}`, and "do not invent changes" guard.
 - Follows the exact pattern of Step 7 (final commit): `state.add_user_message()` → `to_rig_messages()` → `log_llm_request()` → `stream_chat()` match → Ok: log + persist WAL / Err: warn + proceed.
+- Added WAL persistence on the Step 8 error path (`state.save(...)`) so the impact prompt turn is durable even when impact analysis fails before assistant response.
 - Agent retains full tool access during impact analysis (unlike PR summary which is text-only).
 - Turn counter updated: Step 7 = `turn`, Step 8 (impact analysis) = `turn + 1`, Step 9 (PR summary) = `turn + 2`.
 - Removed an orphan doc comment (stale `is_transient_llm_error` description) that became visible as a clippy `empty_line_after_doc_comments` error after insertion.
-- 6 new unit tests added covering prompt content validation (story key, sprint-status path, planning artifacts path, scope guard, commit prefix, idempotent language).
-- All 7 existing `parse_pr_summary` tests pass unchanged.
+- 7 unit tests cover impact prompt content validation (story key, explicit short key, sprint-status path, planning artifacts path, scope guard, commit prefix, idempotent language).
+- All existing `parse_pr_summary` tests pass unchanged.
+- AC #9 status: `cargo build` and `cargo test` pass; strict `clippy -D warnings` and `fmt --check` remain blocked by pre-existing repository-wide baseline issues outside Story 4.6 scope.
 
 ### Change Log
 
 - Implemented post-implementation impact analysis step (Step 8) in `run_session()` — inserts between final commit (Step 7) and PR summary (renumbered to Step 9). (2026-02-15)
+- Post-review hardening pass: injected explicit short-key guidance into impact prompt and persisted WAL on impact-analysis error path; updated validation notes to reflect pre-existing repo-wide clippy/fmt baseline failures outside Story 4.6 scope. (2026-02-16)
 
 ### File List
 
-- `src/session/runner.rs` — Added `build_impact_analysis_prompt()` helper, inserted Step 8 impact analysis block in `ResponseAction::Completed` arm, renumbered Step 8 → Step 9 for PR summary, adjusted turn counters from `turn + 1` to `turn + 2`, removed orphan doc comment, added 6 unit tests.
+- `src/session/runner.rs` — Added `build_impact_analysis_prompt()` helper, inserted Step 8 impact analysis block in `ResponseAction::Completed` arm, renumbered Step 8 → Step 9 for PR summary, adjusted turn counters from `turn + 1` to `turn + 2`, removed orphan doc comment, added impact-prompt tests, added explicit short-key prompt injection, and persisted WAL on impact-analysis error path.
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` — Updated `4-6-post-implementation-impact-analysis` status: `ready-for-dev` → `in-progress` → `review`.
-- `_bmad-output/implementation-artifacts/4-6-post-implementation-impact-analysis.md` — Marked all tasks/subtasks complete, updated Dev Agent Record and status.
+- `_bmad-output/implementation-artifacts/4-6-post-implementation-impact-analysis.md` — Marked all tasks/subtasks complete, updated Dev Agent Record and status, and documented post-review fixes/validation baseline context.
