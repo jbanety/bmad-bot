@@ -87,7 +87,7 @@ so that I'm confident the daemon produces well-formed PRs on both GitHub and Git
 - [x] Task 8: Verify all tests pass (AC: all)
   - [x] 8.1 `cargo test --test integration` — all git provider tests pass
   - [x] 8.2 `cargo test` — no regressions in 573+ unit tests
-  - [x] 8.3 `cargo clippy` — zero warnings
+  - [ ] 8.3 `cargo clippy` — currently failing due existing repository-wide deny-level lint errors (not introduced by this story)
 
 ## Dev Notes
 
@@ -440,13 +440,14 @@ N/A
 ### Completion Notes List
 - ✅ Task 0: Verified `src/lib.rs` exists with `pub mod git_provider;` — all public API symbols accessible from integration tests. `cargo build` succeeds.
 - ✅ Task 1: Created `tests/integration/test_git_provider.rs` (364 lines, 13 tests). Added `#[path]` module declaration in `tests/integration.rs`.
-- ✅ Task 2: Factory smoke tests — GitHub (requires `#[tokio::test]` due to octocrab runtime), GitLab sync, bitbucket/empty provider error paths. All 4 tests pass.
+- ✅ Task 2: Factory smoke tests — GitHub (requires `#[tokio::test]` due to octocrab runtime), GitLab sync, bitbucket/empty provider error paths. Added behavioral assertion that GitHub factory output produces `https://github.com/{owner}/{repo}/pull/{number}` URL pattern (AC #1). All 4 tests pass.
 - ✅ Task 3: `GitLabProvider::new(&config, "")` → `Err(AuthenticationFailed)` with "empty" in reason. Test passes.
 - ✅ Task 4: Cross-module integration — built real `DecisionRecord` instances (RuleEngine + LlmFallback sources), called `format_pr_decisions_section()` from supervisor module, passed into `PrDescriptionParams` → `build_pr_description()`. Verified story key in header, outcome summary, Supervisor Decisions section with real decision content. Also verified `build_pr_title()` success format.
 - ✅ Task 5: Failure PR description — verified `⚠️ Failure Details` section with failure text. `build_pr_title()` failure format with `[NEEDS REVIEW]` suffix.
 - ✅ Task 6: Escalation PR description — built escalation `DecisionRecord` (empty answer, Escalation source), verified `⚠️ Escalated` in decisions table, escalation details in failure section.
 - ✅ Task 7: End-to-end factory → trait dispatch — `create_provider("gitlab")` → `Box<dyn GitProvider>` → `get_pr_url("42")` → correct URL. Invalid PR ID → `Err(InvalidPrId)`. Full dynamic dispatch chain validated.
-- ✅ Task 8: All 13 integration tests pass. Full suite: 849 unit + 104 bin + 103 integration = 1056 tests, 0 failures. Pre-existing clippy errors in library code (auth/github_copilot.rs, config/mod.rs, session/analyzer.rs) — not introduced by this story.
+- ✅ Task 8.1/8.2: All 13 git provider integration tests pass; no regressions in full test suite.
+- ⚠️ Task 8.3: `cargo clippy --all-targets --all-features` currently fails on pre-existing deny-level lint errors in multiple modules (e.g., `src/auth/github_copilot.rs`, `src/config/mod.rs`, `src/session/analyzer.rs`, plus existing test-only lints) that were not introduced by this story.
 - **Decision:** GitHub factory test uses `#[tokio::test]` instead of `#[test]` because octocrab client construction requires a Tokio runtime (tower::Buffer spawns a task).
 - **Decision:** Used `match` on `Result` instead of `unwrap_err()` for error assertions because `Box<dyn GitProvider>` and `GitLabProvider` don't implement `Debug`.
 - **Decision:** `PrDescriptionParams.pr_summary` set to `None` in all tests — story spec doesn't cover enriched summaries (those have separate unit tests in mod.rs).
@@ -455,4 +456,6 @@ N/A
 - `tests/integration/test_git_provider.rs` — NEW — 13 integration tests for git provider module
 - `tests/integration.rs` — MODIFIED — added `mod test_git_provider;` declaration
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED — story status updated
-- `_bmad-output/implementation-artifacts/7-6-git-provider-pr-creation-integration-tests.md` — MODIFIED — task checkboxes, status, dev agent record
+- `_bmad-output/implementation-artifacts/7-6-git-provider-pr-creation-integration-tests.md` — MODIFIED — task checkboxes, dev agent record, review follow-up corrections
+- `_bmad-output/implementation-artifacts/7-7-notification-flow-integration-tests.md` — MODIFIED (post-story downstream update in commit `0333cb5`)
+- `_bmad-output/implementation-artifacts/7-8-branch-management-git-tools-integration-tests.md` — MODIFIED (post-story downstream update in commit `0333cb5`)
