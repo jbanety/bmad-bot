@@ -201,8 +201,9 @@ impl AskSupervisor {
         factory: Option<Arc<AgentFactory>>,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
+        mcp_manager: Arc<crate::mcp::McpManager>,
     ) -> Result<Self, ArchitectSessionError> {
-        let session = ArchitectSession::new_with_factory(config, factory)?;
+        let session = ArchitectSession::new_with_factory(config, factory, mcp_manager)?;
         Ok(Self {
             rule_engine: RuleEngine::new(),
             answer_provider: Some(Box::new(session)),

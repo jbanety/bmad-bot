@@ -1,6 +1,6 @@
 # Story 9.2: Agent Integration — Register MCP Tools on Session Build
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -28,16 +28,16 @@ So that I can use browser automation and other external tools identically to edi
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `mcp_servers` field to `ToolConfigurator` and update macro (AC: #1, #3)
-  - [ ] 1.1 In `src/llm/agent_factory.rs`, add field to `ToolConfigurator<T>`: `pub mcp_servers: Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>`
-  - [ ] 1.2 Update `configure_agent_tools!` macro to initialize `mcp_servers: vec![]` alongside `tools`:
+- [x] Task 1: Add `mcp_servers` field to `ToolConfigurator` and update macro (AC: #1, #3)
+  - [x] 1.1 In `src/llm/agent_factory.rs`, add field to `ToolConfigurator<T>`: `pub mcp_servers: Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>`
+  - [x] 1.2 Update `configure_agent_tools!` macro to initialize `mcp_servers: vec![]` alongside `tools`:
         ```
         $crate::llm::agent_factory::ToolConfigurator {
             tools: ($($tool,)+),
             mcp_servers: vec![],
         }
         ```
-  - [ ] 1.3 Implement `with_mcp()` builder method on `ToolConfigurator<T>` (generic over T — works for any arity):
+  - [x] 1.3 Implement `with_mcp()` builder method on `ToolConfigurator<T>` (generic over T — works for any arity):
         ```
         impl<T> ToolConfigurator<T> {
             pub fn with_mcp(mut self, servers: Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>) -> Self {
@@ -46,10 +46,10 @@ So that I can use browser automation and other external tools identically to edi
             }
         }
         ```
-  - [ ] 1.4 Add unconditional imports at top of `agent_factory.rs`: `rmcp` is a direct dependency in `Cargo.toml` (added in Story 9.1) — no `#[cfg(feature)]` gate needed on our crate. Add: `use rmcp::model::Tool as McpToolDef; use rmcp::service::ServerSink;` (or use fully qualified paths in the struct field type)
+  - [x] 1.4 Add unconditional imports at top of `agent_factory.rs`: `rmcp` is a direct dependency in `Cargo.toml` (added in Story 9.1) — no `#[cfg(feature)]` gate needed on our crate. Add: `use rmcp::model::Tool as McpToolDef; use rmcp::service::ServerSink;` (or use fully qualified paths in the struct field type)
 
-- [ ] Task 2: Update 9-tool `AgentConfigurator` impl to chain MCP tools (AC: #2, #3)
-  - [ ] 2.1 In the `impl AgentConfigurator for ToolConfigurator<(T1..T9)>`, refactor each `configure_*` method to chain `.rmcp_tools()` after native `.tool()` calls:
+- [x] Task 2: Update 9-tool `AgentConfigurator` impl to chain MCP tools (AC: #2, #3)
+  - [x] 2.1 In the `impl AgentConfigurator for ToolConfigurator<(T1..T9)>`, refactor each `configure_*` method to chain `.rmcp_tools()` after native `.tool()` calls:
         ```
         fn configure_anthropic(self, builder: AgentBuilder<...>) -> Agent<...> {
             let (t1, t2, t3, t4, t5, t6, t7, t8, t9) = self.tools;
@@ -61,11 +61,11 @@ So that I can use browser automation and other external tools identically to edi
             simple.build()
         }
         ```
-  - [ ] 2.2 Apply the same pattern to `configure_openai_responses` and `configure_openai_completions`
-  - [ ] 2.3 When `mcp_servers` is empty, the `for` loop body never executes — zero behavioral change, no `.rmcp_tools()` calls
+  - [x] 2.2 Apply the same pattern to `configure_openai_responses` and `configure_openai_completions`
+  - [x] 2.3 When `mcp_servers` is empty, the `for` loop body never executes — zero behavioral change, no `.rmcp_tools()` calls
 
-- [ ] Task 3: Update 1-tool `AgentConfigurator` impl to chain MCP tools (AC: #4)
-  - [ ] 3.1 In the `impl AgentConfigurator for ToolConfigurator<(T1,)>`, apply the same pattern:
+- [x] Task 3: Update 1-tool `AgentConfigurator` impl to chain MCP tools (AC: #4)
+  - [x] 3.1 In the `impl AgentConfigurator for ToolConfigurator<(T1,)>`, apply the same pattern:
         ```
         fn configure_anthropic(self, builder: AgentBuilder<...>) -> Agent<...> {
             let (t1,) = self.tools;
@@ -76,17 +76,17 @@ So that I can use browser automation and other external tools identically to edi
             simple.build()
         }
         ```
-  - [ ] 3.2 Apply to all three `configure_*` methods
-  - [ ] 3.3 This gives the supervisor/architect agent MCP tools when configured
+  - [x] 3.2 Apply to all three `configure_*` methods
+  - [x] 3.3 This gives the supervisor/architect agent MCP tools when configured
 
-- [ ] Task 4: Update `build_preamble()` to accept optional MCP tool names (AC: #6)
-  - [ ] 4.1 Change signature from `pub fn build_preamble() -> String` to `pub fn build_preamble(mcp_tool_names: &[String]) -> String`
-  - [ ] 4.2 In the `## Tools` section, if `mcp_tool_names` is non-empty, append: `"\nYou also have access to MCP tools: {names_joined}. Use them like any other tool."` after the existing tool list line
-  - [ ] 4.3 When `mcp_tool_names` is empty, the preamble output is byte-identical to current
-  - [ ] 4.4 Update existing tests for `build_preamble` to pass `&[]` — they must still pass unchanged
+- [x] Task 4: Update `build_preamble()` to accept optional MCP tool names (AC: #6)
+  - [x] 4.1 Change signature from `pub fn build_preamble() -> String` to `pub fn build_preamble(mcp_tool_names: &[String]) -> String`
+  - [x] 4.2 In the `## Tools` section, if `mcp_tool_names` is non-empty, append: `"\nYou also have access to MCP tools: {names_joined}. Use them like any other tool."` after the existing tool list line
+  - [x] 4.3 When `mcp_tool_names` is empty, the preamble output is byte-identical to current
+  - [x] 4.4 Update existing tests for `build_preamble` to pass `&[]` — they must still pass unchanged
 
-- [ ] Task 5: Update `SessionRunner` to pass MCP data through (AC: #5, #6)
-  - [ ] 5.1 Update `SessionRunner::build_preamble()` wrapper (L711-713) to handle MCP tool names internally — this centralizes the preamble MCP logic so `build_agent_for_role()` stays simple:
+- [x] Task 5: Update `SessionRunner` to pass MCP data through (AC: #5, #6)
+  - [x] 5.1 Update `SessionRunner::build_preamble()` wrapper (L711-713) to handle MCP tool names internally — this centralizes the preamble MCP logic so `build_agent_for_role()` stays simple:
         ```
         fn build_preamble(&self, _story: &StoryInfo) -> Result<String, ProviderError> {
             let mcp_data = self.mcp_manager.tools_for_builder();
@@ -94,7 +94,7 @@ So that I can use browser automation and other external tools identically to edi
             Ok(dev_agent::build_preamble(&mcp_names))
         }
         ```
-  - [ ] 5.2 In `SessionRunner::build_agent_for_role()` (L679-701), chain `.with_mcp()` using a single call to `tools_for_builder()`:
+  - [x] 5.2 In `SessionRunner::build_agent_for_role()` (L679-701), chain `.with_mcp()` using a single call to `tools_for_builder()`:
         ```
         let mcp_data = self.mcp_manager.tools_for_builder();
         self.agent_factory
@@ -109,10 +109,10 @@ So that I can use browser automation and other external tools identically to edi
             )
             .await
         ```
-  - [ ] 5.3 Note: `build_preamble()` and `build_agent_for_role()` each call `tools_for_builder()` independently — this is acceptable since agent builds are infrequent and the clone cost is trivial
+  - [x] 5.3 Note: `build_preamble()` and `build_agent_for_role()` each call `tools_for_builder()` independently — this is acceptable since agent builds are infrequent and the clone cost is trivial
 
-- [ ] Task 6: Update `ReviewRunner` to pass MCP data through (AC: #5)
-  - [ ] 6.1 In `ReviewRunner::run_inner()` (around L300-325), retrieve MCP tool names for preamble and chain `.with_mcp()`:
+- [x] Task 6: Update `ReviewRunner` to pass MCP data through (AC: #5)
+  - [x] 6.1 In `ReviewRunner::run_inner()` (around L300-325), retrieve MCP tool names for preamble and chain `.with_mcp()`:
         ```
         let mcp_data = self.mcp_manager.tools_for_builder();
         let mcp_tool_names = extract_mcp_tool_names(&mcp_data);
@@ -124,20 +124,20 @@ So that I can use browser automation and other external tools identically to edi
         )
         .with_mcp(mcp_data),
         ```
-  - [ ] 6.2 Ensure `self.mcp_manager` is accessible (stored in ReviewRunner from Story 9.1)
+  - [x] 6.2 Ensure `self.mcp_manager` is accessible (stored in ReviewRunner from Story 9.1)
 
-- [ ] Task 7: Update `ArchitectSession` to pass MCP data through (AC: #4, #5)
-  - [ ] 7.1 Add `mcp_manager: Arc<McpManager>` field to `ArchitectSession` struct
-  - [ ] 7.2 Update `ArchitectSession::new_with_factory()` to accept `mcp_manager: Arc<McpManager>` and store it
-  - [ ] 7.3 Update `ArchitectSession::new()` (legacy constructor used in tests) to pass `Arc::new(McpManager::empty())` as default — preserves backward compatibility for existing tests (`test_architect_session_missing_agent_file`, `test_architect_session_missing_api_key`, `test_architect_session_unsupported_provider`):
+- [x] Task 7: Update `ArchitectSession` to pass MCP data through (AC: #4, #5)
+  - [x] 7.1 Add `mcp_manager: Arc<McpManager>` field to `ArchitectSession` struct
+  - [x] 7.2 Update `ArchitectSession::new_with_factory()` to accept `mcp_manager: Arc<McpManager>` and store it
+  - [x] 7.3 Update `ArchitectSession::new()` (legacy constructor used in tests) to pass `Arc::new(McpManager::empty())` as default — preserves backward compatibility for existing tests (`test_architect_session_missing_agent_file`, `test_architect_session_missing_api_key`, `test_architect_session_unsupported_provider`):
         ```
         pub fn new(config: &BotConfig) -> Result<Self, ArchitectSessionError> {
             Self::new_with_factory(config, None, Arc::new(McpManager::empty()))
         }
         ```
-  - [ ] 7.4 Update `AskSupervisor::with_architect_from_config()` to accept and forward `mcp_manager: Arc<McpManager>` to `ArchitectSession::new_with_factory()`
-  - [ ] 7.5 Update `SessionRunner::create_tools()` and `ReviewRunner::create_tools()` to pass `Arc::clone(&self.mcp_manager)` when constructing `AskSupervisor`
-  - [ ] 7.6 In `ArchitectSession::ask()` (L336-360), chain `.with_mcp()` and update preamble using single-call pattern:
+  - [x] 7.4 Update `AskSupervisor::with_architect_from_config()` to accept and forward `mcp_manager: Arc<McpManager>` to `ArchitectSession::new_with_factory()`
+  - [x] 7.5 Update `SessionRunner::create_tools()` and `ReviewRunner::create_tools()` to pass `Arc::clone(&self.mcp_manager)` when constructing `AskSupervisor`
+  - [x] 7.6 In `ArchitectSession::ask()` (L336-360), chain `.with_mcp()` and update preamble using single-call pattern:
         ```
         let mcp_data = self.mcp_manager.tools_for_builder();
         let mcp_tool_names = extract_mcp_tool_names(&mcp_data);
@@ -147,8 +147,8 @@ So that I can use browser automation and other external tools identically to edi
             .with_mcp(mcp_data),
         ```
 
-- [ ] Task 8: Create `extract_mcp_tool_names` free function in `src/mcp/mod.rs` (AC: #6)
-  - [ ] 8.1 Create a public free function in `src/mcp/mod.rs` that extracts tool names from the `tools_for_builder()` output. This is a free function (not a method on McpManager) because callers already have the data from `tools_for_builder()` — avoids a second traversal of McpManager internals:
+- [x] Task 8: Create `extract_mcp_tool_names` free function in `src/mcp/mod.rs` (AC: #6)
+  - [x] 8.1 Create a public free function in `src/mcp/mod.rs` that extracts tool names from the `tools_for_builder()` output. This is a free function (not a method on McpManager) because callers already have the data from `tools_for_builder()` — avoids a second traversal of McpManager internals:
         ```
         /// Extract tool names from MCP server data returned by `McpManager::tools_for_builder()`.
         pub fn extract_mcp_tool_names(
@@ -159,17 +159,17 @@ So that I can use browser automation and other external tools identically to edi
                 .collect()
         }
         ```
-  - [ ] 8.2 Re-export from `src/mcp/mod.rs` so callers use `crate::mcp::extract_mcp_tool_names()`
+  - [x] 8.2 Re-export from `src/mcp/mod.rs` so callers use `crate::mcp::extract_mcp_tool_names()`
 
-- [ ] Task 9: Write unit tests (AC: #8)
-  - [ ] 9.1 Test `configure_agent_tools!` macro produces `ToolConfigurator` with empty `mcp_servers`
-  - [ ] 9.2 Test `with_mcp()` sets the `mcp_servers` field (mock data — construct fake `Vec` if possible, or test at struct level)
-  - [ ] 9.3 Test `build_preamble(&[])` output is identical to current hardcoded output
-  - [ ] 9.4 Test `build_preamble(&["browser_navigate".into(), "browser_screenshot".into()])` includes MCP tool names
-  - [ ] 9.5 Test `build_preamble` with MCP tools still contains all existing assertions (edit_file, read_file, grep, etc.)
-  - [ ] 9.6 Test `extract_mcp_tool_names(&[])` returns empty vec
-  - [ ] 9.7 Test `extract_mcp_tool_names` with mock data returns expected tool names
-  - [ ] 9.8 Verify ALL existing tests pass — `cargo test` must show zero regressions. Critical tests to watch: `test_build_preamble_contains_tool_rules`, `test_build_preamble_contains_english_override`, `test_no_tools_configurator`, all `test_agent_factory_build_*` tests, `test_architect_session_*` tests (must work with legacy `new()` constructor)
+- [x] Task 9: Write unit tests (AC: #8)
+  - [x] 9.1 Test `configure_agent_tools!` macro produces `ToolConfigurator` with empty `mcp_servers`
+  - [x] 9.2 Test `with_mcp()` sets the `mcp_servers` field (mock data — construct fake `Vec` if possible, or test at struct level)
+  - [x] 9.3 Test `build_preamble(&[])` output is identical to current hardcoded output
+  - [x] 9.4 Test `build_preamble(&["browser_navigate".into(), "browser_screenshot".into()])` includes MCP tool names
+  - [x] 9.5 Test `build_preamble` with MCP tools still contains all existing assertions (edit_file, read_file, grep, etc.)
+  - [x] 9.6 Test `extract_mcp_tool_names(&[])` returns empty vec
+  - [x] 9.7 Test `extract_mcp_tool_names` with mock data returns expected tool names — NOTE: Cannot construct `ServerSink` without a live MCP server; covered by empty-vec test and preamble integration tests
+  - [x] 9.8 Verify ALL existing tests pass — `cargo test` must show zero regressions. Critical tests to watch: `test_build_preamble_contains_tool_rules`, `test_build_preamble_contains_english_override`, `test_no_tools_configurator`, all `test_agent_factory_build_*` tests, `test_architect_session_*` tests (must work with legacy `new()` constructor)
 
 ## Dev Notes
 
@@ -379,10 +379,31 @@ Story 9.1 established:
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (via Copilot)
 
 ### Debug Log References
 
+- `cargo test` final run: 981 passed, 0 failed, 0 ignored
+
 ### Completion Notes List
 
+- ✅ Task 1: Added `mcp_servers: Vec<(Vec<McpToolDef>, ServerSink)>` field to `ToolConfigurator<T>`, updated `configure_agent_tools!` macro to initialize it to `vec![]`, implemented generic `with_mcp()` builder method, added `use rmcp::model::Tool as McpToolDef; use rmcp::service::ServerSink;` imports
+- ✅ Task 2: Refactored all three `configure_*` methods in 9-tool `AgentConfigurator` impl to use intermediate `let mut simple = ...` binding and `for (tools, sink) in self.mcp_servers` loop before `.build()`
+- ✅ Task 3: Applied identical pattern to all three `configure_*` methods in 1-tool `AgentConfigurator` impl (supervisor/architect use case)
+- ✅ Task 4: Changed `build_preamble()` signature to accept `mcp_tool_names: &[String]`, conditionally appends MCP tool line when non-empty, updated all 7 existing tests to pass `&[]`
+- ✅ Task 5: Made `SessionRunner::build_preamble()` async, calls `tools_for_builder().await` + `extract_mcp_tool_names()` + `dev_agent::build_preamble(&mcp_names)`. Updated `build_agent_for_role()` to chain `.with_mcp(mcp_data)` with separate `tools_for_builder().await` call
+- ✅ Task 6: Updated `ReviewRunner::run_inner()` to call `tools_for_builder().await`, extract MCP names for preamble, and chain `.with_mcp(mcp_data)` on the configurator. Also passed `Arc::clone(&self.mcp_manager)` to `AskSupervisor::with_architect_from_config()` in `create_tools()`
+- ✅ Task 7: Added `mcp_manager: Arc<McpManager>` field to `ArchitectSession`, updated `new_with_factory()` signature, legacy `new()` passes `Arc::new(McpManager::empty())` for backward compat. Updated `AskSupervisor::with_architect_from_config()` to accept and forward `mcp_manager`. Updated both `SessionRunner::create_tools()` and `ReviewRunner::create_tools()` call sites. Updated `ArchitectSession::ask()` to use MCP data for preamble and `.with_mcp()`.
+- ✅ Task 8: Created `extract_mcp_tool_names()` free function in `src/mcp/mod.rs` — `flat_map` over `(tools, sink)` pairs extracting `t.name.to_string()`
+- ✅ Task 9: Added 7 new unit tests across 3 files. All 981 tests pass (974 existing + 7 new). All critical tests verified: `test_build_preamble_*`, `test_no_tools_configurator`, `test_agent_factory_build_*`, `test_architect_session_*`
+- ⚠️ Task 9.7 (mock `extract_mcp_tool_names` with data): `ServerSink` cannot be constructed without a live MCP server process, so the test with non-empty mock data was not feasible. Empty-vec test and preamble integration tests cover the logic path.
+
 ### File List
+
+- `src/llm/agent_factory.rs` — Added `mcp_servers` field to `ToolConfigurator`, `with_mcp()` method, rmcp imports, refactored all 6 `configure_*` methods (9-tool and 1-tool impls), added 3 unit tests
+- `src/session/dev_agent.rs` — Changed `build_preamble()` to accept `&[String]`, conditional MCP line append, updated 7 existing tests to pass `&[]`, added 3 new MCP-specific tests
+- `src/session/runner.rs` — Made `build_preamble()` async with MCP name injection, chained `.with_mcp()` in `build_agent_for_role()`, passed `mcp_manager` to `AskSupervisor` in `create_tools()`
+- `src/review/mod.rs` — Updated `run_inner()` with MCP data flow for preamble and `.with_mcp()`, passed `mcp_manager` to `AskSupervisor` in `create_tools()`
+- `src/supervisor/architect.rs` — Added `mcp_manager` field, updated both constructors, updated `ask()` with MCP data flow for preamble and `.with_mcp()`
+- `src/supervisor/mod.rs` — Updated `with_architect_from_config()` to accept and forward `mcp_manager: Arc<McpManager>`
+- `src/mcp/mod.rs` — Added `extract_mcp_tool_names()` free function, added 1 unit test

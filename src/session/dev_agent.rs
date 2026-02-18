@@ -42,11 +42,25 @@ const STREAMING_MAX_TURNS: usize = 300;
 /// This preamble is used as the system prompt for both dev sessions and code
 /// review sessions. It does NOT contain the agent persona — that is sent as
 /// a user message via [`activate_agent`].
-pub fn build_preamble() -> String {
-    r#"You are an AI agent operating autonomously in a BMAD workflow environment.
+///
+/// When `mcp_tool_names` is non-empty, the preamble's tool section includes
+/// the MCP tool names so the agent knows they are available. When empty, the
+/// preamble output is identical to the pre-MCP version.
+pub fn build_preamble(mcp_tool_names: &[String]) -> String {
+    let mcp_line = if mcp_tool_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nYou also have access to MCP tools: {}. Use them like any other tool.",
+            mcp_tool_names.join(", ")
+        )
+    };
+
+    format!(
+        r#"You are an AI agent operating autonomously in a BMAD workflow environment.
 
 ## Tools
-You have access to these tools: edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, plus a built-in think tool for reasoning.
+You have access to these tools: edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, plus a built-in think tool for reasoning.{mcp_line}
 
 ## Tool Usage Rules
 - **ALWAYS use `edit_file` with mode="edit"** to modify existing files. NEVER rewrite entire files unless creating a new file (mode="create") or a complete rewrite is truly necessary (mode="overwrite").
@@ -75,8 +89,9 @@ OVERRIDE: communication_language = English
 - When the user provides an agent file in <context><files> tags, you MUST fully embody that agent's persona and follow ALL activation instructions exactly as specified.
 - NEVER break character until given an exit command.
 - Execute activation steps in order — load configuration files via tools, then greet and display the menu.
-- Wait for user input after displaying the menu."#
-        .to_string()
+- Wait for user input after displaying the menu."#,
+        mcp_line = mcp_line
+    )
 }
 
 /// Send a prompt via streaming and collect the complete text response.
@@ -240,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_tool_rules() {
-        let preamble = build_preamble();
+        let preamble = build_preamble(&[]);
         assert!(preamble.contains("edit_file"));
         assert!(preamble.contains("read_file"));
         assert!(preamble.contains("grep"));
@@ -252,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_english_override() {
-        let preamble = build_preamble();
+        let preamble = build_preamble(&[]);
         assert!(
             preamble.contains("communication_language = English"),
             "Preamble must contain English override"
@@ -261,14 +276,14 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_activation_rules() {
-        let preamble = build_preamble();
+        let preamble = build_preamble(&[]);
         assert!(preamble.contains("<context><files>"));
         assert!(preamble.contains("activation instructions"));
     }
 
     #[test]
     fn test_build_preamble_does_not_contain_agent_content() {
-        let preamble = build_preamble();
+        let preamble = build_preamble(&[]);
         // The preamble should NOT contain the agent file content — that goes
         // in the user message via activate_agent()
         assert!(
@@ -283,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_job_done_sentinel() {
-        let preamble = build_preamble();
+        let preamble = build_preamble(&[]);
         assert!(
             preamble.contains("<<BMAD_JOB_DONE>>"),
             "Preamble must contain the deterministic completion sentinel"
@@ -296,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_build_preamble_mentions_tool_usage_best_practices() {
-        let preamble = build_preamble();
+        let preamble = build_preamble(&[]);
         assert!(
             preamble.contains("mode=\"edit\""),
             "Should mention edit mode for existing files"
@@ -311,5 +326,59 @@ mod tests {
     fn test_shutdown_flag_type_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ShutdownFlag>();
+    }
+
+    // -- Story 9.2: build_preamble MCP integration tests --
+
+    #[test]
+    fn test_build_preamble_empty_mcp_is_identical() {
+        // When mcp_tool_names is empty, output must be byte-identical to
+        // the pre-MCP hardcoded preamble (no extra lines, no trailing space).
+        let preamble = build_preamble(&[]);
+        assert!(
+            !preamble.contains("MCP tools"),
+            "Empty MCP names must not inject any MCP line into preamble"
+        );
+    }
+
+    #[test]
+    fn test_build_preamble_with_mcp_tools_includes_names() {
+        let names = vec![
+            "browser_navigate".to_string(),
+            "browser_screenshot".to_string(),
+        ];
+        let preamble = build_preamble(&names);
+        assert!(
+            preamble.contains("browser_navigate"),
+            "Preamble must mention browser_navigate when MCP tools provided"
+        );
+        assert!(
+            preamble.contains("browser_screenshot"),
+            "Preamble must mention browser_screenshot when MCP tools provided"
+        );
+        assert!(
+            preamble.contains("MCP tools"),
+            "Preamble must contain the MCP tools label"
+        );
+        assert!(
+            preamble.contains("Use them like any other tool"),
+            "Preamble must instruct the agent to use MCP tools normally"
+        );
+    }
+
+    #[test]
+    fn test_build_preamble_with_mcp_still_contains_native_tools() {
+        // Even with MCP tools, all existing native tool references must be present.
+        let names = vec!["browser_navigate".to_string(), "browser_click".to_string()];
+        let preamble = build_preamble(&names);
+        assert!(preamble.contains("edit_file"));
+        assert!(preamble.contains("read_file"));
+        assert!(preamble.contains("grep"));
+        assert!(preamble.contains("find_path"));
+        assert!(preamble.contains("list_directory"));
+        assert!(preamble.contains("terminal"));
+        assert!(preamble.contains("ask_supervisor"));
+        assert!(preamble.contains("<<BMAD_JOB_DONE>>"));
+        assert!(preamble.contains("communication_language = English"));
     }
 }

@@ -690,11 +690,12 @@ impl SessionRunner {
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
     ) -> Result<BuiltAgent, ProviderError> {
-        let preamble = self.build_preamble(story)?;
+        let preamble = self.build_preamble(story).await?;
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
         let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
             self.create_tools(&project_root, escalation_slot, decision_log)?;
 
+        let mcp_data = self.mcp_manager.tools_for_builder().await;
         self.agent_factory
             .build(
                 role,
@@ -702,7 +703,8 @@ impl SessionRunner {
                 crate::configure_agent_tools!(
                     git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
                     ThinkTool
-                ),
+                )
+                .with_mcp(mcp_data),
             )
             .await
     }
@@ -715,8 +717,10 @@ impl SessionRunner {
     /// XML context tags via [`dev_agent::activate_agent()`].
     ///
     /// The system prompt provides persistent grounding across all turns.
-    fn build_preamble(&self, _story: &StoryInfo) -> Result<String, ProviderError> {
-        Ok(dev_agent::build_preamble())
+    async fn build_preamble(&self, _story: &StoryInfo) -> Result<String, ProviderError> {
+        let mcp_data = self.mcp_manager.tools_for_builder().await;
+        let mcp_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
+        Ok(dev_agent::build_preamble(&mcp_names))
     }
 
     /// Create the 8 tools for the rig agent: 7 custom tools + ask_supervisor.
@@ -739,6 +743,7 @@ impl SessionRunner {
             Some(Arc::clone(&self.agent_factory)),
             escalation_slot,
             decision_log,
+            Arc::clone(&self.mcp_manager),
         )
         .map_err(|e| ProviderError::ClientCreation {
             provider: "supervisor".to_string(),

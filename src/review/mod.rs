@@ -304,7 +304,9 @@ impl ReviewRunner {
         );
 
         // 1. Build generic preamble (same as SessionRunner)
-        let preamble = dev_agent::build_preamble();
+        let mcp_data = self.mcp_manager.tools_for_builder().await;
+        let mcp_tool_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
+        let preamble = dev_agent::build_preamble(&mcp_tool_names);
 
         // 2. Create shared resources
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
@@ -323,7 +325,8 @@ impl ReviewRunner {
                 crate::configure_agent_tools!(
                     git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
                     ThinkTool
-                ),
+                )
+                .with_mcp(mcp_data),
             )
             .await
             .map_err(|e| match e {
@@ -376,6 +379,7 @@ impl ReviewRunner {
             Some(Arc::clone(&self.agent_factory)),
             escalation_slot,
             decision_log,
+            Arc::clone(&self.mcp_manager),
         )
         .map_err(|e| ReviewError::AgentBuildFailed {
             reason: format!("Failed to create AskSupervisor: {e}"),

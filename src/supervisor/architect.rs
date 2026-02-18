@@ -123,6 +123,8 @@ pub struct ArchitectSession {
     agent_factory: Arc<AgentFactory>,
     /// Project root path — for the ReadFile tool boundary.
     project_root: PathBuf,
+    /// MCP server manager — provides external tool capabilities.
+    mcp_manager: Arc<crate::mcp::McpManager>,
 }
 
 impl ArchitectSession {
@@ -138,7 +140,7 @@ impl ArchitectSession {
     /// Now the `AgentFactory` handles all provider setup (API keys, Copilot token
     /// exchange, API format detection).
     pub fn new(config: &BotConfig) -> Result<Self, ArchitectSessionError> {
-        Self::new_with_factory(config, None)
+        Self::new_with_factory(config, None, Arc::new(crate::mcp::McpManager::empty()))
     }
 
     /// Create a new `ArchitectSession` with an explicit [`AgentFactory`].
@@ -148,6 +150,7 @@ impl ArchitectSession {
     pub fn new_with_factory(
         config: &BotConfig,
         factory: Option<Arc<AgentFactory>>,
+        mcp_manager: Arc<crate::mcp::McpManager>,
     ) -> Result<Self, ArchitectSessionError> {
         // 1. Validate architect.md exists (fail-fast)
         let agent_path = PathBuf::from(&config.bmad_paths.project_root).join(ARCHITECT_AGENT_PATH);
@@ -222,6 +225,7 @@ impl ArchitectSession {
         Ok(Self {
             agent_factory,
             project_root,
+            mcp_manager,
         })
     }
 
@@ -345,13 +349,15 @@ impl AnswerProvider for ArchitectSession {
         // Build the agent via AgentFactory with the generic preamble (tool rules,
         // English override). The architect persona is sent as a user message during
         // activation — same pattern as dev_agent.rs.
-        let preamble = build_preamble();
+        let mcp_data = self.mcp_manager.tools_for_builder().await;
+        let mcp_tool_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
+        let preamble = build_preamble(&mcp_tool_names);
         let agent = self
             .agent_factory
             .build(
                 LlmRole::Supervisor,
                 &preamble,
-                crate::configure_agent_tools!(read_tool),
+                crate::configure_agent_tools!(read_tool).with_mcp(mcp_data),
             )
             .await
             .map_err(|e| ArchitectSessionError::ProviderInit {

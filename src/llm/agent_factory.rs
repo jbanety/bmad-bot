@@ -26,6 +26,8 @@ use rig::agent::{Agent, AgentBuilder};
 use rig::client::CompletionClient;
 use rig::completion::Message;
 use rig::providers::{anthropic, openai};
+use rmcp::model::Tool as McpToolDef;
+use rmcp::service::ServerSink;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -581,6 +583,7 @@ macro_rules! configure_agent_tools {
     ($($tool:expr),+ $(,)?) => {
         $crate::llm::agent_factory::ToolConfigurator {
             tools: ($($tool,)+),
+            mcp_servers: vec![],
         }
     };
 }
@@ -594,6 +597,24 @@ macro_rules! configure_agent_tools {
 pub struct ToolConfigurator<T> {
     /// The tools tuple.
     pub tools: T,
+    /// MCP server tools and sinks to register alongside native tools.
+    ///
+    /// Each entry is a `(tools, sink)` pair from a single MCP server.
+    /// When empty, no `.rmcp_tools()` calls are made — behavior is identical
+    /// to pre-MCP code paths.
+    pub mcp_servers: Vec<(Vec<McpToolDef>, ServerSink)>,
+}
+
+impl<T> ToolConfigurator<T> {
+    /// Inject MCP server tools for registration alongside native tools.
+    ///
+    /// Pass the output of [`McpManager::tools_for_builder()`] directly.
+    /// When `servers` is empty, this is a no-op — no `.rmcp_tools()` calls
+    /// are made during agent construction.
+    pub fn with_mcp(mut self, servers: Vec<(Vec<McpToolDef>, ServerSink)>) -> Self {
+        self.mcp_servers = servers;
+        self
+    }
 }
 
 /// Implement [`AgentConfigurator`] for a 9-tool tuple (the standard tool set).
@@ -617,7 +638,7 @@ where
         builder: AgentBuilder<anthropic::completion::CompletionModel>,
     ) -> Agent<anthropic::completion::CompletionModel> {
         let (t1, t2, t3, t4, t5, t6, t7, t8, t9) = self.tools;
-        builder
+        let mut simple = builder
             .tool(t1)
             .tool(t2)
             .tool(t3)
@@ -626,8 +647,11 @@ where
             .tool(t6)
             .tool(t7)
             .tool(t8)
-            .tool(t9)
-            .build()
+            .tool(t9);
+        for (tools, sink) in self.mcp_servers {
+            simple = simple.rmcp_tools(tools, sink);
+        }
+        simple.build()
     }
 
     fn configure_openai_responses(
@@ -635,7 +659,7 @@ where
         builder: AgentBuilder<openai::responses_api::ResponsesCompletionModel>,
     ) -> Agent<openai::responses_api::ResponsesCompletionModel> {
         let (t1, t2, t3, t4, t5, t6, t7, t8, t9) = self.tools;
-        builder
+        let mut simple = builder
             .tool(t1)
             .tool(t2)
             .tool(t3)
@@ -644,8 +668,11 @@ where
             .tool(t6)
             .tool(t7)
             .tool(t8)
-            .tool(t9)
-            .build()
+            .tool(t9);
+        for (tools, sink) in self.mcp_servers {
+            simple = simple.rmcp_tools(tools, sink);
+        }
+        simple.build()
     }
 
     fn configure_openai_completions(
@@ -653,7 +680,7 @@ where
         builder: AgentBuilder<openai::completion::CompletionModel>,
     ) -> Agent<openai::completion::CompletionModel> {
         let (t1, t2, t3, t4, t5, t6, t7, t8, t9) = self.tools;
-        builder
+        let mut simple = builder
             .tool(t1)
             .tool(t2)
             .tool(t3)
@@ -662,8 +689,11 @@ where
             .tool(t6)
             .tool(t7)
             .tool(t8)
-            .tool(t9)
-            .build()
+            .tool(t9);
+        for (tools, sink) in self.mcp_servers {
+            simple = simple.rmcp_tools(tools, sink);
+        }
+        simple.build()
     }
 }
 
@@ -677,7 +707,11 @@ where
         builder: AgentBuilder<anthropic::completion::CompletionModel>,
     ) -> Agent<anthropic::completion::CompletionModel> {
         let (t1,) = self.tools;
-        builder.tool(t1).build()
+        let mut simple = builder.tool(t1);
+        for (tools, sink) in self.mcp_servers {
+            simple = simple.rmcp_tools(tools, sink);
+        }
+        simple.build()
     }
 
     fn configure_openai_responses(
@@ -685,7 +719,11 @@ where
         builder: AgentBuilder<openai::responses_api::ResponsesCompletionModel>,
     ) -> Agent<openai::responses_api::ResponsesCompletionModel> {
         let (t1,) = self.tools;
-        builder.tool(t1).build()
+        let mut simple = builder.tool(t1);
+        for (tools, sink) in self.mcp_servers {
+            simple = simple.rmcp_tools(tools, sink);
+        }
+        simple.build()
     }
 
     fn configure_openai_completions(
@@ -693,7 +731,11 @@ where
         builder: AgentBuilder<openai::completion::CompletionModel>,
     ) -> Agent<openai::completion::CompletionModel> {
         let (t1,) = self.tools;
-        builder.tool(t1).build()
+        let mut simple = builder.tool(t1);
+        for (tools, sink) in self.mcp_servers {
+            simple = simple.rmcp_tools(tools, sink);
+        }
+        simple.build()
     }
 }
 
@@ -1197,5 +1239,58 @@ mod tests {
                 .reasoning_effort
                 .is_none()
         );
+    }
+
+    // -- Story 9.2: ToolConfigurator MCP integration tests --
+
+    #[tokio::test]
+    async fn test_configure_agent_tools_macro_produces_empty_mcp_servers() {
+        // The macro must initialize mcp_servers to an empty vec.
+        let client: anthropic::Client = anthropic::Client::builder()
+            .api_key("sk-test")
+            .build()
+            .unwrap();
+        let builder = client.agent("test-model").preamble("test");
+
+        let configurator = crate::configure_agent_tools!(rig::tools::think::ThinkTool);
+        assert!(
+            configurator.mcp_servers.is_empty(),
+            "configure_agent_tools! must produce empty mcp_servers by default"
+        );
+        // Verify it still compiles and builds an agent
+        let _agent = configurator.configure_anthropic(builder);
+    }
+
+    #[tokio::test]
+    async fn test_with_mcp_sets_mcp_servers_field() {
+        // with_mcp() should store the provided servers vec.
+        // We can't easily construct real ServerSink instances without a running
+        // MCP server, but we can verify the struct-level plumbing at the type level.
+        let configurator = crate::configure_agent_tools!(rig::tools::think::ThinkTool);
+        assert!(configurator.mcp_servers.is_empty());
+
+        // Verify with_mcp returns Self and the field type is correct.
+        // Using an empty vec is the simplest verification that the builder works.
+        let configurator = configurator.with_mcp(vec![]);
+        assert!(
+            configurator.mcp_servers.is_empty(),
+            "with_mcp(vec![]) should set an empty mcp_servers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_configurator_with_empty_mcp_is_noop() {
+        // When mcp_servers is empty, the for loop never executes — behavior
+        // must be identical to pre-MCP code (zero .rmcp_tools() calls).
+        let client: anthropic::Client = anthropic::Client::builder()
+            .api_key("sk-test")
+            .build()
+            .unwrap();
+        let builder = client.agent("test-model").preamble("test");
+
+        let configurator =
+            crate::configure_agent_tools!(rig::tools::think::ThinkTool).with_mcp(vec![]);
+        // Should build successfully — identical to no-MCP path
+        let _agent = configurator.configure_anthropic(builder);
     }
 }
