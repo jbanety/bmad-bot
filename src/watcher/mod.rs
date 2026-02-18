@@ -762,6 +762,7 @@ development_status:
             log_level: "info".to_string(),
             log_file: "test.log".to_string(),
             code_review_enabled: true,
+            mcp_servers: vec![],
         }
     }
 }

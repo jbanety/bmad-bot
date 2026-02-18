@@ -274,6 +274,9 @@ fn is_context_limit_error(error_msg: &str) -> bool {
 
 /// Session runner — manages the full lifecycle of a single story development session.
 ///
+/// Accepts an `Arc<McpManager>` at construction time so that Story 9.2 can
+/// register MCP-discovered tools on the agent builder.
+///
 /// Constructed once per daemon run and reused across stories. Each call to
 /// [`run()`](Self::run) creates a fresh agent, WAL, and chat loop for one story.
 /// Also provides [`check_and_recover_wal()`](Self::check_and_recover_wal) and
@@ -289,6 +292,8 @@ pub struct SessionRunner {
     analyzer: ResponseAnalyzer,
     /// Cooperative shutdown flag — checked between streaming chunks and chat turns.
     shutdown: ShutdownFlag,
+    /// MCP server manager — provides external tool capabilities (Story 9.2 usage).
+    mcp_manager: Arc<crate::mcp::McpManager>,
 }
 
 impl SessionRunner {
@@ -304,6 +309,7 @@ impl SessionRunner {
         config: Arc<BotConfig>,
         agent_factory: Arc<AgentFactory>,
         shutdown: ShutdownFlag,
+        mcp_manager: Arc<crate::mcp::McpManager>,
     ) -> Self {
         let state_file_path =
             Path::new(&config.bmad_paths.implementation_artifacts).join(".bmad-bot-session.yaml");
@@ -313,6 +319,7 @@ impl SessionRunner {
             state_file_path,
             analyzer: ResponseAnalyzer::new(),
             shutdown,
+            mcp_manager,
         }
     }
 
@@ -1970,6 +1977,7 @@ mod tests {
             log_level: "info".to_string(),
             log_file: "test.log".to_string(),
             code_review_enabled: true,
+            mcp_servers: vec![],
         }
     }
 
@@ -1991,6 +1999,10 @@ mod tests {
         Arc::new(AgentFactory::new(config, secrets))
     }
 
+    fn make_test_mcp_manager() -> Arc<crate::mcp::McpManager> {
+        Arc::new(crate::mcp::McpManager::empty())
+    }
+
     #[test]
     fn test_session_runner_new_sets_state_file_path() {
         let dir = tempfile::tempdir().expect("create temp dir");
@@ -1998,7 +2010,7 @@ mod tests {
         let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, factory, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown, make_test_mcp_manager());
 
         assert!(
             runner
@@ -2018,10 +2030,28 @@ mod tests {
         let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, factory, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown, make_test_mcp_manager());
 
         let expected = dir.path().join(".bmad-bot-session.yaml");
         assert_eq!(runner.state_file_path, expected);
+    }
+
+    #[test]
+    fn test_session_runner_stores_mcp_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let factory = make_test_factory(Arc::clone(&config));
+        let mcp = make_test_mcp_manager();
+        let runner = SessionRunner::new(
+            Arc::clone(&config),
+            Arc::clone(&factory),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&mcp),
+        );
+        // Verify mcp_manager is stored (Arc strong count increased)
+        assert_eq!(Arc::strong_count(&mcp), 2);
+        drop(runner);
+        assert_eq!(Arc::strong_count(&mcp), 1);
     }
 
     #[test]
@@ -2033,7 +2063,7 @@ mod tests {
         let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, factory, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown, make_test_mcp_manager());
 
         // Must still be {implementation_artifacts}/.bmad-bot-session.yaml
         let expected = dir.path().join(".bmad-bot-session.yaml");
@@ -2190,7 +2220,7 @@ mod tests {
         let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let runner = SessionRunner::new(config, factory, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown, make_test_mcp_manager());
 
         let result = runner.check_and_recover_wal().await;
         assert!(
@@ -2212,7 +2242,7 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory = make_test_factory(Arc::clone(&config));
-        let runner = SessionRunner::new(config, factory, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown, make_test_mcp_manager());
 
         let result = runner.check_and_recover_wal().await;
         assert!(result.is_some(), "Should return Some when WAL file exists");
@@ -2241,7 +2271,7 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory = make_test_factory(Arc::clone(&config));
-        let runner = SessionRunner::new(config, factory, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown, make_test_mcp_manager());
 
         let result = runner.check_and_recover_wal().await;
         assert!(result.is_none(), "Should return None for corrupt WAL");
@@ -2349,7 +2379,7 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory = make_test_factory(Arc::clone(&config));
-        let runner = SessionRunner::new(config, factory, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown, make_test_mcp_manager());
         let recovery = runner
             .check_and_recover_wal()
             .await
@@ -2382,7 +2412,7 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory = make_test_factory(Arc::clone(&config));
-        let runner = SessionRunner::new(config, factory, shutdown);
+        let runner = SessionRunner::new(config, factory, shutdown, make_test_mcp_manager());
         let recovery = runner
             .check_and_recover_wal()
             .await
@@ -2630,6 +2660,17 @@ mod tests {
 
     // -- build_recovery_message tests --
 
+    fn make_test_runner_with_dir(dir: &std::path::Path) -> SessionRunner {
+        let config = Arc::new(make_runner_test_config(dir));
+        let factory = make_test_factory(Arc::clone(&config));
+        SessionRunner::new(
+            config,
+            factory,
+            Arc::new(AtomicBool::new(false)),
+            make_test_mcp_manager(),
+        )
+    }
+
     fn make_test_runner() -> SessionRunner {
         let dir = tempfile::tempdir().expect("create temp dir");
         let config = Arc::new(make_runner_test_config(dir.path()));
@@ -2637,7 +2678,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         // Leak the tempdir so it isn't dropped (this is fine in tests)
         std::mem::forget(dir);
-        SessionRunner::new(config, factory, shutdown)
+        SessionRunner::new(config, factory, shutdown, make_test_mcp_manager())
     }
 
     fn make_test_story_info() -> StoryInfo {

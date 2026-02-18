@@ -186,6 +186,8 @@ pub struct ReviewRunner {
     analyzer: ResponseAnalyzer,
     /// Cooperative shutdown flag — checked between streaming chunks and chat turns.
     shutdown: ShutdownFlag,
+    /// MCP server manager — provides external tool capabilities (Story 9.2 usage).
+    mcp_manager: Arc<crate::mcp::McpManager>,
 }
 
 impl ReviewRunner {
@@ -195,6 +197,7 @@ impl ReviewRunner {
         secrets: Arc<BotSecrets>,
         agent_factory: Arc<AgentFactory>,
         shutdown: ShutdownFlag,
+        mcp_manager: Arc<crate::mcp::McpManager>,
     ) -> Self {
         Self {
             config,
@@ -202,6 +205,7 @@ impl ReviewRunner {
             agent_factory,
             analyzer: ResponseAnalyzer::new(),
             shutdown,
+            mcp_manager,
         }
     }
 
@@ -733,7 +737,14 @@ mod tests {
 
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let agent_factory = Arc::new(AgentFactory::new(config.clone(), secrets.clone()));
-        let runner = ReviewRunner::new(config.clone(), secrets, agent_factory, shutdown);
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let runner = ReviewRunner::new(
+            config.clone(),
+            secrets,
+            agent_factory,
+            shutdown,
+            mcp_manager,
+        );
         // Verify config is stored by checking a known field
         assert_eq!(runner.config.llm.review.provider, "anthropic");
     }

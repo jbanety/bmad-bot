@@ -104,6 +104,11 @@ pub struct BotConfig {
     /// Default: `true`.
     #[serde(default = "default_code_review_enabled")]
     pub code_review_enabled: bool,
+
+    /// External MCP server configurations.
+    /// Defaults to empty vec when absent — daemon operates identically to before.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 /// Default code review enabled — true (review runs by default).
@@ -209,6 +214,50 @@ pub struct BmadPathsConfig {
     pub planning_artifacts: String,
     /// Path to implementation artifacts (stories, sprint-status).
     pub implementation_artifacts: String,
+}
+
+// ---------------------------------------------------------------------------
+// MCP Server Configuration
+// ---------------------------------------------------------------------------
+
+/// Transport protocol for communicating with an MCP server.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    /// Standard I/O transport — spawn a child process and communicate via stdin/stdout.
+    Stdio,
+}
+
+impl Default for McpTransport {
+    fn default() -> Self {
+        Self::Stdio
+    }
+}
+
+/// Configuration for an external MCP server that the daemon connects to at startup.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct McpServerConfig {
+    /// Human-readable name for this MCP server (e.g. `"playwright"`).
+    pub name: String,
+    /// Command to spawn the MCP server process (e.g. `"npx"`).
+    pub command: String,
+    /// Arguments passed to the command (e.g. `["@anthropic/mcp-playwright"]`).
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Transport protocol. Defaults to `Stdio`.
+    #[serde(default)]
+    pub transport: McpTransport,
+    /// Whether this server is enabled. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-server handshake timeout in seconds. `None` falls back to 30s default.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Default for `enabled` fields — true.
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +444,7 @@ impl BotConfig {
             log_format: log_format.to_string(),
             log_level: log_level.to_string(),
             log_file: "bmad-bot.log".to_string(),
+            mcp_servers: vec![],
         }
     }
 }
@@ -1208,5 +1258,123 @@ bmad_paths:
         assert_eq!(config.llm.dev.reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(config.llm.review.reasoning_effort.as_deref(), Some("low"));
         assert!(config.llm.supervisor.reasoning_effort.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // MCP Server Config tests (Story 9.1 — Task 2 / Task 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mcp_server_config_full_deserialization() {
+        let yaml = r#"
+name: playwright
+command: npx
+args: ["@anthropic/mcp-playwright"]
+transport: stdio
+enabled: true
+timeout_secs: 45
+"#;
+        let cfg: McpServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(cfg.name, "playwright");
+        assert_eq!(cfg.command, "npx");
+        assert_eq!(cfg.args, vec!["@anthropic/mcp-playwright"]);
+        assert!(matches!(cfg.transport, McpTransport::Stdio));
+        assert!(cfg.enabled);
+        assert_eq!(cfg.timeout_secs, Some(45));
+    }
+
+    #[test]
+    fn test_mcp_server_config_defaults() {
+        let yaml = r#"
+name: minimal
+command: some-cmd
+"#;
+        let cfg: McpServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(cfg.name, "minimal");
+        assert_eq!(cfg.command, "some-cmd");
+        assert!(cfg.args.is_empty(), "args should default to empty vec");
+        assert!(
+            matches!(cfg.transport, McpTransport::Stdio),
+            "transport should default to Stdio"
+        );
+        assert!(cfg.enabled, "enabled should default to true");
+        assert_eq!(
+            cfg.timeout_secs, None,
+            "timeout_secs should default to None"
+        );
+    }
+
+    #[test]
+    fn test_mcp_transport_default_is_stdio() {
+        let transport = McpTransport::default();
+        assert!(matches!(transport, McpTransport::Stdio));
+    }
+
+    #[test]
+    fn test_bot_config_parses_without_mcp_servers() {
+        // Backward compatibility: existing YAML without mcp_servers section must still parse.
+        let config = config_from_str(VALID_YAML).unwrap();
+        assert!(
+            config.mcp_servers.is_empty(),
+            "mcp_servers should default to empty vec"
+        );
+    }
+
+    #[test]
+    fn test_bot_config_parses_with_mcp_servers() {
+        let yaml = format!(
+            r#"{}
+mcp_servers:
+  - name: playwright
+    command: npx
+    args: ["@anthropic/mcp-playwright"]
+  - name: filesystem
+    command: node
+    args: ["fs-server.js"]
+    enabled: false
+    timeout_secs: 10
+"#,
+            VALID_YAML
+        );
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 2);
+
+        let pw = &config.mcp_servers[0];
+        assert_eq!(pw.name, "playwright");
+        assert_eq!(pw.command, "npx");
+        assert!(pw.enabled);
+        assert_eq!(pw.timeout_secs, None);
+
+        let fs = &config.mcp_servers[1];
+        assert_eq!(fs.name, "filesystem");
+        assert!(!fs.enabled);
+        assert_eq!(fs.timeout_secs, Some(10));
+    }
+
+    #[test]
+    fn test_bot_config_with_mcp_servers_passes_validation() {
+        let yaml = format!(
+            r#"{}
+mcp_servers:
+  - name: test-server
+    command: echo
+    args: ["hello"]
+"#,
+            VALID_YAML
+        );
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_mcp_server_config_disabled_explicit() {
+        let yaml = r#"
+name: disabled-server
+command: npx
+args: ["@some/mcp-server"]
+enabled: false
+"#;
+        let cfg: McpServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert!(!cfg.enabled);
     }
 }

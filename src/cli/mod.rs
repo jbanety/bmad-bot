@@ -724,6 +724,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
         log_format: LOG_FORMATS[log_format_idx].to_string(),
         log_level: LOG_LEVELS[log_level_idx].to_string(),
         log_file: "bmad-bot.log".to_string(),
+        mcp_servers: vec![],
     })
 }
 
@@ -1315,11 +1316,15 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     // Create watcher (Story 2.1)
     let watcher = crate::watcher::Watcher::new(Arc::clone(&config));
 
+    // Init MCP servers — infallible, logs failures internally (Story 9.1)
+    let mcp_manager = Arc::new(crate::mcp::McpManager::init(&config.mcp_servers).await);
+
     // Create story pipeline (Story 6.2)
     let pipeline = crate::pipeline::StoryPipeline::new(
         Arc::clone(&config),
         Arc::clone(&secrets),
         std::sync::Arc::clone(&shutdown),
+        Arc::clone(&mcp_manager),
     )
     .map_err(|e| CliError::Init {
         reason: format!("Failed to create story pipeline: {e}"),
@@ -1355,6 +1360,9 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
         &shutdown,
     )
     .await?;
+
+    // Shutdown MCP servers before marking daemon stopped (Story 9.1)
+    mcp_manager.shutdown().await;
 
     // Clean shutdown — update state and remove file
     daemon_state.mark_stopped();
@@ -1519,6 +1527,7 @@ mod tests {
             log_format: "pretty".to_string(),
             log_level: "info".to_string(),
             log_file: "bmad-bot.log".to_string(),
+            mcp_servers: vec![],
         }
     }
 

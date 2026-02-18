@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod git_provider;
 mod llm;
+mod mcp;
 mod notifier;
 mod pipeline;
 mod review;

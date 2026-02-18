@@ -145,6 +145,7 @@ impl StoryPipeline {
         config: Arc<BotConfig>,
         secrets: Arc<BotSecrets>,
         shutdown: ShutdownFlag,
+        mcp_manager: Arc<crate::mcp::McpManager>,
     ) -> Result<Self, PipelineError> {
         // Extract the correct token for the configured git provider
         let token = match config.git_provider.provider.as_str() {
@@ -172,12 +173,14 @@ impl StoryPipeline {
             Arc::clone(&config),
             Arc::clone(&agent_factory),
             Arc::clone(&shutdown),
+            Arc::clone(&mcp_manager),
         );
         let review_runner = ReviewRunner::new(
             Arc::clone(&config),
             Arc::clone(&secrets),
             Arc::clone(&agent_factory),
             shutdown,
+            mcp_manager,
         );
 
         Ok(Self {
