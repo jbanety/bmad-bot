@@ -221,17 +221,12 @@ pub struct BmadPathsConfig {
 // ---------------------------------------------------------------------------
 
 /// Transport protocol for communicating with an MCP server.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpTransport {
     /// Standard I/O transport — spawn a child process and communicate via stdin/stdout.
+    #[default]
     Stdio,
-}
-
-impl Default for McpTransport {
-    fn default() -> Self {
-        Self::Stdio
-    }
 }
 
 /// Configuration for an external MCP server that the daemon connects to at startup.
@@ -373,17 +368,17 @@ impl BotConfig {
         }
 
         // Validate reasoning_effort if provided
-        if let Some(ref effort) = role.reasoning_effort {
-            if !VALID_REASONING_EFFORTS.contains(&effort.as_str()) {
-                return Err(ConfigError::InvalidField {
-                    field: format!("{field_prefix}.reasoning_effort"),
-                    reason: format!(
-                        "invalid value '{}'; expected one of: {}",
-                        effort,
-                        VALID_REASONING_EFFORTS.join(", ")
-                    ),
-                });
-            }
+        if let Some(ref effort) = role.reasoning_effort
+            && !VALID_REASONING_EFFORTS.contains(&effort.as_str())
+        {
+            return Err(ConfigError::InvalidField {
+                field: format!("{field_prefix}.reasoning_effort"),
+                reason: format!(
+                    "invalid value '{}'; expected one of: {}",
+                    effort,
+                    VALID_REASONING_EFFORTS.join(", ")
+                ),
+            });
         }
 
         Ok(())

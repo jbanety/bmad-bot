@@ -90,6 +90,7 @@ BMAD Bot is a Rust daemon that autonomously picks up user stories from a sprint 
 - **Pull Request Automation** — Creates PRs on GitHub or GitLab with agent-written descriptions and supervisor decision logs
 - **Telegram Notifications** — Run summaries with story status and PR links
 - **Graceful Shutdown** — SIGTERM/SIGINT triggers clean completion of the current step
+- **MCP Tool Extensibility** — Connect external [MCP servers](docs/mcp-servers.md) (e.g., Playwright browser automation) via config — zero code changes required
 - **BMAD Auto-Discovery** — Detects BMAD version and installed modules from the project repository
 
 ---

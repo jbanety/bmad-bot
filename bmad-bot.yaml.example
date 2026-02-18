@@ -49,16 +49,28 @@ notifications:
 # When enabled, a separate LLM runs the BMAD CR workflow to review code before PR creation.
 code_review_enabled: true
 
-# External MCP servers — optional, defaults to none
-# The daemon connects to these at startup, discovers their tools,
-# and makes them available to the agent during sessions.
+# MCP (Model Context Protocol) server configuration — optional
+# The daemon connects to configured MCP servers at startup, discovers their tools,
+# and exposes them to the dev agent alongside native tools (edit_file, grep, etc.).
+# Adding a new MCP server = one config entry here, zero code changes.
+# All changes require a daemon restart to take effect.
+# See docs/mcp-servers.md for full documentation.
+#
 # mcp_servers:
 #   - name: playwright
 #     command: npx
-#     args: ["@anthropic/mcp-playwright"]
-#     transport: stdio          # "stdio" (default, only option for now)
-#     enabled: true             # default: true — set false to skip
-#     timeout_secs: 30          # handshake timeout in seconds (default: 30)
+#     args: ["-y", "@playwright/mcp"]
+#     transport: stdio        # Only "stdio" supported currently
+#     enabled: true           # Set to false to disable without removing config
+#     # timeout_secs: 30      # Optional: MCP handshake timeout in seconds (default: 30)
+#
+#   # Example: adding another MCP server
+#   # - name: my-database-tool
+#   #   command: npx
+#   #   args: ["-y", "@example/db-mcp-server"]
+#   #   transport: stdio
+#   #   enabled: true
+#   #   timeout_secs: 60      # Increase timeout for slow-starting servers
 
 # BMAD project paths — adjust to match your project layout
 bmad_paths:
