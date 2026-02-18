@@ -1,6 +1,6 @@
 ---
 stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step-03-create-stories', 'step-04-final-validation']
-inputDocuments: ['_bmad-output/planning-artifacts/prd.md', '_bmad-output/planning-artifacts/architecture.md']
+inputDocuments: ['_bmad-output/planning-artifacts/prd.md', '_bmad-output/planning-artifacts/architecture.md', '_bmad-output/planning-artifacts/architect-brief-mcp-client-integration.md']
 ---
 
 # BMAD Bot - Epic Breakdown
@@ -70,6 +70,13 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR36: The daemon can validate configuration at startup and report missing or invalid settings
 - FR37: The daemon can detect an interrupted session at startup (presence of WAL file) and resume the session by reloading chat history and reconstructing the agent
 - FR38: The daemon can detect a context window limit error during a session, summarize the history via a separate LLM call, and bootstrap a fresh session with compressed context to continue the work
+
+**MCP Client Integration**
+- FR44: The daemon can connect to external MCP servers at startup via the Model Context Protocol (stdio transport), perform the initialize handshake, and discover available tools via `list_tools()`
+- FR45: The daemon can parse an optional `mcp_servers` configuration section defining for each server: name, command, arguments, transport, and enabled/disabled flag
+- FR46: MCP server connection failures are non-blocking — the daemon logs a warning and continues with native tools only
+- FR47: The daemon gracefully shuts down MCP server connections during cooperative shutdown (sends MCP `close` notification before killing child processes)
+- FR48: The agent can use MCP-discovered tools (e.g., Playwright browser automation) identically to native tools during development sessions, via rig's built-in `McpTool` + `.rmcp_tools()` bridge
 
 ### NonFunctional Requirements
 
@@ -181,6 +188,11 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR41: Epic 4 (Story 4.4) — Validate git CLI availability at startup and fail fast if missing
 - FR42: Epic 4 (Story 4.5) — Centralize LLM provider construction via AgentFactory with BuiltAgent enum dispatch. Hardcoded API format per provider/model. Fixes Copilot Responses API bug for OpenAI models
 - FR43: Epic 4 (Story 4.6) — Post-implementation impact analysis: agent analyzes downstream dependent stories after completion and updates their Previous Story Intelligence sections. Best-effort, non-blocking
+- FR44: Epic 9 — Connect to external MCP servers at startup, perform handshake, discover tools
+- FR45: Epic 9 — Parse optional `mcp_servers` config section
+- FR46: Epic 9 — MCP connection failures are non-blocking
+- FR47: Epic 9 — Graceful MCP shutdown during cooperative shutdown
+- FR48: Epic 9 — Agent uses MCP-discovered tools identically to native tools via rig's `McpTool`
 
 ## Epic List
 
@@ -218,6 +230,11 @@ All 6 functional epics have been implemented and pass 573 unit tests. This epic 
 Replace the monolithic FsTool with focused, Claude Code-style tools to dramatically improve agent token efficiency, code safety, and codebase navigation. After this epic, the dev agent edits files surgically instead of rewriting them, searches code with grep, and navigates with outlines — matching the capability level of modern AI coding assistants. This is a refactoring of Epic 4 Story 4.1's FsTool implementation, not greenfield work.
 **FRs covered:** FR9
 **Depends on:** Epic 4 (Story 4.1 as baseline)
+
+### Epic 9: MCP Client Integration — Dynamic External Tool Discovery
+Connect to external MCP servers at daemon startup, discover their tools, and expose them to the rig agent alongside native tools — leveraging rig's built-in `McpTool` and `.rmcp_tools()` support. The autonomous agent gains browser automation (Playwright) and any future MCP-compatible tooling without custom tool implementations. Zero code changes to add a new MCP server — just a config entry.
+**FRs covered:** FR44, FR45, FR46, FR47, FR48
+**Depends on:** Epic 4 (AgentFactory + tool registration infrastructure)
 
 ---
 
@@ -2034,4 +2051,221 @@ So that I can use the full tool set for efficient autonomous development.
 **Existing Epics Impacted:**
 - **Epic 4, Story 4.1** ("Rig Tools Implementation") — already implemented. Epic 8 is a refactoring follow-up. Story 4.1 is the baseline.
 - **Epic 4, Story 4.2** ("Agent Session Setup & Chat Loop") — preamble changes in Story 8.5. Already implemented, needs update.
+
+---
+
+## Epic 9: MCP Client Integration — Dynamic External Tool Discovery
+
+Connect to external MCP servers at daemon startup, discover their tools, and expose them to the rig agent alongside native tools — leveraging rig's built-in `McpTool` and `.rmcp_tools()` support. The autonomous agent gains browser automation (Playwright) and any future MCP-compatible tooling without custom tool implementations. Zero code changes to add a new MCP server — just a config entry.
+
+**Why this epic exists:** The autonomous agent needs to verify its own work — launch a dev server, open a browser, confirm the app runs. Rather than building and maintaining custom tool implementations for each external capability, we connect to the MCP ecosystem. An architecture spike (2026-02-18) confirmed that rig already provides native MCP client support (`McpTool`, `AgentBuilder::rmcp_tools()`, `ToolDyn`), eliminating the need for a custom bridge layer.
+
+**Dependency order:** Sequential — each story builds on the previous.
+
+```
+9.1 McpManager + Config ──► 9.2 Agent Integration ──► 9.3 Playwright Validation & Docs
+```
+
+**Reference documents:**
+- `_bmad-output/planning-artifacts/architect-brief-mcp-client-integration.md` — Full brief with spike findings
+- `src/llm/agent_factory.rs` — `AgentConfigurator` trait, `ToolConfigurator` struct, `configure_agent_tools!` macro
+- `src/session/runner.rs` — `build_preamble()`, `configure_agent_tools!` usage
+- `rig-core/src/tool/mod.rs` — `McpTool`, `ToolDyn` (behind `rmcp` feature flag)
+- `rig-core/src/agent/builder.rs` — `AgentBuilder::rmcp_tools()`, `AgentBuilderSimple::rmcp_tools()`
+
+---
+
+### Story 9.1: MCP Server Lifecycle Management & Config
+
+As a daemon operator,
+I want the daemon to connect to external MCP servers at startup, discover their tools, and shut them down gracefully,
+So that the agent gains access to external capabilities (browser automation, etc.) without custom tool implementations.
+
+**Acceptance Criteria:**
+
+**Given** `Cargo.toml` is updated
+**When** the project is compiled
+**Then** `rmcp` is added as a dependency with features `client` + `transport-child-process`
+**And** the `rmcp` feature flag is enabled on `rig-core`
+**And** the `rmcp` version is compatible with rig-core's dependency (currently 0.13)
+
+**Given** `bmad-bot.yaml` contains an `mcp_servers` section with one or more server entries
+**When** the daemon parses the config at startup
+**Then** `BotConfig` exposes an optional `mcp_servers: Vec<McpServerConfig>` field (defaults to empty)
+**And** each entry includes: `name` (String), `command` (String), `args` (Vec<String>), `transport` (enum, default stdio), `enabled` (bool, default true)
+**And** entries with `enabled: false` are skipped
+
+**Given** no `mcp_servers` section exists in the config
+**When** the daemon starts
+**Then** `McpManager` is initialized with zero servers (empty Vec)
+**And** the daemon operates identically to before — zero behavioral change
+
+**Given** a valid `mcp_servers` config with an enabled server (e.g., Playwright)
+**When** `McpManager::init()` is called during daemon startup
+**Then** the daemon spawns the server process via rmcp's stdio transport
+**And** the MCP initialize handshake completes successfully (handled by rmcp)
+**And** `list_tools()` is called on the connected server
+**And** the discovered `Vec<rmcp::model::Tool>` and `ServerSink` are stored in `McpServerHandle`
+**And** a `tracing::info!()` log records the server name and number of tools discovered
+
+**Given** a configured MCP server command that does not exist on the system (e.g., `npx` not installed)
+**When** `McpManager::init()` attempts to spawn it
+**Then** the failure is logged via `tracing::warn!()` with the server name and error details
+**And** the daemon continues startup without that server's tools
+**And** other configured MCP servers are still attempted
+
+**Given** a configured MCP server that fails the handshake or times out
+**When** `McpManager::init()` attempts the connection
+**Then** a configurable timeout (default 30s) bounds the handshake attempt
+**And** the failure is logged via `tracing::warn!()`
+**And** the daemon continues without that server
+
+**Given** multiple MCP servers are configured and connected
+**When** `McpManager::tools_for_builder()` is called
+**Then** it returns `Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>` — one tuple per connected server
+**And** each `ServerSink` is cloneable for use across sessions
+
+**Given** the daemon receives SIGTERM/SIGINT
+**When** cooperative shutdown begins
+**Then** `McpManager::shutdown()` is called
+**And** MCP `close` notifications are sent to all connected servers before dropping connections
+**And** child processes are cleaned up
+
+**Given** the module is implemented
+**When** inspecting the code structure
+**Then** `src/mcp/mod.rs` exports `McpManager` and `McpServerConfig`
+**And** `src/mcp/manager.rs` contains `McpManager`, `McpServerHandle`, and `McpServerConfig`
+**And** error types follow the per-module thiserror pattern (`McpError` enum)
+**And** unit tests cover: empty config, successful connection (mocked), failed spawn, handshake timeout, graceful shutdown, `tools_for_builder()` output shape
+
+**Dependencies:** None (first story in epic)
+
+---
+
+### Story 9.2: Agent Integration — Register MCP Tools on Session Build
+
+As a dev agent,
+I want MCP-discovered tools registered alongside my native tools when my session is built,
+So that I can use browser automation and other external tools identically to edit_file, grep, terminal, etc.
+
+**Acceptance Criteria:**
+
+**Given** `ToolConfigurator` in `src/llm/agent_factory.rs` currently has a single `tools` field
+**When** Story 9.2 is complete
+**Then** `ToolConfigurator` has an additional `mcp_servers: Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>` field
+**And** the `configure_agent_tools!` macro initializes `mcp_servers` to `vec![]` by default
+**And** `ToolConfigurator` exposes a `with_mcp(self, servers: Vec<(Vec<rmcp::model::Tool>, ServerSink)>) -> Self` method for injection
+
+**Given** `McpManager` has discovered tools from one or more MCP servers
+**When** a `ToolConfigurator` is created via `configure_agent_tools!` and `.with_mcp(mcp_manager.tools_for_builder())`
+**Then** each `configure_*` impl (configure_anthropic, configure_openai_responses, configure_openai_completions) chains `.rmcp_tools(tools, sink)` once per MCP server after the native `.tool()` calls and before `.build()`
+
+**Given** no MCP servers are configured (empty vec)
+**When** the `configure_*` methods execute
+**Then** behavior is identical to before — no `.rmcp_tools()` calls, native tools only
+**And** the `AgentConfigurator` trait signature is unchanged
+
+**Given** the `ToolConfigurator` impl for 1-tool tuple (supervisor/architect use case in `ToolConfigurator<(T1,)>`)
+**When** MCP tools are injected via `.with_mcp()`
+**Then** MCP tools are also chained for the 1-tool configurator
+**And** the supervisor/architect agent gains MCP tools if configured
+
+**Given** `AgentFactory::build()` in `src/llm/agent_factory.rs` is called
+**When** `McpManager` is available
+**Then** `McpManager` (or a reference/clone of its tool data) is accessible to the configurator
+**And** the call sites in `src/session/runner.rs`, `src/review/mod.rs`, and `src/supervisor/architect.rs` pass MCP data through to the configurator
+
+**Given** MCP tools are registered on an agent
+**When** `build_preamble()` in `src/session/dev_agent.rs` generates the system prompt
+**Then** the preamble's tool list section includes the names of available MCP tools (e.g., `browser_navigate`, `browser_screenshot`, etc.)
+**And** if no MCP tools are configured, the preamble is unchanged
+
+**Given** an agent session is started with MCP tools registered
+**When** the agent receives its tool definitions
+**Then** both native tools (edit_file, grep, etc.) and MCP tools (browser_navigate, etc.) appear in the tool list
+**And** the agent can call MCP tools — calls are proxied via rig's `McpTool` to the MCP server transparently
+
+**Given** all changes are complete
+**When** `cargo test` is run
+**Then** all existing tests pass unchanged (zero regression on native tool registration)
+**And** new unit tests verify: ToolConfigurator with empty mcp_servers behaves identically, ToolConfigurator with mocked MCP data chains rmcp_tools correctly, with_mcp builder method works
+
+**Dependencies:** Story 9.1
+
+---
+
+### Story 9.3: Playwright MCP Validation & Documentation
+
+As a daemon operator,
+I want validated Playwright MCP integration and clear documentation on adding MCP servers,
+So that I can confidently enable browser automation and extend the agent with new MCP tools in the future.
+
+**Acceptance Criteria:**
+
+**Given** Playwright MCP server (`@playwright/mcp`) is installed on the system
+**When** the daemon starts with this config:
+```yaml
+mcp_servers:
+  - name: playwright
+    command: npx
+    args: ["-y", "@playwright/mcp"]
+    transport: stdio
+    enabled: true
+```
+**Then** the daemon connects to the Playwright MCP server
+**And** discovers browser automation tools (navigate, screenshot, click, fill, etc.)
+**And** logs the discovered tool names and count
+
+**Given** an agent session is active with Playwright MCP tools registered
+**When** the agent calls `browser_navigate` with a URL
+**Then** the Playwright MCP server opens a browser and navigates to the URL
+**And** the result is returned to the agent as text content
+
+**Given** an agent session is active with Playwright MCP tools registered
+**When** the agent calls `browser_screenshot`
+**Then** the Playwright MCP server captures a screenshot
+**And** the result (base64 image data or confirmation) is returned to the agent
+
+**Given** the Playwright MCP server crashes or becomes unresponsive mid-session
+**When** the agent calls a Playwright tool
+**Then** a clear error is returned to the agent via rig's `McpTool` error handling
+**And** the agent can continue using native tools (edit_file, grep, terminal, etc.)
+**And** the session is not terminated
+
+**Given** a user wants to add a new MCP server (e.g., a database tool)
+**When** they read the project documentation
+**Then** `docs/mcp-servers.md` (or equivalent section in README) explains:
+  - The `mcp_servers` config format with all fields
+  - How to add a new server (one config entry, zero code changes)
+  - How to disable a server without removing config (`enabled: false`)
+  - Prerequisites (e.g., `npx` for npm-based MCP servers)
+  - Troubleshooting: how to verify a server connects (check daemon logs for tool discovery messages)
+**And** the Playwright example config is included as a reference
+
+**Given** the documentation is complete
+**When** reviewing the `bmad-bot.yaml` example/template
+**Then** it includes a commented-out `mcp_servers` section showing the Playwright example
+
+**Dependencies:** Story 9.2
+
+---
+
+### Epic 9 Summary
+
+| Story | Title | Dependencies |
+|-------|-------|--------------|
+| 9.1 | MCP Server Lifecycle Management & Config | — |
+| 9.2 | Agent Integration — Register MCP Tools on Session Build | 9.1 |
+| 9.3 | Playwright MCP Validation & Documentation | 9.2 |
+
+**Execution Strategy:**
+- Stories must be executed sequentially: 9.1 → 9.2 → 9.3
+- Story 9.1 is the heaviest (new module, config, lifecycle) but all components are tightly coupled
+- Story 9.2 is a targeted refactor of existing `ToolConfigurator` — no new modules, no trait changes
+- Story 9.3 is validation + docs — requires a working Playwright environment for manual E2E testing
+
+**Key architecture decisions:**
+- rig's native `rmcp` feature provides `McpTool` + `AgentBuilder::rmcp_tools()` — zero custom bridge code
+- `AgentConfigurator` trait is unchanged — only `ToolConfigurator` struct and its impls are modified
+- MCP failures are always non-blocking — the daemon never crashes due to an MCP server issue
 - **Epic 7** (Integration Tests) — not yet implemented. Tool integration test stories (especially 7.8) should be written against the new surgical tools, not the old FsTool.
