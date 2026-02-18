@@ -116,3 +116,9 @@ development_status:
   8-4-list-directory-tool-fstool-removal-complete-migration: done # depends-on: 8-3
   8-5-agent-integration-preamble-registration-session-update: done # depends-on: 8-4
   epic-8-retrospective: optional
+
+  epic-9: backlog
+  9-1-mcp-server-lifecycle-management-config: backlog
+  9-2-agent-integration-register-mcp-tools-on-session-build: backlog # depends-on: 9-1
+  9-3-playwright-mcp-validation-documentation: backlog # depends-on: 9-2
+  epic-9-retrospective: optional
