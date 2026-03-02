@@ -758,7 +758,6 @@ impl StoryPipeline {
         summary
     }
 
-    /// Send a notification for a single story result (non-blocking).
     /// Push a local branch to the remote using git CLI.
     ///
     /// Uses `--force-with-lease` because story branches are single-developer
@@ -845,6 +844,11 @@ impl StoryPipeline {
         })
     }
 
+    /// Send a notification for a single story result (non-blocking).
+    ///
+    /// Derives `story_id` from the first two dash-separated segments of `story_key`
+    /// (e.g. `"4-1-rig-tools"` → `"4.1"`). Notification failures are logged but
+    /// never propagate — the pipeline always continues regardless of notifier state.
     async fn notify_story_result(&self, result: &PipelineResult) {
         let notification = StoryNotification {
             story_id: result
