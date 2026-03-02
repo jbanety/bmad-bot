@@ -720,7 +720,10 @@ impl SessionRunner {
     async fn build_preamble(&self, _story: &StoryInfo) -> Result<String, ProviderError> {
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         let mcp_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
-        Ok(dev_agent::build_preamble(&mcp_names))
+        Ok(dev_agent::build_preamble(
+            &mcp_names,
+            &self.config.llm.dev.model,
+        ))
     }
 
     /// Create the 8 tools for the rig agent: 7 custom tools + ask_supervisor.

@@ -351,7 +351,11 @@ impl AnswerProvider for ArchitectSession {
         // activation — same pattern as dev_agent.rs.
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         let mcp_tool_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
-        let preamble = build_preamble(&mcp_tool_names);
+        let supervisor_model = &self
+            .agent_factory
+            .config_for_role(LlmRole::Supervisor)
+            .model;
+        let preamble = build_preamble(&mcp_tool_names, supervisor_model);
         let agent = self
             .agent_factory
             .build(

@@ -306,7 +306,7 @@ impl ReviewRunner {
         // 1. Build generic preamble (same as SessionRunner)
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         let mcp_tool_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
-        let preamble = dev_agent::build_preamble(&mcp_tool_names);
+        let preamble = dev_agent::build_preamble(&mcp_tool_names, &self.config.llm.review.model);
 
         // 2. Create shared resources
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));

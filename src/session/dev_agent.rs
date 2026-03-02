@@ -111,7 +111,14 @@ impl<M: CompletionModel> StreamingPromptHook<M> for ChatHistoryHook {
 /// When `mcp_tool_names` is non-empty, the preamble's tool section includes
 /// the MCP tool names so the agent knows they are available. When empty, the
 /// preamble output is identical to the pre-MCP version.
-pub fn build_preamble(mcp_tool_names: &[String]) -> String {
+///
+/// When `model` contains `"preview"`, an extra rule is injected to force
+/// sequential tool calls (one at a time). This works around a known issue
+/// where preview models (e.g. `gemini-3.1-pro-preview`) concatenate multiple
+/// tool call arguments into a single malformed JSON blob (`{...}{...}`),
+/// which poisons the conversation history and causes unrecoverable 400 errors.
+/// TODO: Remove this workaround once the model exits preview.
+pub fn build_preamble(mcp_tool_names: &[String], model: &str) -> String {
     let mcp_line = if mcp_tool_names.is_empty() {
         String::new()
     } else {
@@ -119,6 +126,14 @@ pub fn build_preamble(mcp_tool_names: &[String]) -> String {
             "\nYou also have access to MCP tools: {}. Use them like any other tool.",
             mcp_tool_names.join(", ")
         )
+    };
+
+    // Workaround: preview models (e.g. gemini-3.1-pro-preview) sometimes
+    // concatenate parallel tool call args into invalid JSON. Force sequential.
+    let sequential_tool_rule = if model.contains("preview") {
+        "- **CRITICAL: Call tools ONE AT A TIME, sequentially.** Never attempt parallel tool calls or combine arguments from multiple calls into one."
+    } else {
+        ""
     };
 
     format!(
@@ -137,6 +152,7 @@ You have access to these tools: edit_file, read_file, grep, find_path, list_dire
 - **Use `ask_supervisor`** when you need clarification on requirements, architecture decisions, or are uncertain about the correct approach.
 - When `edit_file` fails (ambiguous match), use `read_file` with a line range to get more context, then retry with a larger `old_text` fragment.
 - When making multiple related changes in one file, batch them in a single `edit_file` call with multiple edit operations.
+{sequential_tool_rule}
 
 ## Session Completion Protocol
 When you have fully completed your workflow (all tasks done, all tests passing, story file updated, all changes committed), your **final message** MUST end with exactly:
@@ -155,7 +171,8 @@ OVERRIDE: communication_language = English
 - NEVER break character until given an exit command.
 - Execute activation steps in order — load configuration files via tools, then greet and display the menu.
 - Wait for user input after displaying the menu."#,
-        mcp_line = mcp_line
+        mcp_line = mcp_line,
+        sequential_tool_rule = sequential_tool_rule
     )
 }
 
@@ -338,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_tool_rules() {
-        let preamble = build_preamble(&[]);
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
         assert!(preamble.contains("edit_file"));
         assert!(preamble.contains("read_file"));
         assert!(preamble.contains("grep"));
@@ -350,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_english_override() {
-        let preamble = build_preamble(&[]);
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
         assert!(
             preamble.contains("communication_language = English"),
             "Preamble must contain English override"
@@ -359,14 +376,14 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_activation_rules() {
-        let preamble = build_preamble(&[]);
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
         assert!(preamble.contains("<context><files>"));
         assert!(preamble.contains("activation instructions"));
     }
 
     #[test]
     fn test_build_preamble_does_not_contain_agent_content() {
-        let preamble = build_preamble(&[]);
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
         // The preamble should NOT contain the agent file content — that goes
         // in the user message via activate_agent()
         assert!(
@@ -381,7 +398,7 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_job_done_sentinel() {
-        let preamble = build_preamble(&[]);
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
         assert!(
             preamble.contains("<<BMAD_JOB_DONE>>"),
             "Preamble must contain the deterministic completion sentinel"
@@ -394,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_build_preamble_mentions_tool_usage_best_practices() {
-        let preamble = build_preamble(&[]);
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
         assert!(
             preamble.contains("mode=\"edit\""),
             "Should mention edit mode for existing files"
@@ -417,7 +434,7 @@ mod tests {
     fn test_build_preamble_empty_mcp_is_identical() {
         // When mcp_tool_names is empty, output must be byte-identical to
         // the pre-MCP hardcoded preamble (no extra lines, no trailing space).
-        let preamble = build_preamble(&[]);
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
         assert!(
             !preamble.contains("MCP tools"),
             "Empty MCP names must not inject any MCP line into preamble"
@@ -430,7 +447,7 @@ mod tests {
             "browser_navigate".to_string(),
             "browser_screenshot".to_string(),
         ];
-        let preamble = build_preamble(&names);
+        let preamble = build_preamble(&names, "gpt-4o");
         assert!(
             preamble.contains("browser_navigate"),
             "Preamble must mention browser_navigate when MCP tools provided"
@@ -453,7 +470,7 @@ mod tests {
     fn test_build_preamble_with_mcp_still_contains_native_tools() {
         // Even with MCP tools, all existing native tool references must be present.
         let names = vec!["browser_navigate".to_string(), "browser_click".to_string()];
-        let preamble = build_preamble(&names);
+        let preamble = build_preamble(&names, "gpt-4o");
         assert!(preamble.contains("edit_file"));
         assert!(preamble.contains("read_file"));
         assert!(preamble.contains("grep"));
@@ -564,5 +581,32 @@ mod tests {
         }
         let full = hook.take_full_history("hi there").unwrap();
         assert_eq!(full.len(), 2); // user("hello"), assistant("hi there")
+    }
+
+    // -- Preview model sequential tool call workaround tests --
+
+    #[test]
+    fn test_build_preamble_preview_model_injects_sequential_rule() {
+        let preamble = build_preamble(&[], "gemini-3.1-pro-preview");
+        assert!(
+            preamble.contains("Call tools ONE AT A TIME"),
+            "Preview model preamble must contain sequential tool call rule"
+        );
+    }
+
+    #[test]
+    fn test_build_preamble_stable_model_no_sequential_rule() {
+        let preamble = build_preamble(&[], "claude-opus-4.6");
+        assert!(
+            !preamble.contains("Call tools ONE AT A TIME"),
+            "Stable model preamble must NOT contain sequential tool call rule"
+        );
+    }
+
+    #[test]
+    fn test_build_preamble_preview_detection_is_substring() {
+        // Any model with "preview" anywhere in the name triggers the rule
+        let preamble = build_preamble(&[], "some-model-preview-v2");
+        assert!(preamble.contains("Call tools ONE AT A TIME"));
     }
 }
