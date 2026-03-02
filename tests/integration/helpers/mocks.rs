@@ -3,11 +3,14 @@
 //! All mocks are `Send + Sync` and use `Arc<Mutex<...>>` for interior mutability.
 //! Builder-pattern configuration keeps tests readable.
 
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
+use bmad_bot::pipeline::{CodeReviewer, DevRunner};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
 use bmad_bot::watcher::StoryInfo;
@@ -30,11 +33,23 @@ pub enum GitProviderCall {
 /// Mock implementation of [`GitProvider`] for integration tests.
 ///
 /// Configurable return values via builder methods. Tracks all calls for assertions.
+/// `Clone` shares inner `Arc` state — both copies see the same captured calls.
 pub struct MockGitProvider {
     create_pr_result: Arc<Mutex<Result<PrInfo, GitProviderError>>>,
     add_comment_result: Arc<Mutex<Result<(), GitProviderError>>>,
     get_pr_url_result: Arc<Mutex<Result<String, GitProviderError>>>,
     calls: Arc<Mutex<Vec<GitProviderCall>>>,
+}
+
+impl Clone for MockGitProvider {
+    fn clone(&self) -> Self {
+        Self {
+            create_pr_result: Arc::clone(&self.create_pr_result),
+            add_comment_result: Arc::clone(&self.add_comment_result),
+            get_pr_url_result: Arc::clone(&self.get_pr_url_result),
+            calls: Arc::clone(&self.calls),
+        }
+    }
 }
 
 impl MockGitProvider {
@@ -75,6 +90,54 @@ impl MockGitProvider {
     /// Return a snapshot of all calls made to this mock.
     pub fn calls(&self) -> Vec<GitProviderCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// Return all captured `create_pr` parameters.
+    pub fn captured_create_pr_params(&self) -> Vec<CreatePrParams> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                GitProviderCall::CreatePr(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Return all captured `add_comment` calls as `(pr_id, body)` pairs.
+    pub fn captured_add_comment_calls(&self) -> Vec<(String, String)> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                GitProviderCall::AddComment(pr_id, body) => {
+                    Some((pr_id.clone(), body.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Count of `create_pr` calls.
+    pub fn create_pr_call_count(&self) -> usize {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| matches!(c, GitProviderCall::CreatePr(_)))
+            .count()
+    }
+
+    /// Count of `add_comment` calls.
+    pub fn add_comment_call_count(&self) -> usize {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| matches!(c, GitProviderCall::AddComment(_, _)))
+            .count()
     }
 }
 
@@ -182,8 +245,20 @@ pub enum NotifierCall {
 ///
 /// Captures all calls into a `Vec` for assertion. Unlike `NoopNotifier`,
 /// this mock preserves the data for inspection.
+/// `Clone` shares inner `Arc` state — both copies see the same captured calls.
 pub struct MockNotifier {
     calls: Arc<Mutex<Vec<NotifierCall>>>,
+    /// When `Some`, `notify_story` returns this error.
+    story_error: Arc<Mutex<Option<String>>>,
+}
+
+impl Clone for MockNotifier {
+    fn clone(&self) -> Self {
+        Self {
+            calls: Arc::clone(&self.calls),
+            story_error: Arc::clone(&self.story_error),
+        }
+    }
 }
 
 impl MockNotifier {
@@ -191,6 +266,15 @@ impl MockNotifier {
     pub fn new() -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
+            story_error: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Create a mock notifier that returns an error on `notify_story`.
+    pub fn failing(reason: &str) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            story_error: Arc::new(Mutex::new(Some(reason.to_string()))),
         }
     }
 
@@ -224,6 +308,16 @@ impl MockNotifier {
             })
             .collect()
     }
+
+    /// Count of `notify_story` calls.
+    pub fn story_notification_count(&self) -> usize {
+        self.story_calls().len()
+    }
+
+    /// Count of `notify_run_summary` calls.
+    pub fn run_summary_count(&self) -> usize {
+        self.summary_calls().len()
+    }
 }
 
 #[async_trait]
@@ -233,6 +327,11 @@ impl Notifier for MockNotifier {
             .lock()
             .unwrap()
             .push(NotifierCall::Story(notification.clone()));
+        if let Some(reason) = self.story_error.lock().unwrap().as_ref() {
+            return Err(NotifierError::HttpRequest {
+                reason: reason.clone(),
+            });
+        }
         Ok(())
     }
 
@@ -362,5 +461,104 @@ impl MockReviewRunner {
     /// Return all recorded calls.
     pub fn calls(&self) -> Vec<ReviewRunnerCall> {
         self.calls.lock().unwrap().clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockDevRunner (implements pipeline::DevRunner trait)
+// ---------------------------------------------------------------------------
+
+/// Mock implementation of [`DevRunner`] for pipeline integration tests.
+///
+/// Uses `VecDeque<SessionOutcome>` to support multi-call scenarios
+/// (e.g., `process_eligible_stories` with multiple stories).
+pub struct MockDevRunner {
+    outcomes: Mutex<VecDeque<SessionOutcome>>,
+    call_count: AtomicUsize,
+}
+
+impl MockDevRunner {
+    /// Single-call mock.
+    pub fn with_outcome(outcome: SessionOutcome) -> Self {
+        let mut q = VecDeque::new();
+        q.push_back(outcome);
+        Self {
+            outcomes: Mutex::new(q),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Multi-call mock — pops outcomes in order per call.
+    pub fn with_outcomes(outcomes: Vec<SessionOutcome>) -> Self {
+        Self {
+            outcomes: Mutex::new(outcomes.into()),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Number of times `run_dev_session` was called.
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl DevRunner for MockDevRunner {
+    async fn run_dev_session(&self, _story: &StoryInfo) -> SessionOutcome {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("MockDevRunner: no more outcomes — add more via with_outcomes()")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockCodeReviewer (implements pipeline::CodeReviewer trait)
+// ---------------------------------------------------------------------------
+
+/// Mock implementation of [`CodeReviewer`] for pipeline integration tests.
+///
+/// Uses `VecDeque<ReviewOutcome>` plus `AtomicUsize` call counter.
+pub struct MockCodeReviewer {
+    outcomes: Mutex<VecDeque<ReviewOutcome>>,
+    call_count: AtomicUsize,
+}
+
+impl MockCodeReviewer {
+    /// Single-call mock.
+    pub fn with_outcome(outcome: ReviewOutcome) -> Self {
+        let mut q = VecDeque::new();
+        q.push_back(outcome);
+        Self {
+            outcomes: Mutex::new(q),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Create a mock that panics if called (asserts zero calls).
+    pub fn never_called() -> Self {
+        Self {
+            outcomes: Mutex::new(VecDeque::new()),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Number of times `run_review` was called.
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CodeReviewer for MockCodeReviewer {
+    async fn run_review(&self, _story: &StoryInfo) -> ReviewOutcome {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("MockCodeReviewer: no more outcomes (or never_called() was used)")
     }
 }

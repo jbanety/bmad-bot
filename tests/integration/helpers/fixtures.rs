@@ -5,13 +5,19 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use bmad_bot::config::{
     BmadPathsConfig, BotConfig, BotSecrets, GitProviderConfig, LlmConfig, LlmRoleConfig,
     NotificationConfig, TelegramConfig,
 };
+use bmad_bot::pipeline::{CodeReviewer, DevRunner, StoryPipeline};
+use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::SessionOutcome;
 use bmad_bot::session::SessionState;
 use bmad_bot::watcher::StoryInfo;
+
+use super::mocks::{MockCodeReviewer, MockDevRunner, MockGitProvider, MockNotifier};
 
 /// Build a complete valid `BotConfig` using the provided temp directory for all paths.
 ///
@@ -185,4 +191,193 @@ pub fn create_test_repo(dir: &Path) {
     run(&["commit", "--allow-empty", "-m", "initial commit"]);
     // Ensure "main" branch exists (default might be "master" depending on git config)
     run(&["branch", "-M", "main"]);
+}
+
+/// Set up a git repository with a local bare remote for pipeline tests.
+///
+/// Creates:
+/// 1. A bare "remote" repo at `{parent}/remote.git`
+/// 2. A working clone at `{parent}/work` with `origin` pointing to the bare repo
+/// 3. Optionally creates story branches with a dummy commit
+///
+/// Returns the working directory path (to use as `project_root` in config).
+pub fn create_pipeline_git_env(parent: &Path, branches: &[&str]) -> std::path::PathBuf {
+    let bare_dir = parent.join("remote.git");
+    let work_dir = parent.join("work");
+
+    std::fs::create_dir_all(&bare_dir).expect("create bare dir");
+
+    // Init bare repo
+    let run_in = |dir: &Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command failed");
+        assert!(
+            output.status.success(),
+            "git {} in {} failed: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    run_in(&bare_dir, &["init", "--bare"]);
+
+    // Clone bare repo to working dir
+    let output = Command::new("git")
+        .args(["clone", bare_dir.to_str().unwrap(), work_dir.to_str().unwrap()])
+        .output()
+        .expect("git clone failed");
+    assert!(
+        output.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    run_in(&work_dir, &["config", "user.email", "test@test.com"]);
+    run_in(&work_dir, &["config", "user.name", "Test"]);
+
+    // Create initial commit on main and push
+    run_in(&work_dir, &["commit", "--allow-empty", "-m", "initial commit"]);
+    run_in(&work_dir, &["branch", "-M", "main"]);
+    run_in(&work_dir, &["push", "-u", "origin", "main"]);
+
+    // Create story branches with a dummy commit each
+    for branch in branches {
+        run_in(&work_dir, &["checkout", "-b", branch]);
+        run_in(&work_dir, &["commit", "--allow-empty", "-m", &format!("work on {branch}")]);
+        run_in(&work_dir, &["checkout", "main"]);
+    }
+
+    work_dir
+}
+
+// ---------------------------------------------------------------------------
+// PipelineTestBuilder
+// ---------------------------------------------------------------------------
+
+/// Builder for constructing `StoryPipeline` with mock dependencies.
+///
+/// After `build()`, the returned mock handles share state with the pipeline’s
+/// copies via `Arc` — assertions on the handles reflect calls made through the pipeline.
+pub struct PipelineTestBuilder {
+    config: BotConfig,
+    session_outcomes: Vec<SessionOutcome>,
+    review_outcome: Option<ReviewOutcome>,
+    mock_git: MockGitProvider,
+    mock_notifier: MockNotifier,
+    /// Temp dir that owns the git repo — keep alive until test completes.
+    _temp_dir: Option<tempfile::TempDir>,
+}
+
+impl PipelineTestBuilder {
+    /// Create a new builder with a real git repo (bare remote + working clone).
+    ///
+    /// The `branches` parameter specifies story branches to create (e.g., `["story/4-1-rig-tools"]`).
+    /// The `project_root` in the config will point to the working clone.
+    pub fn new_with_git(branches: &[&str]) -> Self {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let work_dir = create_pipeline_git_env(temp_dir.path(), branches);
+        Self {
+            config: make_test_config(&work_dir),
+            session_outcomes: vec![],
+            review_outcome: None,
+            mock_git: MockGitProvider::new(),
+            mock_notifier: MockNotifier::new(),
+            _temp_dir: Some(temp_dir),
+        }
+    }
+
+    /// Create a new builder with sensible defaults (no git repo).
+    pub fn new() -> Self {
+        let tmp = std::env::temp_dir().join("pipeline-test-default");
+        Self {
+            config: make_test_config(&tmp),
+            session_outcomes: vec![],
+            review_outcome: None,
+            mock_git: MockGitProvider::new(),
+            mock_notifier: MockNotifier::new(),
+            _temp_dir: None,
+        }
+    }
+
+    /// Enable or disable code review in config.
+    pub fn with_code_review(mut self, enabled: bool) -> Self {
+        self.config.code_review_enabled = enabled;
+        self
+    }
+
+    /// Set a single session outcome.
+    pub fn with_session(mut self, outcome: SessionOutcome) -> Self {
+        self.session_outcomes = vec![outcome];
+        self
+    }
+
+    /// Set multiple session outcomes (for batch processing).
+    pub fn with_sessions(mut self, outcomes: Vec<SessionOutcome>) -> Self {
+        self.session_outcomes = outcomes;
+        self
+    }
+
+    /// Set the review outcome.
+    pub fn with_review(mut self, outcome: ReviewOutcome) -> Self {
+        self.review_outcome = Some(outcome);
+        self
+    }
+
+    /// Replace the default mock git provider.
+    pub fn with_git_provider(mut self, mock: MockGitProvider) -> Self {
+        self.mock_git = mock;
+        self
+    }
+
+    /// Replace the default mock notifier.
+    pub fn with_notifier(mut self, mock: MockNotifier) -> Self {
+        self.mock_notifier = mock;
+        self
+    }
+
+    /// Build the pipeline, returning shared handles for assertions.
+    ///
+    /// **Important:** The returned tuple includes a `TempDir` guard. The git repo is
+    /// deleted when this guard is dropped. Keep it alive for the duration of the test.
+    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider, Option<tempfile::TempDir>) {
+        let notifier_for_assertions = self.mock_notifier.clone();
+        let git_for_assertions = self.mock_git.clone();
+
+        let dev_runner: Box<dyn DevRunner> = if self.session_outcomes.len() <= 1 {
+            let outcome = self
+                .session_outcomes
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| SessionOutcome::Completed {
+                    story_key: "test".to_string(),
+                    branch: "story/test".to_string(),
+                    decisions: vec![],
+                    pr_context: None,
+                    pr_how_to_test: None,
+                    pr_additional_info: None,
+                });
+            Box::new(MockDevRunner::with_outcome(outcome))
+        } else {
+            Box::new(MockDevRunner::with_outcomes(self.session_outcomes))
+        };
+
+        let code_reviewer: Box<dyn CodeReviewer> = match self.review_outcome {
+            Some(o) => Box::new(MockCodeReviewer::with_outcome(o)),
+            None => Box::new(MockCodeReviewer::never_called()),
+        };
+
+        let pipeline = StoryPipeline::new_with_components(
+            Arc::new(self.config),
+            Box::new(self.mock_git),
+            Box::new(self.mock_notifier),
+            dev_runner,
+            code_reviewer,
+        );
+
+        (pipeline, notifier_for_assertions, git_for_assertions, self._temp_dir)
+    }
 }
