@@ -674,6 +674,9 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one
+- **⚠️ lib.rs exports (resolved in 7-2):** `src/lib.rs` now exports ALL project modules (auth, cli, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). No need to add individual `pub mod` lines — all `bmad_bot::*` import paths work out of the box.
+- **⚠️ session::state visibility (resolved in 7-2):** `session::state` is now `pub` (was `pub(crate)`). `SessionState` and `ChatMessage` are re-exported from `bmad_bot::session` directly.
+- **⚠️ Obsolete assumption:** Any notes saying "lib.rs only has `pub mod config; pub mod mcp;`" or "project is currently a pure binary crate" are outdated. lib.rs is fully populated.
 
 ### Git Intelligence
 

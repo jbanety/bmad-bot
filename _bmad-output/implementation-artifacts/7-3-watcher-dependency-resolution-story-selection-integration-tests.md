@@ -246,6 +246,9 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
+- **⚠️ lib.rs exports (resolved in 7-2):** `src/lib.rs` now exports ALL project modules (auth, cli, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). No need to add individual `pub mod` lines — all `bmad_bot::*` import paths work out of the box.
+- **⚠️ session::state visibility (resolved in 7-2):** `session::state` is now `pub` (was `pub(crate)`). `SessionState` and `ChatMessage` are re-exported from `bmad_bot::session` directly.
+- **⚠️ Obsolete assumption:** Any story notes saying "lib.rs only has `pub mod config; pub mod mcp;`" or "project is currently a pure binary crate" are outdated. lib.rs is fully populated.
 
 ### Dependencies Required
 
