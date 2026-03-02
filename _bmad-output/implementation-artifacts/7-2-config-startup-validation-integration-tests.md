@@ -1,6 +1,6 @@
 # Story 7.2: Config → Startup Validation Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
