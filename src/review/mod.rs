@@ -427,16 +427,19 @@ impl ReviewRunner {
             })?;
 
         // Send "CR" with English language override (same pattern as DS in dev session)
-        let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [CR]";
+        let initial_message = format!(
+            "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [CR] for story file: {}",
+            story.specs_path.display()
+        );
         log_llm_request(
             "code-review",
             1,
-            initial_message,
+            &initial_message,
             activation_rig_history.len(),
         );
         let (response, _) = agent
             .stream_chat(
-                initial_message,
+                &initial_message,
                 activation_rig_history,
                 Some(&self.shutdown),
             )

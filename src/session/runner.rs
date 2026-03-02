@@ -1309,8 +1309,11 @@ impl SessionRunner {
                 // config.yaml which may set communication_language to a non-English
                 // language, causing the agent to respond in that language. The response
                 // analyzer only matches English patterns, so we must enforce English here.
-                let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [DS]";
-                state.add_user_message(initial_message);
+                let initial_message = format!(
+                    "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [DS] for story file: {}",
+                    story.specs_path.display()
+                );
+                state.add_user_message(&initial_message);
 
                 let activation_turn = activation_chat_history.len() / 2;
 
@@ -1320,12 +1323,12 @@ impl SessionRunner {
                     log_llm_request(
                         "dev-session",
                         activation_turn,
-                        initial_message,
+                        &initial_message,
                         activation_rig_history.len(),
                     );
                     match agent
                         .stream_chat(
-                            initial_message,
+                            &initial_message,
                             activation_rig_history.clone(),
                             Some(&self.shutdown),
                         )
@@ -1431,19 +1434,22 @@ impl SessionRunner {
 
                     // Now send "DS" — the agent is activated.
                     // Override language to English (see normal path comment for rationale).
-                    let initial_message = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. DS";
-                    state.add_user_message(initial_message);
+                    let initial_message = format!(
+                        "IMPORTANT: ALL communication MUST be in English regardless of config file settings. DS for story file: {}",
+                        story.specs_path.display()
+                    );
+                    state.add_user_message(&initial_message);
 
                     let activation_turn = activation_chat_history.len() / 2;
                     log_llm_request(
                         "dev-recovery",
                         activation_turn,
-                        initial_message,
+                        &initial_message,
                         activation_rig_history.len(),
                     );
                     let (response, ds_full_history) = match agent
                         .stream_chat(
-                            initial_message,
+                            &initial_message,
                             activation_rig_history,
                             Some(&self.shutdown),
                         )
