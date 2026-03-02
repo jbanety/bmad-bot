@@ -233,11 +233,13 @@ fn test_config_invalid_yaml_syntax_rejected() {
 
 #[test]
 fn test_config_load_nonexistent_file() {
-    // Arrange
-    let path = Path::new("/tmp/this-file-does-not-exist-bmad-test.yaml");
+    // Arrange — reference a path inside a fresh tempdir that was never created
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("this-file-does-not-exist.yaml");
+    // Do NOT write anything — path must be absent
 
     // Act
-    let err = BotConfig::load(path).unwrap_err();
+    let err = BotConfig::load(&path).unwrap_err();
 
     // Assert
     assert!(
@@ -386,6 +388,18 @@ fn test_config_secrets_errors_contain_env_var_name() {
     let err2 = secrets2.validate_for_config(&config).unwrap_err();
     let msg2 = err2.to_string();
     assert!(msg2.contains("GITHUB_TOKEN"), "error should mention env var: {msg2}");
+
+    // Missing telegram token (telegram must be enabled in config)
+    let mut config_tg = make_test_config(tmp.path());
+    config_tg.notifications.telegram.enabled = true;
+    config_tg.notifications.telegram.chat_id = "12345".to_string();
+    let secrets3 = BotSecrets {
+        telegram_bot_token: None,
+        ..make_test_secrets()
+    };
+    let err3 = secrets3.validate_for_config(&config_tg).unwrap_err();
+    let msg3 = err3.to_string();
+    assert!(msg3.contains("TELEGRAM_BOT_TOKEN"), "error should mention env var: {msg3}");
 }
 
 // ===========================================================================

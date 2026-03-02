@@ -34,6 +34,11 @@ pub mod runner;
 /// WAL state file — session persistence for crash recovery.
 pub mod state;
 
+// Re-exported for ergonomic integration test imports: `use bmad_bot::session::SessionState`.
+// The `pub use` re-export is used by external consumers (tests/integration/helpers/fixtures.rs),
+// not within src/ itself — suppress the spurious unused_imports lint that fires in lib crate
+// compilation context.
+#[allow(unused_imports)]
 pub use state::{ChatMessage, SessionState};
 
 use crate::supervisor::decisions::DecisionRecord;
