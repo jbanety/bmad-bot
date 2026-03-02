@@ -257,17 +257,14 @@ fn make_story(key: &str, deps: Vec<&str>) -> bmad_bot::watcher::StoryInfo {
 
 ### Previous Story Intelligence (Stories 7.1 through 7.7)
 
-All stories 7.1–7.7 have been created as `ready-for-dev` context stories but **none have been implemented yet** (no integration test code exists in `tests/integration/`). Key patterns learned from reviewing those stories:
+**Story 7.1 (IMPLEMENTED):** Integration test infrastructure is in place.
+1. **`lib.rs` blocker is RESOLVED** — `src/lib.rs` exposes 12 modules (auth, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). `src/main.rs` only has `mod cli;`. No Task 0 needed for any subsequent story.
+2. **Module declaration pattern:** `tests/integration.rs` uses `#[path]` attributes: `#[path = "integration/test_branch_git.rs"] mod test_branch_git;` (NOT bare `mod`).
+3. **Mock infrastructure available:** `MockGitProvider` (builder + call tracking), `MockNotifier` (captures calls), `MockSessionRunner` (configurable outcomes via closure), `MockReviewRunner` (configurable outcomes via closure). All `Send + Sync`.
+4. **Fixture builders available:** `create_test_repo(dir)` initializes git repo with initial commit and `main` branch. `make_test_story(key, label, deps)` builds `StoryInfo`. `make_test_config(dir)` builds `BotConfig` with paths under `"{dir}/_bmad-output/..."`. `write_sprint_status(dir, entries)` writes parseable YAML.
+5. **28 integration tests already passing** (20 mock + 8 fixture self-verification).
 
-1. **Every story repeats the `lib.rs` blocker** — Task 0 is identical across all stories. Implement it once, and subsequent stories skip it.
-
-2. **Test file naming convention:** `test_{module_name}.rs` (e.g., `test_config.rs`, `test_watcher.rs`, `test_notifier.rs`). For this story: `test_branch_git.rs`.
-
-3. **Mock infrastructure (7.1):** `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner` — these are NOT needed for Story 7.8. Branch management and git tool tests use **real Git CLI operations on temp repos** (no mocking needed).
-
-4. **Story 7.6 (Git Provider)** tests PR creation via mock HTTP — different from this story which tests local git operations via Git CLI subprocess. No overlap.
-
-5. **Helpers pattern:** If Story 7.1 is implemented first, `tests/integration/helpers/fixtures.rs` will contain `create_test_repo()` and `make_test_story()`. If not, this story should create them inline or in a local helper.
+Stories 7.2–7.7 planned patterns (from story specs, not yet implemented):
 
 ### Git Intelligence
 

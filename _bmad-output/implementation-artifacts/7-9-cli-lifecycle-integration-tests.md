@@ -288,17 +288,14 @@ assert_eq!(loaded.llm.dev.provider, config.llm.dev.provider);
 
 ### Previous Story Intelligence (Stories 7.1 through 7.8)
 
-Key patterns from reviewing all previous stories:
+**Story 7.1 (IMPLEMENTED):** Integration test infrastructure is in place.
+1. **`lib.rs` blocker is RESOLVED** — `src/lib.rs` exposes 12 modules. `src/main.rs` only has `mod cli;`. No Task 0 needed.
+2. **Module declaration pattern:** `tests/integration.rs` uses `#[path]` attributes: `#[path = "integration/test_cli_lifecycle.rs"] mod test_cli_lifecycle;` (NOT bare `mod`).
+3. **⚠️ `cli` module is NOT in `lib.rs`** — it's binary-only (`mod cli;` in `main.rs`). `DaemonState` and `CliError` are in the binary crate, not importable from `bmad_bot::cli::`. This story's Task 0 (adding `pub mod cli;` to lib.rs) is correct and needed.
+4. **Fixture builders available:** `make_test_config(dir)`, `make_test_secrets()`, `write_sprint_status(dir, entries)` from `crate::helpers::fixtures`.
+5. **28 integration tests already passing.**
 
-1. **`lib.rs` blocker is universal** — Every story needs it. This story adds `pub mod cli;` which previous stories explicitly excluded. This is the correct resolution for accessing `DaemonState`.
-
-2. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_cli_lifecycle.rs`.
-
-3. **No mocks needed for this story.** All tests operate on real filesystem state files and real config YAML files in temp directories. No LLM, HTTP, or git mocking required.
-
-4. **Story 7.2 (Config Startup Validation)** also tests `BotConfig::load()` — but focuses on validation edge cases (missing fields, invalid values). Story 7.9 AC #6 tests the happy-path roundtrip only. No overlap.
-
-5. **Story 7.8 (Branch Management)** established the pattern of confirming module visibility definitively (✅ instead of ⚠️) and providing a Quick API Reference table. This story follows the same pattern.
+Key patterns from later stories:
 
 ### Git Intelligence
 

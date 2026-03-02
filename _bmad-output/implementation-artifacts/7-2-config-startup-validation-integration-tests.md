@@ -216,11 +216,14 @@ Known modules scanned by discovery: `bmm`, `core`, `_config`, `_memory`.
 
 ### Previous Story Intelligence (Story 7.1)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. All test modules are declared in `tests/integration.rs` via `mod test_config;` etc.
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **⚠️ Module declarations require `#[path]` attributes** due to Rust 2024 edition test binary module resolution. Example: `#[path = "integration/test_config.rs"] mod test_config;` (NOT bare `mod test_config;`).
+- **`lib.rs` Task 0 is DONE:** `src/lib.rs` exposes 12 modules: `auth`, `config`, `git_provider`, `llm`, `mcp`, `notifier`, `pipeline`, `review`, `session`, `supervisor`, `tools`, `watcher`. `src/main.rs` now only has `mod cli;` — everything else imported via `bmad_bot::`. `pub use state::{SessionState, ChatMessage}` re-export added to `src/session/mod.rs`.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_secrets};`
+- **`make_test_config(dir)` path format:** Sets `bmad_paths.implementation_artifacts` to `"{dir}/_bmad-output/implementation-artifacts"` (appends subdirectory structure, not just the dir itself).
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
+- **28 integration tests already exist** (20 mock self-verification + 8 fixture self-verification) — all passing.
 
 ### Dependencies Required
 
@@ -228,13 +231,13 @@ All already present — no new dependencies needed:
 - `tempfile = "3"` (dev-dependency)
 - `serde_yml = "0.0.12"` (main dependency, used for YAML serialization in tests)
 
-**Prerequisite from Story 7.1:** `src/lib.rs` must exist with `pub mod config;` — see Story 7.1 Task 0.
+**Prerequisite from Story 7.1:** `src/lib.rs` already exists with `pub mod config;` (and 11 other modules). No Task 0 needed.
 
 ### File Structure
 
 ```
 tests/
-├── integration.rs                    # Add: mod test_config;
+├── integration.rs                    # Add: #[path = "integration/test_config.rs"] mod test_config;
 └── integration/
     ├── helpers/
     │   ├── mod.rs

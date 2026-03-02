@@ -329,6 +329,12 @@ URL pattern: `https://github.com/{owner}/{repo}/pull/{number}`
 
 ### Previous Story Intelligence (Stories 7.4, 7.5)
 
+**Story 7.1 infrastructure (IMPLEMENTED):**
+- `lib.rs` Task 0 is DONE: 12 modules exposed. No prerequisite needed.
+- `tests/integration.rs` uses `#[path]` attributes for module declarations: `#[path = "integration/test_git_provider.rs"] mod test_git_provider;`
+- `MockGitProvider` available with builder pattern (`with_create_pr()`, `with_add_comment()`, `with_get_pr_url()`) and call tracking (`calls()`).
+- `make_test_config(dir)`, `make_test_secrets()`, `make_test_story()` fixtures available.
+
 **Story 7.5 (Session WAL Crash Recovery):**
 - Established the "Cross-Module Integration Value" section pattern — use it here
 - Used full struct literal for `BotConfig` instead of `_test_minimal()` — follow same pattern if config needed

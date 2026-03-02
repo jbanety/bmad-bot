@@ -240,12 +240,14 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **⚠️ Module declarations require `#[path]` attributes** due to Rust 2024 edition test binary module resolution. Example: `#[path = "integration/test_watcher.rs"] mod test_watcher;` (NOT bare `mod test_watcher;`).
+- **`lib.rs` Task 0 is DONE:** `src/lib.rs` exposes 12 modules including `watcher`. `src/main.rs` only has `mod cli;`. No Task 0 prerequisite needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
+- **`make_test_config(dir)` path format:** Sets `bmad_paths.implementation_artifacts` to `"{dir}/_bmad-output/implementation-artifacts"` (appends subdirectory structure, not just the dir). The `story_location` in `write_sprint_status` uses the raw `dir` path.
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
-- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
+- **Config helper:** `make_test_config(dir)` uses `polling_interval_secs: 60`, `provider: "github"`, `code_review_enabled: true`.
 
 ### Dependencies Required
 
@@ -254,13 +256,13 @@ All already present — no new dependencies needed:
 - `std::sync::Arc` for `Watcher::new()`
 - `std::collections::HashMap` for cascade blocking assertions
 
-**Prerequisite from Story 7.1:** `src/lib.rs` must exist with `pub mod watcher;` — see Story 7.1 Task 0.
+**Prerequisite from Story 7.1:** `src/lib.rs` already exists with `pub mod watcher;` (and 11 other modules). No Task 0 needed.
 
 ### File Structure
 
 ```
 tests/
-├── integration.rs                    # Add: mod test_watcher;
+├── integration.rs                    # Add: #[path = "integration/test_watcher.rs"] mod test_watcher;
 └── integration/
     ├── helpers/
     │   ├── mod.rs
