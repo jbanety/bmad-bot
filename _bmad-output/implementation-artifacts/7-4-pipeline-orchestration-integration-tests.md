@@ -668,15 +668,12 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **⚠️ Module declarations require `#[path]` attributes** due to Rust 2024 edition test binary module resolution. Example: `#[path = "integration/test_pipeline.rs"] mod test_pipeline;` (NOT bare `mod test_pipeline;`).
-- **`lib.rs` Task 0 is DONE:** `src/lib.rs` exposes 12 modules including `pipeline`. No Task 0 prerequisite needed.
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
 - **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
-- **`make_test_config(dir)` path format:** Sets `bmad_paths.implementation_artifacts` to `"{dir}/_bmad-output/implementation-artifacts"` (appends subdirectory structure).
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one
-- **Existing mocks from 7.1:** `MockGitProvider` (builder pattern, call tracking), `MockNotifier` (captures calls), `MockSessionRunner` (configurable `SessionOutcome` via closure), `MockReviewRunner` (configurable `ReviewOutcome` via closure). All `Send + Sync`.
 
 ### Git Intelligence
 
@@ -692,9 +689,9 @@ All present — no new crate dependencies:
 - `tempfile = "3"` (dev-dependency) — if filesystem fixtures needed
 
 **Prerequisite from Story 7.1:**
-- `src/lib.rs` already exists with `pub mod pipeline;` and all 12 module re-exports. No Task 0 needed.
-- `tests/integration.rs` + `tests/integration/helpers/` structure already in place with 28 passing tests.
-- `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner`, `make_test_config()`, `make_test_story()` all available.
+- `src/lib.rs` with `pub mod pipeline;` and all module re-exports
+- `tests/integration.rs` + `tests/integration/helpers/` structure
+- `MockGitProvider`, `MockNotifier`, `make_test_config()`, `make_test_story()`
 
 ### File Structure
 
@@ -702,7 +699,7 @@ All present — no new crate dependencies:
 src/
 ├── pipeline.rs                       ← MODIFIED (add traits, new_with_components, refactor struct)
 tests/
-├── integration.rs                    # Add: #[path = "integration/test_pipeline.rs"] mod test_pipeline;
+├── integration.rs                    # Add: mod test_pipeline;
 └── integration/
     ├── helpers/
     │   ├── mod.rs

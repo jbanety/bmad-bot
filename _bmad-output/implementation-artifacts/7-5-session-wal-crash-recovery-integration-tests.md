@@ -442,16 +442,13 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 
 ### Previous Story Intelligence (Stories 7.1, 7.4, 6.3)
 
-**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
-- `tests/integration.rs` entry point with **`#[path]` attributes** for module declarations (e.g., `#[path = "integration/test_session_wal.rs"] mod test_session_wal;`). NOT bare `mod` declarations.
-- `tests/integration/helpers/mod.rs` with shared fixtures and mocks
-- `lib.rs` Task 0 is DONE: 12 modules exposed including `session`. `pub use state::{SessionState, ChatMessage}` already re-exported in `src/session/mod.rs`.
-- All mock implementations are `Send + Sync`, use `Arc<Mutex<Vec<...>>>` for interior mutability
-- `MockSessionRunner` returns configurable `SessionOutcome` via closure (`with_outcome()`)
-- `write_wal_file(dir, &SessionState)` fixture available — writes valid WAL YAML via `serde_yml`
-- `make_test_config(dir)` sets paths to `"{dir}/_bmad-output/implementation-artifacts"` (appends subdirectory)
+**Story 7.1 (Integration Test Infrastructure):**
+- Defines `tests/integration.rs` entry point with `mod helpers;` + individual test modules
+- Defines `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, etc.)
+- Defines `lib.rs` creation and session::state re-export as Task 0
+- All mock implementations must be `Send + Sync`
+- Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
 - Uses `tempfile::tempdir()` for filesystem isolation
-- 28 integration tests already exist and pass
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `DevRunner` and `CodeReviewer` traits for DI
