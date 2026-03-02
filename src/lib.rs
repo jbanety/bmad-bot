@@ -9,3 +9,16 @@
 
 pub mod config;
 pub mod mcp;
+
+// Re-exported for integration tests. These modules mirror main.rs declarations.
+pub mod auth;
+pub mod cli;
+pub mod git_provider;
+pub mod llm;
+pub mod notifier;
+pub mod pipeline;
+pub mod review;
+pub mod session;
+pub mod supervisor;
+pub mod tools;
+pub mod watcher;
