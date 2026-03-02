@@ -329,10 +329,13 @@ URL pattern: `https://github.com/{owner}/{repo}/pull/{number}`
 
 ### Previous Story Intelligence (Stories 7.4, 7.5)
 
-**Story 7.5 (Session WAL Crash Recovery):**
+**Story 7.5 (Session WAL Crash Recovery) — IMPLEMENTED:**
 - Established the "Cross-Module Integration Value" section pattern — use it here
-- Used full struct literal for `BotConfig` instead of `_test_minimal()` — follow same pattern if config needed
-- `wal_path()` helper pattern for deriving private internal paths
+- **Did NOT create a new full struct literal for `BotConfig`** — reused `helpers::fixtures::make_test_config()` from Story 7.1 infra and overrode `config.bmad_paths.implementation_artifacts` to point at temp dir. Follow this pattern (reuse fixtures, override specific fields) instead of writing standalone config builders.
+- `wal_path()` helper pattern for deriving private internal paths — confirmed useful
+- `process_recovered_session()` in `src/pipeline.rs` changed from private to `pub` for integration test access. If 7-6 needs to test other pipeline internals, this precedent exists.
+- `build_pipeline_with_git()` pattern: uses `create_pipeline_git_env()` to create a real git repo (bare remote + working clone) for pipeline tests that exercise `push_branch()`. Essential for any test where `process_recovered_session()` or `process_story()` handles `SessionOutcome::Completed` (push is mandatory before PR creation).
+- `SessionRunner::new()` actual signature requires 4 args: `(Arc<BotConfig>, Arc<AgentFactory>, ShutdownFlag, Arc<McpManager>)` — not just config + secrets as story spec suggested. Use `McpManager::empty()` for tests.
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `MockGitProvider` with builder pattern for test setup

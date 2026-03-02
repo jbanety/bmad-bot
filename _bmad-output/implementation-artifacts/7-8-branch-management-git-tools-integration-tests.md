@@ -257,17 +257,19 @@ fn make_story(key: &str, deps: Vec<&str>) -> bmad_bot::watcher::StoryInfo {
 
 ### Previous Story Intelligence (Stories 7.1 through 7.7)
 
-All stories 7.1–7.7 have been created as `ready-for-dev` context stories but **none have been implemented yet** (no integration test code exists in `tests/integration/`). Key patterns learned from reviewing those stories:
+Stories 7.1, 7.2, 7.4 are **done**; stories 7.3, 7.5 are in **review**. Stories 7.6, 7.7 are **ready-for-dev**. The integration test infrastructure is fully operational.
 
-1. **Every story repeats the `lib.rs` blocker** — Task 0 is identical across all stories. Implement it once, and subsequent stories skip it.
+1. **`lib.rs` blocker is resolved** — Story 7.1 created `src/lib.rs` with all `pub mod` declarations. Task 0 should verify it exists but will not need to create it.
 
-2. **Test file naming convention:** `test_{module_name}.rs` (e.g., `test_config.rs`, `test_watcher.rs`, `test_notifier.rs`). For this story: `test_branch_git.rs`.
+2. **Test file naming convention:** `test_{module_name}.rs` (e.g., `test_config.rs`, `test_watcher.rs`, `test_session_wal.rs`). For this story: `test_branch_git.rs`.
 
-3. **Mock infrastructure (7.1):** `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner` — these are NOT needed for Story 7.8. Branch management and git tool tests use **real Git CLI operations on temp repos** (no mocking needed).
+3. **Mock infrastructure (7.1) is in place:** `MockGitProvider`, `MockNotifier`, `MockDevRunner`, `MockCodeReviewer` in `tests/integration/helpers/mocks.rs`. `PipelineTestBuilder` in `tests/integration/helpers/fixtures.rs`. These are NOT needed for Story 7.8 — branch management and git tool tests use **real Git CLI operations on temp repos** (no mocking needed).
 
 4. **Story 7.6 (Git Provider)** tests PR creation via mock HTTP — different from this story which tests local git operations via Git CLI subprocess. No overlap.
 
-5. **Helpers pattern:** If Story 7.1 is implemented first, `tests/integration/helpers/fixtures.rs` will contain `create_test_repo()` and `make_test_story()`. If not, this story should create them inline or in a local helper.
+5. **Helpers confirmed in place:** `tests/integration/helpers/fixtures.rs` contains `create_test_repo()`, `make_test_story()`, `make_test_config()`, `make_test_secrets()`, `create_pipeline_git_env()`, `write_wal_file()`, `write_sprint_status()`, and `PipelineTestBuilder`. Reuse these instead of creating standalone helpers.
+
+6. **`tests/integration.rs` module declarations:** Use `#[path = "integration/test_branch_git.rs"] mod test_branch_git;` pattern (not bare `mod`). Current entries: `test_fixtures`, `test_mocks`, `test_config`, `test_watcher`, `test_pipeline`, `test_session_wal`.
 
 ### Git Intelligence
 
