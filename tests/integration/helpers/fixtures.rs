@@ -291,15 +291,20 @@ impl PipelineTestBuilder {
     }
 
     /// Create a new builder with sensible defaults (no git repo).
+    ///
+    /// Uses an isolated `TempDir` for config paths. Suitable for tests that do not
+    /// exercise git push or any filesystem operation.
+    #[allow(dead_code)]
     pub fn new() -> Self {
-        let tmp = std::env::temp_dir().join("pipeline-test-default");
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let tmp_path = temp_dir.path().to_path_buf();
         Self {
-            config: make_test_config(&tmp),
+            config: make_test_config(&tmp_path),
             session_outcomes: vec![],
             review_outcome: None,
             mock_git: MockGitProvider::new(),
             mock_notifier: MockNotifier::new(),
-            _temp_dir: None,
+            _temp_dir: Some(temp_dir),
         }
     }
 
@@ -343,7 +348,19 @@ impl PipelineTestBuilder {
     ///
     /// **Important:** The returned tuple includes a `TempDir` guard. The git repo is
     /// deleted when this guard is dropped. Keep it alive for the duration of the test.
-    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider, Option<tempfile::TempDir>) {
+    ///
+    /// The returned `MockCodeReviewer` shares the call-count `Arc` with the pipeline's
+    /// internal reviewer — use `reviewer.call_count()` after `process_story()` to assert
+    /// whether review was invoked (AC #4, #5).
+    pub fn build(
+        self,
+    ) -> (
+        StoryPipeline,
+        MockNotifier,
+        MockGitProvider,
+        MockCodeReviewer,
+        Option<tempfile::TempDir>,
+    ) {
         let notifier_for_assertions = self.mock_notifier.clone();
         let git_for_assertions = self.mock_git.clone();
 
@@ -365,10 +382,12 @@ impl PipelineTestBuilder {
             Box::new(MockDevRunner::with_outcomes(self.session_outcomes))
         };
 
-        let code_reviewer: Box<dyn CodeReviewer> = match self.review_outcome {
-            Some(o) => Box::new(MockCodeReviewer::with_outcome(o)),
-            None => Box::new(MockCodeReviewer::never_called()),
+        let reviewer = match self.review_outcome {
+            Some(o) => MockCodeReviewer::with_outcome(o),
+            None => MockCodeReviewer::never_called(),
         };
+        let reviewer_for_assertions = reviewer.clone();
+        let code_reviewer: Box<dyn CodeReviewer> = Box::new(reviewer);
 
         let pipeline = StoryPipeline::new_with_components(
             Arc::new(self.config),
@@ -378,6 +397,12 @@ impl PipelineTestBuilder {
             code_reviewer,
         );
 
-        (pipeline, notifier_for_assertions, git_for_assertions, self._temp_dir)
+        (
+            pipeline,
+            notifier_for_assertions,
+            git_for_assertions,
+            reviewer_for_assertions,
+            self._temp_dir,
+        )
     }
 }

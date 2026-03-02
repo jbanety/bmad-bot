@@ -271,6 +271,9 @@ impl MockNotifier {
     }
 
     /// Create a mock notifier that returns an error on `notify_story`.
+    ///
+    /// Note: `notify_run_summary` always succeeds on this notifier — only story
+    /// notifications fail. This is intentional: tests only need story-level failure.
     pub fn failing(reason: &str) -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -497,6 +500,7 @@ impl MockDevRunner {
     }
 
     /// Number of times `run_dev_session` was called.
+    #[allow(dead_code)]
     pub fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
     }
@@ -520,10 +524,23 @@ impl DevRunner for MockDevRunner {
 
 /// Mock implementation of [`CodeReviewer`] for pipeline integration tests.
 ///
-/// Uses `VecDeque<ReviewOutcome>` plus `AtomicUsize` call counter.
+/// Uses `VecDeque<ReviewOutcome>` plus `Arc<AtomicUsize>` call counter.
+/// `Clone` shares the same `Arc` state — both copies see the same call count,
+/// enabling assertion after the mock is boxed into the pipeline.
 pub struct MockCodeReviewer {
     outcomes: Mutex<VecDeque<ReviewOutcome>>,
-    call_count: AtomicUsize,
+    call_count: Arc<AtomicUsize>,
+}
+
+impl Clone for MockCodeReviewer {
+    fn clone(&self) -> Self {
+        // Share the same VecDeque is NOT desired here (outcomes are consumed),
+        // but sharing the call_count Arc IS desired for post-build assertions.
+        Self {
+            outcomes: Mutex::new(VecDeque::new()),
+            call_count: Arc::clone(&self.call_count),
+        }
+    }
 }
 
 impl MockCodeReviewer {
@@ -533,7 +550,7 @@ impl MockCodeReviewer {
         q.push_back(outcome);
         Self {
             outcomes: Mutex::new(q),
-            call_count: AtomicUsize::new(0),
+            call_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -541,7 +558,7 @@ impl MockCodeReviewer {
     pub fn never_called() -> Self {
         Self {
             outcomes: Mutex::new(VecDeque::new()),
-            call_count: AtomicUsize::new(0),
+            call_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 

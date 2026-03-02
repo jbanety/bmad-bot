@@ -83,7 +83,7 @@ async fn test_pipeline_happy_path_completed_with_review() {
         number: 42,
     }));
 
-    let (pipeline, notifier, git, _tmp) =
+    let (pipeline, notifier, git, _reviewer, _tmp) =
         PipelineTestBuilder::new_with_git(&["story/4-1-rig-tools"])
             .with_session(completed_outcome())
             .with_review(completed_review())
@@ -143,7 +143,7 @@ async fn test_pipeline_session_failure_creates_failure_pr() {
         number: 99,
     }));
 
-    let (pipeline, notifier, git, _tmp) =
+    let (pipeline, notifier, git, _reviewer, _tmp) =
         PipelineTestBuilder::new_with_git(&["story/4-1-rig-tools"])
             .with_session(failed_outcome("LLM timeout"))
             .with_git_provider(mock_git)
@@ -188,7 +188,7 @@ async fn test_pipeline_session_failure_creates_failure_pr() {
 #[tokio::test]
 async fn test_pipeline_escalation_blocks_with_escalation_pr() {
     // Arrange — escalation also pushes and creates a PR (actual code behavior)
-    let (pipeline, notifier, git, _tmp) =
+    let (pipeline, notifier, git, _reviewer, _tmp) =
         PipelineTestBuilder::new_with_git(&["story/4-1-rig-tools"])
             .with_session(escalated_outcome())
             .build();
@@ -232,7 +232,7 @@ async fn test_pipeline_review_disabled_skips_review() {
         number: 50,
     }));
 
-    let (pipeline, _notifier, git, _tmp) =
+    let (pipeline, _notifier, git, reviewer, _tmp) =
         PipelineTestBuilder::new_with_git(&["story/4-1-rig-tools"])
             .with_code_review(false)
             .with_session(completed_outcome())
@@ -248,6 +248,9 @@ async fn test_pipeline_review_disabled_skips_review() {
     // Assert — pipeline still Completed
     assert_eq!(result.status, StoryStatus::Completed);
     assert!(result.pr_url.is_some());
+
+    // Assert — MockCodeReviewer NOT called (code_review_enabled: false) [AC #4]
+    assert_eq!(reviewer.call_count(), 0);
 
     // Assert — MockGitProvider: add_comment NOT called (no review report to post)
     assert_eq!(git.add_comment_call_count(), 0);
@@ -265,7 +268,7 @@ async fn test_pipeline_pr_creation_failure_returns_error() {
         message: "Internal server error".to_string(),
     }));
 
-    let (pipeline, notifier, _git, _tmp) =
+    let (pipeline, notifier, _git, reviewer, _tmp) =
         PipelineTestBuilder::new_with_git(&["story/4-1-rig-tools"])
             .with_session(completed_outcome())
             .with_git_provider(mock_git)
@@ -287,6 +290,9 @@ async fn test_pipeline_pr_creation_failure_returns_error() {
 
     // Assert — MockNotifier still receives a notification (best-effort)
     assert_eq!(notifier.story_notification_count(), 1);
+
+    // Assert — MockCodeReviewer NOT called (no PR means no point running review) [AC #5]
+    assert_eq!(reviewer.call_count(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +308,7 @@ async fn test_pipeline_review_failure_still_completes() {
         number: 60,
     }));
 
-    let (pipeline, _notifier, git, _tmp) =
+    let (pipeline, _notifier, git, _reviewer, _tmp) =
         PipelineTestBuilder::new_with_git(&["story/4-1-rig-tools"])
             .with_session(completed_outcome())
             .with_review(ReviewOutcome::Failed {
@@ -339,7 +345,7 @@ async fn test_pipeline_notification_failure_non_blocking() {
         number: 70,
     }));
 
-    let (pipeline, _notifier, _git, _tmp) =
+    let (pipeline, _notifier, _git, _reviewer, _tmp) =
         PipelineTestBuilder::new_with_git(&["story/4-1-rig-tools"])
             .with_code_review(false)
             .with_session(completed_outcome())
@@ -393,7 +399,7 @@ async fn test_pipeline_process_eligible_stories_batch() {
         },
     ];
 
-    let (pipeline, notifier, _git, _tmp) = PipelineTestBuilder::new_with_git(&[
+    let (pipeline, notifier, _git, _reviewer, _tmp) = PipelineTestBuilder::new_with_git(&[
         "story/4-1-rig-tools",
         "story/4-2-rig-agents",
         "story/4-3-rig-deploy",
