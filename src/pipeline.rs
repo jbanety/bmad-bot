@@ -1193,9 +1193,10 @@ async fn has_uncommitted_sprint_status(repo_path: &str, sprint_status_path: &Pat
 
 /// Robustly commit sprint-status.yaml changes.
 ///
-/// Uses `--no-verify` (skip pre-commit hooks) and `--no-gpg-sign` (skip GPG
-/// signing) to maximize the chance of success. Captures and logs stderr on
-/// failure so the root cause is diagnosable.
+/// Respects the user's full git configuration (hooks, GPG signing, etc.).
+/// Checks for staged changes before committing to avoid "nothing to commit"
+/// failures. Captures and logs stderr on failure so the root cause is
+/// diagnosable.
 ///
 /// This is critical for preventing the infinite-loop bug where `git checkout`
 /// for the next story discards uncommitted sprint-status changes, causing
@@ -1243,7 +1244,7 @@ async fn commit_sprint_status(
     let commit_output = tokio::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .args(["commit", "--no-verify", "--no-gpg-sign", "-m", commit_msg])
+        .args(["commit", "-m", commit_msg])
         .output()
         .await
         .map_err(|e| format!("git commit exec failed: {e}"))?;
