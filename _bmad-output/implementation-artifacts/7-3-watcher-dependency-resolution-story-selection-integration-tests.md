@@ -240,12 +240,12 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **New test modules must use `#[path]` attributes** — e.g., `#[path = "integration/test_watcher.rs"] mod test_watcher;` in `tests/integration.rs`. Direct `mod test_watcher;` does NOT resolve.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
+- **`make_test_config(dir)` path layout:** Sets `bmad_paths.project_root` to `dir`, `implementation_artifacts` to `dir/_bmad-output/implementation-artifacts`. Tests using `SprintStatusFile::load()` or `Watcher::poll()` that expect files in `implementation_artifacts` must `create_dir_all()` the nested path and write there.
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
-- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
 
 ### Dependencies Required
 

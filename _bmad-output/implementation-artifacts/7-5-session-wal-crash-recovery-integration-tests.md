@@ -442,13 +442,15 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 
 ### Previous Story Intelligence (Stories 7.1, 7.4, 6.3)
 
-**Story 7.1 (Integration Test Infrastructure):**
-- Defines `tests/integration.rs` entry point with `mod helpers;` + individual test modules
-- Defines `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, etc.)
-- Defines `lib.rs` creation and session::state re-export as Task 0
-- All mock implementations must be `Send + Sync`
-- Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
-- Uses `tempfile::tempdir()` for filesystem isolation
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point uses `#[path]` attributes for module declarations — e.g., `#[path = "integration/test_wal.rs"] mod test_wal;`. Direct `mod test_wal;` does NOT resolve.
+- `tests/integration/helpers/mod.rs` re-exports `mocks` and `fixtures`
+- `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner` in `helpers/mocks.rs`
+- `make_test_config(dir)`, `make_test_secrets()`, `make_test_story()`, `write_wal_file()`, `write_sprint_status()`, `create_test_repo()` in `helpers/fixtures.rs`
+- `make_test_config(dir)` path layout: `project_root` = `dir`, `implementation_artifacts` = `dir/_bmad-output/implementation-artifacts`
+- `src/lib.rs` exposes all modules; `src/session/mod.rs` re-exports `pub use state::{SessionState, ChatMessage};`
+- All mocks are `Send + Sync`, use `Arc<Mutex<Vec<...>>>` for interior mutability
+- `tempfile::tempdir()` for filesystem isolation
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `DevRunner` and `CodeReviewer` traits for DI

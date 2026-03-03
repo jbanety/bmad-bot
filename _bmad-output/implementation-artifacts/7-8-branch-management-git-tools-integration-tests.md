@@ -257,7 +257,13 @@ fn make_story(key: &str, deps: Vec<&str>) -> bmad_bot::watcher::StoryInfo {
 
 ### Previous Story Intelligence (Stories 7.1 through 7.7)
 
-All stories 7.1–7.7 have been created as `ready-for-dev` context stories but **none have been implemented yet** (no integration test code exists in `tests/integration/`). Key patterns learned from reviewing those stories:
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` uses `#[path]` attributes for module declarations — e.g., `#[path = "integration/test_branch_git.rs"] mod test_branch_git;`. Direct `mod` does NOT resolve.
+- `helpers/fixtures.rs` contains `create_test_repo(dir)` and `make_test_story(key, label, deps)` — confirmed available.
+- `make_test_config(dir)` path layout: `project_root` = `dir`, `implementation_artifacts` = `dir/_bmad-output/implementation-artifacts`.
+- `main.rs` retains `mod X;` declarations (dual-crate compilation). Integration tests import via `bmad_bot::`.
+
+All stories 7.1–7.7 have been created as `ready-for-dev` context stories. **Story 7.1 has been implemented** (38 integration tests passing). Key patterns confirmed from implementation:
 
 1. **Every story repeats the `lib.rs` blocker** — Task 0 is identical across all stories. Implement it once, and subsequent stories skip it.
 

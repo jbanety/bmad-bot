@@ -290,15 +290,19 @@ assert_eq!(loaded.llm.dev.provider, config.llm.dev.provider);
 
 Key patterns from reviewing all previous stories:
 
-1. **`lib.rs` blocker is universal** — Every story needs it. This story adds `pub mod cli;` which previous stories explicitly excluded. This is the correct resolution for accessing `DaemonState`.
+1. **`lib.rs` blocker is resolved** — Story 7.1 expanded `src/lib.rs` to 12 `pub mod` declarations. `main.rs` retains `mod X;` (dual-crate compilation, `crate::` paths preserved for CLI). Integration tests import via `bmad_bot::`.
 
-2. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_cli_lifecycle.rs`.
+2. **Test module registration requires `#[path]` attributes** — e.g., `#[path = "integration/test_cli_lifecycle.rs"] mod test_cli_lifecycle;` in `tests/integration.rs`. Direct `mod test_cli_lifecycle;` does NOT resolve. This story adds `pub mod cli;` which previous stories explicitly excluded. This is the correct resolution for accessing `DaemonState`.
 
-3. **No mocks needed for this story.** All tests operate on real filesystem state files and real config YAML files in temp directories. No LLM, HTTP, or git mocking required.
+3. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_cli_lifecycle.rs`.
 
-4. **Story 7.2 (Config Startup Validation)** also tests `BotConfig::load()` — but focuses on validation edge cases (missing fields, invalid values). Story 7.9 AC #6 tests the happy-path roundtrip only. No overlap.
+4. **No mocks needed for this story.** All tests operate on real filesystem state files and real config YAML files in temp directories. No LLM, HTTP, or git mocking required.
 
-5. **Story 7.8 (Branch Management)** established the pattern of confirming module visibility definitively (✅ instead of ⚠️) and providing a Quick API Reference table. This story follows the same pattern.
+5. **`make_test_config(dir)` path layout:** `project_root` = `dir`, `implementation_artifacts` = `dir/_bmad-output/implementation-artifacts`.
+
+6. **Story 7.2 (Config Startup Validation)** also tests `BotConfig::load()` — but focuses on validation edge cases (missing fields, invalid values). Story 7.9 AC #6 tests the happy-path roundtrip only. No overlap.
+
+7. **Story 7.8 (Branch Management)** established the pattern of confirming module visibility definitively (✅ instead of ⚠️) and providing a Quick API Reference table. This story follows the same pattern.
 
 ### Git Intelligence
 

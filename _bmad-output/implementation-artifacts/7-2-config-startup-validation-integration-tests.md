@@ -216,11 +216,13 @@ Known modules scanned by discovery: `bmm`, `core`, `_config`, `_memory`.
 
 ### Previous Story Intelligence (Story 7.1)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. All test modules are declared in `tests/integration.rs` via `mod test_config;` etc.
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **New test modules must use `#[path]` attributes** — e.g., `#[path = "integration/test_config.rs"] mod test_config;` in `tests/integration.rs`. Direct `mod test_config;` does NOT resolve to `tests/integration/test_config.rs`.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_secrets};`
+- **`make_test_config(dir)` path layout:** Sets `bmad_paths.project_root` to `dir`, `implementation_artifacts` to `dir/_bmad-output/implementation-artifacts`. Tests writing fixture files to `implementation_artifacts` must `std::fs::create_dir_all()` the subdirectory first.
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
+- **`main.rs` still has `mod X;` declarations** (dual-crate compilation). Integration tests import via `bmad_bot::` — the `crate::` paths in cli/ are unaffected.
 
 ### Dependencies Required
 

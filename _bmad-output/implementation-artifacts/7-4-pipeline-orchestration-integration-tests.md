@@ -668,9 +668,10 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **New test modules must use `#[path]` attributes** — e.g., `#[path = "integration/test_pipeline.rs"] mod test_pipeline;` in `tests/integration.rs`.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
 - **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
+- **`make_test_config(dir)` path layout:** Sets `bmad_paths.project_root` to `dir`, `implementation_artifacts` to `dir/_bmad-output/implementation-artifacts`. Paths are NOT flat to `dir` — use the nested structure.
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one

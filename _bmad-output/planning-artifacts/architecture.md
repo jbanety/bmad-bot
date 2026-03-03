@@ -112,6 +112,7 @@ cargo init bmad-bot
 bmad-bot/
 ├── Cargo.toml
 ├── src/
+│   ├── lib.rs                          # Library crate — pub mod declarations for integration tests
 │   ├── main.rs
 │   ├── auth/
 │   │   ├── mod.rs
@@ -158,7 +159,15 @@ bmad-bot/
 │   ├── llm_logging.rs                 # LLM request/response debug logging
 │   └── pipeline.rs                    # Pipeline orchestration (watcher → session → review → PR → notify)
 └── tests/
-    └── e2e/
+    ├── e2e/
+    ├── integration.rs                  # Integration test binary entry point (cargo test --test integration)
+    └── integration/                    # Submodule directory for integration.rs
+        ├── helpers/
+        │   ├── mod.rs                  # Re-exports mocks + fixtures
+        │   ├── mocks.rs               # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+        │   └── fixtures.rs            # make_test_config, make_test_secrets, make_test_story, etc.
+        ├── test_mocks.rs              # Self-verification tests for mocks
+        └── test_fixtures.rs           # Self-verification tests for fixtures
 ```
 
 **Note:** Project initialization (`cargo init` + dependency setup + module scaffolding) should be the first implementation story.
@@ -946,6 +955,7 @@ bmad-bot/
 ├── .env.example                      # Template secrets (API keys)
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
+│   ├── lib.rs                          # Library crate — pub mod declarations for integration tests
 │   ├── main.rs                       # Entry point, CLI dispatch, rustls init
 │   ├── auth/
 │   │   ├── mod.rs                    # Auth module root
@@ -998,9 +1008,17 @@ bmad-bot/
 │   │   ├── context.rs                # Zed-style XML ContextBuilder — adaptive backtick fencing, absolute path resolution, multi-file support
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
-└── tests/
-    └── e2e/
-        └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+├── tests/
+│   ├── e2e/
+│   │   └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+│   ├── integration.rs                # Integration test binary entry point (cargo test --test integration)
+│   └── integration/                  # Submodule directory for integration.rs
+│       ├── helpers/
+│       │   ├── mod.rs                # Re-exports mocks + fixtures
+│       │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+│       │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, etc.
+│       ├── test_mocks.rs             # Self-verification tests for mock implementations
+│       └── test_fixtures.rs          # Self-verification tests for fixture builders
 ```
 
 ### Requirements to Structure Mapping
