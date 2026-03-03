@@ -8,10 +8,13 @@ use std::sync::{Arc, Mutex};
 
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
+use bmad_bot::pipeline::{CodeReviewer, DevRunner};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
 use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::watcher::StoryInfo;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // MockGitProvider (Task 2)
@@ -242,6 +245,110 @@ impl Notifier for MockNotifier {
             .unwrap()
             .take()
             .unwrap_or(Ok(()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockDevRunner (Story 7.4 Task 1)
+// ---------------------------------------------------------------------------
+
+/// Mock implementation of [`DevRunner`] for integration tests.
+///
+/// Uses `VecDeque` to support sequential multi-call scenarios
+/// (e.g., `process_eligible_stories`). `SessionOutcome` does NOT derive `Clone`,
+/// so outcomes are consumed (popped) on each call.
+pub struct MockDevRunner {
+    outcomes: Mutex<VecDeque<SessionOutcome>>,
+    call_count: AtomicUsize,
+}
+
+impl MockDevRunner {
+    /// Single-call mock.
+    pub fn with_outcome(outcome: SessionOutcome) -> Self {
+        let mut q = VecDeque::new();
+        q.push_back(outcome);
+        Self {
+            outcomes: Mutex::new(q),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Multi-call mock — pops outcomes in order per call.
+    pub fn with_outcomes(outcomes: Vec<SessionOutcome>) -> Self {
+        Self {
+            outcomes: Mutex::new(outcomes.into()),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl DevRunner for MockDevRunner {
+    async fn run_dev_session(&self, _story: &StoryInfo) -> SessionOutcome {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("MockDevRunner: no more outcomes — add more via with_outcomes()")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockCodeReviewer (Story 7.4 Task 1)
+// ---------------------------------------------------------------------------
+
+/// Mock implementation of [`CodeReviewer`] for integration tests.
+///
+/// Tracks call count and supports sequential outcomes via `VecDeque`.
+pub struct MockCodeReviewer {
+    outcomes: Mutex<VecDeque<ReviewOutcome>>,
+    call_count: AtomicUsize,
+}
+
+impl MockCodeReviewer {
+    pub fn with_outcome(outcome: ReviewOutcome) -> Self {
+        let mut q = VecDeque::new();
+        q.push_back(outcome);
+        Self {
+            outcomes: Mutex::new(q),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Multi-call mock — pops outcomes in order per call.
+    pub fn with_outcomes(outcomes: Vec<ReviewOutcome>) -> Self {
+        Self {
+            outcomes: Mutex::new(outcomes.into()),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn never_called() -> Self {
+        Self {
+            outcomes: Mutex::new(VecDeque::new()),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CodeReviewer for MockCodeReviewer {
+    async fn run_review(&self, _story: &StoryInfo) -> ReviewOutcome {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("MockCodeReviewer: no more outcomes (or never_called() was used)")
     }
 }
 

@@ -890,7 +890,7 @@ impl StoryPipeline {
             status: "in-progress".to_string(),
         };
 
-        let outcome = self.session_runner.resume_session(recovery).await;
+        let outcome = runner.resume_session(recovery).await;
         let result = self
             .process_recovered_session(&story_for_pipeline, outcome)
             .await;
