@@ -380,17 +380,17 @@ N/A
 - Task 2 decision: Used factory closures (`Box<dyn Fn() -> Result<T, E> + Send>`) instead of stored `Result` values because `GitProviderError` does not implement `Clone`.
 - Tasks 4-5: Used factory pattern with named constructors (`completed()`, `escalated()`, `failed()`) since `SessionOutcome` and `ReviewOutcome` are not `Clone`.
 - Task 6: Added `make_test_session_state()` convenience helper for WAL file tests.
-- Task 7: 29 integration tests covering all mocks (return values, call tracking, Send+Sync) and all fixtures (config validation, YAML parsing roundtrips, git repo creation).
+- CR review (claude-sonnet-4-20250514): Fixed 5 HIGH/MEDIUM issues — (1) `MockSessionRunner::check_and_recover_wal` return type corrected from `Option<()>` to `Option<RecoveryInfo>` matching real API; (2) added `Default` impls for `MockGitProvider` and `MockNotifier`; (3) added error-path tests for `add_comment` and `get_pr_url`; (4) `create_test_repo` now uses `git init -b main` to suppress stderr hint; (5) `pub(crate) mod state` reordered before `pub use` in session/mod.rs. Added 3 new tests (empty sprint status, error paths × 2). Total: 32 integration tests passing.
 
 ### File List
 - `src/lib.rs` — MODIFIED (expanded from 2 to 12 pub mod declarations)
 - `src/main.rs` — MODIFIED (removed mod declarations except cli)
-- `src/session/mod.rs` — MODIFIED (added `pub use state::{SessionState, ChatMessage};`)
+- `src/session/mod.rs` — MODIFIED (added `pub use state::{SessionState, ChatMessage};`; fixed mod/use ordering)
 - `src/cli/mod.rs` — MODIFIED (crate:: → bmad_bot:: for 14 references)
 - `src/cli/state.rs` — MODIFIED (crate:: → bmad_bot:: for 2 references)
 - `tests/integration.rs` — NEW (Cargo test binary entry point)
 - `tests/integration/helpers/mod.rs` — NEW (re-exports mocks + fixtures)
-- `tests/integration/helpers/mocks.rs` — NEW (MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner)
-- `tests/integration/helpers/fixtures.rs` — NEW (make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, make_test_session_state, create_test_repo)
-- `tests/integration/test_mocks.rs` — NEW (21 mock self-verification tests)
-- `tests/integration/test_fixtures.rs` — NEW (8 fixture self-verification tests)
+- `tests/integration/helpers/mocks.rs` — NEW/MODIFIED (MockGitProvider+Default, MockNotifier+Default, MockSessionRunner+correct RecoveryInfo return, MockReviewRunner+scope docs)
+- `tests/integration/helpers/fixtures.rs` — NEW/MODIFIED (create_test_repo uses git init -b main)
+- `tests/integration/test_mocks.rs` — NEW/MODIFIED (32 tests: added 2 error-path tests, RecoveryInfo type assertion)
+- `tests/integration/test_fixtures.rs` — NEW/MODIFIED (32 tests: added empty sprint status test, removed unused import)

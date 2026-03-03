@@ -181,10 +181,9 @@ pub fn create_test_repo(dir: &Path) {
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    run(&["init"]);
+    // Use -b main to suppress git's default-branch hint on stderr
+    run(&["init", "-b", "main"]);
     run(&["config", "user.email", "test@test.com"]);
     run(&["config", "user.name", "Test"]);
     run(&["commit", "--allow-empty", "-m", "initial commit"]);
-    // Ensure "main" branch exists regardless of git default branch config
-    run(&["branch", "-M", "main"]);
 }

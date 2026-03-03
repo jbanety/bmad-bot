@@ -32,8 +32,8 @@ pub mod provider;
 /// Session runner — build agent, chat loop, lifecycle management.
 pub mod runner;
 /// WAL state file — session persistence for crash recovery.
-pub use state::{ChatMessage, SessionState};
 pub(crate) mod state;
+pub use state::{ChatMessage, SessionState};
 
 use crate::supervisor::decisions::DecisionRecord;
 use escalation::EscalationReport;

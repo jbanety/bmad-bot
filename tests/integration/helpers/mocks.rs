@@ -9,6 +9,7 @@ use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrIn
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::watcher::StoryInfo;
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,12 @@ pub struct MockGitProvider {
     add_comment_factory: Arc<Mutex<GitProviderFactory<()>>>,
     get_pr_url_factory: Arc<Mutex<GitProviderFactory<String>>>,
     calls: Arc<Mutex<Vec<GitProviderCall>>>,
+}
+
+impl Default for MockGitProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockGitProvider {
@@ -135,6 +142,12 @@ pub struct MockNotifier {
     calls: Arc<Mutex<Vec<NotifierCall>>>,
 }
 
+impl Default for MockNotifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockNotifier {
     pub fn new() -> Self {
         Self {
@@ -208,7 +221,12 @@ pub struct SessionRunCall {
 
 /// Mock session runner — returns a configurable [`SessionOutcome`].
 ///
-/// Not a trait impl — mirrors the public API surface of the real `SessionRunner`.
+/// # Scope
+/// This is a **standalone struct** that mirrors the public method signatures of
+/// the real `SessionRunner`. It is NOT a trait implementation because `Pipeline`
+/// uses `SessionRunner` as a concrete type, not a boxed trait. These mocks are
+/// intended for unit-testing code that calls `.run()` / `.check_and_recover_wal()`
+/// in isolation, not for substitution into a live `Pipeline` instance.
 pub struct MockSessionRunner {
     outcome_factory: Arc<Mutex<Box<dyn Fn(&StoryInfo) -> SessionOutcome + Send>>>,
     calls: Arc<Mutex<Vec<SessionRunCall>>>,
@@ -271,8 +289,11 @@ impl MockSessionRunner {
         factory(story)
     }
 
-    /// Check and recover WAL — always returns None (no crash recovery in mock).
-    pub async fn check_and_recover_wal(&self) -> Option<()> {
+    /// Check and recover WAL — always returns `None` (no crash in mock).
+    ///
+    /// Returns the correct [`RecoveryInfo`] type to match the real
+    /// `SessionRunner::check_and_recover_wal` signature.
+    pub async fn check_and_recover_wal(&self) -> Option<RecoveryInfo> {
         None
     }
 
@@ -294,7 +315,11 @@ pub struct ReviewRunCall {
 
 /// Mock review runner — returns a configurable [`ReviewOutcome`].
 ///
-/// Not a trait impl — mirrors the public API surface of the real `ReviewRunner`.
+/// # Scope
+/// This is a **standalone struct** that mirrors the public method signatures of
+/// the real `ReviewRunner`. It is NOT a trait implementation because `Pipeline`
+/// uses `ReviewRunner` as a concrete type, not a boxed trait. These mocks are
+/// intended for unit-testing code that calls `.run()` in isolation.
 pub struct MockReviewRunner {
     outcome_factory: Arc<Mutex<Box<dyn Fn(&StoryInfo) -> ReviewOutcome + Send>>>,
     calls: Arc<Mutex<Vec<ReviewRunCall>>>,

@@ -1,7 +1,5 @@
 //! Self-verification tests for fixture builders.
 
-use std::path::Path;
-
 use crate::helpers::fixtures;
 use bmad_bot::session::SessionState;
 use bmad_bot::watcher::SprintStatusFile;
@@ -196,4 +194,14 @@ fn test_create_test_repo_creates_valid_git_repo() {
         .expect("git branch should work");
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(branch, "main", "branch should be 'main'");
+}
+
+#[test]
+fn test_write_sprint_status_empty_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = fixtures::write_sprint_status(tmp.path(), vec![]);
+    assert!(path.exists(), "sprint-status.yaml should exist even with no entries");
+    let ssf = SprintStatusFile::load(&path, tmp.path()).expect("should parse empty entries");
+    assert_eq!(ssf.stories().len(), 0);
+    assert_eq!(ssf.entry_count(), 0);
 }

@@ -36,6 +36,28 @@ async fn test_mock_git_provider_create_pr_returns_configured_ok() {
 }
 
 #[tokio::test]
+async fn test_mock_git_provider_add_comment_returns_configured_error() {
+    let mock = MockGitProvider::new().with_add_comment(|| {
+        Err(GitProviderError::AuthenticationFailed {
+            reason: "bad token".into(),
+        })
+    });
+    let result = mock.add_comment("1", "body").await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_mock_git_provider_get_pr_url_returns_configured_error() {
+    let mock = MockGitProvider::new().with_get_pr_url(|| {
+        Err(GitProviderError::AuthenticationFailed {
+            reason: "bad token".into(),
+        })
+    });
+    let result = mock.get_pr_url("1").await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn test_mock_git_provider_create_pr_returns_configured_error() {
     let mock = MockGitProvider::new().with_create_pr(|| {
         Err(GitProviderError::AuthenticationFailed {
@@ -212,8 +234,11 @@ async fn test_mock_session_runner_failed() {
 
 #[tokio::test]
 async fn test_mock_session_runner_wal_recovery_returns_none() {
+    // check_and_recover_wal must return Option<RecoveryInfo>, matching the real SessionRunner API.
     let mock = MockSessionRunner::completed();
-    assert!(mock.check_and_recover_wal().await.is_none());
+    let result: Option<bmad_bot::session::runner::RecoveryInfo> =
+        mock.check_and_recover_wal().await;
+    assert!(result.is_none());
 }
 
 #[tokio::test]
