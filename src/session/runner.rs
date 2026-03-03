@@ -500,13 +500,18 @@ impl SessionRunner {
         // Phase 3 — Activate agent properly before resuming work.
         // The WAL only contains text-only messages — no persona, no tool calls,
         // no project context. Passing raw WAL to run_session() would give the
-        // fresh LLM zero activation context. Instead, follow the same pattern as
-        // context_limit_recovery: summarize history, activate agent, then resume.
-        let outcome = if state.chat_history.is_empty() {
-            // Empty WAL (crash before first response) — fresh start
+        // fresh LLM zero activation context. Instead, activate a fresh agent
+        // and pass the raw WAL history so the dev agent (with tools) can read
+        // the story file and understand where to resume.
+        //
+        // A WAL with ≤2 messages contains only the activation exchange
+        // (user=dev.md, assistant=greeting). No real work was done — the agent
+        // never received DS. Treat as fresh start.
+        let outcome = if state.chat_history.len() <= 2 {
             tracing::info!(
-                action = "crash_recovery_empty_wal",
-                "Empty WAL — delegating to fresh run_session(None)"
+                action = "crash_recovery_shallow_wal",
+                history_len = %state.chat_history.len(),
+                "Activation-only WAL (≤2 messages) — delegating to fresh run_session(None)"
             );
             self.run_session(
                 &agent,
@@ -520,44 +525,22 @@ impl SessionRunner {
             )
             .await
         } else {
-            // Non-empty WAL — summarize + activate + recover (same as context_limit_recovery)
-            let last_exchanges =
-                Self::extract_last_exchanges(&state.chat_history, RECOVERY_KEEP_LAST_EXCHANGES);
-            let formatted_exchanges = Self::format_exchanges_for_message(&last_exchanges);
-
-            let summary = match self
-                .summarize_history(&state, &story_info, &provider_name, &model_name)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(
-                        action = "crash_recovery_summary_failed",
-                        error = %e,
-                        "History summarization failed during crash recovery"
-                    );
-                    let _ = SessionState::delete(&self.state_file_path).await;
-                    return SessionOutcome::Failed {
-                        story_key: story_info.story_key.clone(),
-                        error: format!("Crash recovery summarization failed: {e}"),
-                        decisions: decision_log.records(),
-                    };
-                }
-            };
+            // Non-empty WAL with real work — pass raw history directly to the
+            // dev agent instead of summarizing via a bare LLM (which produces
+            // low-quality summaries without tool access). The dev agent has
+            // tools (read_file, grep, etc.) to verify actual progress by
+            // reading the story file checkboxes and inspecting the codebase.
+            let formatted_history = Self::format_exchanges_for_message(&state.chat_history);
 
             tracing::info!(
-                action = "crash_recovery_summary_generated",
-                original_len = %state.chat_history.len(),
-                summary_len = %summary.len(),
-                "Session summary generated for crash recovery"
+                action = "crash_recovery_raw_history",
+                history_len = %state.chat_history.len(),
+                formatted_len = %formatted_history.len(),
+                "Using raw WAL history for crash recovery (no LLM summarize)"
             );
 
-            let recovery_message = self.build_recovery_message(
-                &story_info,
-                &summary,
-                &formatted_exchanges,
-                "Crash Recovery",
-            );
+            let recovery_message =
+                self.build_crash_recovery_message(&story_info, &formatted_history);
 
             match self
                 .drive_activation_and_recover(
@@ -847,131 +830,56 @@ impl SessionRunner {
     /// file. This is sent as a plain user message — NOT injected into the preamble.
     /// The agent already has its standard preamble and has loaded project context
     /// via the BMAD activation flow (CH → "Load the project context").
-    fn build_recovery_message(
+    /// Build recovery message for crash recovery — uses raw WAL history, no LLM summary.
+    ///
+    /// The dev agent receives the full conversation history and is instructed to
+    /// read the story file to determine actual progress (checkboxes, file changes).
+    fn build_crash_recovery_message(&self, story: &StoryInfo, formatted_history: &str) -> String {
+        format!(
+            "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+             \n\
+             === SESSION RECOVERY — Crash Recovery ===\n\
+             Your previous session was interrupted (crash recovery). Below is the raw conversation \
+             history from before the crash.\n\
+             \n\
+             {formatted_history}\n\
+             \n\
+             === Current Story ===\n\
+             The story file is at: {path}\n\
+             Read this file NOW to see current task checkboxes and progress.\n\
+             Then continue working directly on the current task. Do NOT restart the workflow from the beginning.",
+            path = story.specs_path.display(),
+        )
+    }
+
+    /// Build recovery message for context window limit recovery — uses LLM-generated summary.
+    ///
+    /// Build recovery message for context window limit recovery.
+    ///
+    /// Same approach as crash recovery: pass the last N exchanges from the WAL
+    /// directly and let the dev agent (with tools) read the story file to
+    /// determine actual progress. No LLM summarize — the story file checkboxes
+    /// are the source of truth.
+    fn build_context_limit_recovery_message(
         &self,
         story: &StoryInfo,
-        summary: &str,
         formatted_exchanges: &str,
-        reason: &str,
     ) -> String {
         format!(
             "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
              \n\
-             === SESSION RECOVERY — {reason} ===\n\
-             Your previous session was interrupted ({reason_lower}). Below is your recovery context:\n\
-             \n\
-             === Session Summary ===\n\
-             {summary}\n\
+             === SESSION RECOVERY — Context Window Limit Reached ===\n\
+             Your previous session hit the context window limit. Below are the most recent \
+             exchanges from before the limit was reached.\n\
              \n\
              {formatted_exchanges}\n\
              \n\
              === Current Story ===\n\
              The story file is at: {path}\n\
-             Read this file to see current task checkboxes and progress.\n\
-             Continue working directly on the current task. Do NOT restart the workflow from the beginning.",
-            reason = reason,
-            reason_lower = reason.to_lowercase(),
+             Read this file NOW to see current task checkboxes and progress.\n\
+             Then continue working directly on the current task. Do NOT restart the workflow from the beginning.",
             path = story.specs_path.display(),
         )
-    }
-
-    /// Summarize the full chat history via a fresh LLM call (no tools, empty history).
-    ///
-    /// Uses the same provider/model as the dev session for consistency. If the full
-    /// history is too large for a fresh context, retries with the last 50% of messages.
-    async fn summarize_history(
-        &self,
-        state: &SessionState,
-        story: &StoryInfo,
-        _provider: &str,
-        _model: &str,
-    ) -> Result<String, String> {
-        let format_history = |messages: &[ChatMessage]| -> String {
-            messages
-                .iter()
-                .map(|m| {
-                    let label = if m.role == "user" {
-                        "User"
-                    } else {
-                        "Assistant"
-                    };
-                    format!("{label}: {}", m.content)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-
-        let full_history_text = format_history(&state.chat_history);
-
-        let summarization_prompt = format!(
-            "You are summarizing a development session for continuity. The session is implementing \
-             story {key} in a software project. Provide a concise but comprehensive summary covering:\n\
-             - What tasks have been completed (with file paths and key decisions)\n\
-             - What task is currently in progress\n\
-             - Any issues encountered and how they were resolved\n\
-             - Key code patterns and conventions established\n\
-             - Current state of the implementation\n\
-             \n\
-             Here is the full conversation history:\n\
-             {full_history_text}",
-            key = story.story_key,
-        );
-
-        // Build a bare summarization agent via the factory — no tools needed.
-        let preamble = "You are a technical session summarizer. Be concise but comprehensive.";
-        let summarize_with_prompt = |prompt: String| {
-            let flag = Arc::clone(&self.shutdown);
-            let factory = Arc::clone(&self.agent_factory);
-            async move {
-                let agent = factory
-                    .build_bare(LlmRole::Dev, preamble)
-                    .await
-                    .map_err(|e| format!("Summarization agent build failed: {e}"))?;
-                log_llm_request("dev-summarize", 0, &prompt, 0);
-                let result = agent
-                    .stream_chat(prompt.as_str(), vec![], Some(&flag))
-                    .await;
-                match &result {
-                    Ok((r, _)) => log_llm_response("dev-summarize", 0, r),
-                    Err(e) => log_llm_error("dev-summarize", 0, e),
-                }
-                result.map(|(text, _)| text).map_err(|e| e.to_string())
-            }
-        };
-
-        match summarize_with_prompt(summarization_prompt).await {
-            Ok(summary) => Ok(summary),
-            Err(e) => {
-                // Fallback: if the full history was too large, retry with last 50%
-                if is_context_limit_error(&e) {
-                    tracing::warn!(
-                        action = "context_limit_summary_fallback",
-                        "Summarization hit context limit — retrying with truncated history (50%)"
-                    );
-                    let half = state.chat_history.len() / 2;
-                    let truncated = &state.chat_history[half..];
-                    let truncated_text = format_history(truncated);
-                    let fallback_prompt = format!(
-                        "You are summarizing a development session for continuity. The session is implementing \
-                         story {key} in a software project. Provide a concise but comprehensive summary covering:\n\
-                         - What tasks have been completed (with file paths and key decisions)\n\
-                         - What task is currently in progress\n\
-                         - Any issues encountered and how they were resolved\n\
-                         - Key code patterns and conventions established\n\
-                         - Current state of the implementation\n\
-                         \n\
-                         Here is the conversation history (truncated to last 50%):\n\
-                         {truncated_text}",
-                        key = story.story_key,
-                    );
-                    summarize_with_prompt(fallback_prompt).await.map_err(|e2| {
-                        format!("Summarization failed even with truncated history: {e2}")
-                    })
-                } else {
-                    Err(format!("Summarization failed: {e}"))
-                }
-            }
-        }
     }
 
     /// Recover from a context window limit error by summarizing history and
@@ -1017,36 +925,21 @@ impl SessionRunner {
             };
         }
 
-        // Step 1 — Extract last N exchanges
+        // Step 1 — Extract last N exchanges from the WAL.
+        // No LLM summarize — the dev agent has tools (read_file, grep) to verify
+        // actual progress by reading the story file checkboxes and codebase.
         let last_exchanges =
             Self::extract_last_exchanges(&state.chat_history, RECOVERY_KEEP_LAST_EXCHANGES);
         let formatted_exchanges = Self::format_exchanges_for_message(&last_exchanges);
 
-        // Step 2 — Summarize full history via fresh LLM call
-        let summary = match self.summarize_history(state, story, provider, model).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(
-                    action = "context_limit_summary_failed",
-                    error = %e,
-                    "History summarization failed"
-                );
-                return SessionOutcome::Failed {
-                    story_key: story.story_key.clone(),
-                    error: format!("Context limit recovery summarization failed: {e}"),
-                    decisions: decision_log.records(),
-                };
-            }
-        };
-
         tracing::info!(
-            action = "context_limit_summary_generated",
+            action = "context_limit_raw_history",
             original_len = %state.chat_history.len(),
-            summary_len = %summary.len(),
-            "Session summary generated for recovery"
+            kept_exchanges = %last_exchanges.len() / 2,
+            "Using raw last exchanges for context limit recovery (no LLM summarize)"
         );
 
-        // Step 3 — Build fresh agent via AgentFactory (single call, no provider match)
+        // Step 2 — Build fresh agent via AgentFactory (single call, no provider match)
         let agent = match self
             .build_agent_for_role(
                 LlmRole::Dev,
@@ -1067,12 +960,8 @@ impl SessionRunner {
             }
         };
 
-        let recovery_message = self.build_recovery_message(
-            story,
-            &summary,
-            &formatted_exchanges,
-            "Context Window Limit Reached",
-        );
+        let recovery_message =
+            self.build_context_limit_recovery_message(story, &formatted_exchanges);
 
         // Step 4-7 — Drive activation and delegate to run_session()
         match self
@@ -2777,15 +2666,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_recovery_message_contains_all_sections() {
+    fn test_build_context_limit_recovery_message_contains_all_sections() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(
-            &story,
-            "summary text",
-            "exchange text",
-            "Context Window Limit Reached",
-        );
+        let msg = runner.build_context_limit_recovery_message(&story, "exchange text");
         assert!(
             msg.contains("SESSION RECOVERY"),
             "Should contain SESSION RECOVERY header"
@@ -2794,11 +2678,6 @@ mod tests {
             msg.contains("Context Window Limit Reached"),
             "Should contain the reason in the header"
         );
-        assert!(
-            msg.contains("Session Summary"),
-            "Should contain Session Summary section"
-        );
-        assert!(msg.contains("summary text"), "Should contain the summary");
         assert!(
             msg.contains("exchange text"),
             "Should contain the formatted exchanges"
@@ -2810,10 +2689,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_recovery_message_includes_story_path() {
+    fn test_build_context_limit_recovery_message_includes_story_path() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(&story, "s", "e", "Context Window Limit Reached");
+        let msg = runner.build_context_limit_recovery_message(&story, "e");
         assert!(
             msg.contains("6-4-context-window-limit-recovery.md"),
             "Should contain the story specs_path"
@@ -2821,15 +2700,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_recovery_message_does_not_contain_project_context() {
+    fn test_build_context_limit_recovery_message_does_not_contain_project_context() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(
-            &story,
-            "summary",
-            "exchanges",
-            "Context Window Limit Reached",
-        );
+        let msg = runner.build_context_limit_recovery_message(&story, "exchanges");
         // Project context is loaded by the agent via BMAD activation, NOT injected in message
         assert!(
             !msg.contains("Project Context"),
@@ -2838,12 +2712,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_recovery_message_contains_continue_instruction() {
+    fn test_build_crash_recovery_message_contains_continue_instruction() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(&story, "s", "e", "Crash Recovery");
+        let msg = runner.build_crash_recovery_message(&story, "e");
         assert!(
-            msg.contains("Continue working directly on the current task"),
+            msg.contains("continue working directly on the current task"),
             "Should instruct agent to continue"
         );
         assert!(
@@ -2853,10 +2727,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_recovery_message_crash_recovery_reason() {
+    fn test_build_crash_recovery_message_reason() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(&story, "summary", "exchanges", "Crash Recovery");
+        let msg = runner.build_crash_recovery_message(&story, "exchanges");
         assert!(
             msg.contains("=== SESSION RECOVERY — Crash Recovery ==="),
             "Should contain crash recovery reason in header"
@@ -2865,54 +2739,54 @@ mod tests {
             msg.contains("crash recovery"),
             "Should contain lowercase reason in description"
         );
-        assert!(
-            !msg.contains("Context Window"),
-            "Crash recovery message should not mention context window"
-        );
     }
 
     #[test]
-    fn test_build_recovery_message_context_limit_reason() {
+    fn test_build_context_limit_recovery_message_reason() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(
-            &story,
-            "summary",
-            "exchanges",
-            "Context Window Limit Reached",
-        );
+        let msg = runner.build_context_limit_recovery_message(&story, "exchanges");
         assert!(
             msg.contains("=== SESSION RECOVERY — Context Window Limit Reached ==="),
             "Should contain context limit reason in header"
         );
         assert!(
-            msg.contains("context window limit reached"),
-            "Should contain lowercase reason in description"
+            msg.contains("context window limit"),
+            "Should contain context limit in description"
         );
     }
 
     #[test]
-    fn test_build_recovery_message_reason_is_parameterized() {
+    fn test_crash_and_context_limit_messages_share_common_sections() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let crash_msg = runner.build_recovery_message(&story, "s", "e", "Crash Recovery");
-        let ctx_msg =
-            runner.build_recovery_message(&story, "s", "e", "Context Window Limit Reached");
-        // Both share the same structure but differ in the reason header
-        assert!(crash_msg.contains("SESSION RECOVERY — Crash Recovery"));
-        assert!(ctx_msg.contains("SESSION RECOVERY — Context Window Limit Reached"));
+        let crash_msg = runner.build_crash_recovery_message(&story, "e");
+        let ctx_msg = runner.build_context_limit_recovery_message(&story, "e");
         // Both contain the common sections
         for msg in [&crash_msg, &ctx_msg] {
-            assert!(msg.contains("Session Summary"));
-            assert!(msg.contains("Current Story"));
-            assert!(msg.contains("Continue working directly"));
+            assert!(msg.contains("=== Current Story ==="));
+            assert!(
+                msg.to_lowercase().contains("continue working directly"),
+                "Should contain 'continue working directly' (case-insensitive)"
+            );
         }
+    }
+
+    #[test]
+    fn test_build_crash_recovery_message_instructs_read_story_file() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let msg = runner.build_crash_recovery_message(&story, "e");
+        assert!(
+            msg.contains("Read this file NOW"),
+            "Should instruct agent to read story file immediately"
+        );
     }
 
     // -- compressed state tests --
 
     #[test]
-    fn test_compressed_state_contains_activation_turns() {
+    fn test_compressed_state_contains_activation_turns_context_limit() {
         // Simulate the compressed history that drive_activation_and_recover would build:
         // 1. dev.md activation (2 msgs)
         // 2. CH (2 msgs)
@@ -3120,7 +2994,7 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
     }
 
     #[test]
-    fn test_compressed_state_last_message_is_recovery() {
+    fn test_compressed_state_last_message_is_recovery_context_limit() {
         let compressed_history = vec![
             ChatMessage {
                 role: "user".to_string(),
@@ -3158,7 +3032,7 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
     }
 
     #[test]
-    fn test_compressed_state_preserves_metadata() {
+    fn test_compressed_state_preserves_metadata_context_limit() {
         let original = SessionState {
             story_id: "6.4".to_string(),
             story_key: "6-4-context-window-limit-recovery".to_string(),
@@ -3201,7 +3075,7 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
     }
 
     #[test]
-    fn test_compressed_state_updates_last_activity() {
+    fn test_compressed_state_updates_last_activity_context_limit() {
         let original_activity = "2026-02-07T10:05:00Z";
         let new_activity = chrono::Utc::now().to_rfc3339();
 
@@ -3209,6 +3083,17 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
         assert_ne!(
             original_activity, &new_activity,
             "last_activity should be refreshed"
+        );
+    }
+
+    #[test]
+    fn test_build_context_limit_recovery_message_instructs_read_story_file() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let msg = runner.build_context_limit_recovery_message(&story, "e");
+        assert!(
+            msg.contains("Read this file NOW"),
+            "Should instruct agent to read story file immediately"
         );
     }
 
@@ -3292,7 +3177,7 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
     }
 
     #[test]
-    fn test_compressed_state_total_messages() {
+    fn test_compressed_state_total_messages_context_limit() {
         // After dev.md activation (2 msgs) + CH (2 msgs) + Load context (2 msgs) + recovery message (1 msg) = 7 messages
         let compressed_history = vec![
             ChatMessage {
