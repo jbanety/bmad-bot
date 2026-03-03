@@ -793,10 +793,8 @@ impl StoryPipeline {
             || stderr.contains("non-fast-forward");
 
         if !is_stale {
-            return Err(PipelineError::PrCreation {
-                story_key: String::new(),
-                branch: branch.to_string(),
-                reason: format!("Git push failed: {stderr}"),
+            return Err(PipelineError::Init {
+                reason: format!("Git push failed for branch '{branch}': {stderr}"),
             });
         }
 
@@ -834,10 +832,8 @@ impl StoryPipeline {
         }
 
         let retry_stderr = String::from_utf8_lossy(&retry.stderr);
-        Err(PipelineError::PrCreation {
-            story_key: String::new(),
-            branch: branch.to_string(),
-            reason: format!("Git push failed after prune: {retry_stderr}"),
+        Err(PipelineError::Init {
+            reason: format!("Git push failed for branch '{branch}' after prune: {retry_stderr}"),
         })
     }
 
@@ -917,36 +913,8 @@ impl StoryPipeline {
                 pr_how_to_test,
                 pr_additional_info,
             } => {
-                // Optional code review
-                let review_report = if self.config.code_review_enabled {
-                    match self.code_reviewer.run_review(story).await {
-                        ReviewOutcome::Completed { report, .. } => Some(report),
-                        ReviewOutcome::Failed {
-                            story_key: rk,
-                            error,
-                        } => {
-                            tracing::warn!(
-                                action = "recovery_review_failed",
-                                story_key = %rk,
-                                error = %error,
-                                "Code review failed after recovery — continuing to PR creation"
-                            );
-                            None
-                        }
-                        ReviewOutcome::Skipped { reason } => {
-                            tracing::info!(
-                                action = "recovery_review_skipped",
-                                reason = %reason,
-                                "Code review skipped after recovery — continuing to PR creation"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                // Push branch before PR creation
+                // Push branch before PR creation — mirrors process_story() phase ordering:
+                // push → PR creation → review → add_comment
                 if let Err(e) = self.push_branch(&branch).await {
                     tracing::error!(
                         action = "recovery_push_failed",
@@ -966,7 +934,7 @@ impl StoryPipeline {
                     };
                 }
 
-                // Success PR
+                // Success PR — create before review so it's immediately visible
                 let decisions_section = format_pr_decisions_section(&decisions);
                 let pr_summary = pr_context.map(|ctx| PrSummary {
                     context: ctx,
@@ -989,30 +957,8 @@ impl StoryPipeline {
                     target_branch: self.config.git_provider.target_branch.clone(),
                 };
 
-                match self.git_provider.create_pr(pr_params).await {
-                    Ok(pr_info) => {
-                        if let Some(ref report) = review_report
-                            && let Err(e) = self
-                                .git_provider
-                                .add_comment(&pr_info.id, &strip_agent_artifacts(report))
-                                .await
-                        {
-                            tracing::error!(
-                                action = "recovery_pr_comment_failed",
-                                pr_id = %pr_info.id,
-                                error = %e,
-                                "Failed to post review comment after recovery"
-                            );
-                        }
-
-                        PipelineResult {
-                            story_key: story_key.clone(),
-                            status: StoryStatus::Completed,
-                            pr_url: Some(pr_info.url.clone()),
-                            error_detail: None,
-                            fatal: false,
-                        }
-                    }
+                let pr_info = match self.git_provider.create_pr(pr_params).await {
+                    Ok(info) => info,
                     Err(e) => {
                         tracing::error!(
                             action = "recovery_pr_creation_failed",
@@ -1021,7 +967,7 @@ impl StoryPipeline {
                             error = %e,
                             "PR creation failed after recovery"
                         );
-                        PipelineResult {
+                        return PipelineResult {
                             story_key: story_key.clone(),
                             status: StoryStatus::Error,
                             pr_url: None,
@@ -1029,8 +975,73 @@ impl StoryPipeline {
                                 "PR creation failed after recovery: {e}. Branch: {branch}"
                             )),
                             fatal: false,
+                        };
+                    }
+                };
+
+                // Optional code review — runs after PR exists (mirrors process_story() order)
+                let review_report = if self.config.code_review_enabled {
+                    match self.code_reviewer.run_review(story).await {
+                        ReviewOutcome::Completed { report, .. } => Some(report),
+                        ReviewOutcome::Failed {
+                            story_key: rk,
+                            error,
+                        } => {
+                            tracing::warn!(
+                                action = "recovery_review_failed",
+                                story_key = %rk,
+                                error = %error,
+                                "Code review failed after recovery — PR already exists"
+                            );
+                            None
+                        }
+                        ReviewOutcome::Skipped { reason } => {
+                            tracing::info!(
+                                action = "recovery_review_skipped",
+                                reason = %reason,
+                                "Code review skipped after recovery — PR already exists"
+                            );
+                            None
                         }
                     }
+                } else {
+                    None
+                };
+
+                // Push review fix commits if review ran
+                if review_report.is_some()
+                    && let Err(e) = self.push_branch(&branch).await
+                {
+                    tracing::warn!(
+                        action = "recovery_review_push_failed",
+                        story_key = %story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Failed to push review fix commits after recovery — PR still exists with dev commits"
+                    );
+                }
+
+                // Post review comment on PR (non-blocking)
+                if let Some(ref report) = review_report
+                    && let Err(e) = self
+                        .git_provider
+                        .add_comment(&pr_info.id, &strip_agent_artifacts(report))
+                        .await
+                {
+                    tracing::error!(
+                        action = "recovery_pr_comment_failed",
+                        pr_id = %pr_info.id,
+                        error = %e,
+                        "Failed to post review comment after recovery"
+                    );
+                }
+
+                PipelineResult {
+                    story_key: story_key.clone(),
+                    status: StoryStatus::Completed,
+                    pr_url: Some(pr_info.url.clone()),
+                    error_detail: None,
+                    fatal: false,
                 }
             }
 

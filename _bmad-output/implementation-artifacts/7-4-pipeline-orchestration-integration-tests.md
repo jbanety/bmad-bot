@@ -1,6 +1,6 @@
 # Story 7.4: Pipeline Orchestration Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -31,7 +31,7 @@ So that I'm confident the orchestration logic correctly chains session → PR �
 3. **Given** the same setup but MockDevRunner returns `SessionOutcome::Escalated`
    **When** `process_story()` is called
    **Then** the pipeline returns `PipelineResult` with `status: Blocked`
-   **And** NO PR is created (`create_pr` not called — escalation skips PR in current code)
+   **And** an escalation PR IS created (`create_pr` called — implementation creates escalation PR with `[NEEDS REVIEW]` title to preserve partial work and prompt human review)
    **And** MockNotifier captured a notification with `StoryStatus::Blocked`
 
 4. **Given** a `StoryPipeline` with `code_review_enabled: false` in config
@@ -750,21 +750,28 @@ Claude Sonnet 4 (via Cursor)
 
 ### Debug Log References
 - Task 0: Already implemented in prior story. Fixed one remaining compile error: `self.session_runner.resume_session(recovery)` → `runner.resume_session(recovery)` at L893 of `src/pipeline.rs`.
-- Task 6 (AC #3): Story AC said escalation skips PR creation, but actual implementation DOES create an escalation PR. Tests aligned to actual behavior.
+- Task 6 (AC #3): Story AC said escalation skips PR creation, but actual implementation DOES create an escalation PR. AC #3 text updated to match actual behavior.
 - `SessionOutcome::Completed` has 6 fields (story spec listed 3) — the 3 extra `pr_context`, `pr_how_to_test`, `pr_additional_info` were added post-story-creation.
 - `PipelineResult` has a `fatal` field not in original spec — tested in supplementary infra error test.
 - `push_branch()` calls real git CLI — tests set up local bare remote to enable push to succeed.
+- Code Review fix: `process_recovered_session()` had inverted phase order (review before push/PR); refactored to match `process_story()` ordering: push → PR creation → review → add_comment.
+- Code Review fix: `push_branch()` returned `PipelineError::PrCreation` with empty `story_key` on non-stale failure; changed to `PipelineError::Init` with descriptive message.
+- Code Review fix: `MockCodeReviewer` now uses `Arc<AtomicUsize>` shared call counter and exposes `MockCodeReviewerHandle` returned from `build()` for explicit call-count assertions.
+- Code Review fix: `PipelineTestBuilder::build()` now returns `(StoryPipeline, MockNotifier, MockGitProvider, MockCodeReviewerHandle)` — 4-tuple.
+- Code Review fix: AC #1 happy-path test now asserts `create_pr` position < `add_comment` position in call sequence (proves ordering).
+- Code Review fix: AC #4 test now asserts `reviewer.call_count() == 0` explicitly.
+- Code Review fix: AC #5 test now asserts `reviewer.call_count() == 0` explicitly.
 
 ### Completion Notes List
 - ✅ Task 0: DI refactor was already done. Fixed residual compile error on `recover_and_process()` L893.
-- ✅ Task 1: `MockDevRunner` + `MockCodeReviewer` added to `tests/integration/helpers/mocks.rs` with VecDeque pattern.
-- ✅ Task 2: `PipelineTestBuilder` + `create_test_repo_with_remote()` + `create_story_branch()` added to fixtures.
+- ✅ Task 1: `MockDevRunner` + `MockCodeReviewer` + `MockCodeReviewerHandle` added to `tests/integration/helpers/mocks.rs` with VecDeque pattern and shared Arc counter.
+- ✅ Task 2: `PipelineTestBuilder` + `create_test_repo_with_remote()` + `create_story_branch()` added to fixtures. `build()` returns 4-tuple including `MockCodeReviewerHandle`.
 - ✅ Task 3: `tests/integration/test_pipeline.rs` created, `mod test_pipeline` added to `tests/integration.rs`.
-- ✅ Task 4: Happy-path test — Completed, pr_url, create_pr title starts with `feat(`, add_comment contains "LGTM", 1 notification.
+- ✅ Task 4: Happy-path test — Completed, pr_url, create_pr title starts with `feat(`, add_comment contains "LGTM", ordering assertion (CreatePr pos < AddComment pos), 1 notification.
 - ✅ Task 5: Session failure — Error, "LLM timeout" in error_detail, failure PR with `[NEEDS REVIEW]`, Error notification.
 - ✅ Task 6: Escalation — Blocked, escalation PR created (actual behavior), Blocked notification.
-- ✅ Task 7: Review disabled — Completed, no add_comment, no review call.
-- ✅ Task 8: PR creation failure — Error, pr_url None, notification still sent.
+- ✅ Task 7: Review disabled — Completed, no add_comment, reviewer.call_count() == 0 asserted.
+- ✅ Task 8: PR creation failure — Error, pr_url None, reviewer.call_count() == 0 asserted, notification still sent.
 - ✅ Task 9: Review failure — still Completed, no add_comment.
 - ✅ Task 10: Notification failure — still Completed with pr_url.
 - ✅ Task 11: Batch 3 stories — RunSummary totals correct, 3 story notifications + 1 run_summary.
@@ -772,8 +779,8 @@ Claude Sonnet 4 (via Cursor)
 - All 76 integration tests pass. All 886 unit tests pass. 0 regressions.
 
 ### File List
-- `src/pipeline.rs` — Fixed `recover_and_process()` L893: `self.session_runner` → `runner`
+- `src/pipeline.rs` — Fixed `recover_and_process()` L893: `self.session_runner` → `runner`; fixed `process_recovered_session()` phase order (push → PR → review → comment); fixed `push_branch()` error variant (PrCreation → Init)
 - `tests/integration.rs` — Added `#[path = "integration/test_pipeline.rs"] mod test_pipeline;`
-- `tests/integration/helpers/mocks.rs` — Added `MockDevRunner`, `MockCodeReviewer` implementing `DevRunner`/`CodeReviewer` traits
-- `tests/integration/helpers/fixtures.rs` — Added `PipelineTestBuilder`, `create_test_repo_with_remote()`, `create_story_branch()`
-- `tests/integration/test_pipeline.rs` — NEW: 11 integration tests covering all ACs + supplementary coverage
+- `tests/integration/helpers/mocks.rs` — Added `MockDevRunner`, `MockCodeReviewer`, `MockCodeReviewerHandle` implementing `DevRunner`/`CodeReviewer` traits with shared Arc counter
+- `tests/integration/helpers/fixtures.rs` — Added `PipelineTestBuilder`, `create_test_repo_with_remote()`, `create_story_branch()`; `build()` now returns 4-tuple with `MockCodeReviewerHandle`
+- `tests/integration/test_pipeline.rs` — NEW: 11 integration tests covering all ACs + supplementary coverage; AC #1 ordering assertion; AC #4/#5 explicit reviewer call-count assertions

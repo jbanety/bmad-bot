@@ -16,7 +16,7 @@ use bmad_bot::session::SessionOutcome;
 use bmad_bot::session::SessionState;
 use bmad_bot::watcher::StoryInfo;
 
-use super::mocks::{MockCodeReviewer, MockDevRunner, MockGitProvider, MockNotifier};
+use super::mocks::{MockCodeReviewer, MockCodeReviewerHandle, MockDevRunner, MockGitProvider, MockNotifier};
 
 // ---------------------------------------------------------------------------
 // make_test_config (Task 6.1)
@@ -389,10 +389,9 @@ impl PipelineTestBuilder {
 
     /// Build the pipeline and return assertion handles.
     ///
-    /// Returns `(StoryPipeline, MockNotifier, MockGitProvider)` where the
-    /// `MockNotifier` and `MockGitProvider` share interior state with the
-    /// pipeline's copies via `Arc<Mutex<...>>`.
-    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider) {
+    /// Returns `(StoryPipeline, MockNotifier, MockGitProvider, MockCodeReviewerHandle)` where the
+    /// mock handles share interior state with the pipeline's copies via `Arc<Mutex<...>>`.
+    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider, MockCodeReviewerHandle) {
         let notifier_for_assertions = self.mock_notifier.clone();
         let git_for_assertions = self.mock_git.clone();
 
@@ -412,15 +411,16 @@ impl PipelineTestBuilder {
             Box::new(MockDevRunner::with_outcomes(self.session_outcomes))
         };
 
-        let code_reviewer: Box<dyn CodeReviewer> = if self.review_outcomes.is_empty() {
-            Box::new(MockCodeReviewer::never_called())
+        let (code_reviewer_mock, reviewer_handle) = if self.review_outcomes.is_empty() {
+            MockCodeReviewer::never_called()
         } else if self.review_outcomes.len() == 1 {
-            Box::new(MockCodeReviewer::with_outcome(
+            MockCodeReviewer::with_outcome(
                 self.review_outcomes.into_iter().next().unwrap(),
-            ))
+            )
         } else {
-            Box::new(MockCodeReviewer::with_outcomes(self.review_outcomes))
+            MockCodeReviewer::with_outcomes(self.review_outcomes)
         };
+        let code_reviewer: Box<dyn CodeReviewer> = Box::new(code_reviewer_mock);
 
         let pipeline = StoryPipeline::new_with_components(
             Arc::new(self.config),
@@ -430,6 +430,6 @@ impl PipelineTestBuilder {
             code_reviewer,
         );
 
-        (pipeline, notifier_for_assertions, git_for_assertions)
+        (pipeline, notifier_for_assertions, git_for_assertions, reviewer_handle)
     }
 }

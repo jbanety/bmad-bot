@@ -307,36 +307,60 @@ impl DevRunner for MockDevRunner {
 /// Tracks call count and supports sequential outcomes via `VecDeque`.
 pub struct MockCodeReviewer {
     outcomes: Mutex<VecDeque<ReviewOutcome>>,
-    call_count: AtomicUsize,
+    call_count: Arc<AtomicUsize>,
+}
+
+/// Assertion handle for `MockCodeReviewer` — shares interior state via `Arc`.
+///
+/// Returned from `PipelineTestBuilder::build()` so tests can assert
+/// `call_count()` without consuming the mock itself.
+#[derive(Clone)]
+pub struct MockCodeReviewerHandle {
+    call_count: Arc<AtomicUsize>,
+}
+
+impl MockCodeReviewerHandle {
+    /// Number of times `run_review` was called on the associated mock.
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
 }
 
 impl MockCodeReviewer {
-    pub fn with_outcome(outcome: ReviewOutcome) -> Self {
+    pub fn with_outcome(outcome: ReviewOutcome) -> (Self, MockCodeReviewerHandle) {
+        let call_count = Arc::new(AtomicUsize::new(0));
         let mut q = VecDeque::new();
         q.push_back(outcome);
-        Self {
+        let mock = Self {
             outcomes: Mutex::new(q),
-            call_count: AtomicUsize::new(0),
-        }
+            call_count: Arc::clone(&call_count),
+        };
+        let handle = MockCodeReviewerHandle { call_count };
+        (mock, handle)
     }
 
     /// Multi-call mock — pops outcomes in order per call.
-    pub fn with_outcomes(outcomes: Vec<ReviewOutcome>) -> Self {
-        Self {
+    pub fn with_outcomes(outcomes: Vec<ReviewOutcome>) -> (Self, MockCodeReviewerHandle) {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let mock = Self {
             outcomes: Mutex::new(outcomes.into()),
-            call_count: AtomicUsize::new(0),
-        }
+            call_count: Arc::clone(&call_count),
+        };
+        let handle = MockCodeReviewerHandle { call_count };
+        (mock, handle)
     }
 
-    pub fn never_called() -> Self {
-        Self {
+    /// Mock that panics with a clear message if `run_review` is ever called.
+    ///
+    /// Used when the test asserts the reviewer must NOT be called (e.g. review disabled).
+    pub fn never_called() -> (Self, MockCodeReviewerHandle) {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let mock = Self {
             outcomes: Mutex::new(VecDeque::new()),
-            call_count: AtomicUsize::new(0),
-        }
-    }
-
-    pub fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::SeqCst)
+            call_count: Arc::clone(&call_count),
+        };
+        let handle = MockCodeReviewerHandle { call_count };
+        (mock, handle)
     }
 }
 
@@ -348,7 +372,7 @@ impl CodeReviewer for MockCodeReviewer {
             .lock()
             .unwrap()
             .pop_front()
-            .expect("MockCodeReviewer: no more outcomes (or never_called() was used)")
+            .expect("MockCodeReviewer: run_review called but no outcome queued (never_called() or exhausted)")
     }
 }
 

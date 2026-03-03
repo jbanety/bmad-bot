@@ -64,7 +64,7 @@ fn setup_git_env(story_branch: &str) -> (tempfile::TempDir, PathBuf) {
 async fn test_pipeline_happy_path_completed_with_review() {
     let (_tmp, work) = setup_git_env("story/4-1-rig-tools");
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new(&work)
+    let (pipeline, notifier, git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_session(completed_outcome())
         .with_review(completed_review())
         .build();
@@ -112,6 +112,21 @@ async fn test_pipeline_happy_path_completed_with_review() {
         comment_calls[0].contains("LGTM"),
         "review comment should contain 'LGTM'"
     );
+
+    // AC #1: create_pr MUST appear before add_comment in the call sequence
+    // (proves PR was created before review ran, since add_comment only fires post-review)
+    let create_pr_pos = calls
+        .iter()
+        .position(|c| matches!(c, GitProviderCall::CreatePr(_)))
+        .expect("create_pr call not found");
+    let add_comment_pos = calls
+        .iter()
+        .position(|c| matches!(c, GitProviderCall::AddComment { .. }))
+        .expect("add_comment call not found");
+    assert!(
+        create_pr_pos < add_comment_pos,
+        "create_pr (pos {create_pr_pos}) must be called before add_comment (pos {add_comment_pos})"
+    );
 }
 
 // ===========================================================================
@@ -122,7 +137,7 @@ async fn test_pipeline_happy_path_completed_with_review() {
 async fn test_pipeline_session_failure_creates_failure_pr() {
     let (_tmp, work) = setup_git_env("story/4-1-rig-tools");
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new(&work)
+    let (pipeline, notifier, git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_session(SessionOutcome::Failed {
             story_key: "4-1-rig-tools".to_string(),
             error: "LLM timeout".to_string(),
@@ -171,7 +186,7 @@ async fn test_pipeline_session_failure_creates_failure_pr() {
 async fn test_pipeline_escalation_returns_blocked_with_escalation_pr() {
     let (_tmp, work) = setup_git_env("story/4-1-rig-tools");
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new(&work)
+    let (pipeline, notifier, git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_session(SessionOutcome::Escalated {
             report: EscalationReport {
                 story_key: "4-1-rig-tools".to_string(),
@@ -224,7 +239,7 @@ async fn test_pipeline_escalation_returns_blocked_with_escalation_pr() {
 async fn test_pipeline_review_disabled_skips_review() {
     let (_tmp, work) = setup_git_env("story/4-1-rig-tools");
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new(&work)
+    let (pipeline, notifier, git, reviewer) = PipelineTestBuilder::new(&work)
         .with_code_review(false)
         .with_session(completed_outcome())
         .build();
@@ -254,6 +269,13 @@ async fn test_pipeline_review_disabled_skips_review() {
         .count();
     assert_eq!(create_pr_count, 1);
 
+    // AC #4: MockCodeReviewer was NOT called (review disabled)
+    assert_eq!(
+        reviewer.call_count(),
+        0,
+        "MockCodeReviewer must not be called when code_review_enabled = false"
+    );
+
     // Notification still sent
     assert_eq!(notifier.story_calls().len(), 1);
 }
@@ -271,7 +293,7 @@ async fn test_pipeline_pr_creation_failure_returns_error() {
         message: "Internal Server Error".to_string(),
     }));
 
-    let (pipeline, notifier, _git) = PipelineTestBuilder::new(&work)
+    let (pipeline, notifier, _git, reviewer) = PipelineTestBuilder::new(&work)
         .with_session(completed_outcome())
         .with_git_provider(mock_git)
         .build();
@@ -292,6 +314,13 @@ async fn test_pipeline_pr_creation_failure_returns_error() {
         "error_detail should mention PR creation failure"
     );
 
+    // AC #5: MockCodeReviewer NOT called (no PR to review against)
+    assert_eq!(
+        reviewer.call_count(),
+        0,
+        "MockCodeReviewer must not be called when PR creation fails"
+    );
+
     // AC #5: notification still sent
     assert_eq!(
         notifier.story_calls().len(),
@@ -308,7 +337,7 @@ async fn test_pipeline_pr_creation_failure_returns_error() {
 async fn test_pipeline_review_failure_still_completes() {
     let (_tmp, work) = setup_git_env("story/4-1-rig-tools");
 
-    let (pipeline, _notifier, git) = PipelineTestBuilder::new(&work)
+    let (pipeline, _notifier, git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_session(completed_outcome())
         .with_review(ReviewOutcome::Failed {
             story_key: "4-1-rig-tools".to_string(),
@@ -354,7 +383,7 @@ async fn test_pipeline_notification_failure_non_blocking() {
         reason: "test error — network unreachable".to_string(),
     }));
 
-    let (pipeline, _notifier, _git) = PipelineTestBuilder::new(&work)
+    let (pipeline, _notifier, _git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_session(completed_outcome())
         .with_review(completed_review())
         .with_notifier(mock_notifier)
@@ -411,7 +440,7 @@ async fn test_pipeline_process_eligible_stories_batch() {
         },
     ];
 
-    let (pipeline, notifier, _git) = PipelineTestBuilder::new(&work)
+    let (pipeline, notifier, _git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_code_review(false)
         .with_sessions(outcomes)
         .build();
@@ -451,7 +480,7 @@ async fn test_pipeline_process_eligible_stories_batch() {
 async fn test_pipeline_review_skipped_no_comment() {
     let (_tmp, work) = setup_git_env("story/4-1-rig-tools");
 
-    let (pipeline, _notifier, git) = PipelineTestBuilder::new(&work)
+    let (pipeline, _notifier, git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_session(completed_outcome())
         .with_review(ReviewOutcome::Skipped {
             reason: "Skipped by policy".to_string(),
@@ -476,7 +505,7 @@ async fn test_pipeline_review_skipped_no_comment() {
 async fn test_pipeline_notification_story_id_extraction() {
     let (_tmp, work) = setup_git_env("story/4-1-rig-tools");
 
-    let (pipeline, notifier, _git) = PipelineTestBuilder::new(&work)
+    let (pipeline, notifier, _git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_session(completed_outcome())
         .with_review(completed_review())
         .build();
@@ -495,7 +524,7 @@ async fn test_pipeline_notification_story_id_extraction() {
 async fn test_pipeline_infra_error_skips_pr() {
     let (_tmp, work) = setup_git_env("story/4-1-rig-tools");
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new(&work)
+    let (pipeline, notifier, git, _reviewer) = PipelineTestBuilder::new(&work)
         .with_session(SessionOutcome::Failed {
             story_key: "4-1-rig-tools".to_string(),
             error: "authentication failed: invalid API key".to_string(),
