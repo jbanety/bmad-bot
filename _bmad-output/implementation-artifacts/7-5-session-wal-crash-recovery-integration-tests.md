@@ -452,12 +452,17 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 - All mock implementations use `Arc<Mutex<Vec<...>>>` for interior mutability
 - Uses `tempfile::tempdir()` for filesystem isolation
 
-**Story 7.4 (Pipeline Orchestration):**
-- Defines `DevRunner` and `CodeReviewer` traits for DI
+**Story 7.4 (Pipeline Orchestration) — IMPLEMENTED:**
+- Defines `DevRunner` and `CodeReviewer` async traits in `src/pipeline.rs` for DI
 - Defines `StoryPipeline::new_with_components()` injectable constructor
-- Defines `MockDevRunner` (VecDeque<SessionOutcome>) and `MockCodeReviewer` (VecDeque<ReviewOutcome>)
-- `session_runner_for_recovery: None` in `new_with_components()` → `recover_and_process()` returns `None`
-- `PipelineTestBuilder` pattern for clean test setup
+- Defines `MockDevRunner` (VecDeque<SessionOutcome>) and `MockCodeReviewer` (VecDeque<ReviewOutcome>) in `tests/integration/helpers/mocks.rs`
+- `MockCodeReviewer::with_outcomes(vec)` supports multi-call scenarios (batch tests)
+- `session_runner_for_recovery: None` in `new_with_components()` → `recover_and_process()` returns `None` (safe no-op for test pipelines)
+- `recover_and_process()` compile bug FIXED: `self.session_runner.resume_session(recovery)` → `runner.resume_session(recovery)` at L893
+- `PipelineTestBuilder` in `tests/integration/helpers/fixtures.rs` for clean pipeline test setup
+- **Git repo helpers (critical for any test calling `process_story()` or `process_recovered_session()`):** `create_test_repo_with_remote(dir)` creates a working repo + local bare "origin" remote; `create_story_branch(repo, branch)` creates a branch with a commit. Without these, `push_branch()` inside `process_story()` fails and short-circuits before PR creation.
+- Import: `use super::helpers::fixtures::{PipelineTestBuilder, create_test_repo_with_remote, create_story_branch};`
+- Import: `use super::helpers::mocks::{MockDevRunner, MockCodeReviewer};`
 
 **Story 6.3 (Crash Recovery — the production implementation):**
 - WAL file persisted after every chat turn via atomic write
