@@ -216,11 +216,14 @@ Known modules scanned by discovery: `bmm`, `core`, `_config`, `_memory`.
 
 ### Previous Story Intelligence (Story 7.1)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. All test modules are declared in `tests/integration.rs` via `mod test_config;` etc.
-- **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_secrets};`
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **Critical:** Cargo does NOT auto-resolve submodule directories for test binaries. New test modules must be declared with explicit `#[path]` attributes: `#[path = "integration/test_config.rs"] mod test_config;` (not plain `mod test_config;`). See `tests/e2e.rs` for the same pattern.
+- **Fixture imports:** `use super::helpers::fixtures::{make_test_config, make_test_secrets};` (NOT `crate::helpers` — test modules are siblings of `helpers` in the module tree, so use `super::`).
+- **Mock imports:** `use super::helpers::mocks::{MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
+- **lib.rs BLOCKER resolved:** `src/lib.rs` now exists with `pub mod` for all 12 modules (auth, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). `src/main.rs` uses `use bmad_bot::X;` re-imports instead of `mod X;` declarations (except `mod cli;` which stays binary-only). No Task 0 needed in downstream stories.
+- **SessionState/ChatMessage re-export:** `src/session/mod.rs` has `pub use state::{SessionState, ChatMessage};` — accessible as `bmad_bot::session::SessionState`
 
 ### Dependencies Required
 

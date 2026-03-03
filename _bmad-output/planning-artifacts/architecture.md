@@ -946,6 +946,7 @@ bmad-bot/
 ├── .env.example                      # Template secrets (API keys)
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
+│   ├── lib.rs                         # Library crate — pub mod re-exports for integration tests
 │   ├── main.rs                       # Entry point, CLI dispatch, rustls init
 │   ├── auth/
 │   │   ├── mod.rs                    # Auth module root
@@ -999,8 +1000,17 @@ bmad-bot/
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
-    └── e2e/
-        └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+    ├── e2e.rs                         # E2E test entry point (gated behind BMAD_E2E=1)
+    ├── e2e/
+    │   └── mcp_playwright.rs          # MCP Playwright E2E tests
+    ├── integration.rs                 # Integration test entry point — cargo test --test integration
+    └── integration/
+        ├── helpers/
+        │   ├── mod.rs                 # Re-exports: pub mod mocks; pub mod fixtures;
+        │   ├── mocks.rs               # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+        │   └── fixtures.rs            # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+        ├── test_mocks.rs              # Self-verification tests for mock implementations
+        └── test_fixtures.rs           # Self-verification tests for fixture builders
 ```
 
 ### Requirements to Structure Mapping

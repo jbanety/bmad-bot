@@ -240,12 +240,13 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
-- **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **Critical:** Cargo does NOT auto-resolve submodule directories for test binaries. New test modules must be declared with explicit `#[path]` attributes: `#[path = "integration/test_watcher.rs"] mod test_watcher;` (not plain `mod test_watcher;`).
+- **Fixture imports:** `use super::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};` (NOT `crate::helpers` — use `super::` because test modules are siblings of `helpers` in the module tree).
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
+- **lib.rs BLOCKER resolved:** `src/lib.rs` now exists with `pub mod watcher;` and all other modules. No Task 0 needed.
 
 ### Dependencies Required
 
