@@ -106,7 +106,7 @@ development_status:
   7-6-git-provider-pr-creation-integration-tests: done # depends-on: 7-1
   7-7-notification-flow-integration-tests: done # depends-on: 7-1
   7-8-branch-management-git-surgical-development-tools-integration-tests: done # depends-on: 7-1
-  7-9-cli-lifecycle-integration-tests: review # depends-on: 7-1
+  7-9-cli-lifecycle-integration-tests: done # depends-on: 7-1
   7-10-response-analyzer-supervisor-rules-integration-tests: ready-for-dev # depends-on: 7-1
   epic-7-retrospective: optional
 

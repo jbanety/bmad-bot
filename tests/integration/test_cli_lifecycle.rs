@@ -88,6 +88,15 @@ fn test_daemon_state_new_running_write_read_roundtrip() {
     assert_eq!(loaded.stories_processed, 0);
     assert_eq!(loaded.log_file, PathBuf::from("daemon.log"));
     assert!(loaded.bmad_discovery.is_some());
+    // AC #2 explicitly requires verifying started_at is preserved through roundtrip
+    assert!(
+        !loaded.started_at.is_empty(),
+        "started_at should be a non-empty ISO 8601 timestamp"
+    );
+    assert_eq!(
+        loaded.started_at, state.started_at,
+        "started_at must survive write/read roundtrip unchanged"
+    );
 
     let disc = loaded.bmad_discovery.unwrap();
     assert_eq!(disc.bmad_version, Some("6.0.0-test".to_string()));

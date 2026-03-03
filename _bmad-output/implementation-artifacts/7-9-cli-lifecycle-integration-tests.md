@@ -1,6 +1,6 @@
 # Story 7.9: CLI Lifecycle Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -42,8 +42,8 @@ So that I'm confident the user experience of init → start → status → logs 
 - [x] Task 0: Ensure `src/lib.rs` prerequisite + resolve `cli` module accessibility (AC: ALL — BLOCKER)
   - [x] 0.1 If `src/lib.rs` does not exist (Story 7.1 Task 0 not yet done), create it with `pub mod` declarations for all modules. See Story `7-1-integration-test-infrastructure-fixtures.md` Task 0.
   - [x] 0.2 🚨 CRITICAL: Add `pub mod cli;` to `src/lib.rs` so that `DaemonState` is accessible from integration tests (see Architecture Compliance section for full rationale)
-  - [x] 0.3 Remove `mod cli;` from `src/main.rs` (it now comes from `bmad_bot::cli`)
-  - [x] 0.4 Update `src/main.rs` to import CLI types from `bmad_bot::cli::*` instead of the local `mod cli;`
+  - [ ] 0.3 ~~Remove `mod cli;` from `src/main.rs`~~ — **SKIPPED (by design)**: dual-crate pattern is established architecture; `crate::cli` is required by `src/session/cleanup.rs` in the binary crate; DaemonState accessibility prerequisite is fully met via `src/lib.rs` without touching `main.rs`
+  - [ ] 0.4 ~~Update `src/main.rs` to import CLI types from `bmad_bot::cli::*`~~ — **SKIPPED (by design)**: depends on 0.3; binary crate continues using local `mod cli;` as intended
   - [x] 0.5 Verify `cargo build` + `cargo test` pass with all existing unit tests
 
 - [x] Task 1: Create integration test file structure (AC: ALL)
@@ -429,9 +429,9 @@ None.
 
 ### Completion Notes List
 
-- **Task 0 (lib.rs prerequisite):** Already resolved by Story 7.1. `src/lib.rs` exists with `pub mod cli;`. Subtasks 0.3/0.4 (remove `mod cli` from main.rs) intentionally SKIPPED — dual-crate pattern is the established architecture. `crate::cli` is referenced by `src/session/cleanup.rs`, so removing `mod cli;` from main.rs would break the binary crate build. The prerequisite (DaemonState accessibility from integration tests) is fully met without main.rs changes.
+- **Task 0 (lib.rs prerequisite):** Already resolved by Story 7.1. `src/lib.rs` exists with `pub mod cli;`. Subtasks 0.3/0.4 (remove `mod cli` from main.rs) intentionally SKIPPED — dual-crate pattern is the established architecture. `crate::cli` is referenced by `src/session/cleanup.rs`, so removing `mod cli;` from main.rs would break the binary crate build. The prerequisite (DaemonState accessibility from integration tests) is fully met without main.rs changes. **[CR fix]** Task 0.3/0.4 checkboxes corrected from [x] to [ ] with skip rationale inline.
 - **Task 1:** Created `tests/integration/test_cli_lifecycle.rs` and added `#[path]` declaration in `tests/integration.rs` following Rust 2024 edition pattern.
-- **Task 2 (AC #1, #2):** 3 tests — `test_daemon_state_read_nonexistent_returns_none`, `test_daemon_state_manual_construct_write_read_roundtrip`, `test_daemon_state_new_running_write_read_roundtrip`. All verify roundtrip serialization fidelity.
+- **Task 2 (AC #1, #2):** 3 tests — `test_daemon_state_read_nonexistent_returns_none`, `test_daemon_state_manual_construct_write_read_roundtrip`, `test_daemon_state_new_running_write_read_roundtrip`. All verify roundtrip serialization fidelity. **[CR fix]** Added missing `started_at` assertions to `test_daemon_state_new_running_write_read_roundtrip` to fully satisfy AC #2 (which explicitly requires verifying `started_at`).
 - **Task 3 (AC #3, #4):** 3 tests — `test_daemon_state_touch_record_story_write_read`, `test_daemon_state_mark_stopped_write_read`, `test_daemon_state_touch_only_updates_last_activity`. All use `thread::sleep(10ms)` to avoid timestamp flakiness.
 - **Task 4 (AC #5):** 2 tests — `test_daemon_state_cleanup_removes_file_and_read_returns_none`, `test_daemon_state_cleanup_idempotent_on_missing_file`.
 - **Task 5 (AC #6):** 2 tests — `test_botconfig_roundtrip_serialize_load_validate`, `test_botconfig_load_malformed_yaml_returns_error`.
