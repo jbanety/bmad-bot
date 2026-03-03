@@ -1,6 +1,6 @@
 # Story 7.2: Config → Startup Validation Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -198,7 +198,7 @@ assert!(matches!(err, ConfigError::MissingSecret { ref env_var, .. } if env_var 
 - `log_format` must be `"json"` or `"pretty"`
 - `log_level` must be one of `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`
 - `git_provider.provider` must be `"github"` or `"gitlab"`
-- Each LLM role provider must be `"anthropic"`, `"openai"`, or `"github-models"`
+- `"anthropic"`, `"openai"`, or `"github-copilot"` (not `"github-models"`)
 - `bmad_paths.project_root`, `output_folder`, `planning_artifacts`, `implementation_artifacts` must be non-empty
 - `log_file` must be non-empty
 
@@ -278,19 +278,52 @@ The real `sprint-status.yaml` has comments like `# depends-on: 7-1`. These are *
 Claude (Anthropic)
 
 ### Debug Log References
-- All 20 new integration tests pass; full suite 55/55 green, 0 regressions.
+- All 61 integration tests pass; full suite 61/61 green, 0 regressions.
+- Code review (CR) added 6 new tests covering previously untested validation paths.
 
 ### Completion Notes List
 - Task 1: Created `tests/integration/test_config.rs`, added `#[path]` declaration in `tests/integration.rs`. Imports cover `BotConfig`, `BotSecrets`, `ConfigError`, `build_http_client`, and `BmadDiscovery`.
 - Task 2: `test_config_valid_roundtrip_succeeds` — serializes `make_test_config` to YAML, loads via `BotConfig::load`, validates. `test_config_valid_roundtrip_secrets_validate` — full pipeline including `BotSecrets::validate_for_config`.
 - Task 3: 7 tests covering zero polling, unknown git provider, unknown LLM provider, empty project_root, invalid YAML syntax, nonexistent file, and error message field-name presence. All use raw YAML strings for invalid configs, `matches!` with field guards.
 - Task 4: 4 tests — missing Anthropic key, missing GitHub token, missing Telegram token (when enabled), and error message env-var-name assertion. All construct `BotSecrets` directly (no env var manipulation).
-- Task 5: 3 tests — full `_bmad/` structure with version extraction, empty dir (no detection), partial `_bmad/` without config.yaml (detected, no version).
+- Task 5: 3 tests — full `_bmad/` structure with version extraction and config_path assertion, empty dir (no detection), partial `_bmad/` without config.yaml (detected, no version).
 - Task 6: 1 test — `build_http_client()` returns `ClientWithMiddleware` without panicking.
+- Code Review (CR) additions: 6 new tests — `test_config_invalid_log_format_rejected`, `test_config_invalid_log_level_rejected`, `test_config_empty_log_file_rejected`, `test_config_empty_output_folder_rejected`, `test_secrets_missing_github_copilot_token_rejected`, `test_secrets_missing_gitlab_token_rejected`. Expanded `test_config_error_messages_contain_field_names` to verify Display output for all 4 invalid-config error scenarios.
 
 ### Change Log
-- Implemented Story 7.2: 20 integration tests for config/secrets/discovery/http-client pipeline.
+- Implemented Story 7.2: 17 integration tests for config/secrets/discovery/http-client pipeline.
+- Included Story 7.1 code review follow-ups (3 tests added to test_mocks.rs: escalation mock, WAL check, custom outcome).
+- Code Review (CR): 6 additional tests added; 1 existing test expanded; story documentation corrected.
+
+### Senior Developer Review (AI)
+**Reviewer:** Amelia (Dev Agent CR) | **Date:** 2026-03-03
+
+**Findings:** 2 HIGH, 4 MEDIUM, 4 LOW
+
+**Fixed (HIGH):**
+- [AI-Review][HIGH] `log_format`, `log_level`, `log_file` validated by `BotConfig::validate()` but had zero integration test coverage. Added `test_config_invalid_log_format_rejected`, `test_config_invalid_log_level_rejected`, `test_config_empty_log_file_rejected`.
+
+**Fixed (MEDIUM):**
+- [AI-Review][MEDIUM] `test_config_error_messages_contain_field_names` only verified Display output for `polling_interval_secs`; subtask 3.7 requires covering all error scenarios. Expanded to verify `git_provider.provider`, `llm.dev.provider`, and `bmad_paths.project_root` Display output.
+- [AI-Review][MEDIUM] `test_discovery_valid_bmad_directory` had no assertion for `config_path` field. Added `assert_eq!(discovery.config_path, Some(bmad_dir.join("bmm/config.yaml")))` [test_config.rs:L407].
+- [AI-Review][MEDIUM] Story File List missing 4 files changed in the story 7.2 commit: `helpers/fixtures.rs`, `helpers/mocks.rs`, `test_fixtures.rs`, `test_mocks.rs` (story 7.1 CR follow-ups). File List updated.
+- [AI-Review][MEDIUM] Dev Record claimed "20 new integration tests" but `test_config.rs` contained 17; 3 additional tests were in `test_mocks.rs` (story 7.1 follow-ups) and not attributed clearly. Record corrected.
+
+**Fixed (LOW):**
+- [AI-Review][LOW] `test_config_load_nonexistent_file_rejected` used hardcoded `/tmp/nonexistent-...` path. Changed to `tempfile::tempdir().path().join("does-not-exist.yaml")` [test_config.rs:L232].
+- [AI-Review][LOW] Empty `bmad_paths.output_folder` validated at src/config/mod.rs:L332 but untested. Added `test_config_empty_output_folder_rejected`.
+- [AI-Review][LOW] `github-copilot` and `gitlab` provider secret validation paths had no test coverage. Added `test_secrets_missing_github_copilot_token_rejected` and `test_secrets_missing_gitlab_token_rejected`.
+- [AI-Review][LOW] Dev Notes stated valid LLM provider `"github-models"` — incorrect; actual code uses `"github-copilot"` (src/config/mod.rs:L266). Dev Notes corrected.
+
+**Remaining Concerns:**
+- AC #5 specifies "retry middleware configured (3 retries, exponential backoff)" but `reqwest_middleware::ClientWithMiddleware` is opaque — middleware configuration cannot be inspected via its public API. Implementation correctness is verified by source review at `src/config/mod.rs:L583-L587`. A behavioural retry test would require a mock HTTP server and is out of scope for this story.
+
+**Outcome:** ✅ APPROVED — all HIGH and MEDIUM issues resolved. Full suite 61/61 passes.
 
 ### File List
 - `tests/integration.rs` (modified — added `mod test_config` declaration)
-- `tests/integration/test_config.rs` (new — 20 integration tests)
+- `tests/integration/test_config.rs` (new — 17 story-7.2 integration tests + 6 CR additions)
+- `tests/integration/helpers/fixtures.rs` (modified — story 7.1 CR follow-up: minor fixture tweak)
+- `tests/integration/helpers/mocks.rs` (modified — story 7.1 CR follow-up: escalation mock additions)
+- `tests/integration/test_fixtures.rs` (modified — story 7.1 CR follow-up: minor cleanup)
+- `tests/integration/test_mocks.rs` (modified — story 7.1 CR follow-up: 3 new mock tests)
