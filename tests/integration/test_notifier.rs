@@ -4,6 +4,8 @@
 //! boundary (`bmad_bot::notifier::*`, `bmad_bot::config::*`), complementing
 //! the 18+ unit tests in `src/notifier/mod.rs`.
 
+use std::time::Duration;
+
 use bmad_bot::config::{BotSecrets, NotificationConfig, TelegramConfig};
 use bmad_bot::notifier::{
     create_notifier, Notifier, NotifierError, RunSummary, StoryNotification,
@@ -208,10 +210,17 @@ async fn test_notifier_factory_enabled_with_token_returns_telegram() {
 
     // A TelegramNotifier will attempt real HTTP and fail — confirming it is NOT a NoopNotifier.
     // NoopNotifier would return Ok(()).
+    // Cap the network call at 5 s so a hung connection never blocks CI indefinitely.
+    // (reqwest::Client has no default timeout; the retry policy has up to 3 retries.)
     let notification = make_completed_notification();
-    let result = notifier.notify_story(&notification).await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        notifier.notify_story(&notification),
+    )
+    .await
+    .expect("notify_story timed out after 5 s — possible hung network connection in test environment");
 
-    // The TelegramNotifier should fail with an HTTP error (no real Telegram server)
+    // The TelegramNotifier must fail (HTTP error / Telegram 401) — NOT Ok(()) like a NoopNotifier would.
     assert!(
         result.is_err(),
         "Factory with valid token should create TelegramNotifier that attempts real HTTP send (not NoopNotifier)"
