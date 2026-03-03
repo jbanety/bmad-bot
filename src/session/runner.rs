@@ -1140,8 +1140,8 @@ impl SessionRunner {
         let ch_msg = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CH";
         let ch_turn = compressed_history.len() / 2;
         log_llm_request("dev-recovery", ch_turn, ch_msg, activation_history.len());
-        let (ch_response, _) = agent
-            .stream_chat(ch_msg, activation_history.clone(), Some(&self.shutdown))
+        let (ch_response, ch_full_history) = agent
+            .stream_chat(ch_msg, activation_history, Some(&self.shutdown))
             .await
             .map_err(|e| {
                 log_llm_error("dev-recovery", 0, &e);
@@ -1153,8 +1153,11 @@ impl SessionRunner {
                 }
             })?;
         log_llm_response("dev-recovery", ch_turn, &ch_response);
-        activation_history.push(Message::user(ch_msg));
-        activation_history.push(Message::assistant(&ch_response));
+        // Use the full rig history returned by stream_chat — it includes tool calls
+        // (think, read_file, etc.) that the agent made during this turn. Manually
+        // pushing Message::user/assistant would lose those intermediate messages and
+        // cause the agent to forget its activation state on the next turn.
+        activation_history = ch_full_history;
         compressed_history.push(ChatMessage {
             role: "user".to_string(),
             content: ch_msg.to_string(),
@@ -1172,10 +1175,10 @@ impl SessionRunner {
             "Load the project context",
             activation_history.len(),
         );
-        let (ctx_response, _) = agent
+        let (ctx_response, ctx_full_history) = agent
             .stream_chat(
                 "Load the project context",
-                activation_history.clone(),
+                activation_history,
                 Some(&self.shutdown),
             )
             .await
@@ -1189,8 +1192,9 @@ impl SessionRunner {
                 }
             })?;
         log_llm_response("dev-recovery", ctx_turn, &ctx_response);
-        activation_history.push(Message::user("Load the project context"));
-        activation_history.push(Message::assistant(&ctx_response));
+        // Same as step 4b — use full rig history to preserve tool call context.
+        // Not read after this point, but kept for symmetry / future use.
+        let _ = ctx_full_history;
         compressed_history.push(ChatMessage {
             role: "user".to_string(),
             content: "Load the project context".to_string(),
