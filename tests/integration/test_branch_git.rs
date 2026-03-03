@@ -180,13 +180,19 @@ fn test_ensure_branch_base_not_found() {
 #[test]
 fn test_ensure_branch_non_git_directory() {
     let dir = TempDir::new().expect("tempdir");
-    // Don't init a git repo — just a plain directory
+    // Plain directory with no git repo — git commands will silently fail,
+    // so branch_exists() returns false for everything, and ensure_story_branch
+    // returns BranchError::BaseBranchNotFound (the base branch can't be located).
 
     let result = ensure_story_branch(dir.path(), "story/1-2-cli", "main");
 
-    // Should get an error (BaseBranchNotFound or similar — the base doesn't exist
-    // because git itself can't operate)
-    assert!(result.is_err(), "Expected error on non-git directory, got: {result:?}");
+    match result {
+        Err(BranchError::BaseBranchNotFound { branch }) => {
+            assert_eq!(branch, "main", "Expected BaseBranchNotFound for 'main'");
+        }
+        Err(other) => panic!("Expected BaseBranchNotFound, got: {other:?}"),
+        Ok(_) => panic!("Expected an error on non-git directory"),
+    }
 }
 
 // ===========================================================================
@@ -494,13 +500,31 @@ async fn test_git_tool_full_roundtrip() {
     args.message = Some(commit_msg.to_string());
     tool.call(args).await.expect("commit should succeed");
 
-    // log — verify commit
+    // log — verify commit message and SHA
     let mut args = git_args("log");
     args.max_count = Some(3);
     let log_output = tool.call(args).await.expect("log should succeed");
     assert!(
         log_output.contains(commit_msg),
         "log should contain commit message: {log_output}"
+    );
+
+    // Verify SHA — parse the commit SHA from git log directly
+    let sha_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git rev-parse failed");
+    let sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+    assert!(
+        sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "HEAD SHA should be a 40-char hex string, got: {sha}"
+    );
+    // The log output contains the short SHA
+    let short_sha = &sha[..7];
+    assert!(
+        log_output.contains(short_sha),
+        "log should contain commit SHA {short_sha}: {log_output}"
     );
 
     // Verify we're on the correct branch
@@ -530,16 +554,20 @@ async fn test_preserve_dirty_tree_creates_wip_commit() {
         "Summary should contain file name: {summary}"
     );
 
-    // Verify the commit actually exists in the log
+    // Verify the commit actually exists in the log and message contains story key
     let output = Command::new("git")
-        .args(["log", "--oneline", "-n", "1"])
+        .args(["log", "--format=%s", "-n", "1"])
         .current_dir(dir.path())
         .output()
         .expect("git log failed");
-    let log_line = String::from_utf8_lossy(&output.stdout);
+    let commit_subject = String::from_utf8_lossy(&output.stdout);
     assert!(
-        log_line.contains("WIP"),
-        "Latest commit should be a WIP commit: {log_line}"
+        commit_subject.contains("WIP"),
+        "Latest commit should be a WIP commit: {commit_subject}"
+    );
+    assert!(
+        commit_subject.contains("1-2-cli"),
+        "WIP commit message should contain story key '1-2-cli': {commit_subject}"
     );
 }
 
@@ -580,16 +608,20 @@ async fn test_preserve_on_story_branch_contains_story_key() {
         "Summary should contain branch name: {summary}"
     );
 
-    // Verify the WIP commit is on the story branch
+    // Verify the WIP commit is on the story branch and message contains the story key
     let output = Command::new("git")
-        .args(["log", "--oneline", "-n", "1"])
+        .args(["log", "--format=%s", "-n", "1"])
         .current_dir(dir.path())
         .output()
         .expect("git log failed");
-    let log_line = String::from_utf8_lossy(&output.stdout);
+    let commit_subject = String::from_utf8_lossy(&output.stdout);
     assert!(
-        log_line.contains("WIP"),
-        "Latest commit on story branch should be WIP: {log_line}"
+        commit_subject.contains("WIP"),
+        "Latest commit on story branch should be WIP: {commit_subject}"
+    );
+    assert!(
+        commit_subject.contains("1-2-cli"),
+        "WIP commit message should contain story key '1-2-cli': {commit_subject}"
     );
 
     // Verify HEAD is still on the story branch

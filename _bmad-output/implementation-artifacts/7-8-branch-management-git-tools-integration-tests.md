@@ -1,6 +1,6 @@
 # Story 7.8: Branch Management & Git Tools Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -155,7 +155,7 @@ If `helpers/` doesn't exist yet, create a minimal `tests/integration/helpers/mod
 | `GitTool::new` | `tools::git` (L93) | Sync | `(repo_path: PathBuf) -> Self` |
 | `GitTool::call` | `tools::git` (L540) | **Async** | `(args: GitToolArgs) -> Result<String, GitToolError>` |
 
-**Key types:** `BranchError` (4 variants: `CreationFailed`, `CheckoutFailed`, `BaseBranchNotFound`, `RepoOpenFailed`), `BranchAction` (`Created { branch_name, base_branch }`, `Reused { branch_name }`), `GitToolArgs` (8 fields, only `action` required — all others `Option`), `StoryInfo` (9 pub fields). See source references at bottom for exact definitions.
+**Key types:** `BranchError` (4 variants: `CreationFailed`, `CheckoutFailed`, `BaseBranchNotFound`, `CommandFailed`), `BranchAction` (`Created { branch_name, base_branch }`, `Reused { branch_name }`), `GitToolArgs` (8 fields, only `action` required — all others `Option`), `StoryInfo` (9 pub fields). See source references at bottom for exact definitions.
 
 #### API Behavior Notes
 
@@ -411,8 +411,31 @@ None — all tests passed on first run.
 
 - `tests/integration/test_branch_git.rs` — NEW (22 integration tests)
 - `tests/integration.rs` — MODIFIED (added `#[path]` declaration for test_branch_git)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED (story status updated to review)
 - `_bmad-output/implementation-artifacts/7-8-branch-management-git-tools-integration-tests.md` — MODIFIED (task checkboxes, status, dev agent record)
+
+### Senior Developer Review (AI)
+
+**Reviewer:** Amelia (Dev Agent) — Code Review Pass  
+**Date:** 2025-01-22  
+**Issues Found:** 1 High, 2 Medium, 2 Low  
+**Issues Fixed:** 4 (1 High, 2 Medium, 1 Low)  
+**Issues as Action Items:** 0  
+
+#### 🔴 HIGH — Fixed
+- **AC5 commit message missing story key** [`src/session/cleanup.rs:121`, `tests/integration/test_branch_git.rs:533,587`]: `preserve_partial_work` embedded the story key only in tracing spans, not in the git commit message. Tests checked `summary.contains("story/1-2-cli")` (the summary's Branch field), masking the gap. **Fixed:** commit message changed to `"chore: WIP [{story_key}] — escalated for human clarification\n\nQuestion: {question}"`. Tests in Task 6.1 and 6.3 now assert `commit_subject.contains("1-2-cli")` on the raw git log.
+
+#### 🟡 MEDIUM — Fixed
+- **Task 2.5 weak assertion + stale `RepoOpenFailed` variant** [`tests/integration/test_branch_git.rs:181`]: Task 2.5 referenced non-existent variant `BranchError::RepoOpenFailed` (actual enum has `CommandFailed`). Test used `is_err()` only. **Fixed:** test now pattern-matches `BranchError::BaseBranchNotFound { branch }` (actual error on non-git dir) with assertion on the branch field.
+- **`sprint-status.yaml` absent from File List** [story File List]: Modified in commit `1edc42a` but not documented. **Fixed:** added to File List.
+
+#### 🟢 LOW — Fixed
+- **Task 5.5 SHA not verified** [`tests/integration/test_branch_git.rs:503`]: Task specified "verify commit message AND SHA" but only message was checked. **Fixed:** `test_git_tool_full_roundtrip` now captures HEAD SHA via `git rev-parse HEAD`, validates it is 40 hex chars, and asserts the short SHA appears in log output.
+
+#### 🟢 LOW — Not Fixed (documentation)
+- **Dev Notes BranchError variant list wrong** [story Dev Notes line 158]: Listed `RepoOpenFailed` instead of `CommandFailed`. **Fixed inline** — corrected the variant name in Dev Notes.
 
 ### Change Log
 
 - Story 7.8 implementation complete — 22 integration tests for branch management, GitTool, and preserve_partial_work cross-module flows (Date: 2025-01-22)
+- Code review fixes applied (Date: 2025-01-22): AC5 story key in commit message, Task 2.5 error variant assertion strengthened, Task 5.5 SHA verification added, sprint-status.yaml added to File List, Dev Notes BranchError variant corrected
