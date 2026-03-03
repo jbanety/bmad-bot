@@ -530,9 +530,17 @@ impl DevRunner for MockDevRunner {
 // ---------------------------------------------------------------------------
 
 /// Mock code reviewer for integration tests — implements [`CodeReviewer`].
+///
+/// Two modes:
+/// - `with_outcome(o)` — returns the configured outcome when called.
+/// - `never_called()` — **asserts** that `run_review` is never invoked.
+///   Any call causes an immediate test panic with a clear message.
+///   This enforces AC assertions like "MockCodeReviewer is NOT called".
 pub struct MockCodeReviewer {
     outcomes: Mutex<VecDeque<ReviewOutcome>>,
     call_count: AtomicUsize,
+    /// When `true`, any call to `run_review` is a test failure.
+    never_called_mode: bool,
 }
 
 impl MockCodeReviewer {
@@ -542,13 +550,21 @@ impl MockCodeReviewer {
         Self {
             outcomes: Mutex::new(q),
             call_count: AtomicUsize::new(0),
+            never_called_mode: false,
         }
     }
 
+    /// Configure the mock to **assert** it is never called.
+    ///
+    /// Any invocation of `run_review` will panic with a descriptive message,
+    /// causing the test to fail. Use this to enforce AC assertions such as
+    /// "MockCodeReviewer is NOT called (review skipped)" (AC #4) or
+    /// "MockCodeReviewer is NOT called (no PR means no point running review)" (AC #5).
     pub fn never_called() -> Self {
         Self {
             outcomes: Mutex::new(VecDeque::new()),
             call_count: AtomicUsize::new(0),
+            never_called_mode: true,
         }
     }
 
@@ -561,10 +577,17 @@ impl MockCodeReviewer {
 impl CodeReviewer for MockCodeReviewer {
     async fn run_review(&self, _story: &StoryInfo) -> ReviewOutcome {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !self.never_called_mode,
+            "MockCodeReviewer: run_review() was invoked but this mock was configured with \
+             never_called() — the code reviewer must NOT be called in this test scenario. \
+             Check that code_review_enabled=false is set or that the pipeline path \
+             correctly skips review (e.g. after PR creation failure)."
+        );
         self.outcomes
             .lock()
             .unwrap()
             .pop_front()
-            .expect("MockCodeReviewer: no more outcomes (or never_called() was used)")
+            .expect("MockCodeReviewer: no more outcomes queued — add one via with_outcome()")
     }
 }
