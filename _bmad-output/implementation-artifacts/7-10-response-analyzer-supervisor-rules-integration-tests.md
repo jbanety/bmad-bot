@@ -385,21 +385,23 @@ let slot: EscalationSlot = Arc::new(Mutex::new(Some(EscalationInfo {
 
 ### Previous Story Intelligence (Stories 7.1 through 7.9)
 
-1. **`lib.rs` blocker is universal** — every integration test story needs it. Story 7.1 defines the creation; all subsequent stories assume it exists. If Task 0 finds it missing, follow the exact spec from Story 7.1.
+1. **`lib.rs` blocker is RESOLVED:** `src/lib.rs` already exists with `pub mod` for ALL modules (auth, cli, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). `main.rs` was NOT modified — both crates compile the same source independently (dual-crate pattern). No Task 0 prerequisite work needed.
 
 2. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_response_analyzer_supervisor.rs`.
 
-3. **No mocks needed for ResponseAnalyzer or RuleEngine tests.** Both operate on in-memory data only (strings, pattern matching). No filesystem, HTTP, or git mocking required.
+3. **Integration test entry point uses `#[path]` attributes (Rust 2024 edition):** New test modules must be added to `tests/integration.rs` as `#[path = "integration/test_response_analyzer_supervisor.rs"] mod test_response_analyzer_supervisor;` (NOT plain `mod` declarations).
 
-4. **`AskSupervisor::new()` creates a supervisor with rule engine only** (no architect provider). For testing the no-architect-fallback path (AC #8), `AskSupervisor::new()` is sufficient — it returns `LlmFallbackNotImplemented` on miss. For testing the full escalation flow with slot write (Task 10.2), use `AskSupervisor::with_answer_provider_and_slot()` with `MockAnswerProvider { should_fail: true }`.
+4. **No mocks needed for ResponseAnalyzer or RuleEngine tests.** Both operate on in-memory data only (strings, pattern matching). No filesystem, HTTP, or git mocking required.
 
-5. **`MockAnswerProvider` already exists** in `src/supervisor/architect.rs`. Do NOT reinvent it. Import as `bmad_bot::supervisor::architect::MockAnswerProvider`.
+5. **`AskSupervisor::new()` creates a supervisor with rule engine only** (no architect provider). For testing the no-architect-fallback path (AC #8), `AskSupervisor::new()` is sufficient — it returns `LlmFallbackNotImplemented` on miss. For testing the full escalation flow with slot write (Task 10.2), use `AskSupervisor::with_answer_provider_and_slot()` with `MockAnswerProvider { should_fail: true }`.
 
-6. **Timestamps in DecisionRecords:** Never assert on exact timestamp values. Assert that the timestamp field is non-empty or parse with `chrono::DateTime::parse_from_rfc3339`.
+6. **`MockAnswerProvider` already exists** in `src/supervisor/architect.rs`. Do NOT reinvent it. Import as `bmad_bot::supervisor::architect::MockAnswerProvider`.
 
-7. **Story 7.9 established pattern:** Confirmed module visibility definitively (✅) and provided Quick API Reference tables. This story follows the same pattern.
+7. **Timestamps in DecisionRecords:** Never assert on exact timestamp values. Assert that the timestamp field is non-empty or parse with `chrono::DateTime::parse_from_rfc3339`.
 
-8. **`rig::tool::Tool` trait `call()` is async** — use `#[tokio::test]` for any test invoking `AskSupervisor::call()`.
+8. **Story 7.9 established pattern:** Confirmed module visibility definitively (✅) and provided Quick API Reference tables. This story follows the same pattern.
+
+9. **`rig::tool::Tool` trait `call()` is async** — use `#[tokio::test]` for any test invoking `AskSupervisor::call()`.
 
 ### Git Intelligence
 
