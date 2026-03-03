@@ -1,6 +1,6 @@
 # Story 7.8: Branch Management & Git Tools Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -402,6 +402,12 @@ None — all tests passed on first run.
 - **Task 6**: 3 `preserve_partial_work` tests — dirty tree WIP commit, clean tree no-op, WIP on story branch with log verification.
 - **Task 7**: 2 cross-module tests — full lifecycle (determine→ensure→GitTool→preserve), branch switching consistency (ensure→GitTool checkout round-trip).
 - **Total: 22 new integration tests, all passing. 121 total tests (99 existing + 22 new), zero regressions.**
+- **Code Review fixes (Amelia/Claude Sonnet 4):**
+  - [HIGH] `src/session/cleanup.rs`: commit message now includes `story_key` — `"chore: WIP [{story_key}] — escalated for human clarification"` — satisfying AC #5 requirement.
+  - [HIGH] `tests/integration/test_branch_git.rs` T6.1: added `git log` assertion verifying commit exists in repo and message contains story key `1-2-cli`.
+  - [MEDIUM] T5.3: removed phantom `|| contains("nothing to commit")` fallback — `handle_status` only ever returns `"Clean working directory"`.
+  - [MEDIUM] T5.4: tightened diff assertion to require both `"modified content"` AND `"existing.txt"` — OR was too lenient.
+  - [MEDIUM] T6.3 + T7.1: replaced `|| log_text.contains("escalated")` with a direct story-key assertion on WIP commit message.
 
 ### Change Log
 
@@ -409,7 +415,8 @@ None — all tests passed on first run.
 
 ### File List
 
-- `tests/integration/test_branch_git.rs` — NEW (all 22 Story 7.8 integration tests)
+- `tests/integration/test_branch_git.rs` — NEW (all 22 Story 7.8 integration tests); MODIFIED by code review (tightened assertions, added story-key checks)
 - `tests/integration.rs` — MODIFIED (added `#[path]` declaration for `test_branch_git`)
-- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED (7-8 status: ready-for-dev → in-progress → review)
-- `_bmad-output/implementation-artifacts/7-8-branch-management-git-tools-integration-tests.md` — MODIFIED (tasks checked, Dev Agent Record filled)
+- `src/session/cleanup.rs` — MODIFIED by code review (WIP commit message now includes story_key per AC #5)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED (7-8 status: ready-for-dev → in-progress → review → done)
+- `_bmad-output/implementation-artifacts/7-8-branch-management-git-tools-integration-tests.md` — MODIFIED (tasks checked, Dev Agent Record filled, code review applied)

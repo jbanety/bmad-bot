@@ -113,9 +113,10 @@ pub async fn preserve_partial_work(repo_path: &Path, story_key: &str, question: 
             _ => {}
         }
 
-        // Commit with WIP message
-        let message =
-            format!("chore: WIP — escalated for human clarification\n\nQuestion: {question}");
+        // Commit with WIP message — must include story_key per AC #5
+        let message = format!(
+            "chore: WIP [{story_key}] — escalated for human clarification\n\nQuestion: {question}"
+        );
         let commit_result = tokio::process::Command::new("git")
             .arg("-C")
             .arg(repo_path)

@@ -441,10 +441,12 @@ async fn test_git_tool_status_dirty_and_clean() {
     let tool = GitTool::new(tmp.path().to_path_buf());
 
     // Clean tree first
+    // handle_status() uses `git status --porcelain` and returns exactly "Clean working directory"
+    // when empty — never "nothing to commit" (that comes from `git status` without --porcelain)
     let status_clean = tool.call(git_args("status")).await.expect("status failed");
     assert!(
-        status_clean.contains("Clean working directory") || status_clean.contains("nothing to commit"),
-        "Expected clean status. Got: {status_clean}"
+        status_clean.contains("Clean working directory"),
+        "Expected 'Clean working directory'. Got: {status_clean}"
     );
 
     // Create a file to dirty the tree
@@ -479,9 +481,15 @@ async fn test_git_tool_diff_shows_changes() {
     std::fs::write(tmp.path().join("existing.txt"), "modified content").expect("write failed");
 
     let diff_output = tool.call(git_args("diff")).await.expect("diff failed");
+    // Assert on the actual changed content — "existing.txt" alone could appear in the
+    // file header even if the diff were empty; "modified content" proves the new text is shown.
     assert!(
-        diff_output.contains("modified content") || diff_output.contains("existing.txt"),
-        "Diff should show changes. Got: {diff_output}"
+        diff_output.contains("modified content"),
+        "Diff should show the new content. Got: {diff_output}"
+    );
+    assert!(
+        diff_output.contains("existing.txt"),
+        "Diff should reference the changed file. Got: {diff_output}"
     );
 }
 
@@ -550,6 +558,23 @@ async fn test_preserve_partial_work_dirty_tree_creates_wip_commit() {
         summary.contains("wip_file.rs"),
         "Summary should list changed file. Got: {summary}"
     );
+
+    // AC #5: commit must exist in git log
+    let log_output = Command::new("git")
+        .args(["log", "--oneline", "-3"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("git log failed");
+    let log_text = String::from_utf8_lossy(&log_output.stdout);
+    assert!(
+        log_text.contains("WIP"),
+        "Git log should contain WIP commit. Got: {log_text}"
+    );
+    // AC #5: commit message must contain the story key
+    assert!(
+        log_text.contains("1-2-cli"),
+        "Commit message must contain story key '1-2-cli'. Got: {log_text}"
+    );
 }
 
 /// Task 6.2 — Clean tree → no commit created.
@@ -599,8 +624,13 @@ async fn test_preserve_partial_work_on_story_branch() {
         .expect("git log failed");
     let log_text = String::from_utf8_lossy(&log_output.stdout);
     assert!(
-        log_text.contains("WIP") || log_text.contains("escalated"),
+        log_text.contains("WIP"),
         "Git log should contain WIP commit. Got: {log_text}"
+    );
+    // AC #5: commit message must contain the story key
+    assert!(
+        log_text.contains("1-2-cli"),
+        "Commit message must contain story key '1-2-cli'. Got: {log_text}"
     );
 
     // Verify we're still on the story branch
@@ -663,8 +693,13 @@ async fn test_cross_module_full_lifecycle() {
         "Log should contain GitTool commit. Got: {log_text}"
     );
     assert!(
-        log_text.contains("WIP") || log_text.contains("escalated"),
+        log_text.contains("WIP"),
         "Log should contain WIP commit. Got: {log_text}"
+    );
+    // AC #5: WIP commit message must contain the story key
+    assert!(
+        log_text.contains("2-1-feature"),
+        "WIP commit must contain story key '2-1-feature'. Got: {log_text}"
     );
 
     assert_eq!(current_branch(tmp.path()), "story/2-1-feature");
