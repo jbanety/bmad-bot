@@ -240,7 +240,12 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention (UPDATED):** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. Due to **Rust 2024 edition**, new test modules must be registered using `#[path]` attributes:
+  ```rust
+  #[path = "integration/test_watcher.rs"]
+  mod test_watcher;
+  ```
+- **`lib.rs` BLOCKER is resolved:** `src/lib.rs` exists with `pub mod watcher;` (and all other non-CLI modules). No Task 0 needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case

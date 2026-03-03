@@ -288,17 +288,24 @@ assert_eq!(loaded.llm.dev.provider, config.llm.dev.provider);
 
 ### Previous Story Intelligence (Stories 7.1 through 7.8)
 
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point uses `#[path = "integration/..."]` attributes (Rust 2024 edition). To add a new test module:
+  ```rust
+  #[path = "integration/test_cli_lifecycle.rs"]
+  mod test_cli_lifecycle;
+  ```
+- `src/lib.rs` exists with ALL non-CLI modules. The `lib.rs` blocker is fully resolved. **Note:** `cli` is NOT in `lib.rs` (binary-only). If this story needs `DaemonState`, it must add `pub mod cli;` to `lib.rs` as its own Task 0.
+- 32 self-verification integration tests already pass (`cargo test --test integration`).
+
 Key patterns from reviewing all previous stories:
 
-1. **`lib.rs` blocker is universal** — Every story needs it. This story adds `pub mod cli;` which previous stories explicitly excluded. This is the correct resolution for accessing `DaemonState`.
+1. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_cli_lifecycle.rs`.
 
-2. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_cli_lifecycle.rs`.
+2. **No mocks needed for this story.** All tests operate on real filesystem state files and real config YAML files in temp directories. No LLM, HTTP, or git mocking required.
 
-3. **No mocks needed for this story.** All tests operate on real filesystem state files and real config YAML files in temp directories. No LLM, HTTP, or git mocking required.
+3. **Story 7.2 (Config Startup Validation)** also tests `BotConfig::load()` — but focuses on validation edge cases (missing fields, invalid values). Story 7.9 AC #6 tests the happy-path roundtrip only. No overlap.
 
-4. **Story 7.2 (Config Startup Validation)** also tests `BotConfig::load()` — but focuses on validation edge cases (missing fields, invalid values). Story 7.9 AC #6 tests the happy-path roundtrip only. No overlap.
-
-5. **Story 7.8 (Branch Management)** established the pattern of confirming module visibility definitively (✅ instead of ⚠️) and providing a Quick API Reference table. This story follows the same pattern.
+4. **Story 7.8 (Branch Management)** established the pattern of confirming module visibility definitively (✅ instead of ⚠️) and providing a Quick API Reference table. This story follows the same pattern.
 
 ### Git Intelligence
 

@@ -668,9 +668,15 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention (UPDATED):** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. Due to **Rust 2024 edition**, new test modules must be registered using `#[path]` attributes:
+  ```rust
+  #[path = "integration/test_pipeline.rs"]
+  mod test_pipeline;
+  ```
+- **`lib.rs` BLOCKER is resolved:** `src/lib.rs` exists with `pub mod pipeline;` (and all other non-CLI modules). No Task 0 needed for lib.rs creation.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
-- **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
+- **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner};`
+- **MockSessionRunner/MockReviewRunner pattern:** Use closure-based outcome factory: `.with_outcome(|story| SessionOutcome::Completed { ... })`. NOT VecDeque-based — the factory receives `&StoryInfo` and returns the outcome.
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one

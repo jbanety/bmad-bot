@@ -216,8 +216,17 @@ Known modules scanned by discovery: `bmm`, `core`, `_config`, `_memory`.
 
 ### Previous Story Intelligence (Story 7.1)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. All test modules are declared in `tests/integration.rs` via `mod test_config;` etc.
+- **Cargo test convention (UPDATED):** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. Due to **Rust 2024 edition**, module resolution from `tests/integration.rs` does NOT automatically look in `tests/integration/`. New test modules must be registered using `#[path]` attributes:
+  ```rust
+  #[path = "integration/test_config.rs"]
+  mod test_config;
+  ```
+- **`lib.rs` BLOCKER is resolved:** `src/lib.rs` exists with `pub mod` for ALL non-CLI modules: `auth`, `config`, `git_provider`, `llm`, `mcp`, `notifier`, `pipeline`, `review`, `session`, `supervisor`, `tools`, `watcher`. `mod cli;` remains binary-only in `main.rs`.
+- **`SessionState` and `ChatMessage` re-exported:** Accessible via `bmad_bot::session::{SessionState, ChatMessage}` (re-exported from private `state` submodule)
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_secrets};`
+- **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner};`
+- **MockSessionRunner/MockReviewRunner pattern:** Use closure-based outcome factory: `.with_outcome(|story| SessionOutcome::Completed { ... })`
+- **Additional fixture:** `make_test_session_state(story_key)` builds a minimal `SessionState` for WAL tests
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert

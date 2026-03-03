@@ -442,13 +442,15 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 
 ### Previous Story Intelligence (Stories 7.1, 7.4, 6.3)
 
-**Story 7.1 (Integration Test Infrastructure):**
-- Defines `tests/integration.rs` entry point with `mod helpers;` + individual test modules
-- Defines `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, etc.)
-- Defines `lib.rs` creation and session::state re-export as Task 0
-- All mock implementations must be `Send + Sync`
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point uses `#[path = "integration/..."]` attributes (Rust 2024 edition requires this — plain `mod X;` does NOT resolve to `tests/integration/X.rs`)
+- `tests/integration/helpers/fixtures.rs` contains: `make_test_config()`, `make_test_secrets()`, `make_test_story()`, `write_sprint_status()`, `write_wal_file()`, `create_test_repo()`, `make_test_session_state()`
+- `tests/integration/helpers/mocks.rs` contains: `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner`
+- `src/lib.rs` exists with ALL non-CLI modules. `SessionState` and `ChatMessage` re-exported via `bmad_bot::session::{SessionState, ChatMessage}`
+- All mock implementations are `Send + Sync`
 - Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
 - Uses `tempfile::tempdir()` for filesystem isolation
+- **`make_test_session_state(story_key)`** helper builds a minimal `SessionState` with 2 chat messages — useful for WAL write tests
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `DevRunner` and `CodeReviewer` traits for DI
