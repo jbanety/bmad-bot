@@ -1,7 +1,5 @@
 //! Self-verification tests for fixture builder functions.
 
-use std::path::Path;
-
 use crate::helpers::fixtures::*;
 
 use bmad_bot::session::{ChatMessage, SessionState};

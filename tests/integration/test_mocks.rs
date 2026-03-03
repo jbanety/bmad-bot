@@ -70,9 +70,29 @@ async fn test_mock_git_provider_tracks_calls() {
 
     let calls = mock.calls();
     assert_eq!(calls.len(), 3);
-    assert!(matches!(calls[0], GitProviderCall::CreatePr(_)));
-    assert!(matches!(calls[1], GitProviderCall::AddComment { .. }));
-    assert!(matches!(calls[2], GitProviderCall::GetPrUrl { .. }));
+
+    // Verify CreatePr captured params
+    if let GitProviderCall::CreatePr(p) = &calls[0] {
+        assert_eq!(p.title, "PR1");
+        assert_eq!(p.source_branch, "feat");
+    } else {
+        panic!("Expected CreatePr call at index 0");
+    }
+
+    // Verify AddComment captured pr_id and body
+    if let GitProviderCall::AddComment { pr_id, body } = &calls[1] {
+        assert_eq!(pr_id, "1");
+        assert_eq!(body, "looks good");
+    } else {
+        panic!("Expected AddComment call at index 1");
+    }
+
+    // Verify GetPrUrl captured pr_id
+    if let GitProviderCall::GetPrUrl { pr_id } = &calls[2] {
+        assert_eq!(pr_id, "1");
+    } else {
+        panic!("Expected GetPrUrl call at index 2");
+    }
 }
 
 #[tokio::test]
@@ -286,6 +306,44 @@ async fn test_mock_review_runner_tracks_calls() {
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].story_key, "7-1-a");
     assert_eq!(calls[1].story_key, "7-2-b");
+}
+
+#[tokio::test]
+async fn test_mock_review_runner_with_outcome() {
+    let mock = MockReviewRunner::with_outcome(|story| ReviewOutcome::Completed {
+        story_key: story.story_key.clone(),
+        branch: "custom-review-branch".into(),
+        report: "Custom review report from with_outcome.".to_string(),
+    });
+    let story = make_test_story("7-1-test", "Test", vec![]);
+    let outcome = mock.run(&story).await;
+    match outcome {
+        ReviewOutcome::Completed { report, branch, .. } => {
+            assert_eq!(report, "Custom review report from with_outcome.");
+            assert_eq!(branch, "custom-review-branch");
+        }
+        _ => panic!("Expected Completed outcome from with_outcome"),
+    }
+}
+
+#[tokio::test]
+async fn test_mock_session_runner_returns_escalated() {
+    let mock = MockSessionRunner::new_escalated("7-1-test", "What should I do here?");
+    let story = make_test_story("7-1-test", "Test", vec![]);
+
+    let outcome = mock.run(&story).await;
+    match outcome {
+        SessionOutcome::Escalated { report, .. } => {
+            assert_eq!(report.story_key, "7-1-test");
+            assert_eq!(report.question, "What should I do here?");
+            assert_eq!(report.reason, "mock escalation");
+        }
+        _ => panic!("Expected Escalated outcome"),
+    }
+
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].story_key, "7-1-test");
 }
 
 // ---------------------------------------------------------------------------

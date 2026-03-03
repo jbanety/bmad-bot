@@ -11,3 +11,6 @@ mod test_fixtures;
 
 #[path = "integration/test_mocks.rs"]
 mod test_mocks;
+
+#[path = "integration/test_config.rs"]
+mod test_config;

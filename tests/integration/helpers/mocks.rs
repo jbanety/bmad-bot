@@ -11,8 +11,9 @@ use async_trait::async_trait;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::escalation::EscalationReport;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::session::SessionOutcome;
-use bmad_bot::supervisor::decisions::DecisionRecord;
 use bmad_bot::watcher::StoryInfo;
 
 // ---------------------------------------------------------------------------
@@ -328,6 +329,27 @@ impl MockSessionRunner {
         }
     }
 
+    /// Create a mock that always returns `SessionOutcome::Escalated`.
+    pub fn new_escalated(story_key: &str, question: &str) -> Self {
+        let report = EscalationReport {
+            story_key: story_key.to_string(),
+            question: question.to_string(),
+            reason: "mock escalation".to_string(),
+            branch_name: format!("story/{story_key}"),
+            partial_work_summary: "mock partial work".to_string(),
+            escalated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        Self {
+            outcome_factory: Arc::new(Mutex::new(Box::new(move |_story: &StoryInfo| {
+                SessionOutcome::Escalated {
+                    report: report.clone(),
+                    decisions: vec![],
+                }
+            }))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
     /// Run the mock session for the given story.
     pub async fn run(&self, story: &StoryInfo) -> SessionOutcome {
         self.calls.lock().unwrap().push(SessionRunCall {
@@ -338,7 +360,7 @@ impl MockSessionRunner {
     }
 
     /// Check for WAL recovery — always returns None (mock has no WAL).
-    pub async fn check_and_recover_wal(&self) -> Option<()> {
+    pub async fn check_and_recover_wal(&self) -> Option<RecoveryInfo> {
         None
     }
 

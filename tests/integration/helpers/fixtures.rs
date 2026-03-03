@@ -10,7 +10,7 @@ use bmad_bot::config::{
     BmadPathsConfig, BotConfig, BotSecrets, GitProviderConfig, LlmConfig, LlmRoleConfig,
     NotificationConfig, TelegramConfig,
 };
-use bmad_bot::session::{ChatMessage, SessionState};
+use bmad_bot::session::SessionState;
 use bmad_bot::watcher::StoryInfo;
 
 // ---------------------------------------------------------------------------
