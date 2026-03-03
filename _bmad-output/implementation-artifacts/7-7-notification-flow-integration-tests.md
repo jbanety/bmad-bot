@@ -1,6 +1,6 @@
 # Story 7.7: Notification Flow Integration Tests
 
-Status: in-progress
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -75,9 +75,9 @@ So that I'm confident the daemon sends correct, well-formatted notifications.
 
 ### Review Follow-ups (AI)
 
-- [ ] [AI-Review][High] AC #1 partial coverage — `format_story_message()` is private so the integration test cannot assert the rendered string contains story ID, status, and PR URL. Consider adding a `pub(crate)` or `#[cfg(test)]`-gated helper in `src/notifier/mod.rs` that exposes formatted output, OR expose a thin `format_story_message` as `pub` with a doc note explaining it is test-facing. [tests/integration/test_notifier.rs — no assertion on message content]
-- [ ] [AI-Review][Medium] AC #3 warning log unverified — `create_notifier()` issues `tracing::warn!` when token is absent, but no integration test captures or asserts on that log output. Add `tracing-test` to `[dev-dependencies]` and a `#[traced_test]` assertion in tests 4.1/4.2. [tests/integration/test_notifier.rs:168-196]
-- [ ] [AI-Review][Medium] AC #4 `build_run_summary()` untestable from integration — AC originally referenced `build_run_summary()` (private to `src/pipeline/mod.rs`). Either expose the function as `pub(crate)` + re-export from `lib.rs`, or document in the story that manual RunSummary construction is the accepted substitute. [src/pipeline/mod.rs]
+- [x] [AI-Review][High] AC #1 partial coverage — `format_story_message()` is private so the integration test cannot assert the rendered string contains story ID, status, and PR URL. Consider adding a `pub(crate)` or `#[cfg(test)]`-gated helper in `src/notifier/mod.rs` that exposes formatted output, OR expose a thin `format_story_message` as `pub` with a doc note explaining it is test-facing. [tests/integration/test_notifier.rs — no assertion on message content]
+- [x] [AI-Review][Medium] AC #3 warning log unverified — `create_notifier()` issues `tracing::warn!` when token is absent, but no integration test captures or asserts on that log output. Add `tracing-test` to `[dev-dependencies]` and a `#[traced_test]` assertion in tests 4.1/4.2. [tests/integration/test_notifier.rs:168-196]
+- [x] [AI-Review][Medium] AC #4 `build_run_summary()` untestable from integration — AC originally referenced `build_run_summary()` (private to `src/pipeline/mod.rs`). Either expose the function as `pub(crate)` + re-export from `lib.rs`, or document in the story that manual RunSummary construction is the accepted substitute. [src/pipeline/mod.rs]
 
 ## Dev Notes
 
@@ -508,8 +508,9 @@ Claude Sonnet 4 (via BMAD dev agent)
 
 ### Debug Log References
 
-- All 16 notifier integration tests pass
-- Full suite: 115 tests pass (0 failures, 0 regressions)
+- All 21 notifier integration tests pass (16 original + 5 review follow-up)
+- Full suite: 120 integration tests pass (0 failures, 0 regressions)
+- Total project: 886 unit + 104 other + 120 integration = all passing
 - `cargo clippy --test integration` clean (no new warnings in test_notifier.rs)
 
 ### Completion Notes List
@@ -524,10 +525,14 @@ Claude Sonnet 4 (via BMAD dev agent)
 - **Task 7:** 3 tests — `StoryStatus::Completed/Blocked/Error` display strings contain expected keywords from external crate.
 - **Task 8:** 2 tests — `NotifierError::Disabled` display message, `NotifierError` is `Send + Sync`.
 - **Decision:** Used actual `BotSecrets.github_copilot_oauth_token` field (not `github_models_api_key` from dev notes — field was renamed). Also accounted for `RunSummary.fatal` field not mentioned in dev notes.
+- **[AI-Review][High] AC #1 resolved:** Exposed `format_story_message` as `#[doc(hidden)] pub` in `src/notifier/mod.rs`. Added 3 integration tests (`test_notifier_format_story_message_completed_with_pr`, `_blocked_with_reason`, `_error_no_pr`) that assert message content contains story ID, status, and PR URL from the external crate boundary.
+- **[AI-Review][Medium] AC #3 resolved:** Added `tracing-test = { version = "0.2", features = ["no-env-filter"] }` to `[dev-dependencies]`. Created 2 dedicated sync tests with `#[traced_test]` (`test_notifier_factory_enabled_no_token_logs_warning`, `test_notifier_factory_enabled_empty_token_logs_warning`) that verify `tracing::warn!` output contains "bot token missing or empty". Required `no-env-filter` feature to capture cross-crate tracing events.
+- **[AI-Review][Medium] AC #4 resolved:** Documented that manual `RunSummary` construction is the accepted substitute for `build_run_summary()` which is intentionally private to `src/pipeline/mod.rs`. All `RunSummary` fields are `pub`, so integration tests construct it directly (Task 6 tests). The pipeline's `build_run_summary()` is already covered by 3 unit tests in `pipeline.rs`.
 
 ### File List
 
-- `tests/integration/test_notifier.rs` — NEW (16 integration tests for notification subsystem)
-- `tests/integration.rs` — MODIFIED (added `#[path] mod test_notifier;` registration)
-- `_bmad-output/implementation-artifacts/7-7-notification-flow-integration-tests.md` — MODIFIED (task checkboxes, status, dev agent record)
-- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED (7-7 status: ready-for-dev → review)
+- `tests/integration/test_notifier.rs` — MODIFIED (added 5 new tests: 3 format_story_message content tests + 2 tracing warn log tests; total 21 integration tests)
+- `src/notifier/mod.rs` — MODIFIED (changed `format_story_message` from `fn` to `#[doc(hidden)] pub fn` for integration test AC #1 coverage)
+- `Cargo.toml` — MODIFIED (added `tracing-test = { version = "0.2", features = ["no-env-filter"] }` to `[dev-dependencies]`)
+- `tests/integration.rs` — UNCHANGED (already had `#[path] mod test_notifier;` from previous session)
+- `_bmad-output/implementation-artifacts/7-7-notification-flow-integration-tests.md` — MODIFIED (review follow-up checkboxes, dev agent record, file list)

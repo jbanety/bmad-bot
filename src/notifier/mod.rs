@@ -152,7 +152,11 @@ fn escape_html(text: &str) -> String {
 }
 
 /// Format a single-story notification as an HTML message for Telegram.
-fn format_story_message(notification: &StoryNotification) -> String {
+///
+/// Exposed as `pub` to allow integration tests to verify message content
+/// (story ID, status, PR URL) from the external crate boundary — see AC #1.
+#[doc(hidden)]
+pub fn format_story_message(notification: &StoryNotification) -> String {
     let status_line = match notification.status {
         StoryStatus::Completed => {
             format!("✅ Story {} completed", escape_html(&notification.story_id))

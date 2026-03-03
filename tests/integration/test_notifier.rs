@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use bmad_bot::config::{BotSecrets, NotificationConfig, TelegramConfig};
 use bmad_bot::notifier::{
-    create_notifier, Notifier, NotifierError, RunSummary, StoryNotification,
-    StoryStatus, TelegramNotifier,
+    create_notifier, format_story_message, Notifier, NotifierError, RunSummary,
+    StoryNotification, StoryStatus, TelegramNotifier,
 };
+use tracing_test::traced_test;
 
 use super::helpers::mocks::MockNotifier;
 
@@ -136,6 +137,84 @@ fn test_notifier_story_notification_struct_construction() {
 }
 
 // ===========================================================================
+// Review Follow-up 1 — format_story_message content verification (AC #1)
+// ===========================================================================
+
+#[test]
+fn test_notifier_format_story_message_completed_with_pr() {
+    let notification = make_completed_notification();
+    let message = format_story_message(&notification);
+
+    // AC #1: formatted message contains story ID, "completed" status, and PR URL
+    assert!(
+        message.contains("6.1"),
+        "Formatted message should contain story ID '6.1', got: {message}"
+    );
+    assert!(
+        message.contains("completed"),
+        "Formatted message should contain 'completed' status, got: {message}"
+    );
+    assert!(
+        message.contains("https://github.com/test/repo/pull/42"),
+        "Formatted message should contain PR URL, got: {message}"
+    );
+    assert!(
+        message.contains("6-1-telegram-notifications"),
+        "Formatted message should contain story key, got: {message}"
+    );
+}
+
+#[test]
+fn test_notifier_format_story_message_blocked_with_reason() {
+    let notification = StoryNotification {
+        story_id: "2.3".to_string(),
+        story_key: "2-3-blocked-story".to_string(),
+        status: StoryStatus::Blocked,
+        pr_url: None,
+        reason: Some("dependency not met".to_string()),
+    };
+    let message = format_story_message(&notification);
+
+    assert!(
+        message.contains("2.3"),
+        "Blocked message should contain story ID '2.3', got: {message}"
+    );
+    assert!(
+        message.contains("blocked"),
+        "Blocked message should contain 'blocked' status, got: {message}"
+    );
+    assert!(
+        message.contains("dependency not met"),
+        "Blocked message should contain reason, got: {message}"
+    );
+}
+
+#[test]
+fn test_notifier_format_story_message_error_no_pr() {
+    let notification = StoryNotification {
+        story_id: "3.1".to_string(),
+        story_key: "3-1-error-story".to_string(),
+        status: StoryStatus::Error,
+        pr_url: None,
+        reason: Some("LLM timeout".to_string()),
+    };
+    let message = format_story_message(&notification);
+
+    assert!(
+        message.contains("3.1"),
+        "Error message should contain story ID '3.1', got: {message}"
+    );
+    assert!(
+        message.contains("error"),
+        "Error message should contain 'error' status, got: {message}"
+    );
+    assert!(
+        !message.contains("href"),
+        "Error message without PR should not contain href, got: {message}"
+    );
+}
+
+// ===========================================================================
 // Task 3 — create_notifier() factory — disabled path (AC #2)
 // ===========================================================================
 
@@ -166,6 +245,20 @@ async fn test_notifier_factory_disabled_notify_run_summary_succeeds() {
 // Task 4 — create_notifier() factory — graceful fallback path (AC #3)
 // ===========================================================================
 
+#[traced_test]
+#[test]
+fn test_notifier_factory_enabled_no_token_logs_warning() {
+    let config = make_notification_config(true, "12345");
+    let secrets = make_test_secrets_with_telegram(None);
+    let _notifier = create_notifier(&config, &secrets);
+
+    // AC #3: verify warning is logged when token is absent (not an error — non-blocking)
+    assert!(
+        logs_contain("bot token missing or empty"),
+        "Expected warning log about missing bot token when token is None"
+    );
+}
+
 #[tokio::test]
 async fn test_notifier_factory_enabled_no_token_returns_noop() {
     let config = make_notification_config(true, "12345");
@@ -180,6 +273,20 @@ async fn test_notifier_factory_enabled_no_token_returns_noop() {
     let summary = make_mixed_run_summary();
     let result = notifier.notify_run_summary(&summary).await;
     assert!(result.is_ok(), "Enabled but no token should fallback to NoopNotifier for notify_run_summary");
+}
+
+#[traced_test]
+#[test]
+fn test_notifier_factory_enabled_empty_token_logs_warning() {
+    let config = make_notification_config(true, "12345");
+    let secrets = make_test_secrets_with_telegram(Some(String::new()));
+    let _notifier = create_notifier(&config, &secrets);
+
+    // AC #3: verify warning is logged when token is empty (not an error — non-blocking)
+    assert!(
+        logs_contain("bot token missing or empty"),
+        "Expected warning log about missing bot token when token is empty"
+    );
 }
 
 #[tokio::test]
