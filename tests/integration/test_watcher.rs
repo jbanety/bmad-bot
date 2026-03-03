@@ -3,9 +3,12 @@
 //! Exercises `Watcher`, `SprintStatusFile`, `DependencyGraph`, and `deps` module
 //! functions together with real filesystem I/O (isolated via `tempfile::tempdir()`).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use bmad_bot::watcher::deps::DependencyGraph;
+use bmad_bot::watcher::deps::{
+    build_full_dependency_map, derive_dependencies, find_cascade_blocks, DependencyGraph,
+};
 use bmad_bot::watcher::{SprintStatusFile, Watcher, WatcherError};
 
 use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};
@@ -58,7 +61,10 @@ fn test_watcher_poll_returns_eligible_with_deps_satisfied() {
 
 #[test]
 fn test_watcher_poll_dependency_valid_ordering() {
-    // Arrange: same scenario — verify ordering is dependency-valid
+    // Arrange: same scenario — verify sprint-order tiebreaker is respected.
+    // Both 1-2 and 2-1 have in-degree 0 in the eligible graph (1-2's dep 1-1 is
+    // not in the eligible set). Document order must be the tiebreaker:
+    // 1-2 (pos 2 in YAML) must come before 2-1 (pos 5 in YAML).
     let tmp = tempfile::tempdir().unwrap();
     let entries = vec![
         ("epic-1", "in-progress"),
@@ -76,13 +82,15 @@ fn test_watcher_poll_dependency_valid_ordering() {
     let eligible = watcher.poll().expect("poll should succeed");
     let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
 
-    // 1-2 must appear before any story that depends on it.
-    // 1-3 is not in the list (dep not met), so the constraint is trivially satisfied.
-    // Just verify 1-2 is present and before 2-1 in document order (sprint order tiebreaker).
-    let pos_1_2 = keys.iter().position(|k| *k == "1-2-cli-framework");
-    assert!(
-        pos_1_2.is_some(),
-        "1-2 must be in eligible list for ordering check"
+    assert_eq!(keys.len(), 2, "Expected exactly 2 eligible stories, got: {keys:?}");
+    // Topological sort with doc-order tiebreaker: 1-2 (pos 2) before 2-1 (pos 5)
+    assert_eq!(
+        keys[0], "1-2-cli-framework",
+        "1-2 should be first (earlier doc position)"
+    );
+    assert_eq!(
+        keys[1], "2-1-polling",
+        "2-1 should be second (later doc position)"
     );
 }
 
@@ -142,14 +150,20 @@ fn test_watcher_no_cascade_on_in_progress_status() {
     // Negative test: 1-1 is in-progress (NOT a blocking status)
     // 1-2 should be skipped (dep not done) but NOT cascade-blocked
     let tmp = tempfile::tempdir().unwrap();
-    let entries = vec![
+    let entries: Vec<(&str, &str)> = vec![
         ("epic-1", "in-progress"),
         ("1-1-scaffolding", "in-progress"),
         ("1-2-cli-framework", "ready-for-dev"),
+        ("1-3-init-command", "ready-for-dev"),
         ("epic-2", "in-progress"),
         ("2-1-polling", "ready-for-dev"),
     ];
-    write_sprint_status(tmp.path(), entries);
+    // Convert to owned before write_sprint_status consumes entries
+    let owned_entries: Vec<(String, String)> = entries
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let path = write_sprint_status(tmp.path(), entries);
 
     let config = make_test_config(tmp.path());
     let watcher = Watcher::new(Arc::new(config));
@@ -166,20 +180,38 @@ fn test_watcher_no_cascade_on_in_progress_status() {
         !keys.contains(&"1-2-cli-framework"),
         "1-2 should be skipped (dep not done)"
     );
+
+    // CRITICAL: directly verify in-progress does NOT trigger cascade blocking.
+    // poll() cannot distinguish "dep not met" from "cascade-blocked" by output alone.
+    let all_statuses_map: HashMap<String, String> = owned_entries.iter().cloned().collect();
+    let full_dep_map = build_full_dependency_map(&owned_entries);
+    let sprint_status = SprintStatusFile::load(&path, tmp.path()).unwrap();
+    let mut eligible_stories = sprint_status.eligible_stories();
+    derive_dependencies(&mut eligible_stories, &owned_entries);
+    let cascade_blocks = find_cascade_blocks(&eligible_stories, &all_statuses_map, &full_dep_map);
+    assert!(
+        cascade_blocks.is_empty(),
+        "in-progress must NOT trigger cascade blocks, got: {cascade_blocks:?}"
+    );
 }
 
 #[test]
 fn test_watcher_no_cascade_on_review_status() {
     // Negative test: 1-1 is in review (NOT a blocking status)
     let tmp = tempfile::tempdir().unwrap();
-    let entries = vec![
+    let entries: Vec<(&str, &str)> = vec![
         ("epic-1", "in-progress"),
         ("1-1-scaffolding", "review"),
         ("1-2-cli-framework", "ready-for-dev"),
+        ("1-3-init-command", "ready-for-dev"),
         ("epic-2", "in-progress"),
         ("2-1-polling", "ready-for-dev"),
     ];
-    write_sprint_status(tmp.path(), entries);
+    let owned_entries: Vec<(String, String)> = entries
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let path = write_sprint_status(tmp.path(), entries);
 
     let config = make_test_config(tmp.path());
     let watcher = Watcher::new(Arc::new(config));
@@ -193,6 +225,18 @@ fn test_watcher_no_cascade_on_review_status() {
     assert!(
         !keys.contains(&"1-2-cli-framework"),
         "1-2 should be skipped (dep not done, but NOT cascade-blocked)"
+    );
+
+    // CRITICAL: directly verify review does NOT trigger cascade blocking.
+    let all_statuses_map: HashMap<String, String> = owned_entries.iter().cloned().collect();
+    let full_dep_map = build_full_dependency_map(&owned_entries);
+    let sprint_status = SprintStatusFile::load(&path, tmp.path()).unwrap();
+    let mut eligible_stories = sprint_status.eligible_stories();
+    derive_dependencies(&mut eligible_stories, &owned_entries);
+    let cascade_blocks = find_cascade_blocks(&eligible_stories, &all_statuses_map, &full_dep_map);
+    assert!(
+        cascade_blocks.is_empty(),
+        "review status must NOT trigger cascade blocks, got: {cascade_blocks:?}"
     );
 }
 
@@ -221,6 +265,39 @@ fn test_watcher_poll_all_done_returns_no_eligible_stories() {
     assert!(
         matches!(err, WatcherError::NoEligibleStories),
         "Expected NoEligibleStories, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Additional AC #3 coverage: NoEligibleStories via dep-filter (second code path)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_watcher_poll_no_eligible_after_dep_filter() {
+    // Scenario: 1-2 is ready-for-dev but its dep 1-1 is in-progress (not done).
+    // filter_eligible skips 1-2 → filtered list is empty → NoEligibleStories.
+    // This exercises the SECOND NoEligibleStories branch in Watcher::poll()
+    // (line 334: `if filtered.is_empty()`), distinct from the first branch
+    // (line 319: `if eligible.is_empty()`) exercised by test_watcher_poll_all_done_returns_no_eligible_stories.
+    let tmp = tempfile::tempdir().unwrap();
+    let entries = vec![
+        ("epic-1", "in-progress"),
+        ("1-1-scaffolding", "in-progress"), // dep NOT done
+        ("1-2-cli-framework", "ready-for-dev"), // depends on 1-1, dep unmet
+    ];
+    write_sprint_status(tmp.path(), entries);
+
+    let config = make_test_config(tmp.path());
+    let watcher = Watcher::new(Arc::new(config));
+    let result = watcher.poll();
+
+    assert!(
+        result.is_err(),
+        "Expected error when all ready-for-dev stories have unmet deps"
+    );
+    assert!(
+        matches!(result.unwrap_err(), WatcherError::NoEligibleStories),
+        "Expected NoEligibleStories when dep-filter empties the eligible list"
     );
 }
 
@@ -258,11 +335,11 @@ fn test_watcher_cyclic_dependency_detected() {
         "Expected CyclicDependency with non-empty cycle, got: {err}"
     );
 
-    // Verify the error contains the story keys involved
+    // Verify the error contains BOTH story keys involved in the cycle
     if let WatcherError::CyclicDependency { cycle } = err {
         assert!(
-            cycle.contains(&"1-1-alpha".to_string()) || cycle.contains(&"1-2-beta".to_string()),
-            "Cycle should contain involved story keys, got: {cycle:?}"
+            cycle.contains(&"1-1-alpha".to_string()) && cycle.contains(&"1-2-beta".to_string()),
+            "Cycle should contain BOTH involved story keys, got: {cycle:?}"
         );
     }
 }

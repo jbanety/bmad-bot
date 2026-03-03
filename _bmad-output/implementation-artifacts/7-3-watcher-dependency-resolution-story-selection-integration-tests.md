@@ -1,6 +1,6 @@
 # Story 7.3: Watcher → Dependency Resolution → Story Selection Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -318,6 +318,13 @@ Claude Sonnet 4 (claude-sonnet-4-20250514)
 - Used `#[path = "integration/test_watcher.rs"]` attribute per Rust 2024 edition convention
 - No new dependencies added
 - Full test suite passes: 886 unit tests + 65 integration tests, 0 failures
+- **Code review fixes (review pass):**
+  - HIGH fixed: `test_watcher_no_cascade_on_in_progress_status` and `test_watcher_no_cascade_on_review_status` now call `find_cascade_blocks()` directly, proving non-cascade behavior is observable (poll() output alone cannot distinguish skipped-dep from cascade-blocked)
+  - MEDIUM fixed: `test_watcher_poll_dependency_valid_ordering` now asserts actual doc-order tiebreaking (`keys[0]=="1-2-cli-framework"`, `keys[1]=="2-1-polling"`), replacing the trivially-true `pos_1_2.is_some()` check
+  - MEDIUM fixed: `test_watcher_cyclic_dependency_detected` cycle assertion changed from `||` to `&&` — both story keys must appear in the cycle
+  - MEDIUM fixed: Added `test_watcher_poll_no_eligible_after_dep_filter` covering the second `NoEligibleStories` code path in `Watcher::poll()` (filtered list empty after dep resolution, distinct from no-ready-for-dev path)
+  - Also added imports: `HashMap`, `build_full_dependency_map`, `derive_dependencies`, `find_cascade_blocks`
+- Post-review full suite: 886 unit tests + 66 integration tests, 0 failures
 
 ### File List
 - `tests/integration/test_watcher.rs` — NEW: 16 integration tests for watcher->deps->story selection chain
