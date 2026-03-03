@@ -388,7 +388,7 @@ let slot: EscalationSlot = Arc::new(Mutex::new(Some(EscalationInfo {
 **Story 7.1 (Integration Test Infrastructure — IMPLEMENTED):**
 - `tests/integration.rs` uses `#[path = "integration/..."]` attributes (Rust 2024 edition) — new test modules must use `#[path = "integration/test_response_analyzer_supervisor.rs"] mod test_response_analyzer_supervisor;`
 - `src/lib.rs` exposes 12 public modules including `supervisor` and `session`. All integration test imports use `bmad_bot::{module}::{Type}`.
-- `tests/integration/` directory exists with helpers (mocks + fixtures) and **121 passing tests** across 8 test modules
+- `tests/integration/` directory exists with helpers (mocks + fixtures) and **133 passing tests** across 9 test modules (12 added by Story 7.9)
 
 1. **`lib.rs` blocker is resolved** — `src/lib.rs` exists with all needed modules. No Task 0 needed.
 
@@ -404,7 +404,9 @@ let slot: EscalationSlot = Arc::new(Mutex::new(Some(EscalationInfo {
 
 7. **Story 7.8 (Branch Management — IMPLEMENTED):** 22 integration tests in `tests/integration/test_branch_git.rs`. Established patterns: `git_args()` helper for `GitToolArgs` (no `Default`), `use rig::tool::Tool;` required for `GitTool::call()`, `create_test_repo()` + `make_test_story()` from shared fixtures. Note: `BranchError::RepoOpenFailed` does not exist in the API.
 
-8. **`rig::tool::Tool` trait `call()` is async** — use `#[tokio::test]` for any test invoking `AskSupervisor::call()`.
+8. **Story 7.9 (CLI Lifecycle — IMPLEMENTED):** 12 integration tests in `tests/integration/test_cli_lifecycle.rs`. Tests are all sync (`#[test]`, no async). Covers `DaemonState` full lifecycle (create → mutate → persist → re-read → cleanup) and `BotConfig` YAML roundtrip. Key patterns: `tempfile::tempdir()` for isolation, `std::thread::sleep(Duration::from_millis(10))` between timestamp-producing operations, manual `DaemonState` construction (all fields pub) as alternative to `new_running()`, `BotConfig::_test_minimal("pretty", "info")` for config roundtrip. `cli` module confirmed accessible via `bmad_bot::cli::state::DaemonState`.
+
+9. **`rig::tool::Tool` trait `call()` is async** — use `#[tokio::test]` for any test invoking `AskSupervisor::call()`.
 
 ### Git Intelligence
 
