@@ -14,7 +14,7 @@
 //! - [`ReviewOutcome`] — the three possible results of a review run
 //! - [`ReviewRunner`] — the main review lifecycle manager
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -24,29 +24,12 @@ use rig::tools::think::ThinkTool;
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
-use crate::session::agent::{self, ShutdownFlag, TERMINAL_TIMEOUT_SECS};
+use crate::session::agent::{self, ShutdownFlag};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::provider::ProviderError;
+use crate::supervisor::EscalationSlot;
 use crate::supervisor::decisions::DecisionLog;
-use crate::supervisor::{AskSupervisor, EscalationSlot};
-use crate::tools::{
-    EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
-};
 use crate::watcher::StoryInfo;
-
-/// Type alias for the standard 8-tool set returned by [`ReviewRunner::create_tools()`].
-///
-/// Avoids `clippy::type_complexity` on the 8-element tuple.
-type ReviewToolSet = (
-    GitTool,
-    ReadFileTool,
-    EditFileTool,
-    GrepTool,
-    FindPathTool,
-    ListDirectoryTool,
-    TerminalTool,
-    AskSupervisor,
-);
 
 /// Maximum chat turns for a review session (safety net).
 const MAX_REVIEW_TURNS: usize = 100;
@@ -451,7 +434,17 @@ impl ReviewRunner {
         // 3. Build agent via AgentFactory — single call replaces 3-arm provider match
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
         let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
-            self.create_tools(&project_root, escalation_slot.clone(), decision_log.clone())?;
+            agent::create_tools_with_supervisor(
+                &project_root,
+                &self.config,
+                &self.agent_factory,
+                escalation_slot.clone(),
+                decision_log.clone(),
+                &self.mcp_manager,
+            )
+            .map_err(|e| ReviewError::AgentBuildFailed {
+                reason: format!("Failed to create AskSupervisor: {e}"),
+            })?;
 
         let agent = self
             .agent_factory
@@ -493,37 +486,6 @@ impl ReviewRunner {
         );
 
         Ok(outcome)
-    }
-
-    /// Create the 8 tools for the rig agent: 7 custom tools + ask_supervisor.
-    fn create_tools(
-        &self,
-        project_root: &Path,
-        escalation_slot: EscalationSlot,
-        decision_log: DecisionLog,
-    ) -> Result<ReviewToolSet, ReviewError> {
-        let git = GitTool::new(project_root.to_path_buf());
-        let read_file = ReadFileTool::new(project_root.to_path_buf());
-        let edit_file = EditFileTool::new(project_root.to_path_buf());
-        let grep = GrepTool::new(project_root.to_path_buf());
-        let find_path = FindPathTool::new(project_root.to_path_buf());
-        let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
-        let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
-
-        let supervisor = AskSupervisor::with_architect_from_config(
-            &self.config,
-            Some(Arc::clone(&self.agent_factory)),
-            escalation_slot,
-            decision_log,
-            Arc::clone(&self.mcp_manager),
-        )
-        .map_err(|e| ReviewError::AgentBuildFailed {
-            reason: format!("Failed to create AskSupervisor: {e}"),
-        })?;
-
-        Ok((
-            git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
-        ))
     }
 
     /// Drive the review session chat loop.

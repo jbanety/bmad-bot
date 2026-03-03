@@ -18,16 +18,12 @@
 use crate::config::BotConfig;
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
-use crate::session::agent::{TERMINAL_TIMEOUT_SECS, build_preamble};
+use crate::session::agent::{build_preamble, create_base_tools};
 use async_trait::async_trait;
 use rig::completion::Message;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::tools::{
-    EditFileTool, FindPathTool, GrepTool, ListDirectoryTool, ReadFileTool, git::GitTool,
-    terminal::TerminalTool,
-};
 use rig::tools::think::ThinkTool;
 
 /// Relative path from project root to the architect agent file.
@@ -352,13 +348,8 @@ impl AnswerProvider for ArchitectSession {
         context: Option<&str>,
     ) -> Result<String, ArchitectSessionError> {
         // All standard tools except ask_supervisor (would recurse).
-        let git = GitTool::new(self.project_root.clone());
-        let read_file = ReadFileTool::new(self.project_root.clone());
-        let edit_file = EditFileTool::new(self.project_root.clone());
-        let grep = GrepTool::new(self.project_root.clone());
-        let find_path = FindPathTool::new(self.project_root.clone());
-        let list_dir = ListDirectoryTool::new(self.project_root.clone());
-        let terminal = TerminalTool::new(self.project_root.clone(), TERMINAL_TIMEOUT_SECS);
+        let (git, read_file, edit_file, grep, find_path, list_dir, terminal) =
+            create_base_tools(&self.project_root);
         let project_root_str = self.project_root.display().to_string();
 
         // Build the agent via AgentFactory with the generic preamble (tool rules,

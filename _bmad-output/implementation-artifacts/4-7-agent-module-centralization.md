@@ -60,12 +60,12 @@ so that adding or changing tools requires editing one place instead of three, an
   - [x] 1.5 `cargo test` — verify all tests pass (1004 pass, 0 fail)
   - [x] 1.6 Commit: `refactor(session): rename dev_agent module to agent`
 
-- [ ] Task 2: Centralize `TERMINAL_TIMEOUT_SECS` (AC: #4)
-  - [ ] 2.1 Add `pub const TERMINAL_TIMEOUT_SECS: u64 = 30` to `session/agent.rs`
-  - [ ] 2.2 Remove the constant from `session/runner.rs`, `review/mod.rs`, `supervisor/architect.rs`
-  - [ ] 2.3 Update references to use `crate::session::agent::TERMINAL_TIMEOUT_SECS`
-  - [ ] 2.4 `cargo build` + `cargo test`
-  - [ ] 2.5 Commit: `refactor: centralize TERMINAL_TIMEOUT_SECS in session::agent`
+- [x] Task 2: Centralize `TERMINAL_TIMEOUT_SECS` (AC: #4)
+  - [x] 2.1 Add `pub const TERMINAL_TIMEOUT_SECS: u64 = 30` to `session/agent.rs`
+  - [x] 2.2 Remove the constant from `session/runner.rs`, `review/mod.rs`, `supervisor/architect.rs`
+  - [x] 2.3 Update references to use `crate::session::agent::TERMINAL_TIMEOUT_SECS`
+  - [x] 2.4 `cargo build` + `cargo test` — 1004 pass, 0 fail
+  - [x] 2.5 Commit: `refactor: centralize TERMINAL_TIMEOUT_SECS in session::agent`
 
 - [ ] Task 3: Centralize tool creation (AC: #2, #3, #5)
   - [ ] 3.1 Add `create_base_tools()` and `create_tools_with_supervisor()` to `session/agent.rs` (see Dev Notes for signatures)

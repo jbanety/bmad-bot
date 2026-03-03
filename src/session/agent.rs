@@ -11,9 +11,17 @@
 //! 4. The agent processes activation steps: loads `config.yaml`, greets user, shows menu
 //! 5. Caller sends a menu command (`DS` for dev, `CR` for review, `CH` for supervisor)
 
+use crate::config::BotConfig;
+use crate::llm::agent_factory::AgentFactory;
 use crate::llm::context::ContextBuilder;
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
+use crate::mcp::McpManager;
 use crate::session::state::ChatMessage;
+use crate::supervisor::decisions::DecisionLog;
+use crate::supervisor::{AskSupervisor, EscalationSlot};
+use crate::tools::{
+    EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
+};
 
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, StreamingPromptHook};
@@ -26,6 +34,75 @@ use std::sync::{Arc, Mutex};
 
 /// Terminal tool timeout in seconds — shared by all agent roles.
 pub const TERMINAL_TIMEOUT_SECS: u64 = 30;
+
+// ---------------------------------------------------------------------------
+// Centralized tool construction
+// ---------------------------------------------------------------------------
+
+/// The 7 base tools returned by [`create_base_tools()`].
+pub type BaseToolSet = (
+    GitTool,
+    ReadFileTool,
+    EditFileTool,
+    GrepTool,
+    FindPathTool,
+    ListDirectoryTool,
+    TerminalTool,
+);
+
+/// The 8 tools (7 base + supervisor) returned by [`create_tools_with_supervisor()`].
+pub type FullToolSet = (
+    GitTool,
+    ReadFileTool,
+    EditFileTool,
+    GrepTool,
+    FindPathTool,
+    ListDirectoryTool,
+    TerminalTool,
+    AskSupervisor,
+);
+
+/// Standard tool set WITHOUT ask_supervisor — used by the supervisor/architect agent.
+///
+/// Returns 7 base tools. Caller adds `ThinkTool` via `configure_agent_tools!`.
+pub fn create_base_tools(project_root: &Path) -> BaseToolSet {
+    let git = GitTool::new(project_root.to_path_buf());
+    let read_file = ReadFileTool::new(project_root.to_path_buf());
+    let edit_file = EditFileTool::new(project_root.to_path_buf());
+    let grep = GrepTool::new(project_root.to_path_buf());
+    let find_path = FindPathTool::new(project_root.to_path_buf());
+    let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
+    let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
+    (
+        git, read_file, edit_file, grep, find_path, list_dir, terminal,
+    )
+}
+
+/// Standard tool set WITH ask_supervisor — used by dev session and code review.
+///
+/// Returns 8 custom tools (7 base + supervisor). Caller adds `ThinkTool` via
+/// `configure_agent_tools!`.
+pub fn create_tools_with_supervisor(
+    project_root: &Path,
+    config: &BotConfig,
+    agent_factory: &Arc<AgentFactory>,
+    escalation_slot: EscalationSlot,
+    decision_log: DecisionLog,
+    mcp_manager: &Arc<McpManager>,
+) -> Result<FullToolSet, Box<dyn std::error::Error>> {
+    let (git, read_file, edit_file, grep, find_path, list_dir, terminal) =
+        create_base_tools(project_root);
+    let supervisor = AskSupervisor::with_architect_from_config(
+        config,
+        Some(Arc::clone(agent_factory)),
+        escalation_slot,
+        decision_log,
+        Arc::clone(mcp_manager),
+    )?;
+    Ok((
+        git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
+    ))
+}
 
 /// Shared shutdown flag — set to `true` when Ctrl+C or SIGTERM is received.
 ///
@@ -607,5 +684,41 @@ mod tests {
         // Any model with "preview" anywhere in the name triggers the rule
         let preamble = build_preamble(&[], "some-model-preview-v2");
         assert!(preamble.contains("Call tools ONE AT A TIME"));
+    }
+
+    // -----------------------------------------------------------------------
+    // create_base_tools tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_create_base_tools_returns_seven_tools() {
+        use rig::tool::Tool;
+        let tmp = std::env::temp_dir();
+        let (git, read_file, edit_file, grep, find_path, list_dir, terminal) =
+            create_base_tools(&tmp);
+        // Type system guarantees tuple correctness — verify construction didn't panic
+        // and that each tool reports the expected NAME constant.
+        assert_eq!(<crate::tools::GitTool as Tool>::NAME, "git");
+        assert_eq!(<crate::tools::ReadFileTool as Tool>::NAME, "read_file");
+        assert_eq!(<crate::tools::EditFileTool as Tool>::NAME, "edit_file");
+        assert_eq!(<crate::tools::GrepTool as Tool>::NAME, "grep");
+        assert_eq!(<crate::tools::FindPathTool as Tool>::NAME, "find_path");
+        assert_eq!(
+            <crate::tools::ListDirectoryTool as Tool>::NAME,
+            "list_directory"
+        );
+        assert_eq!(<crate::tools::TerminalTool as Tool>::NAME, "terminal");
+        // Suppress unused-variable warnings — the bindings prove the tuple destructures correctly.
+        let _ = (
+            git, read_file, edit_file, grep, find_path, list_dir, terminal,
+        );
+    }
+
+    #[test]
+    fn test_create_base_tools_accepts_any_path() {
+        // Ensure construction works with an arbitrary path (no filesystem validation at build time).
+        let fake_root = Path::new("/nonexistent/project/root");
+        let tools = create_base_tools(fake_root);
+        let _ = tools; // 7-tuple constructed without panic
     }
 }

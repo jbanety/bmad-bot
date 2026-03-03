@@ -18,34 +18,18 @@ use crate::llm::logging::{
     log_llm_error, log_llm_history, log_llm_history_summary, log_llm_request, log_llm_response,
 };
 use crate::session::SessionOutcome;
+use crate::session::agent;
 /// Re-export [`ShutdownFlag`] so existing callers (`pipeline.rs`, `cli/mod.rs`) keep working.
 pub use crate::session::agent::ShutdownFlag;
-use crate::session::agent::{self, TERMINAL_TIMEOUT_SECS};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
 use crate::session::cleanup::{mark_story_needs_clarification, preserve_partial_work};
 use crate::session::escalation::EscalationReport;
 use crate::session::provider::ProviderError;
 use crate::session::state::{ChatMessage, SessionState};
+use crate::supervisor::EscalationSlot;
 use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
-use crate::supervisor::{AskSupervisor, EscalationSlot};
-use crate::tools::{
-    EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
-};
 
-/// Type alias for the standard 8-tool set returned by [`SessionRunner::create_tools()`].
-///
-/// Avoids `clippy::type_complexity` on the 8-element tuple.
-type ToolSet = (
-    GitTool,
-    ReadFileTool,
-    EditFileTool,
-    GrepTool,
-    FindPathTool,
-    ListDirectoryTool,
-    TerminalTool,
-    AskSupervisor,
-);
 use crate::watcher::StoryInfo;
 
 use rig::completion::Message;
@@ -770,7 +754,18 @@ impl SessionRunner {
         let preamble = self.build_preamble(story).await?;
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
         let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
-            self.create_tools(&project_root, escalation_slot, decision_log)?;
+            agent::create_tools_with_supervisor(
+                &project_root,
+                &self.config,
+                &self.agent_factory,
+                escalation_slot,
+                decision_log,
+                &self.mcp_manager,
+            )
+            .map_err(|e| ProviderError::ClientCreation {
+                provider: "supervisor".to_string(),
+                reason: format!("Failed to create AskSupervisor: {e}"),
+            })?;
 
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         self.agent_factory
@@ -800,38 +795,6 @@ impl SessionRunner {
         Ok(agent::build_preamble(
             &mcp_names,
             &self.config.llm.dev.model,
-        ))
-    }
-
-    /// Create the 8 tools for the rig agent: 7 custom tools + ask_supervisor.
-    fn create_tools(
-        &self,
-        project_root: &Path,
-        escalation_slot: EscalationSlot,
-        decision_log: DecisionLog,
-    ) -> Result<ToolSet, ProviderError> {
-        let git = GitTool::new(project_root.to_path_buf());
-        let read_file = ReadFileTool::new(project_root.to_path_buf());
-        let edit_file = EditFileTool::new(project_root.to_path_buf());
-        let grep = GrepTool::new(project_root.to_path_buf());
-        let find_path = FindPathTool::new(project_root.to_path_buf());
-        let list_dir = ListDirectoryTool::new(project_root.to_path_buf());
-        let terminal = TerminalTool::new(project_root.to_path_buf(), TERMINAL_TIMEOUT_SECS);
-
-        let supervisor = AskSupervisor::with_architect_from_config(
-            &self.config,
-            Some(Arc::clone(&self.agent_factory)),
-            escalation_slot,
-            decision_log,
-            Arc::clone(&self.mcp_manager),
-        )
-        .map_err(|e| ProviderError::ClientCreation {
-            provider: "supervisor".to_string(),
-            reason: format!("Failed to create AskSupervisor: {e}"),
-        })?;
-
-        Ok((
-            git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
         ))
     }
 
