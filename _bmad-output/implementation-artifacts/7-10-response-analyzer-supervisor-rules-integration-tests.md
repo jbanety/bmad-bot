@@ -1,6 +1,6 @@
 # Story 7.10: Response Analyzer & Supervisor Rules Integration Tests
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -54,61 +54,61 @@ So that I'm confident the chat loop handles all agent response patterns and the 
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Verify `lib.rs` blocker resolved (AC: all)
-  - [ ] 0.1 Confirm `src/lib.rs` exists with `pub mod supervisor;` and `pub mod session;`
-  - [ ] 0.2 If missing, create `src/lib.rs` per Story 7.1 Task 0 spec (BLOCKER)
+- [x] Task 0: Verify `lib.rs` blocker resolved (AC: all)
+  - [x] 0.1 Confirm `src/lib.rs` exists with `pub mod supervisor;` and `pub mod session;`
+  - [x] 0.2 If missing, create `src/lib.rs` per Story 7.1 Task 0 spec (BLOCKER)
 
-- [ ] Task 1: Create integration test file (AC: 1-10)
-  - [ ] 1.1 Create `tests/integration/test_response_analyzer_supervisor.rs`
-  - [ ] 1.2 Register module in `tests/integration.rs`: `mod test_response_analyzer_supervisor;`
+- [x] Task 1: Create integration test file (AC: 1-10)
+  - [x] 1.1 Create `tests/integration/test_response_analyzer_supervisor.rs`
+  - [x] 1.2 Register module in `tests/integration.rs`: `mod test_response_analyzer_supervisor;`
 
-- [ ] Task 2: ResponseAnalyzer completion signal tests (AC: 1)
-  - [ ] 2.1 Test each `COMPLETION_SIGNALS` phrase triggers `Completed`
-  - [ ] 2.2 Test completion signals are case-insensitive
-  - [ ] 2.3 Test non-completion phrases do NOT trigger `Completed` (e.g., "I'll complete the task", "implementation of the feature")
+- [x] Task 2: ResponseAnalyzer completion signal tests (AC: 1)
+  - [x] 2.1 Test each `COMPLETION_SIGNALS` phrase triggers `Completed`
+  - [x] 2.2 Test completion signals are case-insensitive
+  - [x] 2.3 Test non-completion phrases do NOT trigger `Completed` (e.g., "I'll complete the task", "implementation of the feature")
 
-- [ ] Task 3: ResponseAnalyzer story selection tests (AC: 2)
-  - [ ] 3.1 Test story selection pattern returns `Continue { reply: story_key }`
-  - [ ] 3.2 Test different story keys are passed through correctly
-  - [ ] 3.3 Test all `STORY_SELECTION_PATTERNS` phrases
+- [x] Task 3: ResponseAnalyzer story selection tests (AC: 2)
+  - [x] 3.1 Test story selection pattern returns `Continue { reply: story_key }`
+  - [x] 3.2 Test different story keys are passed through correctly
+  - [x] 3.3 Test all `STORY_SELECTION_PATTERNS` phrases
 
-- [ ] Task 4: RuleEngine confirmation tests (AC: 3)
-  - [ ] 4.1 Test confirmation patterns return `Matched` with "Yes, proceed."
-  - [ ] 4.2 Test permission patterns ("Should I create…") return `Matched`
-  - [ ] 4.3 Verify NO architect/LLM call is involved (rule engine only)
+- [x] Task 4: RuleEngine confirmation tests (AC: 3)
+  - [x] 4.1 Test confirmation patterns return `Matched` with "Yes, proceed."
+  - [x] 4.2 Test permission patterns ("Should I create…") return `Matched`
+  - [x] 4.3 Verify NO architect/LLM call is involved (rule engine only)
 
-- [ ] Task 5: RuleEngine no-match fallthrough tests (AC: 4)
-  - [ ] 5.1 Test substantive questions return `RuleResult::NoMatch`
-  - [ ] 5.2 Test ambiguous technical questions return `NoMatch`
-  - [ ] 5.3 Test empty string returns `NoMatch`
+- [x] Task 5: RuleEngine no-match fallthrough tests (AC: 4)
+  - [x] 5.1 Test substantive questions return `RuleResult::NoMatch`
+  - [x] 5.2 Test ambiguous technical questions return `NoMatch`
+  - [x] 5.3 Test empty string returns `NoMatch`
 
-- [ ] Task 6: ResponseAnalyzer step-by-step and YOLO detection tests (AC: 5)
-  - [ ] 6.1 Test step-by-step phrases return `Continue` with yolo/execute directive
-  - [ ] 6.2 Test YOLO patterns return `Continue` with batch mode directive
-  - [ ] 6.3 Test priority ordering: step-by-step (4) vs YOLO (5)
+- [x] Task 6: ResponseAnalyzer step-by-step and YOLO detection tests (AC: 5)
+  - [x] 6.1 Test step-by-step phrases return `Continue` with yolo/execute directive
+  - [x] 6.2 Test YOLO patterns return `Continue` with batch mode directive
+  - [x] 6.3 Test priority ordering: step-by-step (4) vs YOLO (5)
 
-- [ ] Task 7: Cross-module escalation slot integration tests (AC: 6)
-  - [ ] 7.1 Create shared `EscalationSlot`, write `EscalationInfo` into it
-  - [ ] 7.2 Call `ResponseAnalyzer::analyze()` with the same slot
-  - [ ] 7.3 Verify `Escalated` returned regardless of response text content
-  - [ ] 7.4 Verify escalation takes priority over completion signals
+- [x] Task 7: Cross-module escalation slot integration tests (AC: 6)
+  - [x] 7.1 Create shared `EscalationSlot`, write `EscalationInfo` into it
+  - [x] 7.2 Call `ResponseAnalyzer::analyze()` with the same slot
+  - [x] 7.3 Verify `Escalated` returned regardless of response text content
+  - [x] 7.4 Verify escalation takes priority over completion signals
 
-- [ ] Task 8: AskSupervisor decision logging integration tests (AC: 7, 8)
-  - [ ] 8.1 Test rule match records `DecisionSource::RuleEngine` with correct rule name
-  - [ ] 8.2 Test no-match-no-architect records `DecisionSource::Escalation`
-  - [ ] 8.3 Test multiple calls accumulate decisions in shared `DecisionLog`
-  - [ ] 8.4 Verify `DecisionLog::len()` and `DecisionLog::records()` reflect all calls
+- [x] Task 8: AskSupervisor decision logging integration tests (AC: 7, 8)
+  - [x] 8.1 Test rule match records `DecisionSource::RuleEngine` with correct rule name
+  - [x] 8.2 Test no-match-no-architect records `DecisionSource::Escalation`
+  - [x] 8.3 Test multiple calls accumulate decisions in shared `DecisionLog`
+  - [x] 8.4 Verify `DecisionLog::len()` and `DecisionLog::records()` reflect all calls
 
-- [ ] Task 9: Review pattern integration tests (AC: 9, 10)
-  - [ ] 9.1 Test `REVIEW_COMPLETE_PATTERNS` phrases trigger `Completed`
-  - [ ] 9.2 Test `REVIEW_FIX_PATTERNS` phrases trigger `Continue { reply: "1" }`
-  - [ ] 9.3 Test priority: review complete (1.5) takes priority over review fix (5.5) when "Issues Fixed:" appears in review summary
-  - [ ] 9.4 Test review complete does NOT false-positive on normal completion signals
+- [x] Task 9: Review pattern integration tests (AC: 9, 10)
+  - [x] 9.1 Test `REVIEW_COMPLETE_PATTERNS` phrases trigger `Completed`
+  - [x] 9.2 Test `REVIEW_FIX_PATTERNS` phrases trigger `Continue { reply: "1" }`
+  - [x] 9.3 Test priority: review complete (1.5) takes priority over review fix (5.5) when "Issues Fixed:" appears in review summary
+  - [x] 9.4 Test review complete does NOT false-positive on normal completion signals
 
-- [ ] Task 10: Full pipeline integration tests (AC: 3, 4, 6, 7, 8)
-  - [ ] 10.1 Test full flow: agent asks confirmation → rule engine matches → analyzer sees no escalation → Continue
-  - [ ] 10.2 Test full flow: agent asks unknown question → rule engine misses → failing `MockAnswerProvider` → supervisor escalates → analyzer sees escalation slot → `Escalated`
-  - [ ] 10.3 Test full flow: agent signals completion → analyzer returns Completed (rule engine not involved)
+- [x] Task 10: Full pipeline integration tests (AC: 3, 4, 6, 7, 8)
+  - [x] 10.1 Test full flow: agent asks confirmation → rule engine matches → analyzer sees no escalation → Continue
+  - [x] 10.2 Test full flow: agent asks unknown question → rule engine misses → failing `MockAnswerProvider` → supervisor escalates → analyzer sees escalation slot → `Escalated`
+  - [x] 10.3 Test full flow: agent signals completion → analyzer returns Completed (rule engine not involved)
 
 ## Dev Notes
 
@@ -525,10 +525,29 @@ tests/
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Sonnet 4 (via Anthropic API)
 
 ### Debug Log References
 
+No issues encountered. All tests passed on first run.
+
 ### Completion Notes List
 
+- Task 0: `src/lib.rs` already exists with `pub mod supervisor;` and `pub mod session;` — no blocker.
+- Task 1: Created `tests/integration/test_response_analyzer_supervisor.rs` and registered via `#[path]` attribute in `tests/integration.rs`.
+- Task 2: 8 tests for completion signals (6 phrase variants, 2 case-insensitive) + 3 false-positive guards.
+- Task 3: 6 tests for story selection (individual patterns, key passthrough, all-patterns sweep).
+- Task 4: 5 tests for rule engine confirmations (individual, variants, permission patterns, no-LLM verification).
+- Task 5: 5 tests for rule engine no-match (substantive, ambiguous, empty, random, architectural).
+- Task 6: 4 tests for step-by-step/YOLO detection (basic, variants, priority ordering).
+- Task 7: 5 tests for escalation slot integration (filled slot returns Escalated, ignores text, priority over completion/proceed, empty slot).
+- Task 8: 4 async tests for decision logging (rule match source, no-match escalation source, accumulation, len/records accessors).
+- Task 9: 4 tests for review patterns (complete triggers, fix triggers, priority, no false positive).
+- Task 10: 3 full pipeline integration tests (confirmation flow, escalation flow via shared slot, completion flow with complementary layer verification).
+- Total: 49 new integration tests, all passing. 209 total tests in integration suite, 0 failures.
+- No new dependencies added. All imports from existing crate modules.
+
 ### File List
+
+- `tests/integration/test_response_analyzer_supervisor.rs` (NEW) — 49 integration tests
+- `tests/integration.rs` (MODIFIED) — added `#[path]` module registration
