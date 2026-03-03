@@ -377,9 +377,15 @@ pub async fn unstick_orphan_stories(
         return vec![];
     }
 
-    // Guard 2 — if another daemon is still running, the story may be legitimately in-progress
+    // Guard 2 — if another daemon is still running, the story may be legitimately in-progress.
+    // Compare against our own PID: the current daemon writes the state file before calling
+    // this function, so we must ignore our own PID to avoid blocking ourselves.
+    let my_pid = std::process::id();
     if let Ok(Some(state)) = DaemonState::read(state_file_path) {
-        if state.status == "running" && DaemonState::is_process_alive(state.pid) {
+        if state.status == "running"
+            && state.pid != my_pid
+            && DaemonState::is_process_alive(state.pid)
+        {
             tracing::debug!(
                 action = "unstick_skip_daemon_alive",
                 pid = state.pid,
@@ -1256,7 +1262,7 @@ development_status:
     }
 
     #[tokio::test]
-    async fn test_unstick_skips_when_daemon_alive() {
+    async fn test_unstick_skips_when_other_daemon_alive() {
         let dir = TempDir::new().unwrap();
         let sprint_path = dir.path().join("sprint-status.yaml");
         let wal_path = dir.path().join(".bmad-bot-session.yaml");
@@ -1265,10 +1271,22 @@ development_status:
         tokio::fs::write(&sprint_path, sprint_status_with_in_progress())
             .await
             .unwrap();
-        // No WAL, but write a state file with current PID (alive)
-        write_daemon_state(&state_path, std::process::id(), "running");
+        // Spawn a real subprocess so we have a guaranteed-alive PID that is not ours
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let other_pid = child.id();
+        // Write state file with the subprocess PID
+        write_daemon_state(&state_path, other_pid, "running");
 
         let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+
+        // Clean up the subprocess
+        let _ = std::process::Command::new("kill")
+            .arg(other_pid.to_string())
+            .status();
+
         assert!(
             result.is_empty(),
             "Should skip when another daemon is running"
@@ -1277,6 +1295,27 @@ development_status:
         // Verify sprint-status unchanged
         let content = tokio::fs::read_to_string(&sprint_path).await.unwrap();
         assert!(content.contains("1-2-cli: in-progress"));
+    }
+
+    #[tokio::test]
+    async fn test_unstick_ignores_own_pid_in_state_file() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        tokio::fs::write(&sprint_path, sprint_status_with_in_progress())
+            .await
+            .unwrap();
+        // State file with OUR OWN PID — must not block ourselves
+        write_daemon_state(&state_path, std::process::id(), "running");
+
+        let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+        assert_eq!(
+            result.len(),
+            2,
+            "Should unstick orphans even when state file has our own PID"
+        );
     }
 
     #[tokio::test]
