@@ -10,6 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::config::{BotConfig, BotSecrets};
 use crate::git_provider::{
     CreatePrParams, GitProvider, PrDescriptionParams, PrSummary, build_pr_description,
@@ -113,6 +115,42 @@ pub struct PipelineResult {
 }
 
 // ---------------------------------------------------------------------------
+// DevRunner / CodeReviewer — async trait abstractions for DI
+// ---------------------------------------------------------------------------
+
+/// Trait abstraction for dev session execution.
+///
+/// Implemented by [`SessionRunner`] in production and mock types in tests.
+#[async_trait]
+pub trait DevRunner: Send + Sync {
+    /// Execute a development session for the given story.
+    async fn run_dev_session(&self, story: &StoryInfo) -> SessionOutcome;
+}
+
+/// Trait abstraction for code review execution.
+///
+/// Implemented by [`ReviewRunner`] in production and mock types in tests.
+#[async_trait]
+pub trait CodeReviewer: Send + Sync {
+    /// Execute a code review for the given story.
+    async fn run_review(&self, story: &StoryInfo) -> ReviewOutcome;
+}
+
+#[async_trait]
+impl DevRunner for SessionRunner {
+    async fn run_dev_session(&self, story: &StoryInfo) -> SessionOutcome {
+        self.run(story).await
+    }
+}
+
+#[async_trait]
+impl CodeReviewer for ReviewRunner {
+    async fn run_review(&self, story: &StoryInfo) -> ReviewOutcome {
+        self.run(story).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // StoryPipeline
 // ---------------------------------------------------------------------------
 
@@ -127,10 +165,13 @@ pub struct StoryPipeline {
     git_provider: Box<dyn GitProvider>,
     /// Notification sender (Telegram or Noop).
     notifier: Box<dyn Notifier>,
-    /// Development session runner.
-    session_runner: SessionRunner,
-    /// Code review session runner.
-    review_runner: ReviewRunner,
+    /// Development session runner (trait object for DI).
+    dev_runner: Box<dyn DevRunner>,
+    /// Code review session runner (trait object for DI).
+    code_reviewer: Box<dyn CodeReviewer>,
+    /// Concrete session runner for WAL recovery (`check_and_recover_wal` + `resume_session`).
+    /// Set by `new()`, `None` in `new_with_components()`. Recovery returns `None` when absent.
+    session_runner_for_recovery: Option<SessionRunner>,
 }
 
 impl StoryPipeline {
@@ -175,6 +216,12 @@ impl StoryPipeline {
             Arc::clone(&shutdown),
             Arc::clone(&mcp_manager),
         );
+        let session_runner_for_recovery = SessionRunner::new(
+            Arc::clone(&config),
+            Arc::clone(&agent_factory),
+            Arc::clone(&shutdown),
+            Arc::clone(&mcp_manager),
+        );
         let review_runner = ReviewRunner::new(
             Arc::clone(&config),
             Arc::clone(&secrets),
@@ -187,9 +234,28 @@ impl StoryPipeline {
             config,
             git_provider,
             notifier,
-            session_runner,
-            review_runner,
+            dev_runner: Box::new(session_runner),
+            code_reviewer: Box::new(review_runner),
+            session_runner_for_recovery: Some(session_runner_for_recovery),
         })
+    }
+
+    /// Construct a pipeline with pre-built dependencies (for integration tests).
+    pub fn new_with_components(
+        config: Arc<BotConfig>,
+        git_provider: Box<dyn GitProvider>,
+        notifier: Box<dyn Notifier>,
+        dev_runner: Box<dyn DevRunner>,
+        code_reviewer: Box<dyn CodeReviewer>,
+    ) -> Self {
+        Self {
+            config,
+            git_provider,
+            notifier,
+            dev_runner,
+            code_reviewer,
+            session_runner_for_recovery: None,
+        }
     }
 
     /// Process a single story through the full pipeline.
@@ -207,7 +273,7 @@ impl StoryPipeline {
         );
 
         // Phase 1 — Dev Session
-        let session_outcome = self.session_runner.run(story).await;
+        let session_outcome = self.dev_runner.run_dev_session(story).await;
 
         match session_outcome {
             SessionOutcome::Completed {
@@ -298,7 +364,7 @@ impl StoryPipeline {
 
                 // Phase 4 — Code Review (optional, on existing PR)
                 let review_report = if self.config.code_review_enabled {
-                    match self.review_runner.run(story).await {
+                    match self.code_reviewer.run_review(story).await {
                         ReviewOutcome::Completed { report, .. } => Some(report),
                         ReviewOutcome::Failed {
                             story_key: rk,
@@ -891,14 +957,7 @@ impl StoryPipeline {
             } => {
                 // Optional code review
                 let review_report = if self.config.code_review_enabled {
-                    match self.review_runner.run(story).await {
-                        ReviewOutcome::Completed { report, .. } => Some(report),
-                        ReviewOutcome::Failed {
-                            story_key: rk,
-                            error,
-                        } => {
-                            tracing::warn!(
-                                action = "recovery_review_failed",
+                    match self.code_reviewer.run_review(story).await {
                                 story_key = %rk,
                                 error = %error,
                                 "Code review failed after recovery — continuing to PR creation"
