@@ -340,9 +340,12 @@ URL pattern: `https://github.com/{owner}/{repo}/pull/{number}`
 - Used full struct literal for `BotConfig` instead of `_test_minimal()` — follow same pattern if config needed
 - `wal_path()` helper pattern for deriving private internal paths
 
-**Story 7.4 (Pipeline Orchestration):**
-- Defines `MockGitProvider` with builder pattern (closures) for test setup
+**Story 7.4 (Pipeline Orchestration — IMPLEMENTED):**
+- `MockGitProvider` extended with `Clone` (inner Arc cloning), `captured_create_pr_params() -> Vec<CreatePrParams>`, `captured_add_comment_calls() -> Vec<(String, String)>`, `create_pr_call_count()`, `add_comment_call_count()` — assertion convenience methods reusable across stories
+- `MockNotifier` extended with `Clone`, `failing_story(|| NotifierError)` constructor for error injection, `story_notification_count()`, `run_summary_count()`
 - `PipelineTestBuilder` pattern — not needed here (no pipeline interaction)
+- `create_test_repo_with_remote(dir, branch)` fixture added — sets up bare remote + story branch for `git push` testing
+- `StoryPipeline` struct now uses `Box<dyn DevRunner>` and `Box<dyn CodeReviewer>` trait objects; `new_with_components()` constructor for test injection
 - Tracing is a no-op in tests — silent without a subscriber
 
 **Existing unit tests in `src/git_provider/mod.rs` (17 tests):**

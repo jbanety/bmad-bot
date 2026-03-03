@@ -454,12 +454,15 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 - Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
 - Uses `tempfile::tempdir()` for filesystem isolation
 
-**Story 7.4 (Pipeline Orchestration):**
-- Defines `DevRunner` and `CodeReviewer` traits for DI
-- Defines `StoryPipeline::new_with_components()` injectable constructor
-- Defines `MockDevRunner` (VecDeque<SessionOutcome>) and `MockCodeReviewer` (VecDeque<ReviewOutcome>)
-- `session_runner_for_recovery: None` in `new_with_components()` → `recover_and_process()` returns `None`
-- `PipelineTestBuilder` pattern for clean test setup
+**Story 7.4 (Pipeline Orchestration — IMPLEMENTED):**
+- Defines `DevRunner` and `CodeReviewer` async traits in `src/pipeline.rs` (public) for DI
+- `StoryPipeline::new_with_components()` injectable constructor takes `Box<dyn GitProvider>`, `Box<dyn Notifier>`, `Box<dyn DevRunner>`, `Box<dyn CodeReviewer>`
+- `MockDevRunner` (VecDeque<SessionOutcome>, `with_outcome`/`with_outcomes` builders) and `MockCodeReviewer` (VecDeque<ReviewOutcome>, `with_outcome`/`never_called`) in `tests/integration/helpers/mocks.rs`
+- `session_runner_for_recovery: None` in `new_with_components()` → `recover_and_process()` returns `None` immediately (safe no-op). Pipeline-level WAL recovery tests need a different approach (direct SessionRunner or a custom wrapper).
+- `PipelineTestBuilder` in `tests/integration/helpers/fixtures.rs` — `build()` returns `(StoryPipeline, MockNotifier, MockGitProvider)` with shared Arc handles for assertions
+- `MockGitProvider` extended with `Clone`, `captured_create_pr_params()`, `captured_add_comment_calls()`, `create_pr_call_count()`, `add_comment_call_count()`
+- `MockNotifier` extended with `Clone`, `failing_story(|| NotifierError)` for error injection, `story_notification_count()`, `run_summary_count()`
+- `create_test_repo_with_remote(dir, branch)` fixture — sets up bare remote + story branch for `git push` testing. Useful for any test where `push_branch()` must succeed.
 
 **Story 6.3 (Crash Recovery — the production implementation):**
 - WAL file persisted after every chat turn via atomic write

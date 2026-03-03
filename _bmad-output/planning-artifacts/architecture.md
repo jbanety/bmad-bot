@@ -998,16 +998,19 @@ bmad-bot/
 │   │   ├── agent_factory.rs          # AgentFactory + BuiltAgent enum dispatch — centralized LLM provider construction, Copilot API format detection
 │   │   ├── context.rs                # Zed-style XML ContextBuilder — adaptive backtick fencing, absolute path resolution, multi-file support
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
-│   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
+│   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story; DevRunner + CodeReviewer traits for DI
 └── tests/
     ├── integration.rs                 # Integration test binary entry point (cargo test --test integration)
     ├── integration/
     │   ├── helpers/
     │   │   ├── mod.rs                 # Re-exports: pub mod mocks; pub mod fixtures;
-    │   │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
-    │   │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+    │   │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner, MockDevRunner, MockCodeReviewer
+    │   │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo, create_test_repo_with_remote, PipelineTestBuilder
     │   ├── test_mocks.rs             # Self-verification tests for mock implementations
-    │   └── test_fixtures.rs          # Self-verification tests for fixture builders
+    │   ├── test_fixtures.rs          # Self-verification tests for fixture builders
+    │   ├── test_config.rs            # Config validation integration tests
+    │   ├── test_watcher.rs           # Watcher/dependency resolution integration tests
+    │   └── test_pipeline.rs          # Pipeline orchestration integration tests (Story 7.4)
     └── e2e/
         └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
 ```

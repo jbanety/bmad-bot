@@ -315,9 +315,11 @@ Since `create_notifier()` returns `Box<dyn Notifier>` (trait object), we cannot 
 - Rustls crypto provider was needed for GitHub provider — **NOT needed for notifier tests** (notifier uses `reqwest_middleware`, no crypto init required)
 - Module visibility already verified pattern — followed here
 
-**Story 7.4 (Pipeline Orchestration):**
-- Defines `MockNotifier` with `Arc<Mutex<Vec<...>>>` for captured notifications — Task 6 depends on this
+**Story 7.4 (Pipeline Orchestration — IMPLEMENTED):**
+- `MockNotifier` extended with `Clone` (inner Arc cloning), `failing_story(|| NotifierError)` constructor for error injection, `story_notification_count()`, `run_summary_count()` — directly useful for notification failure testing
+- `MockGitProvider` extended with `Clone`, `captured_create_pr_params()`, `captured_add_comment_calls()`, `create_pr_call_count()`, `add_comment_call_count()`
 - `build_run_summary()` is tested in pipeline unit tests (3 tests: mixed, all-completed, empty) — integration tests complement by testing `RunSummary` construction from external crate
+- `PipelineTestBuilder` pattern reusable for any test needing a wired-up pipeline with mocks
 
 **Existing unit tests in `src/notifier/mod.rs` (18 tests):**
 - `test_story_status_display_*` (3 tests) — Display trait formatting
