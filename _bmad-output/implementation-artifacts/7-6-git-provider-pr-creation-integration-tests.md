@@ -335,10 +335,13 @@ URL pattern: `https://github.com/{owner}/{repo}/pull/{number}`
 - `MockNotifier::new()` captures calls; `.story_calls()` / `.summary_calls()` for assertions
 - `src/lib.rs` exposes 12 modules including `git_provider` with all public types
 
-**Story 7.5 (Session WAL Crash Recovery):**
+**Story 7.5 (Session WAL Crash Recovery — IMPLEMENTED):**
 - Established the "Cross-Module Integration Value" section pattern — use it here
-- Used full struct literal for `BotConfig` instead of `_test_minimal()` — follow same pattern if config needed
-- `wal_path()` helper pattern for deriving private internal paths
+- Reused `make_test_config()` / `make_test_secrets()` from `helpers/fixtures.rs` (Story 7.1) — no new config builder needed; wrap in `Arc::new()` when `Arc<BotConfig>` is required
+- `wal_path()` helper pattern for deriving private internal paths from external test crate
+- `process_recovered_session()` in `src/pipeline.rs` changed from **private** to **`pub`** — now callable from integration tests via `StoryPipeline` for any downstream story needing pipeline recovery path testing
+- Pattern for constructing a **real `SessionRunner`** in integration tests: `AgentFactory::new(config, secrets)` + `McpManager::empty()` + `ShutdownFlag` — exercises file I/O methods (`check_and_recover_wal`) without LLM calls
+- 13 tests in `tests/integration/test_session_wal.rs`, registered in `tests/integration.rs` via `#[path]` attribute
 
 **Story 7.4 (Pipeline Orchestration — IMPLEMENTED):**
 - `MockGitProvider` extended with `Clone` (inner Arc cloning), `captured_create_pr_params() -> Vec<CreatePrParams>`, `captured_add_comment_calls() -> Vec<(String, String)>`, `create_pr_call_count()`, `add_comment_call_count()` — assertion convenience methods reusable across stories
