@@ -291,8 +291,8 @@ assert_eq!(loaded.llm.dev.provider, config.llm.dev.provider);
 **Story 7.1 (Integration Test Infrastructure — IMPLEMENTED):**
 - `tests/integration.rs` uses `#[path = "integration/..."]` attributes (Rust 2024 edition) — new test modules must use `#[path = "integration/test_cli_lifecycle.rs"] mod test_cli_lifecycle;`
 - `src/lib.rs` exposes 12 public modules (auth, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). **`cli` is NOT in lib.rs** — it remains `mod cli;` in `main.rs` (binary-only). To access `DaemonState` from integration tests, this story will need to either move relevant types to lib.rs or use a `#[path]` import.
-- `tests/integration/` directory exists with 29 passing tests covering mocks and fixtures
-- Fixtures available: `make_test_config(dir)`, `make_test_secrets()`, `make_test_story(key, label, deps)`, etc.
+- `tests/integration/` directory exists with **121 passing tests** across 8 test modules (test_mocks, test_fixtures, test_config, test_watcher, test_pipeline, test_session_wal, test_git_provider, test_branch_git)
+- Fixtures available: `make_test_config(dir)`, `make_test_secrets()`, `make_test_story(key, label, deps)`, `create_test_repo(dir)`, `create_test_repo_with_remote(dir, branch)`, `write_sprint_status(dir, entries)`, `write_wal_file(dir, state)`, `make_test_session_state(story_key)`, `PipelineTestBuilder`
 
 Key patterns:
 1. **`lib.rs` blocker is resolved for all modules except `cli`** — this story may need to add `pub mod cli;` to lib.rs or extract `DaemonState` to a separate public module.
@@ -303,7 +303,7 @@ Key patterns:
 
 4. **Story 7.2 (Config Startup Validation)** also tests `BotConfig::load()` — but focuses on validation edge cases (missing fields, invalid values). Story 7.9 AC #6 tests the happy-path roundtrip only. No overlap.
 
-5. **Story 7.8 (Branch Management)** established the pattern of confirming module visibility definitively (✅ instead of ⚠️) and providing a Quick API Reference table. This story follows the same pattern.
+5. **Story 7.8 (Branch Management — IMPLEMENTED):** 22 integration tests in `tests/integration/test_branch_git.rs` covering `ensure_story_branch`, `determine_base_branch`, `GitTool` local ops, `preserve_partial_work`, and cross-module flows. Key patterns established: `git_args()` helper for `GitToolArgs` construction (no `Default` trait), `make_test_story()` with deps for `StoryInfo`, `create_test_repo()` for temp git repos. Note: `BranchError::RepoOpenFailed` does not exist — non-git directories return `BaseBranchNotFound`.
 
 ### Git Intelligence
 
