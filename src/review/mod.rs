@@ -576,7 +576,7 @@ impl ReviewRunner {
             &initial_message,
             activation_rig_history.len(),
         );
-        let (response, _) = agent
+        let (response, mut full_history) = agent
             .stream_chat(
                 &initial_message,
                 activation_rig_history,
@@ -611,8 +611,6 @@ impl ReviewRunner {
                 error: "Shutdown requested (Ctrl+C)".to_string(),
             });
         }
-        let mut chat_history: Vec<(String, String)> =
-            vec![(initial_message.to_string(), current_response.clone())];
         const MAX_RETRIES: usize = 3;
 
         loop {
@@ -711,23 +709,15 @@ impl ReviewRunner {
                 ResponseAction::NoReply => "Continue.".to_string(),
             };
 
-            // Build rig message history
-            let history: Vec<Message> = chat_history
-                .iter()
-                .flat_map(|(user, assistant)| {
-                    vec![Message::user(user), Message::assistant(assistant)]
-                })
-                .collect();
-
-            log_llm_request("code-review", turn, &reply, history.len());
+            log_llm_request("code-review", turn, &reply, full_history.len());
             match agent
-                .stream_chat(reply.as_str(), history, Some(&self.shutdown))
+                .stream_chat(reply.as_str(), full_history.clone(), Some(&self.shutdown))
                 .await
             {
-                Ok((r, _)) => {
+                Ok((r, new_hist)) => {
                     log_llm_response("code-review", turn, &r);
                     retries = 0;
-                    chat_history.push((reply, r.clone()));
+                    full_history = new_hist;
                     current_response = r;
                 }
                 Err(e) => {
