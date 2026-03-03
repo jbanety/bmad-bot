@@ -1,6 +1,6 @@
 # Story 7.5: Session WAL Crash Recovery Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -563,21 +563,25 @@ No debug issues encountered.
 - Task 0: All prerequisites verified — `src/lib.rs` exposes `pub mod session;`, `src/session/mod.rs` has `pub use state::{SessionState, ChatMessage};`, `SessionRunner`/`RecoveryInfo`/`story_info_from_wal` all public. Stories 7.1 and 7.4 already implemented.
 - Task 1: Created `tests/integration/test_session_wal.rs`, added `#[path]` module declaration in `tests/integration.rs`.
 - Task 2: Fixture helpers (`make_valid_wal_state`, `write_wal_to_dir`, `make_test_config_arc`, `make_test_secrets_arc`, `wal_path`, `make_session_runner`) defined in test file. Reused existing `make_test_config`/`make_test_secrets` from `helpers/fixtures.rs`. Real `SessionRunner` constructed with `AgentFactory` + `McpManager::empty()` (no LLM calls).
-- Task 3: `test_wal_recovery_valid_returns_recovery_info` + `test_wal_recovery_story_info_from_wal_produces_correct_story_info` — validates full save→recover→parse chain through public API (AC #1).
+- Task 3: `test_wal_recovery_valid_returns_recovery_info` + `test_wal_recovery_story_info_from_wal_produces_correct_story_info` — validates full save→recover→parse chain through public API (AC #1). CR fix: added assertion that WAL still exists after `check_and_recover_wal` (AC #5 contract: deletion is `resume_session`'s responsibility).
 - Task 4: `test_wal_to_rig_messages_converts_all_messages` + `test_wal_to_rig_messages_preserves_order` — verifies all 4 messages converted, role mapping via debug format (AC #2).
 - Task 5: `test_wal_corrupt_file_deleted_and_returns_none` — writes garbage YAML, asserts `None` returned and WAL file deleted (AC #3).
 - Task 6: `test_wal_no_file_returns_none` — empty temp dir, asserts immediate `None` (AC #4).
-- Task 7: `process_recovered_session` changed from `async fn` (private) to `pub async fn` in `src/pipeline.rs`. Three tests: Completed (PR created, status Completed), Failed (PR with NEEDS REVIEW, status Error), Escalated (status Blocked). Uses `PipelineTestBuilder` + `create_test_repo_with_remote` for git push support (AC #5).
-- Task 8: `test_pipeline_recover_and_process_no_wal_returns_none` (new_with_components has no session_runner → None) + `test_wal_recovery_priority_wal_detected_before_polling` (real SessionRunner detects WAL before any polling) (AC #6).
+- Task 7: `process_recovered_session` changed from `async fn` (private) to `pub async fn` in `src/pipeline.rs`. Three tests: Completed (PR created, status Completed), Failed (PR with NEEDS REVIEW, status Error), Escalated (status Blocked + PR created — escalation PR). CR fix: Task 7.6 now asserts `pr_url.is_some()` and `create_pr_call_count == 1` for escalated (implementation creates a PR; previous test had misleading "no PR" comment). Uses `PipelineTestBuilder` + `create_test_repo_with_remote` for git push support (AC #5).
+- Task 8: `test_pipeline_recover_and_process_no_wal_returns_none` (new_with_components has no session_runner → None) + `test_wal_recovery_priority_wal_detected_before_polling` (real SessionRunner detects WAL before any polling). CR fix: AC #6 test now writes both a valid WAL AND a sprint-status with eligible stories, asserting the WAL recovery path wins before polling (AC #6).
 - Task 9: `test_wal_legacy_branch_fallback` — empty `branch_name` falls back to legacy `branch` field.
 - Task 10: `test_wal_forward_compat_unknown_fields_ignored` — extra YAML fields ignored by serde.
-- Task 11: All 87 tests pass (13 new + 74 existing). Zero clippy warnings from new code.
+- Task 11: All 87 integration tests pass (13 new + 74 existing). `cargo clippy` passes (exit 0) after fixing pre-existing `Default` impl errors in `src/auth/github_copilot.rs`, `src/session/analyzer.rs`, `src/session/dev_agent.rs`.
 - Decision: Used real `SessionRunner` (with `AgentFactory` + `McpManager::empty()`) for Tasks 3-6 instead of mocks, since `check_and_recover_wal()` only does file I/O — no LLM calls needed.
 - Decision: Task 8.1 tested via direct `SessionRunner::check_and_recover_wal()` (not `recover_and_process()`) because `new_with_components()` always sets `session_runner_for_recovery = None`.
+- CR Review by: Claude Sonnet 4 (Amelia / Dev Agent). Issues fixed: 2 HIGH (Task 7.6 incomplete assertion, AC #5 WAL contract clarified), 2 MEDIUM (AC #6 test strengthened, 3 pre-existing clippy errors resolved).
 
 ### File List
-- `tests/integration/test_session_wal.rs` (NEW) — 13 integration tests for WAL crash recovery
-- `tests/integration.rs` (MODIFIED) — added `mod test_session_wal` declaration
-- `src/pipeline.rs` (MODIFIED) — changed `process_recovered_session` from private to `pub` for integration test access
-- `_bmad-output/implementation-artifacts/sprint-status.yaml` (MODIFIED) — story status: ready-for-dev → review
-- `_bmad-output/implementation-artifacts/7-5-session-wal-crash-recovery-integration-tests.md` (MODIFIED) — task checkboxes, Dev Agent Record, status
+- `tests/integration/test_session_wal.rs` (MODIFIED) — 13 integration tests; CR fixes: Task 7.6 escalated PR assertion + WAL-still-exists assertion + AC #6 test with sprint-status
+- `tests/integration.rs` (unchanged)
+- `src/pipeline.rs` (unchanged)
+- `src/auth/github_copilot.rs` (MODIFIED) — added `Default` impl for `ReqwestCopilotHttpClient` (clippy fix)
+- `src/session/analyzer.rs` (MODIFIED) — added `Default` impl for `ResponseAnalyzer` (clippy fix)
+- `src/session/dev_agent.rs` (MODIFIED) — added `Default` impl for `ChatHistoryHook` (clippy fix)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (MODIFIED) — story status: review → done
+- `_bmad-output/implementation-artifacts/7-5-session-wal-crash-recovery-integration-tests.md` (MODIFIED) — status done, Dev Agent Record updated

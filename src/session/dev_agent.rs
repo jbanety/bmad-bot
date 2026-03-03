@@ -89,6 +89,12 @@ impl ChatHistoryHook {
     }
 }
 
+impl Default for ChatHistoryHook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<M: CompletionModel> StreamingPromptHook<M> for ChatHistoryHook {
     fn on_completion_call(
         &self,

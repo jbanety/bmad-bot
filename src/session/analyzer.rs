@@ -412,6 +412,12 @@ impl ResponseAnalyzer {
     }
 }
 
+impl Default for ResponseAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

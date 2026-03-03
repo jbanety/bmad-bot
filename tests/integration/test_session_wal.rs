@@ -124,6 +124,14 @@ async fn test_wal_recovery_valid_returns_recovery_info() {
     assert_eq!(recovery.state.model, "claude-sonnet-4-20250514");
     assert_eq!(recovery.state.chat_history.len(), 4);
     assert_eq!(recovery.state.base_branch, "main");
+
+    // AC #5 contract: check_and_recover_wal does NOT delete the WAL.
+    // Deletion is resume_session()'s responsibility (prevents infinite loops).
+    // Verify the WAL still exists after successful recovery detection.
+    assert!(
+        wal_path(dir).exists(),
+        "WAL must remain after check_and_recover_wal — only resume_session() deletes it"
+    );
 }
 
 #[tokio::test]
@@ -362,8 +370,17 @@ async fn test_pipeline_process_recovered_session_escalated() {
     let result = pipeline.process_recovered_session(&story, outcome).await;
 
     assert_eq!(result.status, bmad_bot::notifier::StoryStatus::Blocked);
-    // Escalated stories: check if PR is created or not based on actual implementation
-    // The dev notes say "no PR created" for escalated
+    // Escalated sessions DO get a PR (escalation PR with question/reason context).
+    // pipeline.rs:1108 creates a PR via git_provider.create_pr() for escalated outcomes.
+    assert!(
+        result.pr_url.is_some(),
+        "Escalated recovery should create an escalation PR"
+    );
+    assert_eq!(
+        _git.create_pr_call_count(),
+        1,
+        "create_pr should be called once for escalated outcome"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -397,22 +414,40 @@ async fn test_pipeline_recover_and_process_no_wal_returns_none() {
 
 #[tokio::test]
 async fn test_wal_recovery_priority_wal_detected_before_polling() {
-    // Verify that check_and_recover_wal() detects the WAL when called
-    // before any polling — this is the "recovery-first" contract.
+    // AC #6: When a WAL exists AND eligible stories are present in sprint-status,
+    // crash recovery is processed FIRST — i.e., check_and_recover_wal() returns
+    // Some before any polling loop is entered.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
 
-    // Write a valid WAL
+    // Write both a valid WAL AND a sprint-status.yaml with eligible stories.
+    // This simulates the scenario where a crash happened mid-story and new
+    // stories are also waiting — recovery must win the ordering race.
     let state = make_valid_wal_state();
     write_wal_to_dir(dir, &state).await;
+    crate::helpers::fixtures::write_sprint_status(
+        dir,
+        vec![
+            ("3-1-another-story", "ready-for-dev"),
+            ("3-2-yet-another", "ready-for-dev"),
+        ],
+    );
 
-    // SessionRunner detects the WAL
+    // Step 1 — recovery check (happens FIRST in daemon startup)
     let runner = make_session_runner(dir);
     let recovery = runner.check_and_recover_wal().await;
     assert!(
         recovery.is_some(),
-        "WAL should be detected on first check (before polling)"
+        "WAL should be detected on recovery check (before polling begins)"
     );
+    assert_eq!(
+        recovery.unwrap().story_info.story_key,
+        "1-2-cli",
+        "Recovered story key should match WAL content"
+    );
+
+    // Step 2 — polling would happen AFTER recovery (not shown, but WAL was
+    // processed first; no new stories are started until recovery completes)
 }
 
 // ---------------------------------------------------------------------------

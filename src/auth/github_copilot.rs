@@ -199,6 +199,12 @@ impl ReqwestCopilotHttpClient {
     }
 }
 
+impl Default for ReqwestCopilotHttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl CopilotHttpClient for ReqwestCopilotHttpClient {
     async fn request_device_code(
