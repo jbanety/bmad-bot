@@ -5,17 +5,12 @@ mod cli;
 
 // Re-export library crate modules so `crate::X` paths in CLI submodules resolve correctly.
 // These were previously `mod X;` declarations — now sourced from the library crate.
+// Only modules actually referenced via `crate::X` in the CLI submodule are listed here.
 use bmad_bot::auth;
 use bmad_bot::config;
-use bmad_bot::git_provider;
-use bmad_bot::llm;
 use bmad_bot::mcp;
-use bmad_bot::notifier;
 use bmad_bot::pipeline;
-use bmad_bot::review;
 use bmad_bot::session;
-use bmad_bot::supervisor;
-use bmad_bot::tools;
 use bmad_bot::watcher;
 
 use anyhow::Result;

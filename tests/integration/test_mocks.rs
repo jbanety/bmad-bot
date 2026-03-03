@@ -7,7 +7,8 @@ use bmad_bot::notifier::{
     Notifier, NotifierError, RunSummary, StoryNotification, StoryStatus,
 };
 use bmad_bot::review::ReviewOutcome;
-use bmad_bot::session::SessionOutcome;
+use bmad_bot::session::{ChatMessage, SessionOutcome, SessionState};
+use bmad_bot::session::runner::RecoveryInfo;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -245,14 +246,30 @@ async fn test_mock_session_runner_check_and_recover_wal_returns_none() {
 
 #[tokio::test]
 async fn test_mock_session_runner_check_and_recover_wal_returns_info() {
-    let mock = MockSessionRunner::new().with_recovery(RecoveryInfo {
+    let story_info = super::helpers::fixtures::make_test_story("7-1-test", "test", vec![]);
+    let state = SessionState {
+        story_id: "7.1".into(),
         story_key: "7-1-test".into(),
         branch: "story/7-1-test".into(),
-    });
+        started_at: "2026-01-01T00:00:00Z".into(),
+        last_activity: "2026-01-01T00:00:00Z".into(),
+        provider: "anthropic".into(),
+        model: "test-model".into(),
+        branch_name: "story/7-1-test".into(),
+        base_branch: "main".into(),
+        chat_history: vec![ChatMessage {
+            role: "user".into(),
+            content: "DS".into(),
+        }],
+    };
+    let info = RecoveryInfo { state, story_info };
+    let mock = MockSessionRunner::new().with_recovery(info);
     let result = mock.check_and_recover_wal().await;
     assert!(result.is_some());
-    let info = result.unwrap();
-    assert_eq!(info.story_key, "7-1-test");
+    let recovered = result.unwrap();
+    assert_eq!(recovered.story_info.story_key, "7-1-test");
+    assert_eq!(recovered.state.story_key, "7-1-test");
+    assert_eq!(recovered.state.chat_history.len(), 1);
 }
 
 #[tokio::test]

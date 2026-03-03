@@ -9,7 +9,7 @@ use bmad_bot::config::{
     BmadPathsConfig, BotConfig, BotSecrets, GitProviderConfig, LlmConfig, LlmRoleConfig,
     McpServerConfig, NotificationConfig, TelegramConfig,
 };
-use bmad_bot::session::{ChatMessage, SessionState};
+use bmad_bot::session::SessionState;
 use bmad_bot::watcher::StoryInfo;
 
 // ---------------------------------------------------------------------------
@@ -123,14 +123,15 @@ pub fn make_test_story(key: &str, label: &str, deps: Vec<String>) -> StoryInfo {
 /// `entries` is a `Vec<(&str, &str)>` of `(key, status)` pairs that go under
 /// `development_status:`. Accepts epic, story, and retrospective entries.
 pub fn write_sprint_status(dir: &Path, entries: Vec<(&str, &str)>) {
-    let mut yaml = String::from(
+    let mut yaml = format!(
         "generated: 2026-02-08\n\
          project: test-project\n\
          project_key: TEST\n\
          tracking_system: file-system\n\
-         story_location: \".\"\n\
+         story_location: \"{}\"\n\
          \n\
          development_status:\n",
+        dir.display()
     );
     for (key, status) in &entries {
         yaml.push_str(&format!("  {key}: {status}\n"));

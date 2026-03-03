@@ -2,9 +2,8 @@
 
 use super::helpers::fixtures::*;
 
-use bmad_bot::config::BotConfig;
 use bmad_bot::session::{ChatMessage, SessionState};
-use bmad_bot::watcher::{SprintStatusFile, StoryInfo};
+use bmad_bot::watcher::SprintStatusFile;
 
 // ---------------------------------------------------------------------------
 // 7.5 — Fixture builders produce valid data structures

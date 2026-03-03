@@ -10,6 +10,7 @@ use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrIn
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::watcher::StoryInfo;
 
 // ---------------------------------------------------------------------------
@@ -51,16 +52,22 @@ impl MockGitProvider {
         }
     }
 
+    /// Configure the result returned by `create_pr`. **One-shot**: consumed on first call;
+    /// subsequent calls return the default success fallback.
     pub fn with_create_pr(self, result: Result<PrInfo, GitProviderError>) -> Self {
         *self.create_pr_result.lock().unwrap() = Some(result);
         self
     }
 
+    /// Configure the result returned by `add_comment`. **One-shot**: consumed on first call;
+    /// subsequent calls return `Ok(())`.
     pub fn with_add_comment(self, result: Result<(), GitProviderError>) -> Self {
         *self.add_comment_result.lock().unwrap() = Some(result);
         self
     }
 
+    /// Configure the result returned by `get_pr_url`. **One-shot**: consumed on first call;
+    /// subsequent calls return the default URL fallback.
     pub fn with_get_pr_url(self, result: Result<String, GitProviderError>) -> Self {
         *self.get_pr_url_result.lock().unwrap() = Some(result);
         self
@@ -69,6 +76,12 @@ impl MockGitProvider {
     /// Returns a snapshot of all recorded calls.
     pub fn calls(&self) -> Vec<GitProviderCall> {
         self.calls.lock().unwrap().clone()
+    }
+}
+
+impl Default for MockGitProvider {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -153,11 +166,15 @@ impl MockNotifier {
         }
     }
 
+    /// Configure the result returned by `notify_story`. **One-shot**: consumed on first call;
+    /// subsequent calls return `Ok(())`.
     pub fn with_notify_story(self, result: Result<(), NotifierError>) -> Self {
         *self.notify_story_result.lock().unwrap() = Some(result);
         self
     }
 
+    /// Configure the result returned by `notify_run_summary`. **One-shot**: consumed on first call;
+    /// subsequent calls return `Ok(())`.
     pub fn with_notify_summary(self, result: Result<(), NotifierError>) -> Self {
         *self.notify_summary_result.lock().unwrap() = Some(result);
         self
@@ -192,6 +209,12 @@ impl MockNotifier {
                 _ => None,
             })
             .collect()
+    }
+}
+
+impl Default for MockNotifier {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -233,13 +256,6 @@ pub enum SessionRunnerCall {
     CheckAndRecoverWal,
 }
 
-/// Information about a recovered WAL session.
-#[derive(Debug, Clone)]
-pub struct RecoveryInfo {
-    pub story_key: String,
-    pub branch: String,
-}
-
 /// Mock session runner that returns configurable `SessionOutcome`.
 ///
 /// Not trait-based — mirrors the real `SessionRunner` public API surface.
@@ -258,11 +274,15 @@ impl MockSessionRunner {
         }
     }
 
+    /// Configure the `SessionOutcome` returned by `run`. **One-shot**: consumed on first call;
+    /// subsequent calls return a default `Completed` outcome.
     pub fn with_run_result(self, outcome: SessionOutcome) -> Self {
         *self.run_result.lock().unwrap() = Some(outcome);
         self
     }
 
+    /// Configure the `RecoveryInfo` returned by `check_and_recover_wal`. **One-shot**: consumed on first call.
+    /// Uses the real [`bmad_bot::session::runner::RecoveryInfo`] type for API compatibility.
     pub fn with_recovery(self, info: RecoveryInfo) -> Self {
         *self.recover_result.lock().unwrap() = Some(info);
         self
@@ -300,6 +320,12 @@ impl MockSessionRunner {
     }
 }
 
+impl Default for MockSessionRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MockReviewRunner (Task 5)
 // ---------------------------------------------------------------------------
@@ -326,6 +352,8 @@ impl MockReviewRunner {
         }
     }
 
+    /// Configure the `ReviewOutcome` returned by `run`. **One-shot**: consumed on first call;
+    /// subsequent calls return a default `Completed` outcome.
     pub fn with_run_result(self, outcome: ReviewOutcome) -> Self {
         *self.run_result.lock().unwrap() = Some(outcome);
         self
@@ -348,5 +376,11 @@ impl MockReviewRunner {
     /// Returns a snapshot of all recorded calls.
     pub fn calls(&self) -> Vec<ReviewRunnerCall> {
         self.calls.lock().unwrap().clone()
+    }
+}
+
+impl Default for MockReviewRunner {
+    fn default() -> Self {
+        Self::new()
     }
 }

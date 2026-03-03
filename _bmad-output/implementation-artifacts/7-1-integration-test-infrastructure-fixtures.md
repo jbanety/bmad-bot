@@ -1,6 +1,6 @@
 # Story 7.1: Integration Test Infrastructure & Fixtures
 
-Status: review
+Status: done
 
 ## Story
 
@@ -381,6 +381,26 @@ None — all tasks completed without HALT conditions.
 - Task 7: 34 self-verification tests across `test_mocks.rs` and `test_fixtures.rs`. All pass. Tests cover: configured return values, call tracking, fallback behavior, YAML round-trips, git repo validation, `Send + Sync` bounds.
 - Decision: Used `#[path = "integration/..."]` attributes in `tests/integration.rs` because Cargo doesn't auto-resolve submodule directories for test binaries (confirmed by existing `tests/e2e.rs` pattern in this project).
 - Decision: Kept unused `use bmad_bot::{supervisor, tools, ...}` in main.rs for completeness — only the modules actually referenced by CLI are strictly needed, but having all re-exports makes the intent clear and avoids confusion when future CLI code references them.
+
+### Senior Developer Review (AI)
+**Reviewer: Amelia (Code Review Agent) — 2026-03-03**
+
+**Issues Found:** 1 HIGH, 2 MEDIUM, 3 LOW — all fixed.
+
+#### 🔴 HIGH — Fixed
+**H1 [mocks.rs:238-241]:** `MockSessionRunner::RecoveryInfo` was a custom struct `{ story_key: String, branch: String }` incompatible with the real `bmad_bot::session::runner::RecoveryInfo { state: SessionState, story_info: StoryInfo }`. Mock claimed to mirror the real API but returned a fundamentally different type from `check_and_recover_wal`. This would have caused type-mismatch compilation failures in Story 7.4. **Fix:** Removed custom struct, imported and used real `RecoveryInfo` from `bmad_bot::session::runner`. Updated test to construct real `RecoveryInfo` with `SessionState` + `StoryInfo`.
+
+#### 🟡 MEDIUM — Fixed
+**M1 [main.rs:8-19]:** 6 unused `use bmad_bot::X;` imports confirmed by compiler warnings (`git_provider`, `llm`, `notifier`, `review`, `supervisor`, `tools`). The code comment claiming they "resolve `crate::X` paths in CLI submodules" was factually incorrect for the 6 removed ones. **Fix:** Removed the 6 unused imports; retained the 6 (`auth`, `config`, `mcp`, `pipeline`, `session`, `watcher`) that are genuinely referenced via `crate::X` by the CLI submodule.
+
+**M2 [mocks.rs — all `with_*` methods]:** One-shot result consumption via `.take()` was undocumented. If any test calls the same mock method twice (e.g., retry-logic tests in Stories 7.2–7.10), the second call silently falls back to success instead of returning the configured error. **Fix:** Added `/// **One-shot**: consumed on first call; ...` doc-comment to all 7 `with_*` builder methods.
+
+#### 🟢 LOW — Fixed
+**L1 [fixtures.rs:131]:** `write_sprint_status` hardcoded `story_location: "."` instead of the dir path as specified. While `SprintStatusFile::load` ignores this YAML field (uses its own `story_dir` parameter), the fixture produced non-spec-compliant YAML. **Fix:** Changed to `format!("story_location: \"{}\"\n", dir.display())`.
+
+**L2 [fixtures.rs:12]:** Unused `ChatMessage` import in `fixtures.rs` (only needed in test files). **Fix:** Removed.
+
+**L3 [test_fixtures.rs:5-7]:** Unused `BotConfig` and `StoryInfo` imports. **Fix:** Removed both; retained only the imports that are genuinely used.
 
 ### File List
 - src/lib.rs (modified — extended from 2 modules to 12)
