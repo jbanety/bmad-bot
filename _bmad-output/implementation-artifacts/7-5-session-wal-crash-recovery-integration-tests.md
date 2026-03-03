@@ -442,13 +442,15 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 
 ### Previous Story Intelligence (Stories 7.1, 7.4, 6.3)
 
-**Story 7.1 (Integration Test Infrastructure):**
-- Defines `tests/integration.rs` entry point with `mod helpers;` + individual test modules
-- Defines `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, etc.)
-- Defines `lib.rs` creation and session::state re-export as Task 0
-- All mock implementations must be `Send + Sync`
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point with `#[path]` attributes (edition 2024 — plain `mod` does NOT work). To add a new test module: `#[path = "integration/test_session_wal.rs"] mod test_session_wal;`
+- `tests/integration/helpers/mod.rs` with `pub mod mocks; pub mod fixtures;`
+- `src/lib.rs` fully set up with ALL modules (including `cli`) — no Task 0 / `lib.rs` blocker work needed
+- `pub use state::{SessionState, ChatMessage};` re-exported from `src/session/mod.rs`
+- All mock implementations are `Send + Sync`
 - Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
 - Uses `tempfile::tempdir()` for filesystem isolation
+- `write_wal_file(dir, &state)` fixture writes `.bmad-bot-session.yaml` from a `SessionState` struct
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `DevRunner` and `CodeReviewer` traits for DI

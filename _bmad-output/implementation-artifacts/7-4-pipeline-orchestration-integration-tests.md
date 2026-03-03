@@ -668,9 +668,12 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention (edition 2024):** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. Due to Rust edition 2024, **plain `mod` does NOT resolve into the subdirectory** — all test modules MUST use `#[path]` attributes. To add a new test module, add to `tests/integration.rs`: `#[path = "integration/test_pipeline.rs"] mod test_pipeline;`
+- **`lib.rs` is fully set up** — all modules (including `cli`) are already exposed via `pub mod` in `src/lib.rs`. No Task 0 / `lib.rs` blocker work needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
 - **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
+- **Mock API (actual from 7-1):** `MockGitProvider` exposes `calls() -> Vec<GitProviderCall>` (single unified tracker, filter by `GitProviderCall::CreatePr`, `GitProviderCall::AddComment`, etc.). Use `.calls().len()` for count. No `captured_create_pr_params()` — filter `calls()` by variant instead, or extend the mock in this story. `MockNotifier` exposes `calls()`, `story_calls() -> Vec<StoryNotification>`, `summary_calls() -> Vec<RunSummary>`. Use `.story_calls().len()` for count. Supports `with_notify_story(Err(...))` for failure mode.
+- **MockSessionRunner/MockReviewRunner use simplified outcome types:** `MockSessionOutcome` and `MockReviewOutcome` are Clone-able simplified enums (the real `SessionOutcome`/`ReviewOutcome` contain non-Clone fields like `Vec<DecisionRecord>`). If Story 7.4 needs to inject real `SessionOutcome`/`ReviewOutcome` via DI traits, the mock API may need to be extended.
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one

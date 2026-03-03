@@ -290,9 +290,9 @@ assert_eq!(loaded.llm.dev.provider, config.llm.dev.provider);
 
 Key patterns from reviewing all previous stories:
 
-1. **`lib.rs` blocker is universal** — Every story needs it. This story adds `pub mod cli;` which previous stories explicitly excluded. This is the correct resolution for accessing `DaemonState`.
+1. **`lib.rs` is FULLY SET UP** — Story 7.1 already added ALL modules (including `cli`) to `src/lib.rs`. The `session::cleanup` → `cli::state::DaemonState` dependency was resolved by including `cli` in the library crate. **No `pub mod cli;` addition needed** — it's already there.
 
-2. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_cli_lifecycle.rs`.
+2. **Test module registration (edition 2024):** Add `#[path = "integration/test_cli_lifecycle.rs"] mod test_cli_lifecycle;` to `tests/integration.rs` (plain `mod` does NOT work in edition 2024).
 
 3. **No mocks needed for this story.** All tests operate on real filesystem state files and real config YAML files in temp directories. No LLM, HTTP, or git mocking required.
 

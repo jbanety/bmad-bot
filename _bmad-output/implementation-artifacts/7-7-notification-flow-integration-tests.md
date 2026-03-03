@@ -301,7 +301,12 @@ Since `create_notifier()` returns `Box<dyn Notifier>` (trait object), we cannot 
 
 **Test strategy for Task 5.1:** Call `notify_story()` on the returned notifier. If it returns `Ok(())` immediately, it's a NoopNotifier (FAIL). If it returns `Err(NotifierError::HttpRequest { .. })`, it's a TelegramNotifier that attempted a real send (PASS — confirms factory created the right type).
 
-### Previous Story Intelligence (Story 7.6)
+### Previous Story Intelligence (Stories 7.1, 7.6)
+
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point with `#[path]` attributes (edition 2024). To add a test module: `#[path = "integration/test_notifier.rs"] mod test_notifier;`
+- `src/lib.rs` fully set up with ALL modules — no `lib.rs` blocker work needed
+- `MockNotifier` available with `calls()`, `story_calls()`, `summary_calls()` accessors. Supports `with_notify_story(Err(NotifierError::HttpRequest { reason: "...".into() }))` for failure mode.
 
 **Story 7.6 (Git Provider & PR Creation Integration Tests):**
 - Established the `lib.rs` BLOCKER pattern — copy same prerequisite check

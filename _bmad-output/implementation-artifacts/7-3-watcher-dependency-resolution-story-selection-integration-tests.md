@@ -240,12 +240,13 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention (edition 2024):** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. Due to Rust edition 2024, **plain `mod` does NOT resolve into the subdirectory** — all test modules MUST use `#[path]` attributes. To add a new test module, add to `tests/integration.rs`: `#[path = "integration/test_watcher.rs"] mod test_watcher;`
+- **`lib.rs` is fully set up** — all modules (including `cli`) are already exposed via `pub mod` in `src/lib.rs`. No Task 0 / `lib.rs` blocker work needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
-- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
+- **Config helper detail:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `"{dir}/_bmad-output/implementation-artifacts"` (NOT just `dir`). If the watcher looks for story files relative to `implementation_artifacts`, you may need to adjust the path or write story files into the nested directory.
 
 ### Dependencies Required
 

@@ -327,7 +327,12 @@ URL pattern: `https://github.com/{owner}/{repo}/pull/{number}`
 
 `GitLabProvider` fields (`client`, `base_url`, `project_path`, `token`, `owner`, `repo`) are all **private**. Integration tests cannot inspect them directly. Verify behavior via trait methods (`get_pr_url()` returns the correct URL pattern).
 
-### Previous Story Intelligence (Stories 7.4, 7.5)
+### Previous Story Intelligence (Stories 7.1, 7.4, 7.5)
+
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point with `#[path]` attributes (edition 2024). To add a test module: `#[path = "integration/test_git_provider.rs"] mod test_git_provider;`
+- `src/lib.rs` fully set up with ALL modules — no `lib.rs` blocker work needed
+- `MockGitProvider` available with builder pattern (`with_create_pr`, `with_add_comment`, `with_get_pr_url`) and unified `calls() -> Vec<GitProviderCall>` tracker
 
 **Story 7.5 (Session WAL Crash Recovery):**
 - Established the "Cross-Module Integration Value" section pattern — use it here

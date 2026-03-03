@@ -112,7 +112,8 @@ cargo init bmad-bot
 bmad-bot/
 ├── Cargo.toml
 ├── src/
-│   ├── main.rs
+│   ├── lib.rs                         # Library crate — pub mod for all modules (integration test access)
+│   ├── main.rs                        # Binary crate — uses bmad_bot::cli
 │   ├── auth/
 │   │   ├── mod.rs
 │   │   └── github_copilot.rs         # Device flow + token exchange + cache
@@ -158,7 +159,14 @@ bmad-bot/
 │   ├── llm_logging.rs                 # LLM request/response debug logging
 │   └── pipeline.rs                    # Pipeline orchestration (watcher → session → review → PR → notify)
 └── tests/
-    └── e2e/
+    ├── e2e/
+    └── integration/                   # Integration tests (cargo test --test integration)
+        ├── helpers/
+        │   ├── mod.rs                 # Re-exports mocks + fixtures
+        │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+        │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, etc.
+        ├── test_mocks.rs             # Self-verification tests for mocks
+        └── test_fixtures.rs          # Self-verification tests for fixtures
 ```
 
 **Note:** Project initialization (`cargo init` + dependency setup + module scaffolding) should be the first implementation story.
@@ -946,7 +954,8 @@ bmad-bot/
 ├── .env.example                      # Template secrets (API keys)
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
-│   ├── main.rs                       # Entry point, CLI dispatch, rustls init
+│   ├── lib.rs                         # Library crate — pub mod for all modules (integration test access)
+│   ├── main.rs                        # Binary crate — uses bmad_bot::cli
 │   ├── auth/
 │   │   ├── mod.rs                    # Auth module root
 │   │   └── github_copilot.rs         # OAuth Device Flow, token exchange, CopilotTokenCache
@@ -999,8 +1008,16 @@ bmad-bot/
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
-    └── e2e/
-        └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+    ├── e2e/
+    │   └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+    ├── integration.rs                # Integration test binary entry point (cargo test --test integration)
+    └── integration/                  # Integration test modules
+        ├── helpers/
+        │   ├── mod.rs                # Re-exports mocks + fixtures
+        │   ├── mocks.rs             # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+        │   └── fixtures.rs          # make_test_config, make_test_secrets, make_test_story, etc.
+        ├── test_mocks.rs            # Self-verification tests for mocks
+        └── test_fixtures.rs         # Self-verification tests for fixtures
 ```
 
 ### Requirements to Structure Mapping

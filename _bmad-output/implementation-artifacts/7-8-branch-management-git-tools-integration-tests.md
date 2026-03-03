@@ -257,9 +257,14 @@ fn make_story(key: &str, deps: Vec<&str>) -> bmad_bot::watcher::StoryInfo {
 
 ### Previous Story Intelligence (Stories 7.1 through 7.7)
 
-All stories 7.1–7.7 have been created as `ready-for-dev` context stories but **none have been implemented yet** (no integration test code exists in `tests/integration/`). Key patterns learned from reviewing those stories:
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point with `#[path]` attributes (edition 2024). To add a test module: `#[path = "integration/test_branch_git.rs"] mod test_branch_git;`
+- `src/lib.rs` fully set up with ALL modules (including `cli`) — **no Task 0 / `lib.rs` blocker work needed**. The `lib.rs` blocker described in earlier story specs was resolved in 7-1 for all downstream stories.
+- `create_test_repo(dir)` and `make_test_story(key, label, deps)` fixtures are available in `tests/integration/helpers/fixtures.rs`.
 
-1. **Every story repeats the `lib.rs` blocker** — Task 0 is identical across all stories. Implement it once, and subsequent stories skip it.
+All stories 7.1–7.7 have been created as `ready-for-dev` context stories but **none beyond 7.1 have been implemented yet**. Key patterns learned from 7.1 implementation:
+
+1. **`lib.rs` blocker is RESOLVED** — Story 7.1 fully set up `src/lib.rs` with all modules. No Task 0 needed.
 
 2. **Test file naming convention:** `test_{module_name}.rs` (e.g., `test_config.rs`, `test_watcher.rs`, `test_notifier.rs`). For this story: `test_branch_git.rs`.
 
@@ -267,7 +272,7 @@ All stories 7.1–7.7 have been created as `ready-for-dev` context stories but *
 
 4. **Story 7.6 (Git Provider)** tests PR creation via mock HTTP — different from this story which tests local git operations via Git CLI subprocess. No overlap.
 
-5. **Helpers pattern:** If Story 7.1 is implemented first, `tests/integration/helpers/fixtures.rs` will contain `create_test_repo()` and `make_test_story()`. If not, this story should create them inline or in a local helper.
+5. **Helpers are available:** `tests/integration/helpers/fixtures.rs` contains `create_test_repo()` and `make_test_story()` — use them directly.
 
 ### Git Intelligence
 
