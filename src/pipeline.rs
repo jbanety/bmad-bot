@@ -339,12 +339,9 @@ impl StoryPipeline {
                 }
 
                 // Phase 6 — Post review comment on PR (non-blocking)
-                // Strip protocol artifacts (<pr-summary>, <<BMAD_JOB_DONE>>) before posting.
+                // Report is already formatted by build_review_comment() — no stripping needed.
                 if let Some(ref report) = review_report
-                    && let Err(e) = self
-                        .git_provider
-                        .add_comment(&pr_info.id, &strip_agent_artifacts(report))
-                        .await
+                    && let Err(e) = self.git_provider.add_comment(&pr_info.id, report).await
                 {
                     tracing::error!(
                         action = "pr_comment_failed",

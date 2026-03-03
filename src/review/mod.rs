@@ -65,8 +65,9 @@ const TERMINAL_TIMEOUT_SECS: u64 = 30;
 /// Build the post-review message sent after the CR workflow completes.
 ///
 /// Asks the agent to commit review fixes with descriptive messages and produce
-/// a structured markdown review report. The format is strict to ensure clean
-/// rendering when posted as a GitHub PR comment.
+/// a structured review report wrapped in XML tags. The XML format ensures we
+/// can parse the report cleanly and discard any LLM narrative/thoughts that
+/// surround it (e.g. "Now let me verify...", "All tests pass...").
 ///
 /// Includes the project name and story key to anchor the agent's context and
 /// prevent hallucinated project names after long review sessions.
@@ -75,16 +76,154 @@ fn build_post_review_message(project_name: &str, story_key: &str) -> String {
         "Commit all your review fixes with descriptive commit messages \
         that reference the findings.\n\n\
         Then provide your review report for project '{project_name}', story '{story_key}', \
-        using EXACTLY this markdown structure:\n\n\
-        ## Code Review Report\n\n\
-        ### Findings\n\
-        (numbered list with **severity** — High/Medium/Low — and description for each finding, or 'No findings.' if clean)\n\n\
-        ### Fixes Applied\n\
-        (list each fix with the commit reference, or 'No fixes needed.' if clean)\n\n\
-        ### Remaining Concerns\n\
-        (list any unresolved issues, or 'None.')\n\n\
-        Do NOT add any preamble, commentary, or meta-text before or after this structure. \
-        Start directly with '## Code Review Report'."
+        using EXACTLY this XML structure:\n\n\
+        <review-report>\n\
+        <findings>\n\
+        (numbered list with **severity** — High/Medium/Low — and description for each finding, or 'No findings.' if clean)\n\
+        </findings>\n\
+        <fixes-applied>\n\
+        (list each fix with the commit reference, or 'No fixes needed.' if clean)\n\
+        </fixes-applied>\n\
+        <remaining-concerns>\n\
+        (list any unresolved issues, or 'None.')\n\
+        </remaining-concerns>\n\
+        </review-report>\n\n\
+        CRITICAL RULES:\n\
+        - Put your ENTIRE report inside the <review-report> tags\n\
+        - Do NOT add any commentary, narrative, or meta-text OUTSIDE the tags\n\
+        - Do NOT add any preamble like 'Here is the report:' before the tags\n\
+        - Start directly with <review-report>"
+    )
+}
+
+/// Parsed review report — extracted from the agent's XML-structured response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedReviewReport {
+    /// Numbered list of findings with severity.
+    pub findings: String,
+    /// List of fixes applied with commit references.
+    pub fixes_applied: String,
+    /// Remaining unresolved concerns.
+    pub remaining_concerns: String,
+}
+
+/// Parse a structured review report from the agent's response.
+///
+/// Extracts content from `<review-report>` with sub-tags `<findings>`,
+/// `<fixes-applied>`, `<remaining-concerns>`. This discards all LLM
+/// narrative/thoughts outside the XML tags (e.g. "Now let me implement...",
+/// "All tests pass...", etc.).
+///
+/// **Lenient fallback:** If `<review-report>` is present but sub-tags are
+/// missing, the raw content is used as `findings` with defaults for the rest.
+///
+/// Returns `None` only if `<review-report>` itself is absent.
+pub fn parse_review_report(response: &str) -> Option<ParsedReviewReport> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static RE_REPORT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?si)<review-report>(.*?)</review-report>").unwrap());
+    static RE_FINDINGS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?si)<findings>(.*?)</findings>").unwrap());
+    static RE_FIXES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?si)<fixes-applied>(.*?)</fixes-applied>").unwrap());
+    static RE_CONCERNS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?si)<remaining-concerns>(.*?)</remaining-concerns>").unwrap()
+    });
+
+    let report_block = RE_REPORT.captures(response)?.get(1)?.as_str().trim();
+
+    if report_block.is_empty() {
+        return None;
+    }
+
+    let findings = RE_FINDINGS
+        .captures(report_block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .unwrap_or_default();
+    let fixes_applied = RE_FIXES
+        .captures(report_block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .unwrap_or_default();
+    let remaining_concerns = RE_CONCERNS
+        .captures(report_block)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .unwrap_or_default();
+
+    // If at least one sub-tag was found, use structured data
+    if !findings.is_empty() {
+        return Some(ParsedReviewReport {
+            findings,
+            fixes_applied,
+            remaining_concerns,
+        });
+    }
+
+    // Lenient fallback: no sub-tags, use raw content as findings
+    tracing::debug!(
+        action = "review_report_lenient_parse",
+        "No sub-tags found in <review-report> — using raw content as findings"
+    );
+    Some(ParsedReviewReport {
+        findings: report_block.to_string(),
+        fixes_applied: String::new(),
+        remaining_concerns: String::new(),
+    })
+}
+
+/// Build a formatted markdown review comment from a parsed report.
+///
+/// Produces a clean, structured PR comment with consistent formatting.
+/// This is the review equivalent of `build_pr_description()` for dev sessions.
+pub fn build_review_comment(story_key: &str, report: &ParsedReviewReport) -> String {
+    let mut body = String::new();
+
+    body.push_str(&format!("## 🔍 Code Review Report — {story_key}\n\n"));
+
+    // Findings section
+    let findings = if report.findings.is_empty() {
+        "No findings."
+    } else {
+        &report.findings
+    };
+    body.push_str(&format!("### Findings\n\n{findings}\n\n"));
+
+    // Fixes Applied section
+    let fixes = if report.fixes_applied.is_empty() {
+        "No fixes needed."
+    } else {
+        &report.fixes_applied
+    };
+    body.push_str(&format!("### Fixes Applied\n\n{fixes}\n\n"));
+
+    // Remaining Concerns section
+    let concerns = if report.remaining_concerns.is_empty() {
+        "None."
+    } else {
+        &report.remaining_concerns
+    };
+    body.push_str(&format!("### Remaining Concerns\n\n{concerns}\n\n"));
+
+    // Footer
+    body.push_str("---\n*Generated by [bmad-bot](https://github.com/jbanety/bmad-bot)*\n");
+
+    body
+}
+
+/// Fallback review comment when the agent's response could not be parsed.
+///
+/// Uses `strip_agent_artifacts()` to clean the raw response as best-effort.
+fn build_fallback_review_comment(story_key: &str, raw_response: &str) -> String {
+    use crate::session::analyzer::strip_agent_artifacts;
+    let cleaned = strip_agent_artifacts(raw_response);
+    format!(
+        "## 🔍 Code Review Report — {story_key}\n\n\
+        {cleaned}\n\n\
+        ---\n*Generated by [bmad-bot](https://github.com/jbanety/bmad-bot)*\n"
     )
 }
 
@@ -504,18 +643,41 @@ impl ReviewRunner {
                 });
             }
 
-            // Post-review phase: the agent's response IS the report
+            // Post-review phase: parse the agent's response into a structured report
             if post_review_phase {
+                let formatted_report = match parse_review_report(&current_response) {
+                    Some(parsed) => {
+                        tracing::info!(
+                            action = "review_report_parsed",
+                            story_key = %story.story_key,
+                            findings_len = %parsed.findings.len(),
+                            fixes_len = %parsed.fixes_applied.len(),
+                            concerns_len = %parsed.remaining_concerns.len(),
+                            "Review report parsed successfully — LLM narrative stripped"
+                        );
+                        build_review_comment(&story.story_key, &parsed)
+                    }
+                    None => {
+                        tracing::warn!(
+                            action = "review_report_parse_failed",
+                            story_key = %story.story_key,
+                            response_len = %current_response.len(),
+                            "Could not parse <review-report> — using fallback"
+                        );
+                        build_fallback_review_comment(&story.story_key, &current_response)
+                    }
+                };
+
                 tracing::info!(
                     action = "review_report_captured",
                     story_key = %story.story_key,
-                    report_len = %current_response.len(),
+                    report_len = %formatted_report.len(),
                     "Review report captured from agent"
                 );
                 return Ok(ReviewOutcome::Completed {
                     story_key: story.story_key.clone(),
                     branch: story.branch_name.clone(),
-                    report: current_response,
+                    report: formatted_report,
                 });
             }
 
@@ -771,11 +933,11 @@ mod tests {
         let msg = build_post_review_message("bmad-bot", "7-1-integration-tests");
         assert!(msg.contains("Commit all your review fixes"));
         assert!(msg.contains("commit messages"));
-        assert!(msg.contains("Findings"));
-        assert!(msg.contains("Fixes Applied"));
-        assert!(msg.contains("Remaining Concerns"));
-        assert!(msg.contains("Code Review Report"));
-        assert!(msg.contains("Do NOT add any preamble"));
+        assert!(msg.contains("<findings>"));
+        assert!(msg.contains("<fixes-applied>"));
+        assert!(msg.contains("<remaining-concerns>"));
+        assert!(msg.contains("<review-report>"));
+        assert!(msg.contains("Do NOT add any commentary"));
     }
 
     #[test]
@@ -787,6 +949,185 @@ mod tests {
             "Should contain story key"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // parse_review_report tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_review_report_valid() {
+        let input = r#"Now let me verify all tests pass. All 1035 tests pass.
+
+<review-report>
+<findings>
+1. **Low** — `test_config_load` used hardcoded path instead of tempdir
+2. **Medium** — Missing error handling in `parse_config`
+</findings>
+<fixes-applied>
+1. Replaced hardcoded path with `tempfile::tempdir()` (commit abc123)
+2. Added `?` propagation in `parse_config` (commit def456)
+</fixes-applied>
+<remaining-concerns>
+None.
+</remaining-concerns>
+</review-report>"#;
+        let result = parse_review_report(input);
+        assert!(result.is_some(), "Should parse valid review report");
+        let report = result.unwrap();
+        assert!(report.findings.contains("hardcoded path"));
+        assert!(report.findings.contains("Missing error handling"));
+        assert!(report.fixes_applied.contains("commit abc123"));
+        assert!(report.fixes_applied.contains("commit def456"));
+        assert_eq!(report.remaining_concerns, "None.");
+    }
+
+    #[test]
+    fn test_parse_review_report_strips_llm_narrative() {
+        let input = "Now let me implement the fixes:\n\
+            Now let me verify all tests pass:\n\
+            All 990 tests pass. Let me commit.\n\n\
+            <review-report>\n\
+            <findings>\n\
+            1. **Low** — unused import\n\
+            </findings>\n\
+            <fixes-applied>\n\
+            1. Removed import (commit abc)\n\
+            </fixes-applied>\n\
+            <remaining-concerns>\n\
+            None.\n\
+            </remaining-concerns>\n\
+            </review-report>\n\n\
+            That concludes the review.";
+        let result = parse_review_report(input);
+        assert!(result.is_some());
+        let report = result.unwrap();
+        // LLM narrative must NOT appear in the parsed report
+        assert!(!report.findings.contains("Now let me"));
+        assert!(!report.findings.contains("All 990 tests"));
+        assert!(!report.fixes_applied.contains("That concludes"));
+        assert!(report.findings.contains("unused import"));
+    }
+
+    #[test]
+    fn test_parse_review_report_lenient_fallback() {
+        let input = "<review-report>\n\
+            Clean code, no issues found. All tests pass.\n\
+            </review-report>";
+        let result = parse_review_report(input);
+        assert!(result.is_some(), "Should parse with lenient fallback");
+        let report = result.unwrap();
+        assert!(report.findings.contains("Clean code"));
+        assert!(report.fixes_applied.is_empty());
+        assert!(report.remaining_concerns.is_empty());
+    }
+
+    #[test]
+    fn test_parse_review_report_no_outer_tag_returns_none() {
+        let input = "## Code Review Report\n\nFindings: none.";
+        assert!(
+            parse_review_report(input).is_none(),
+            "Should return None without <review-report> tag"
+        );
+    }
+
+    #[test]
+    fn test_parse_review_report_empty_tag_returns_none() {
+        let input = "<review-report></review-report>";
+        assert!(
+            parse_review_report(input).is_none(),
+            "Should return None for empty <review-report>"
+        );
+    }
+
+    #[test]
+    fn test_parse_review_report_garbage_input() {
+        assert!(parse_review_report("random text").is_none());
+    }
+
+    #[test]
+    fn test_parse_review_report_empty_input() {
+        assert!(parse_review_report("").is_none());
+    }
+
+    #[test]
+    fn test_parse_review_report_partial_subtags() {
+        let input = "<review-report>\n\
+            <findings>\n\
+            1. **High** — SQL injection vulnerability\n\
+            </findings>\n\
+            </review-report>";
+        let result = parse_review_report(input);
+        assert!(result.is_some());
+        let report = result.unwrap();
+        assert!(report.findings.contains("SQL injection"));
+        assert!(report.fixes_applied.is_empty());
+        assert!(report.remaining_concerns.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // build_review_comment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_review_comment_full_report() {
+        let report = ParsedReviewReport {
+            findings: "1. **Low** — unused import".to_string(),
+            fixes_applied: "1. Removed import (commit abc)".to_string(),
+            remaining_concerns: "None.".to_string(),
+        };
+        let comment = build_review_comment("7-1-test", &report);
+        assert!(comment.contains("## 🔍 Code Review Report — 7-1-test"));
+        assert!(comment.contains("### Findings"));
+        assert!(comment.contains("unused import"));
+        assert!(comment.contains("### Fixes Applied"));
+        assert!(comment.contains("Removed import"));
+        assert!(comment.contains("### Remaining Concerns"));
+        assert!(comment.contains("None."));
+        assert!(comment.contains("bmad-bot"));
+    }
+
+    #[test]
+    fn test_build_review_comment_empty_sections_use_defaults() {
+        let report = ParsedReviewReport {
+            findings: String::new(),
+            fixes_applied: String::new(),
+            remaining_concerns: String::new(),
+        };
+        let comment = build_review_comment("7-1-test", &report);
+        assert!(comment.contains("No findings."));
+        assert!(comment.contains("No fixes needed."));
+        // Remaining Concerns empty → "None."
+        assert!(comment.contains("None."));
+    }
+
+    #[test]
+    fn test_build_review_comment_has_footer() {
+        let report = ParsedReviewReport {
+            findings: "x".to_string(),
+            fixes_applied: String::new(),
+            remaining_concerns: String::new(),
+        };
+        let comment = build_review_comment("1-1-test", &report);
+        assert!(comment.contains("Generated by [bmad-bot]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // build_fallback_review_comment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fallback_review_comment_contains_cleaned_content() {
+        let raw = "Some review.\n\n<<BMAD_JOB_DONE>>";
+        let comment = build_fallback_review_comment("7-1-test", raw);
+        assert!(comment.contains("## 🔍 Code Review Report — 7-1-test"));
+        assert!(comment.contains("Some review."));
+        assert!(!comment.contains("BMAD_JOB_DONE"));
+        assert!(comment.contains("bmad-bot"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Constants tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_max_review_turns_is_reasonable() {
