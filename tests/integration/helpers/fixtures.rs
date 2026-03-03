@@ -14,6 +14,19 @@ use bmad_bot::session::SessionState;
 use bmad_bot::watcher::StoryInfo;
 
 // ---------------------------------------------------------------------------
+// impl_artifacts_dir
+// ---------------------------------------------------------------------------
+
+/// Create the `_bmad-output/implementation-artifacts` subdirectory under `root`
+/// and return its path.  `make_test_config(root)` sets
+/// `bmad_paths.implementation_artifacts` to this location.
+pub fn impl_artifacts_dir(root: &Path) -> PathBuf {
+    let dir = root.join("_bmad-output/implementation-artifacts");
+    std::fs::create_dir_all(&dir).expect("create impl artifacts dir");
+    dir
+}
+
+// ---------------------------------------------------------------------------
 // make_test_config
 // ---------------------------------------------------------------------------
 

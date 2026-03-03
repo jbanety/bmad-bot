@@ -1,6 +1,6 @@
 # Story 7.3: Watcher → Dependency Resolution → Story Selection Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -311,18 +311,19 @@ No debug issues encountered. All 14 integration tests passed on first run.
 
 ### Completion Notes List
 
-- Task 1: Created `tests/integration/test_watcher.rs`, added `#[path]` module declaration in `tests/integration.rs`. Imported `Watcher`, `SprintStatusFile`, `WatcherError`, `DependencyGraph`, `filter_eligible`, and fixture helpers.
-- Task 2: Two tests — `test_watcher_poll_returns_eligible_with_deps_satisfied` (AC #1 core: 5 stories, verifies [1-2, 2-1] eligible) and `test_watcher_poll_dependency_valid_ordering` (AC #1 ordering: topological + document order tiebreak).
-- Task 3: Four tests — `test_watcher_cascade_blocks_transitive_dependents` (blocked cascades to 1-2, 1-3; 2-1 independent), `test_watcher_cascade_blocks_needs_clarification` (same behavior), `test_watcher_no_cascade_on_in_progress` (negative: dep-unmet but NOT cascade), `test_watcher_no_cascade_on_review` (negative: same for review status).
+- Task 1: Created `tests/integration/test_watcher.rs`, added `#[path]` module declaration in `tests/integration.rs`. Imported `Watcher`, `SprintStatusFile`, `WatcherError`, `DependencyGraph`, `filter_eligible`, `derive_dependencies`, and fixture helpers.
+- Task 2: Two tests — `test_watcher_poll_returns_eligible_with_deps_satisfied` (AC #1 core: asserts exact `[1-2, 2-1]` in document order) and `test_watcher_poll_dependency_valid_ordering` (AC #1 ordering: topological + document order tiebreak).
+- Task 3: Five tests — `test_watcher_cascade_blocks_transitive_dependents` (blocked cascades to 1-2, 1-3; 2-1 independent), `test_watcher_cascade_blocks_needs_clarification` (same behavior), `test_watcher_no_cascade_on_in_progress` (negative: calls `filter_eligible()` directly, asserts `cascade_count == 0`), `test_watcher_no_cascade_on_review` (same pattern), `test_filter_eligible_cascade_count_positive` (positive counterpart: asserts `cascade_count == 2`).
 - Task 4: `test_watcher_poll_all_done_returns_no_eligible` — all stories done → `NoEligibleStories`.
 - Task 5: Two tests — `test_watcher_cyclic_dependency_detected` (manual cycle via `DependencyGraph::topological_sort()`, asserts `CyclicDependency` with both keys) and `test_watcher_cyclic_dependency_via_filter_eligible` (propagation through `filter_eligible()`).
 - Task 6: `test_watcher_poll_missing_file_returns_error` — empty temp dir → `SprintStatusNotFound` with path containing "sprint-status.yaml".
 - Task 7: Four tests — `test_sprint_status_load_valid_yaml_correct_story_count` (5 stories, order preserved), `test_sprint_status_stories_filters_out_epics_and_retrospectives`, `test_sprint_status_eligible_stories_returns_only_ready_for_dev`, `test_sprint_status_malformed_yaml_returns_parse_error`.
-- Decision: `impl_artifacts_dir()` helper creates `_bmad-output/implementation-artifacts` subdir to match `make_test_config()` path convention, with `write_sprint_status()` writing directly to that subdir.
-- All 75 tests pass (14 new integration + 61 existing). Zero regressions.
+- Code Review fixes (CR): Rewritten Task 3.5 negative-cascade tests to call `filter_eligible()` directly and assert `cascade_count == 0` (mechanistic proof, not just output check). Added `test_filter_eligible_cascade_count_positive` (positive counterpart). Promoted `impl_artifacts_dir()` to shared `fixtures.rs`. Removed dead `mut` + redundant status assignments in `test_watcher_cyclic_dependency_detected`. Changed AC #1 assertion from `contains()` to `assert_eq!` for deterministic exact-match.
+- All 76 tests pass (15 new integration + 61 existing). Zero regressions.
 
 ### File List
 
 - `tests/integration.rs` — Added `#[path = "integration/test_watcher.rs"] mod test_watcher;`
-- `tests/integration/test_watcher.rs` — NEW: 14 integration tests for Watcher → deps → story selection pipeline
+- `tests/integration/test_watcher.rs` — NEW: 15 integration tests for Watcher → deps → story selection pipeline
+- `tests/integration/helpers/fixtures.rs` — Added `impl_artifacts_dir()` helper (promoted from test_watcher.rs)
 - `_bmad-output/implementation-artifacts/7-3-watcher-dependency-resolution-story-selection-integration-tests.md` — Story file updated (tasks checked, dev record, status → review)

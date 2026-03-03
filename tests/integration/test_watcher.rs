@@ -4,26 +4,12 @@
 //! sprint-status.yaml, filters eligible stories, resolves dependencies,
 //! detects cascade blocks, and returns stories in topological order.
 
-use std::path::Path;
 use std::sync::Arc;
 
-use bmad_bot::watcher::deps::{filter_eligible, DependencyGraph};
+use bmad_bot::watcher::deps::{filter_eligible, DependencyGraph, derive_dependencies};
 use bmad_bot::watcher::{SprintStatusFile, Watcher, WatcherError};
 
-use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Create the `_bmad-output/implementation-artifacts` subdirectory under `root`
-/// and return its path.  `make_test_config(root)` sets
-/// `bmad_paths.implementation_artifacts` to this location.
-fn impl_artifacts_dir(root: &Path) -> std::path::PathBuf {
-    let dir = root.join("_bmad-output/implementation-artifacts");
-    std::fs::create_dir_all(&dir).expect("create impl artifacts dir");
-    dir
-}
+use crate::helpers::fixtures::{impl_artifacts_dir, make_test_config, make_test_story, write_sprint_status};
 
 // ===========================================================================
 // Task 2 — Watcher poll with dependency filtering (AC #1)
@@ -58,14 +44,14 @@ fn test_watcher_poll_returns_eligible_with_deps_satisfied() {
     // Act
     let result = watcher.poll();
 
-    // Assert
+    // Assert: exact set and deterministic document-order
     let eligible = result.expect("poll should succeed");
     let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
-    assert_eq!(keys.len(), 2, "expected exactly 2 eligible stories, got {keys:?}");
-    assert!(keys.contains(&"1-2-cli-framework"), "1-2 should be eligible");
-    assert!(keys.contains(&"2-1-polling"), "2-1 should be eligible");
-    assert!(!keys.contains(&"1-3-init-command"), "1-3 should be skipped (dep 1-2 not done)");
-    assert!(!keys.contains(&"2-2-deps-resolution"), "2-2 should be skipped (backlog)");
+    assert_eq!(
+        keys,
+        vec!["1-2-cli-framework", "2-1-polling"],
+        "expected exactly [1-2, 2-1] in document order"
+    );
 }
 
 #[test]
@@ -157,57 +143,87 @@ fn test_watcher_cascade_blocks_needs_clarification() {
 
 #[test]
 fn test_watcher_no_cascade_on_in_progress() {
-    // in-progress is NOT a BLOCKING_STATUS → 1-2 should NOT be cascade-blocked,
-    // but it IS skipped because dep 1-1 is not done yet.
-    let tmp = tempfile::tempdir().unwrap();
-    let artifacts = impl_artifacts_dir(tmp.path());
+    // in-progress is NOT a BLOCKING_STATUS → cascade_count MUST be 0.
+    // Use filter_eligible() directly so we can assert the cascade count,
+    // distinguishing "dep-unmet (correct)" from "incorrectly cascade-blocked".
+    let all_statuses: Vec<(String, String)> = vec![
+        ("epic-1".to_string(), "in-progress".to_string()),
+        ("1-1-scaffolding".to_string(), "in-progress".to_string()),
+        ("1-2-cli-framework".to_string(), "ready-for-dev".to_string()),
+        ("epic-2".to_string(), "in-progress".to_string()),
+        ("2-1-polling".to_string(), "ready-for-dev".to_string()),
+    ];
 
-    write_sprint_status(
-        &artifacts,
-        vec![
-            ("epic-1", "in-progress"),
-            ("1-1-scaffolding", "in-progress"),
-            ("1-2-cli-framework", "ready-for-dev"),
-            ("epic-2", "in-progress"),
-            ("2-1-polling", "ready-for-dev"),
-        ],
-    );
+    let mut eligible_input = vec![
+        make_test_story("1-2-cli-framework", "cli-framework", vec![]),
+        make_test_story("2-1-polling", "polling", vec![]),
+    ];
+    derive_dependencies(&mut eligible_input, &all_statuses);
 
-    let config = make_test_config(tmp.path());
-    let watcher = Watcher::new(Arc::new(config));
-    let eligible = watcher.poll().expect("poll should succeed");
+    let (result, cascade_count) =
+        filter_eligible(eligible_input, &all_statuses).expect("filter_eligible should succeed");
 
-    // 1-2 is skipped (dep not done), but NOT cascade-blocked
-    // 2-1 is eligible (no deps)
-    let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
-    assert_eq!(keys, vec!["2-1-polling"]);
-    // Key distinction: this is NOT cascade blocking — 1-2 is simply dep-unmet.
-    // With `blocked` status, 1-2 would be cascade-blocked (different codepath logged at warn).
+    // 1-2 is skipped because dep (1-1) is not done — NOT cascade-blocked
+    // cascade_count MUST be 0, proving the in-progress codepath is NOT cascade
+    assert_eq!(cascade_count, 0, "in-progress must not trigger cascade blocking");
+    let keys: Vec<&str> = result.iter().map(|s| s.story_key.as_str()).collect();
+    assert_eq!(keys, vec!["2-1-polling"], "only dep-free story should be eligible");
 }
 
 #[test]
 fn test_watcher_no_cascade_on_review() {
-    // review is NOT a BLOCKING_STATUS
-    let tmp = tempfile::tempdir().unwrap();
-    let artifacts = impl_artifacts_dir(tmp.path());
+    // review is NOT a BLOCKING_STATUS → cascade_count MUST be 0.
+    // Use filter_eligible() directly to prove the mechanism, not just the output.
+    let all_statuses: Vec<(String, String)> = vec![
+        ("epic-1".to_string(), "in-progress".to_string()),
+        ("1-1-scaffolding".to_string(), "review".to_string()),
+        ("1-2-cli-framework".to_string(), "ready-for-dev".to_string()),
+        ("epic-2".to_string(), "in-progress".to_string()),
+        ("2-1-polling".to_string(), "ready-for-dev".to_string()),
+    ];
 
-    write_sprint_status(
-        &artifacts,
-        vec![
-            ("epic-1", "in-progress"),
-            ("1-1-scaffolding", "review"),
-            ("1-2-cli-framework", "ready-for-dev"),
-            ("epic-2", "in-progress"),
-            ("2-1-polling", "ready-for-dev"),
-        ],
-    );
+    let mut eligible_input = vec![
+        make_test_story("1-2-cli-framework", "cli-framework", vec![]),
+        make_test_story("2-1-polling", "polling", vec![]),
+    ];
+    derive_dependencies(&mut eligible_input, &all_statuses);
 
-    let config = make_test_config(tmp.path());
-    let watcher = Watcher::new(Arc::new(config));
-    let eligible = watcher.poll().expect("poll should succeed");
+    let (result, cascade_count) =
+        filter_eligible(eligible_input, &all_statuses).expect("filter_eligible should succeed");
 
-    // 1-2 skipped (dep not done), 2-1 eligible
-    let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
+    // cascade_count MUST be 0 — review is transient, not a blocker
+    assert_eq!(cascade_count, 0, "review must not trigger cascade blocking");
+    let keys: Vec<&str> = result.iter().map(|s| s.story_key.as_str()).collect();
+    assert_eq!(keys, vec!["2-1-polling"]);
+}
+
+#[test]
+fn test_filter_eligible_cascade_count_positive() {
+    // Positive case: blocked status → cascade_count reflects actual cascade blocks.
+    // This is the counterpart to the two negative tests above.
+    let all_statuses: Vec<(String, String)> = vec![
+        ("epic-1".to_string(), "in-progress".to_string()),
+        ("1-1-scaffolding".to_string(), "blocked".to_string()),
+        ("1-2-cli-framework".to_string(), "ready-for-dev".to_string()),
+        ("1-3-init-command".to_string(), "ready-for-dev".to_string()),
+        ("epic-2".to_string(), "in-progress".to_string()),
+        ("2-1-polling".to_string(), "ready-for-dev".to_string()),
+    ];
+
+    let mut eligible_input = vec![
+        make_test_story("1-2-cli-framework", "cli-framework", vec![]),
+        make_test_story("1-3-init-command", "init-command", vec![]),
+        make_test_story("2-1-polling", "polling", vec![]),
+    ];
+    derive_dependencies(&mut eligible_input, &all_statuses);
+
+    let (result, cascade_count) =
+        filter_eligible(eligible_input, &all_statuses).expect("filter_eligible should succeed");
+
+    // 1-2 directly cascade-blocked (dep 1-1 is blocked)
+    // 1-3 transitively cascade-blocked (dep chain 1-3 → 1-2 → 1-1 blocked)
+    assert_eq!(cascade_count, 2, "both 1-2 and 1-3 should be cascade-blocked");
+    let keys: Vec<&str> = result.iter().map(|s| s.story_key.as_str()).collect();
     assert_eq!(keys, vec!["2-1-polling"]);
 }
 
@@ -251,11 +267,9 @@ fn test_watcher_poll_all_done_returns_no_eligible() {
 fn test_watcher_cyclic_dependency_detected() {
     // Create stories with manually injected circular deps.
     // derive_dependencies() can't produce cycles, so we build StoryInfo manually.
-    let mut story_a = make_test_story("1-1-foo", "Foo", vec!["1-2-bar".to_string()]);
-    let mut story_b = make_test_story("1-2-bar", "Bar", vec!["1-1-foo".to_string()]);
-    // Override status to ready-for-dev (make_test_story default)
-    story_a.status = "ready-for-dev".to_string();
-    story_b.status = "ready-for-dev".to_string();
+    // make_test_story defaults status to "ready-for-dev" — no override needed
+    let story_a = make_test_story("1-1-foo", "Foo", vec!["1-2-bar".to_string()]);
+    let story_b = make_test_story("1-2-bar", "Bar", vec!["1-1-foo".to_string()]);
 
     let all_statuses: Vec<(String, String)> = vec![
         ("1-1-foo".to_string(), "ready-for-dev".to_string()),
