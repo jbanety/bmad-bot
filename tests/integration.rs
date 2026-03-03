@@ -32,3 +32,6 @@ mod test_notifier;
 
 #[path = "integration/test_branch_git.rs"]
 mod test_branch_git;
+
+#[path = "integration/test_cli_lifecycle.rs"]
+mod test_cli_lifecycle;
