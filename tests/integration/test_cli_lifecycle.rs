@@ -296,16 +296,19 @@ fn test_daemon_state_full_lifecycle() {
     assert_eq!(loaded.pid, std::process::id());
     assert_eq!(loaded.log_file, PathBuf::from("lifecycle.log"));
 
-    // Timestamps should be monotonically ordered: started_at <= last_activity
-    // (started_at is fixed, last_activity was updated by mark_stopped)
+    // Timestamps must be monotonically ordered: started_at <= last_activity.
+    // Parse both as RFC 3339 for a proper chronological comparison.
     assert_eq!(loaded.started_at, original_started, "started_at should not change");
-    assert_ne!(
-        loaded.last_activity, original_started,
-        "last_activity should differ from started_at"
+    let ts_started = chrono::DateTime::parse_from_rfc3339(&loaded.started_at)
+        .expect("started_at must be valid RFC 3339");
+    let ts_activity = chrono::DateTime::parse_from_rfc3339(&loaded.last_activity)
+        .expect("last_activity must be valid RFC 3339");
+    assert!(
+        ts_activity > ts_started,
+        "last_activity ({}) must be strictly after started_at ({})",
+        loaded.last_activity,
+        loaded.started_at
     );
-    // Verify timestamp format
-    assert!(loaded.started_at.contains('T'));
-    assert!(loaded.last_activity.contains('T'));
 }
 
 /// State file is valid JSON: write → read raw → parse as serde_json::Value → verify keys.

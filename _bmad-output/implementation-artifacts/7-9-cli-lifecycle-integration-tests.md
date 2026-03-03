@@ -1,6 +1,6 @@
 # Story 7.9: CLI Lifecycle Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -440,6 +440,7 @@ None — no issues encountered.
 - Task 5 (5.1–5.2): 2 tests — BotConfig YAML roundtrip with validate, malformed YAML returns error.
 - Task 6 (6.1–6.2): 2 tests — full lifecycle coherence, state file valid JSON with expected keys.
 - Total: 12 new integration tests, all passing. Full suite: 133 tests pass (121 existing + 12 new).
+- **Code Review fixes:** (1) Added `sprint-status.yaml` to File List (was modified in implementation commit but omitted). (2) Replaced misleading `assert_ne!` comment/assertion in `test_daemon_state_full_lifecycle` with proper RFC 3339 parse + `ts_activity > ts_started` chronological ordering check.
 
 ### Change Log
 
@@ -450,4 +451,5 @@ None — no issues encountered.
 
 - `tests/integration/test_cli_lifecycle.rs` (NEW)
 - `tests/integration.rs` (MODIFIED)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (MODIFIED)
 - `_bmad-output/implementation-artifacts/7-9-cli-lifecycle-integration-tests.md` (MODIFIED)
