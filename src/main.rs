@@ -1,22 +1,10 @@
 #![deny(clippy::all)]
 #![warn(dead_code)] // FIXME: Change to #![deny(dead_code)] once all modules have real implementations
 
-mod auth;
-mod cli;
-mod config;
-mod git_provider;
-mod llm;
-mod mcp;
-mod notifier;
-mod pipeline;
-mod review;
-mod session;
-mod supervisor;
-mod tools;
-mod watcher;
-
 use anyhow::Result;
 use clap::Parser;
+
+use bmad_bot::cli;
 
 #[tokio::main]
 async fn main() -> Result<()> {
