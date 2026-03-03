@@ -20,3 +20,6 @@ mod test_watcher;
 
 #[path = "integration/test_pipeline.rs"]
 mod test_pipeline;
+
+#[path = "integration/test_session_wal.rs"]
+mod test_session_wal;
