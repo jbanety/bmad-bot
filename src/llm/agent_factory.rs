@@ -19,7 +19,7 @@
 
 use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets, LlmRoleConfig};
-use crate::session::dev_agent::streaming_chat;
+use crate::session::agent::streaming_chat;
 use crate::session::provider::{ProviderError, copilot_headers};
 
 use rig::agent::{Agent, AgentBuilder};
@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Re-export [`ShutdownFlag`] for convenience.
-pub use crate::session::dev_agent::ShutdownFlag;
+pub use crate::session::agent::ShutdownFlag;
 
 // ---------------------------------------------------------------------------
 // LlmRole
@@ -117,7 +117,7 @@ impl BuiltAgent {
 
     /// Activate a BMAD agent by sending the agent file as the first user message.
     ///
-    /// Thin wrapper around [`crate::session::dev_agent::activate_agent()`] that
+    /// Thin wrapper around [`crate::session::agent::activate_agent()`] that
     /// dispatches to the correct concrete agent type.
     ///
     /// # Arguments
@@ -135,7 +135,7 @@ impl BuiltAgent {
     ) -> Result<(Vec<Message>, Vec<crate::session::state::ChatMessage>), String> {
         match self {
             Self::Anthropic(agent) => {
-                crate::session::dev_agent::activate_agent(
+                crate::session::agent::activate_agent(
                     agent,
                     project_root,
                     agent_relative_path,
@@ -145,7 +145,7 @@ impl BuiltAgent {
                 .await
             }
             Self::OpenAiResponses(agent) => {
-                crate::session::dev_agent::activate_agent(
+                crate::session::agent::activate_agent(
                     agent,
                     project_root,
                     agent_relative_path,
@@ -155,7 +155,7 @@ impl BuiltAgent {
                 .await
             }
             Self::OpenAiCompletions(agent) => {
-                crate::session::dev_agent::activate_agent(
+                crate::session::agent::activate_agent(
                     agent,
                     project_root,
                     agent_relative_path,

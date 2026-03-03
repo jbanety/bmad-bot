@@ -18,12 +18,12 @@ use crate::llm::logging::{
     log_llm_error, log_llm_history, log_llm_history_summary, log_llm_request, log_llm_response,
 };
 use crate::session::SessionOutcome;
+/// Re-export [`ShutdownFlag`] so existing callers (`pipeline.rs`, `cli/mod.rs`) keep working.
+pub use crate::session::agent::ShutdownFlag;
+use crate::session::agent::{self};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
 use crate::session::cleanup::{mark_story_needs_clarification, preserve_partial_work};
-/// Re-export [`ShutdownFlag`] so existing callers (`pipeline.rs`, `cli/mod.rs`) keep working.
-pub use crate::session::dev_agent::ShutdownFlag;
-use crate::session::dev_agent::{self};
 use crate::session::escalation::EscalationReport;
 use crate::session::provider::ProviderError;
 use crate::session::state::{ChatMessage, SessionState};
@@ -794,13 +794,13 @@ impl SessionRunner {
     /// This mirrors Zed's `system_prompt.hbs` pattern: the system prompt contains
     /// operational instructions (tool usage, formatting rules, communication style)
     /// while the agent persona (`dev.md`) is sent as a user message wrapped in
-    /// XML context tags via [`dev_agent::activate_agent()`].
+    /// XML context tags via [`agent::activate_agent()`].
     ///
     /// The system prompt provides persistent grounding across all turns.
     async fn build_preamble(&self, _story: &StoryInfo) -> Result<String, ProviderError> {
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         let mcp_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
-        Ok(dev_agent::build_preamble(
+        Ok(agent::build_preamble(
             &mcp_names,
             &self.config.llm.dev.model,
         ))

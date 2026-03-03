@@ -18,7 +18,7 @@
 use crate::config::BotConfig;
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
-use crate::session::dev_agent::build_preamble;
+use crate::session::agent::build_preamble;
 use async_trait::async_trait;
 use rig::completion::Message;
 use std::path::PathBuf;
@@ -366,7 +366,7 @@ impl AnswerProvider for ArchitectSession {
 
         // Build the agent via AgentFactory with the generic preamble (tool rules,
         // English override). The architect persona is sent as a user message during
-        // activation — same pattern as dev_agent.rs.
+        // activation — same pattern as agent.rs.
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         let mcp_tool_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
         let supervisor_model = &self

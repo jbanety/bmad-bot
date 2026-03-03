@@ -24,8 +24,8 @@ use rig::tools::think::ThinkTool;
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
+use crate::session::agent::{self, ShutdownFlag};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
-use crate::session::dev_agent::{self, ShutdownFlag};
 use crate::session::provider::ProviderError;
 use crate::supervisor::decisions::DecisionLog;
 use crate::supervisor::{AskSupervisor, EscalationSlot};
@@ -445,7 +445,7 @@ impl ReviewRunner {
         // 1. Build generic preamble (same as SessionRunner)
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         let mcp_tool_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
-        let preamble = dev_agent::build_preamble(&mcp_tool_names, &self.config.llm.review.model);
+        let preamble = agent::build_preamble(&mcp_tool_names, &self.config.llm.review.model);
 
         // 2. Create shared resources
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));

@@ -41,7 +41,7 @@ pub enum ResponseAction {
 
 /// Deterministic sentinel token emitted by the agent when its workflow is done.
 ///
-/// Injected in the system preamble (`dev_agent::build_preamble`). The agent is
+/// Injected in the system preamble (`agent::build_preamble`). The agent is
 /// instructed to emit this exact string on its own line as the last thing in
 /// its final message. This is checked at **priority 0** — before any fuzzy
 /// pattern matching — so it works identically across all LLM providers/models.

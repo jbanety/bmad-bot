@@ -17,14 +17,14 @@
 //! - [`escalation::EscalationReport`] — full report returned to the daemon for logging,
 //!   notification (Epic 6), and PR creation (Epic 5).
 
+/// Shared agent activation — preamble, tool construction, activation, and streaming chat.
+pub mod agent;
 /// Response analyzer — pattern matching for workflow interactions.
 pub mod analyzer;
 /// Branch management — dependency-aware branch chaining for story sessions.
 pub mod branch;
 /// Session cleanup: partial work preservation and sprint-status updates.
 pub mod cleanup;
-/// Shared BMAD dev agent activation — preamble, streaming chat, agent activation.
-pub mod dev_agent;
 /// Escalation types for supervisor-to-session communication.
 pub mod escalation;
 /// LLM provider factory — multi-provider support.
