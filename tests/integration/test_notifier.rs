@@ -310,6 +310,7 @@ async fn test_notifier_factory_enabled_empty_token_returns_noop() {
 // ===========================================================================
 
 #[tokio::test]
+#[ignore = "requires-network: makes real HTTP call to api.telegram.org; run with --include-ignored"]
 async fn test_notifier_factory_enabled_with_token_returns_telegram() {
     let config = make_notification_config(true, "12345");
     let secrets = make_test_secrets_with_telegram(Some("bot123:ABCDEF-test-DO-NOT-USE".to_string()));
@@ -320,18 +321,26 @@ async fn test_notifier_factory_enabled_with_token_returns_telegram() {
     // Cap the network call at 5 s so a hung connection never blocks CI indefinitely.
     // (reqwest::Client has no default timeout; the retry policy has up to 3 retries.)
     let notification = make_completed_notification();
-    let result = tokio::time::timeout(
+    let timeout_result = tokio::time::timeout(
         Duration::from_secs(5),
         notifier.notify_story(&notification),
     )
-    .await
-    .expect("notify_story timed out after 5 s — possible hung network connection in test environment");
+    .await;
 
-    // The TelegramNotifier must fail (HTTP error / Telegram 401) — NOT Ok(()) like a NoopNotifier would.
-    assert!(
-        result.is_err(),
-        "Factory with valid token should create TelegramNotifier that attempts real HTTP send (not NoopNotifier)"
-    );
+    // If the timeout fires the network is unreachable — which still confirms a TelegramNotifier
+    // was returned (NoopNotifier would have returned Ok(()) instantly, never timing out).
+    match timeout_result {
+        Ok(result) => assert!(
+            result.is_err(),
+            "Factory with valid token should create TelegramNotifier that attempts real HTTP send \
+             (expected HTTP/API error, got Ok)"
+        ),
+        Err(_elapsed) => {
+            // Timeout reached: network unreachable or packet-drop firewall. The test is still
+            // meaningful — a NoopNotifier returns Ok(()) in microseconds; only a TelegramNotifier
+            // would block for 5 s trying to reach api.telegram.org.
+        }
+    }
 }
 
 // ===========================================================================
@@ -462,8 +471,8 @@ fn test_notifier_error_disabled_display() {
     let err = NotifierError::Disabled;
     let display = format!("{err}");
     assert!(
-        display.contains("disabled") || display.contains("Disabled"),
-        "NotifierError::Disabled display should mention disabled, got: {display}"
+        display.contains("disabled"),
+        "NotifierError::Disabled display should contain 'disabled', got: {display}"
     );
 }
 

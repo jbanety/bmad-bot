@@ -508,9 +508,9 @@ Claude Sonnet 4 (via BMAD dev agent)
 
 ### Debug Log References
 
-- All 21 notifier integration tests pass (16 original + 5 review follow-up)
-- Full suite: 120 integration tests pass (0 failures, 0 regressions)
-- Total project: 886 unit + 104 other + 120 integration = all passing
+- All 20 notifier integration tests pass (1 ignored: network test now has `#[ignore = "requires-network"]`)
+- Full suite: 119 integration tests pass (0 failures, 0 regressions)
+- Total project: 886 unit + 104 other + 119 integration = all passing
 - `cargo clippy --test integration` clean (no new warnings in test_notifier.rs)
 
 ### Completion Notes List
@@ -534,5 +534,6 @@ Claude Sonnet 4 (via BMAD dev agent)
 - `tests/integration/test_notifier.rs` — MODIFIED (added 5 new tests: 3 format_story_message content tests + 2 tracing warn log tests; total 21 integration tests)
 - `src/notifier/mod.rs` — MODIFIED (changed `format_story_message` from `fn` to `#[doc(hidden)] pub fn` for integration test AC #1 coverage)
 - `Cargo.toml` — MODIFIED (added `tracing-test = { version = "0.2", features = ["no-env-filter"] }` to `[dev-dependencies]`)
-- `tests/integration.rs` — UNCHANGED (already had `#[path] mod test_notifier;` from previous session)
+- `Cargo.lock` — MODIFIED (auto-updated by Cargo when tracing-test dependency added)
+- `tests/integration.rs` — MODIFIED (added `#[path = "integration/test_notifier.rs"] mod test_notifier;` registration)
 - `_bmad-output/implementation-artifacts/7-7-notification-flow-integration-tests.md` — MODIFIED (review follow-up checkboxes, dev agent record, file list)
