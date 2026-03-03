@@ -1,6 +1,6 @@
 # Story 7.4: Pipeline Orchestration Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -754,6 +754,22 @@ Claude Sonnet 4 (via BMAD workflow)
 - Task 0: `cargo test --test integration` — 76 passed (pre-existing), 0 regressions
 - Tasks 1–11: `cargo test --test integration test_pipeline` — 8 pipeline tests passed
 - Full suite: `cargo test` — all tests pass (lib: 1012, integration: 84, doc: 0+4 ignored)
+- Code Review (AI): `cargo test` — 1012 lib + 84 integration passed after all CR fixes
+
+### Senior Developer Review (AI)
+**Date:** 2026-01-01 | **Reviewer:** Amelia (Dev Agent, adversarial review)
+
+**Issues Found:** 2 High, 4 Medium → all fixed
+
+#### 🔴 HIGH — Fixed
+- **H1** `tests/integration/test_pipeline.rs:69–108` — AC #1 ordering assertion missing. AC explicitly requires `create_pr` called **before** `run_review` — no sequence assertion existed. **Fix:** Added shared `event_log: Arc<Mutex<Vec<String>>>` between `MockGitProvider` (writes `"create_pr"`) and `MockCodeReviewer` (writes `"run_review"`); `test_pipeline_happy_path_completed` now asserts `create_pr_pos < run_review_pos`.
+- **H2** `tests/integration/helpers/mocks.rs:654` — Task 7.2 `MockCodeReviewer::call_count == 0` assertion completely absent; compiler warned `method 'call_count' is never used`. `build()` returned no reviewer handle, making the assertion architecturally impossible. **Fix:** Removed orphaned `call_count()` method; `test_pipeline_review_disabled_skips_review` now asserts `!events.contains("run_review")` via shared event log.
+
+#### 🟡 MEDIUM — Fixed
+- **M1** `tests/integration/helpers/fixtures.rs:434` — `std::mem::forget(self.env)` permanently leaked temp git directories. **Fix:** Changed `build()` return to `(StoryPipeline, MockNotifier, MockGitProvider, PipelineTestEnv)`; caller holds env until end of test scope.
+- **M2** `tests/integration/test_pipeline.rs:96` — PR title assertion too weak: `starts_with("feat(")` passes for any story_key. **Fix:** Changed to `starts_with("feat(4-1-rig-tools)")`.
+- **M3** `tests/integration/test_pipeline.rs:181` — Escalation PR title never verified (Task 6.2: "with wip title"). **Fix:** Added assertions `starts_with("wip(4-1-rig-tools)")` and `contains("[NEEDS REVIEW]")`.
+- **M4** `tests/integration/helpers/fixtures.rs:407` — `build()` branch condition `<= 1` caused confusing panic path for `len == 0`. **Fix:** Changed to `== 1`.
 
 ### Completion Notes List
 - Task 0: Refactored `StoryPipeline` for dependency injection. Added `DevRunner` and `CodeReviewer` async traits in `src/pipeline.rs`. Implemented traits for `SessionRunner` and `ReviewRunner`. Changed struct to store `Box<dyn DevRunner>`, `Box<dyn CodeReviewer>`, `Option<SessionRunner>` for WAL recovery. Added `new_with_components()` constructor. Updated 4 call sites. Zero regressions.
