@@ -77,7 +77,7 @@ pub fn make_test_secrets() -> BotSecrets {
     BotSecrets {
         anthropic_api_key: Some("test-anthropic-key-DO-NOT-USE".to_string()),
         openai_api_key: Some("test-openai-key-DO-NOT-USE".to_string()),
-        github_copilot_oauth_token: Some("test-ghmodels-key-DO-NOT-USE".to_string()),
+        github_copilot_oauth_token: Some("test-github-copilot-token-DO-NOT-USE".to_string()),
         github_token: Some("test-github-token-DO-NOT-USE".to_string()),
         gitlab_token: Some("test-gitlab-token-DO-NOT-USE".to_string()),
         telegram_bot_token: Some("test-telegram-token-DO-NOT-USE".to_string()),

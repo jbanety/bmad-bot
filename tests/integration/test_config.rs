@@ -205,6 +205,74 @@ fn test_config_load_nonexistent_file_rejected() {
 }
 
 #[test]
+fn test_config_invalid_log_format_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bad_yaml = r#"
+polling_interval_secs: 60
+git_provider:
+  provider: github
+  repo_owner: test
+  repo_name: test
+llm:
+  dev: { provider: anthropic, model: test }
+  review: { provider: anthropic, model: test }
+  supervisor: { provider: anthropic, model: test }
+notifications:
+  telegram: { enabled: false, chat_id: "x" }
+bmad_paths:
+  project_root: "."
+  output_folder: "out"
+  planning_artifacts: "out/planning"
+  implementation_artifacts: "out/impl"
+log_format: "xml"
+log_file: "bot.log"
+"#;
+    let path = tmp.path().join("bmad-bot.yaml");
+    std::fs::write(&path, bad_yaml).expect("write");
+
+    let config = BotConfig::load(&path).expect("load");
+    let err = config.validate().unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidField { ref field, .. } if field == "log_format"),
+        "expected InvalidField for log_format, got: {err:?}"
+    );
+}
+
+#[test]
+fn test_config_invalid_log_level_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bad_yaml = r#"
+polling_interval_secs: 60
+git_provider:
+  provider: github
+  repo_owner: test
+  repo_name: test
+llm:
+  dev: { provider: anthropic, model: test }
+  review: { provider: anthropic, model: test }
+  supervisor: { provider: anthropic, model: test }
+notifications:
+  telegram: { enabled: false, chat_id: "x" }
+bmad_paths:
+  project_root: "."
+  output_folder: "out"
+  planning_artifacts: "out/planning"
+  implementation_artifacts: "out/impl"
+log_level: "verbose"
+log_file: "bot.log"
+"#;
+    let path = tmp.path().join("bmad-bot.yaml");
+    std::fs::write(&path, bad_yaml).expect("write");
+
+    let config = BotConfig::load(&path).expect("load");
+    let err = config.validate().unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidField { ref field, .. } if field == "log_level"),
+        "expected InvalidField for log_level, got: {err:?}"
+    );
+}
+
+#[test]
 fn test_config_error_messages_contain_field_names() {
     // Verify each error variant includes the offending field name in the Display output
     let tmp = tempfile::tempdir().unwrap();
@@ -357,9 +425,11 @@ fn test_config_discovery_full_bmad_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    // Create full _bmad structure
+    // Create full _bmad structure with all known modules
     std::fs::create_dir_all(root.join("_bmad/bmm")).unwrap();
     std::fs::create_dir_all(root.join("_bmad/core")).unwrap();
+    std::fs::create_dir_all(root.join("_bmad/_config")).unwrap();
+    std::fs::create_dir_all(root.join("_bmad/_memory")).unwrap();
     std::fs::write(
         root.join("_bmad/bmm/config.yaml"),
         "# Version: 6.0.0-Beta.7\nproject_name: test\n",
@@ -372,6 +442,8 @@ fn test_config_discovery_full_bmad_directory() {
     assert_eq!(discovery.bmad_version.as_deref(), Some("6.0.0-Beta.7"));
     assert!(discovery.installed_modules.contains(&"bmm".to_string()));
     assert!(discovery.installed_modules.contains(&"core".to_string()));
+    assert!(discovery.installed_modules.contains(&"_config".to_string()));
+    assert!(discovery.installed_modules.contains(&"_memory".to_string()));
     assert!(discovery.config_path.is_some());
 }
 

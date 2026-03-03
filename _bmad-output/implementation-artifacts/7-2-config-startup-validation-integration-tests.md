@@ -1,6 +1,6 @@
 # Story 7.2: Config → Startup Validation Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -198,7 +198,7 @@ assert!(matches!(err, ConfigError::MissingSecret { ref env_var, .. } if env_var 
 - `log_format` must be `"json"` or `"pretty"`
 - `log_level` must be one of `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`
 - `git_provider.provider` must be `"github"` or `"gitlab"`
-- Each LLM role provider must be `"anthropic"`, `"openai"`, or `"github-models"`
+- Each LLM role provider must be `"anthropic"`, `"openai"`, or `"github-copilot"`
 - `bmad_paths.project_root`, `output_folder`, `planning_artifacts`, `implementation_artifacts` must be non-empty
 - `log_file` must be non-empty
 
@@ -280,22 +280,25 @@ The real `sprint-status.yaml` has comments like `# depends-on: 7-1`. These are *
 Claude (Anthropic)
 
 ### Debug Log References
-- All 51 tests pass (19 new test_config + 32 existing) — zero regressions
+- All 53 tests pass (18 new test_config + 35 existing) — zero regressions
 
 ### Completion Notes List
 - Task 1: Created `tests/integration/test_config.rs`, added `#[path]` mod declaration in `tests/integration.rs`. Imports: `BotConfig`, `BotSecrets`, `ConfigError`, `build_http_client`, `BmadDiscovery`, fixture helpers.
 - Task 2: `test_config_valid_roundtrip_succeeds` — serializes valid config to YAML, loads, validates, then validates secrets. AC #1 satisfied.
-- Task 3: 7 tests covering all invalid config variants: zero polling (InvalidField), unknown git provider (InvalidField), unknown LLM provider (InvalidField), empty project_root (MissingField), invalid YAML (YamlParse), nonexistent file (FileRead), plus field-name-in-error-message assertions. AC #2 satisfied.
+- Task 3: 9 tests covering all invalid config variants: zero polling (InvalidField), unknown git provider (InvalidField), unknown LLM provider (InvalidField), empty project_root (MissingField), invalid YAML (YamlParse), nonexistent file (FileRead), invalid log_format (InvalidField), invalid log_level (InvalidField), plus field-name-in-error-message assertions. AC #2 satisfied.
 - Task 4: 4 tests — missing anthropic key, missing github token, missing telegram token (with enabled=true), plus env-var-name-in-error-message assertions. All construct `BotSecrets` directly (no env var manipulation). AC #3 satisfied.
-- Task 5: 3 tests — full `_bmad/` structure (detected, version extracted, modules found), no `_bmad/` (not detected, empty), partial `_bmad/` without config.yaml (detected, no version). AC #4 satisfied.
+- Task 5: 3 tests — full `_bmad/` structure with all 4 known modules (bmm, core, _config, _memory) detected, version extracted; no `_bmad/` (not detected, empty); partial `_bmad/` without config.yaml (detected, no version). AC #4 satisfied.
 - Task 6: 1 test — `build_http_client()` returns `ClientWithMiddleware` without panicking. AC #5 satisfied.
 - No new dependencies added. All tests use `tempfile::tempdir()` for filesystem isolation.
+- Code Review fixes: corrected Dev Notes provider name (`github-models` → `github-copilot`); added `test_config_invalid_log_format_rejected` and `test_config_invalid_log_level_rejected`; enhanced discovery test to create and assert all 4 known modules; fixed misleading `"test-ghmodels-key"` string in `fixtures.rs`.
 
 ### File List
 - `tests/integration.rs` (modified — added `mod test_config` declaration)
-- `tests/integration/test_config.rs` (new — 19 integration tests)
+- `tests/integration/test_config.rs` (modified — 18 integration tests; added log_format/log_level rejection tests; enhanced discovery test for all 4 modules)
+- `tests/integration/helpers/fixtures.rs` (modified — fixed misleading `github_copilot_oauth_token` test value string)
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified — story status updated)
-- `_bmad-output/implementation-artifacts/7-2-config-startup-validation-integration-tests.md` (modified — tasks marked complete, dev agent record)
+- `_bmad-output/implementation-artifacts/7-2-config-startup-validation-integration-tests.md` (modified — tasks marked complete, dev agent record, code review fixes)
 
 ### Change Log
-- Story 7.2 implemented: 19 integration tests for config loading, validation, secrets, BMAD discovery, and HTTP client builder. All ACs #1–#5 satisfied. Full test suite passes (51 tests, 0 failures).
+- Story 7.2 implemented: 18 integration tests for config loading, validation, secrets, BMAD discovery, and HTTP client builder. All ACs #1–#5 satisfied. Full test suite passes (53 tests, 0 failures).
+- Code Review (post-implementation): fixed 1 HIGH (Dev Notes: `github-models` → `github-copilot`), 2 MEDIUM (added log_format/log_level tests; expanded discovery test to cover all 4 known modules), 2 LOW (fixtures.rs misleading string; test count in debug log corrected).
