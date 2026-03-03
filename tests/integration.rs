@@ -14,3 +14,6 @@ mod test_fixtures;
 
 #[path = "integration/test_config.rs"]
 mod test_config;
+
+#[path = "integration/test_watcher.rs"]
+mod test_watcher;
