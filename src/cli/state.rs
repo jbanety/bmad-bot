@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::discovery::BmadDiscovery;
+use bmad_bot::config::discovery::BmadDiscovery;
 
 /// Default state file name, written in the current working directory.
 pub const STATE_FILE_NAME: &str = "bmad-bot.state.json";
@@ -231,7 +231,7 @@ mod tests {
     fn test_new_running_sets_fields_correctly() {
         let state = DaemonState::new_running(
             PathBuf::from("test.log"),
-            crate::config::discovery::BmadDiscovery {
+            BmadDiscovery {
                 bmad_version: Some("1.0.0".to_string()),
                 installed_modules: vec!["bmm".to_string()],
                 config_path: None,
