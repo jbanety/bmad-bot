@@ -1,6 +1,6 @@
 # Story 7.10: Response Analyzer & Supervisor Rules Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -546,8 +546,10 @@ No issues encountered. All tests passed on first run.
 - Task 10: 3 full pipeline integration tests (confirmation flow, escalation flow via shared slot, completion flow with complementary layer verification).
 - Total: 49 new integration tests, all passing. 209 total tests in integration suite, 0 failures.
 - No new dependencies added. All imports from existing crate modules.
+- Code Review (cr-7.10, commit 4013602): 6 findings addressed — 3 Medium, 3 Low. Source fixes: 'ready for review' → 'is ready for review' (false-positive prevention), 'story would you like' → 'story would you like me' (pattern tightening). Test fixes: brittle rule_count assertion, missing 'choose [2]'/'choose [3]' coverage, declarative false-positive guard, misleading comments corrected. Post-review: 211 integration tests pass (1012 total).
 
 ### File List
 
-- `tests/integration/test_response_analyzer_supervisor.rs` (NEW) — 49 integration tests
+- `tests/integration/test_response_analyzer_supervisor.rs` (NEW) — 49 integration tests; +4 tests added by CR (53 total)
 - `tests/integration.rs` (MODIFIED) — added `#[path]` module registration
+- `src/session/analyzer.rs` (MODIFIED by CR) — tightened COMPLETION_SIGNALS and STORY_SELECTION_PATTERNS
