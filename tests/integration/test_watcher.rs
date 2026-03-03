@@ -5,9 +5,10 @@
 //! and `deps` module functions together — no mocks. The only external dependency
 //! is the filesystem, isolated via `tempfile::tempdir()`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use bmad_bot::watcher::deps::DependencyGraph;
+use bmad_bot::watcher::deps::{build_full_dependency_map, find_cascade_blocks, DependencyGraph};
 use bmad_bot::watcher::{SprintStatusFile, Watcher, WatcherError};
 
 use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};
@@ -76,7 +77,13 @@ fn test_watcher_poll_returns_eligible_with_deps_satisfied() {
 
 #[test]
 fn test_watcher_poll_dependency_valid_ordering() {
-    // Arrange: same as above — verify topological order
+    // Arrange: 3 epics — verifies topological ordering with multiple independent stories.
+    // Epic-1: 1-1 done → 1-2 ready (dep met) → 1-3 ready (dep NOT met, 1-2 not done)
+    // Epic-2: 2-1 ready (no deps), 2-2 backlog
+    // Epic-3: 3-1 done → 3-2 ready (dep met)
+    // Expected eligible: [1-2, 2-1, 3-2] in topological order.
+    // 1-2 MUST appear before any story that depends on it (3-2 has no relation, but
+    // we explicitly verify document order is respected for independent stories).
     let tmp = tempfile::tempdir().unwrap();
     let entries = &[
         ("epic-1", "in-progress"),
@@ -86,6 +93,9 @@ fn test_watcher_poll_dependency_valid_ordering() {
         ("epic-2", "in-progress"),
         ("2-1-polling", "ready-for-dev"),
         ("2-2-deps-resolution", "backlog"),
+        ("epic-3", "in-progress"),
+        ("3-1-scaffolding", "done"),
+        ("3-2-parser", "ready-for-dev"),
     ];
     setup_sprint_status(tmp.path(), entries);
 
@@ -93,12 +103,21 @@ fn test_watcher_poll_dependency_valid_ordering() {
     let watcher = make_watcher(tmp.path());
     let eligible = watcher.poll().expect("poll should succeed");
 
-    // Assert: 1-2 must come before any story that depends on it.
-    // Since 1-3 is filtered out (dep unmet), we just verify 1-2 appears in the result
-    // and the overall ordering is valid (no dependent appears before its dependency).
+    // Assert correct set of eligible stories
     let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
-    let pos_1_2 = keys.iter().position(|k| *k == "1-2-cli-framework");
-    assert!(pos_1_2.is_some(), "1-2 must be in eligible list");
+    assert_eq!(keys.len(), 3, "Expected 3 eligible stories, got: {keys:?}");
+    assert!(keys.contains(&"1-2-cli-framework"), "1-2 must be eligible");
+    assert!(keys.contains(&"2-1-polling"), "2-1 must be eligible");
+    assert!(keys.contains(&"3-2-parser"), "3-2 must be eligible");
+    assert!(!keys.contains(&"1-3-init-command"), "1-3 must NOT be eligible (dep 1-2 not done)");
+
+    // Assert topological ordering: document order is used as tiebreaker for independent
+    // stories, so 1-2 (epic-1) < 2-1 (epic-2) < 3-2 (epic-3).
+    let pos_1_2 = keys.iter().position(|k| *k == "1-2-cli-framework").unwrap();
+    let pos_2_1 = keys.iter().position(|k| *k == "2-1-polling").unwrap();
+    let pos_3_2 = keys.iter().position(|k| *k == "3-2-parser").unwrap();
+    assert!(pos_1_2 < pos_2_1, "1-2 (epic-1) must precede 2-1 (epic-2) in document order");
+    assert!(pos_2_1 < pos_3_2, "2-1 (epic-2) must precede 3-2 (epic-3) in document order");
 }
 
 // ===========================================================================
@@ -196,6 +215,21 @@ fn test_watcher_in_progress_does_not_trigger_cascade() {
     assert!(keys.contains(&"2-1-polling"));
     // 1-2 is NOT cascade-blocked — just skipped because dep not done
     assert!(!keys.contains(&"1-2-cli-framework"));
+
+    // Directly verify find_cascade_blocks() returns EMPTY for in-progress — proves
+    // the exclusion is dep-not-met, NOT cascade blocking.
+    let all_statuses: Vec<(String, String)> = entries
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let all_statuses_map: HashMap<String, String> = all_statuses.iter().cloned().collect();
+    let full_dep_map = build_full_dependency_map(&all_statuses);
+    let story_1_2 = make_test_story("1-2-cli-framework", "cli-framework", vec!["1-1-scaffolding".to_string()]);
+    let cascade_blocks = find_cascade_blocks(&[story_1_2], &all_statuses_map, &full_dep_map);
+    assert!(
+        cascade_blocks.is_empty(),
+        "in-progress must NOT trigger cascade blocking, got: {cascade_blocks:?}"
+    );
 }
 
 #[test]
@@ -218,6 +252,21 @@ fn test_watcher_review_status_does_not_trigger_cascade() {
     // 1-2 skipped (dep 1-1 not done), but NOT cascade-blocked
     assert!(keys.contains(&"2-1-polling"));
     assert!(!keys.contains(&"1-2-cli-framework"));
+
+    // Directly verify find_cascade_blocks() returns EMPTY for review — proves
+    // the exclusion is dep-not-met, NOT cascade blocking.
+    let all_statuses: Vec<(String, String)> = entries
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let all_statuses_map: HashMap<String, String> = all_statuses.iter().cloned().collect();
+    let full_dep_map = build_full_dependency_map(&all_statuses);
+    let story_1_2 = make_test_story("1-2-cli-framework", "cli-framework", vec!["1-1-scaffolding".to_string()]);
+    let cascade_blocks = find_cascade_blocks(&[story_1_2], &all_statuses_map, &full_dep_map);
+    assert!(
+        cascade_blocks.is_empty(),
+        "review must NOT trigger cascade blocking, got: {cascade_blocks:?}"
+    );
 }
 
 // ===========================================================================
@@ -255,15 +304,12 @@ fn test_watcher_poll_all_done_returns_no_eligible() {
 
 #[test]
 fn test_watcher_cyclic_dependency_detected() {
-    // Arrange: manually create stories with circular deps
+    // Arrange: manually create stories with circular deps.
     // Cannot occur naturally via derive_dependencies, so we create StoryInfo
     // manually and call DependencyGraph directly.
-    let mut story_a = make_test_story("1-1-foo", "foo", vec!["1-2-bar".to_string()]);
-    let mut story_b = make_test_story("1-2-bar", "bar", vec!["1-1-foo".to_string()]);
-
-    // Both must be ready-for-dev to be included in the graph
-    story_a.status = "ready-for-dev".to_string();
-    story_b.status = "ready-for-dev".to_string();
+    // make_test_story already sets status = "ready-for-dev" by default.
+    let story_a = make_test_story("1-1-foo", "foo", vec!["1-2-bar".to_string()]);
+    let story_b = make_test_story("1-2-bar", "bar", vec!["1-1-foo".to_string()]);
 
     let stories = vec![story_a, story_b];
     let all_statuses: Vec<(String, String)> = vec![
@@ -349,9 +395,15 @@ fn test_watcher_poll_missing_file_error_contains_path() {
 
     // Verify the error message contains the expected path
     let err_msg = format!("{err}");
+    // Verify both the filename AND the actual temp path are present in the error.
     assert!(
         err_msg.contains("sprint-status.yaml"),
         "Error message should contain 'sprint-status.yaml', got: {err_msg}"
+    );
+    let expected_path_fragment = impl_artifacts.to_string_lossy();
+    assert!(
+        err_msg.contains(expected_path_fragment.as_ref()),
+        "Error message should contain the actual path '{expected_path_fragment}', got: {err_msg}"
     );
 }
 

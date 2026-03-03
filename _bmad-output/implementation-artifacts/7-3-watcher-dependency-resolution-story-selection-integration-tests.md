@@ -1,6 +1,6 @@
 # Story 7.3: Watcher → Dependency Resolution → Story Selection Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -319,6 +319,13 @@ Full suite: 69 passed, 0 failed.
 - Task 7: 4 SprintStatusFile integration tests — load, stories(), eligible_stories(), malformed YAML
 - Helper functions `setup_sprint_status()` and `make_watcher()` abstract common patterns (nested dir creation, config wiring)
 - Key design decision: `make_test_config(dir)` sets `implementation_artifacts` to `{dir}/_bmad-output/implementation-artifacts`, so `setup_sprint_status()` creates nested dirs and writes sprint-status.yaml there
+
+**Code Review Fixes (post-review):**
+- [MEDIUM] `test_watcher_poll_dependency_valid_ordering`: replaced vacuous `pos_1_2.is_some()` check with a real 3-epic scenario that verifies document-order tiebreaking (pos_1_2 < pos_2_1 < pos_3_2)
+- [MEDIUM] `test_watcher_in_progress_does_not_trigger_cascade` + `test_watcher_review_status_does_not_trigger_cascade`: added direct `find_cascade_blocks()` assertion (returns empty Vec) proving exclusion is dep-not-met, not cascade-blocked
+- [LOW] Removed dead `let mut` + no-op status reassignment in `test_watcher_cyclic_dependency_detected`
+- [LOW] `test_watcher_poll_missing_file_error_contains_path`: strengthened to assert full temp dir path present in error message, not just `"sprint-status.yaml"` substring
+- Added `HashMap`, `build_full_dependency_map`, `find_cascade_blocks` imports for cascade direct-call tests
 
 ### File List
 - tests/integration/test_watcher.rs (NEW) — 16 integration tests for watcher/deps/story-selection chain
