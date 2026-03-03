@@ -98,7 +98,7 @@ development_status:
   epic-6-retrospective: optional
 
   epic-7: in-progress # was blocked by epic-8 — epic-8 now in review, tooling surface finalized
-  7-1-integration-test-infrastructure-fixtures: ready-for-dev # depends-on: epic-8 (resolved)
+  7-1-integration-test-infrastructure-fixtures: review # depends-on: epic-8 (resolved)
   7-2-config-startup-validation-integration-tests: blocked # depends-on: 7-1
   7-3-watcher-dependency-resolution-story-selection-integration-tests: blocked # depends-on: 7-1
   7-4-pipeline-orchestration-integration-tests: blocked # depends-on: 7-1
