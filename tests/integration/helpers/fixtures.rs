@@ -367,6 +367,17 @@ impl PipelineTestBuilder {
         self
     }
 
+    /// Register a branch name to be created in the test git repo during `build()`.
+    ///
+    /// Use this when testing methods like `process_recovered_session()` that call
+    /// `push_branch()` internally but don't use the dev session mock.
+    /// This avoids having to configure a spurious `with_session()` outcome just to
+    /// trigger branch creation.
+    pub fn with_branch(mut self, branch: impl Into<String>) -> Self {
+        self.branches.push(branch.into());
+        self
+    }
+
     pub fn with_review(mut self, outcome: ReviewOutcome) -> Self {
         self.review_outcome = Some(outcome);
         self

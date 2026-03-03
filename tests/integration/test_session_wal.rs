@@ -229,7 +229,10 @@ async fn test_wal_no_file_returns_none() {
 
 #[tokio::test]
 async fn test_wal_process_recovered_session_completed() {
-    // Arrange — pipeline with mocks
+    // Arrange — pipeline with mocks.
+    // with_branch() creates "story/1-2-cli" in the test git repo so that
+    // process_recovered_session() → push_branch() succeeds. The session mock
+    // is NOT used by process_recovered_session (it takes an outcome directly).
     let story = crate::helpers::fixtures::make_test_story("1-2-cli", "cli", vec![]);
     let outcome = SessionOutcome::Completed {
         story_key: "1-2-cli".to_string(),
@@ -241,14 +244,7 @@ async fn test_wal_process_recovered_session_completed() {
     };
 
     let (pipeline, _notifier, git_provider, _env) = PipelineTestBuilder::new()
-        .with_session(SessionOutcome::Completed {
-            story_key: "1-2-cli".to_string(),
-            branch: "story/1-2-cli".to_string(),
-            decisions: vec![],
-            pr_context: None,
-            pr_how_to_test: None,
-            pr_additional_info: None,
-        })
+        .with_branch("story/1-2-cli")
         .with_review(ReviewOutcome::Skipped {
             reason: "test".to_string(),
         })
@@ -269,6 +265,9 @@ async fn test_wal_process_recovered_session_completed() {
 #[tokio::test]
 async fn test_wal_process_recovered_session_failed_creates_failure_pr() {
     // Arrange
+    // with_branch() creates the story branch so push_branch() succeeds inside
+    // process_recovered_session(). For Failed outcomes the branch is
+    // "story/{story_key}" by convention.
     let story = crate::helpers::fixtures::make_test_story("1-2-cli", "cli", vec![]);
     let outcome = SessionOutcome::Failed {
         story_key: "1-2-cli".to_string(),
@@ -277,11 +276,7 @@ async fn test_wal_process_recovered_session_failed_creates_failure_pr() {
     };
 
     let (pipeline, _notifier, git_provider, _env) = PipelineTestBuilder::new()
-        .with_session(SessionOutcome::Failed {
-            story_key: "1-2-cli".to_string(),
-            error: "dummy".to_string(),
-            decisions: vec![],
-        })
+        .with_branch("story/1-2-cli")
         .build();
 
     // Act
