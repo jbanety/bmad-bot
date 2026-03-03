@@ -516,8 +516,18 @@ impl SessionRunner {
             }
         };
 
-        let outcome = self
-            .run_session(
+        // Phase 3 — Activate agent properly before resuming work.
+        // The WAL only contains text-only messages — no persona, no tool calls,
+        // no project context. Passing raw WAL to run_session() would give the
+        // fresh LLM zero activation context. Instead, follow the same pattern as
+        // context_limit_recovery: summarize history, activate agent, then resume.
+        let outcome = if state.chat_history.is_empty() {
+            // Empty WAL (crash before first response) — fresh start
+            tracing::info!(
+                action = "crash_recovery_empty_wal",
+                "Empty WAL — delegating to fresh run_session(None)"
+            );
+            self.run_session(
                 &agent,
                 &story_info,
                 &provider_name,
@@ -525,11 +535,70 @@ impl SessionRunner {
                 &base_branch,
                 escalation_slot.clone(),
                 decision_log.clone(),
-                Some(state),
+                None,
             )
-            .await;
+            .await
+        } else {
+            // Non-empty WAL — summarize + activate + recover (same as context_limit_recovery)
+            let last_exchanges =
+                Self::extract_last_exchanges(&state.chat_history, RECOVERY_KEEP_LAST_EXCHANGES);
+            let formatted_exchanges = Self::format_exchanges_for_message(&last_exchanges);
 
-        // Phase 3 — ALWAYS delete WAL after recovery attempt (prevents infinite loops)
+            let summary = match self
+                .summarize_history(&state, &story_info, &provider_name, &model_name)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(
+                        action = "crash_recovery_summary_failed",
+                        error = %e,
+                        "History summarization failed during crash recovery"
+                    );
+                    let _ = SessionState::delete(&self.state_file_path).await;
+                    return SessionOutcome::Failed {
+                        story_key: story_info.story_key.clone(),
+                        error: format!("Crash recovery summarization failed: {e}"),
+                        decisions: decision_log.records(),
+                    };
+                }
+            };
+
+            tracing::info!(
+                action = "crash_recovery_summary_generated",
+                original_len = %state.chat_history.len(),
+                summary_len = %summary.len(),
+                "Session summary generated for crash recovery"
+            );
+
+            let recovery_message = self.build_recovery_message(
+                &story_info,
+                &summary,
+                &formatted_exchanges,
+                "Crash Recovery",
+            );
+
+            match self
+                .drive_activation_and_recover(
+                    &agent,
+                    &state,
+                    &story_info,
+                    &provider_name,
+                    &model_name,
+                    &base_branch,
+                    escalation_slot.clone(),
+                    decision_log.clone(),
+                    &recovery_message,
+                    0, // recovery_depth: first attempt (not a recursive context-limit recovery)
+                )
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(outcome) => outcome,
+            }
+        };
+
+        // Phase 4 — ALWAYS delete WAL after recovery attempt (prevents infinite loops)
         let _ = SessionState::delete(&self.state_file_path).await;
 
         outcome
@@ -812,12 +881,13 @@ impl SessionRunner {
         story: &StoryInfo,
         summary: &str,
         formatted_exchanges: &str,
+        reason: &str,
     ) -> String {
         format!(
             "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
              \n\
-             === SESSION RECOVERY — Context Window Limit Reached ===\n\
-             Your previous session hit the context window limit. Below is your recovery context:\n\
+             === SESSION RECOVERY — {reason} ===\n\
+             Your previous session was interrupted ({reason_lower}). Below is your recovery context:\n\
              \n\
              === Session Summary ===\n\
              {summary}\n\
@@ -828,6 +898,8 @@ impl SessionRunner {
              The story file is at: {path}\n\
              Read this file to see current task checkboxes and progress.\n\
              Continue working directly on the current task. Do NOT restart the workflow from the beginning.",
+            reason = reason,
+            reason_lower = reason.to_lowercase(),
             path = story.specs_path.display(),
         )
     }
@@ -1024,7 +1096,12 @@ impl SessionRunner {
             }
         };
 
-        let recovery_message = self.build_recovery_message(story, &summary, &formatted_exchanges);
+        let recovery_message = self.build_recovery_message(
+            story,
+            &summary,
+            &formatted_exchanges,
+            "Context Window Limit Reached",
+        );
 
         // Step 4-7 — Drive activation and delegate to run_session()
         match self
@@ -2728,10 +2805,19 @@ mod tests {
     fn test_build_recovery_message_contains_all_sections() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(&story, "summary text", "exchange text");
+        let msg = runner.build_recovery_message(
+            &story,
+            "summary text",
+            "exchange text",
+            "Context Window Limit Reached",
+        );
         assert!(
             msg.contains("SESSION RECOVERY"),
             "Should contain SESSION RECOVERY header"
+        );
+        assert!(
+            msg.contains("Context Window Limit Reached"),
+            "Should contain the reason in the header"
         );
         assert!(
             msg.contains("Session Summary"),
@@ -2752,7 +2838,7 @@ mod tests {
     fn test_build_recovery_message_includes_story_path() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(&story, "s", "e");
+        let msg = runner.build_recovery_message(&story, "s", "e", "Context Window Limit Reached");
         assert!(
             msg.contains("6-4-context-window-limit-recovery.md"),
             "Should contain the story specs_path"
@@ -2763,7 +2849,12 @@ mod tests {
     fn test_build_recovery_message_does_not_contain_project_context() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(&story, "summary", "exchanges");
+        let msg = runner.build_recovery_message(
+            &story,
+            "summary",
+            "exchanges",
+            "Context Window Limit Reached",
+        );
         // Project context is loaded by the agent via BMAD activation, NOT injected in message
         assert!(
             !msg.contains("Project Context"),
@@ -2775,7 +2866,7 @@ mod tests {
     fn test_build_recovery_message_contains_continue_instruction() {
         let runner = make_test_runner();
         let story = make_test_story_info();
-        let msg = runner.build_recovery_message(&story, "s", "e");
+        let msg = runner.build_recovery_message(&story, "s", "e", "Crash Recovery");
         assert!(
             msg.contains("Continue working directly on the current task"),
             "Should instruct agent to continue"
@@ -2784,6 +2875,63 @@ mod tests {
             msg.contains("Do NOT restart the workflow"),
             "Should instruct agent not to restart"
         );
+    }
+
+    #[test]
+    fn test_build_recovery_message_crash_recovery_reason() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let msg = runner.build_recovery_message(&story, "summary", "exchanges", "Crash Recovery");
+        assert!(
+            msg.contains("=== SESSION RECOVERY — Crash Recovery ==="),
+            "Should contain crash recovery reason in header"
+        );
+        assert!(
+            msg.contains("crash recovery"),
+            "Should contain lowercase reason in description"
+        );
+        assert!(
+            !msg.contains("Context Window"),
+            "Crash recovery message should not mention context window"
+        );
+    }
+
+    #[test]
+    fn test_build_recovery_message_context_limit_reason() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let msg = runner.build_recovery_message(
+            &story,
+            "summary",
+            "exchanges",
+            "Context Window Limit Reached",
+        );
+        assert!(
+            msg.contains("=== SESSION RECOVERY — Context Window Limit Reached ==="),
+            "Should contain context limit reason in header"
+        );
+        assert!(
+            msg.contains("context window limit reached"),
+            "Should contain lowercase reason in description"
+        );
+    }
+
+    #[test]
+    fn test_build_recovery_message_reason_is_parameterized() {
+        let runner = make_test_runner();
+        let story = make_test_story_info();
+        let crash_msg = runner.build_recovery_message(&story, "s", "e", "Crash Recovery");
+        let ctx_msg =
+            runner.build_recovery_message(&story, "s", "e", "Context Window Limit Reached");
+        // Both share the same structure but differ in the reason header
+        assert!(crash_msg.contains("SESSION RECOVERY — Crash Recovery"));
+        assert!(ctx_msg.contains("SESSION RECOVERY — Context Window Limit Reached"));
+        // Both contain the common sections
+        for msg in [&crash_msg, &ctx_msg] {
+            assert!(msg.contains("Session Summary"));
+            assert!(msg.contains("Current Story"));
+            assert!(msg.contains("Continue working directly"));
+        }
     }
 
     // -- compressed state tests --
