@@ -4,9 +4,12 @@
 //! `DependencyGraph`, and `deps` module functions — no mocks.
 //! Filesystem isolation via `tempfile::tempdir()`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use bmad_bot::watcher::deps::DependencyGraph;
+use bmad_bot::watcher::deps::{
+    build_full_dependency_map, derive_dependencies, find_cascade_blocks, DependencyGraph,
+};
 use bmad_bot::watcher::{SprintStatusFile, Watcher, WatcherError};
 
 use super::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};
@@ -69,10 +72,9 @@ fn test_watcher_poll_dependency_valid_ordering() {
     let eligible = watcher.poll().expect("poll should succeed");
     let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
 
-    // 1-2 should come before 1-3 (but 1-3 is filtered out by dep check).
-    // Main check: the returned list is in dependency-valid order.
-    // Since 1-2 and 2-1 are independent, both orderings are valid.
-    // But sprint-order tiebreaker means 1-2 before 2-1.
+    // 1-3 is filtered out (its dep 1-2 is not done).
+    // Remaining eligible: 1-2 and 2-1 — independent across epics.
+    // Sprint-order tiebreaker (insertion order in YAML) means 1-2 before 2-1.
     assert_eq!(keys, vec!["1-2-cli-framework", "2-1-polling"]);
 }
 
@@ -147,8 +149,23 @@ fn test_watcher_in_progress_does_not_cascade_block() {
     // 2-1 has no deps → eligible.
     let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
     assert_eq!(keys, vec!["2-1-polling"]);
-    // The key distinction: 1-2 is just "skipped" not "cascade-blocked".
-    // We confirm by checking poll succeeds (no error) and 2-1 is returned.
+
+    // CRITICAL: Directly verify find_cascade_blocks() returns empty.
+    // This distinguishes "dep not satisfied" (skipped) from "cascade-blocked".
+    // poll() returns the same output for both; only direct inspection proves the difference.
+    let path = tmp.path().join("sprint-status.yaml");
+    let ssf = SprintStatusFile::load(&path, tmp.path()).unwrap();
+    let mut eligible_for_cascade = ssf.eligible_stories();
+    let all_entries = ssf.entries();
+    let all_statuses_map: HashMap<String, String> = all_entries.iter().cloned().collect();
+    derive_dependencies(&mut eligible_for_cascade, all_entries);
+    let full_dep_map = build_full_dependency_map(all_entries);
+    let cascade_blocks = find_cascade_blocks(&eligible_for_cascade, &all_statuses_map, &full_dep_map);
+    assert!(
+        cascade_blocks.is_empty(),
+        "in-progress must NOT trigger cascade blocking, found {} cascade block(s)",
+        cascade_blocks.len()
+    );
 }
 
 #[test]
@@ -171,6 +188,22 @@ fn test_watcher_review_does_not_cascade_block() {
     // 1-2 skipped (dep not done, review != done), NOT cascade-blocked.
     let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
     assert_eq!(keys, vec!["2-1-polling"]);
+
+    // CRITICAL: Directly verify find_cascade_blocks() returns empty.
+    // Proves "review" is a transient status — not a cascade trigger.
+    let path = tmp.path().join("sprint-status.yaml");
+    let ssf = SprintStatusFile::load(&path, tmp.path()).unwrap();
+    let mut eligible_for_cascade = ssf.eligible_stories();
+    let all_entries = ssf.entries();
+    let all_statuses_map: HashMap<String, String> = all_entries.iter().cloned().collect();
+    derive_dependencies(&mut eligible_for_cascade, all_entries);
+    let full_dep_map = build_full_dependency_map(all_entries);
+    let cascade_blocks = find_cascade_blocks(&eligible_for_cascade, &all_statuses_map, &full_dep_map);
+    assert!(
+        cascade_blocks.is_empty(),
+        "review must NOT trigger cascade blocking, found {} cascade block(s)",
+        cascade_blocks.len()
+    );
 }
 
 // ===========================================================================
@@ -209,11 +242,9 @@ fn test_watcher_poll_all_done_returns_no_eligible() {
 fn test_watcher_cyclic_dependency_detected() {
     // Create stories with manually injected circular deps.
     // A depends on B, B depends on A → cycle.
-    let mut story_a = make_test_story("1-1-alpha", "alpha", vec!["1-2-beta".to_string()]);
-    let mut story_b = make_test_story("1-2-beta", "beta", vec!["1-1-alpha".to_string()]);
-    // Override status to ready-for-dev (make_test_story default)
-    story_a.status = "ready-for-dev".to_string();
-    story_b.status = "ready-for-dev".to_string();
+    // make_test_story defaults to status="ready-for-dev" (no override needed).
+    let story_a = make_test_story("1-1-alpha", "alpha", vec!["1-2-beta".to_string()]);
+    let story_b = make_test_story("1-2-beta", "beta", vec!["1-1-alpha".to_string()]);
 
     let all_statuses: Vec<(String, String)> = vec![
         ("1-1-alpha".to_string(), "ready-for-dev".to_string()),
@@ -351,4 +382,52 @@ fn test_sprint_status_malformed_yaml_returns_parse_error() {
         matches!(err, WatcherError::SprintStatusParse(_)),
         "Expected SprintStatusParse, got: {err:?}"
     );
+}
+
+#[test]
+fn test_sprint_status_entries_returns_all_raw_entries() {
+    // entries() returns ALL entries including epics and retrospectives (no filtering)
+    let tmp = tempfile::tempdir().unwrap();
+    let entries = vec![
+        ("epic-1", "in-progress"),
+        ("1-1-scaffolding", "done"),
+        ("1-2-cli-framework", "ready-for-dev"),
+        ("epic-1-retrospective", "optional"),
+        ("epic-2", "in-progress"),
+        ("2-1-polling", "ready-for-dev"),
+    ];
+    write_sprint_status(tmp.path(), entries);
+
+    let path = tmp.path().join("sprint-status.yaml");
+    let ssf = SprintStatusFile::load(&path, tmp.path()).unwrap();
+
+    let raw = ssf.entries();
+    // All 6 entries preserved — epics and retrospectives are NOT filtered out
+    assert_eq!(raw.len(), 6);
+    // Verify specific keys present (order-preserving)
+    let raw_keys: Vec<&str> = raw.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(raw_keys.contains(&"epic-1"));
+    assert!(raw_keys.contains(&"epic-1-retrospective"));
+    assert!(raw_keys.contains(&"1-1-scaffolding"));
+    assert!(raw_keys.contains(&"2-1-polling"));
+}
+
+#[test]
+fn test_sprint_status_entry_count_matches_raw_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entries = vec![
+        ("epic-1", "in-progress"),
+        ("1-1-scaffolding", "done"),
+        ("1-2-cli-framework", "ready-for-dev"),
+        ("2-1-polling", "ready-for-dev"),
+        ("2-2-deps-resolution", "backlog"),
+    ];
+    write_sprint_status(tmp.path(), entries);
+
+    let path = tmp.path().join("sprint-status.yaml");
+    let ssf = SprintStatusFile::load(&path, tmp.path()).unwrap();
+
+    // entry_count() == entries().len() — consistent view of raw entries
+    assert_eq!(ssf.entry_count(), 5);
+    assert_eq!(ssf.entry_count(), ssf.entries().len());
 }

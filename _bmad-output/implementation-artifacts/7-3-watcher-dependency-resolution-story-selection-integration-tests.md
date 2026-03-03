@@ -1,6 +1,6 @@
 # Story 7.3: Watcher → Dependency Resolution → Story Selection Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -41,7 +41,7 @@ So that I'm confident the daemon picks the right stories in the right order.
 
 - [x] Task 1: Create integration test file `tests/integration/test_watcher.rs` (AC: #1–#5)
   - [x] 1.1 Add `mod test_watcher;` declaration in `tests/integration.rs`
-  - [x] 1.2 Import required types: `Watcher`, `SprintStatusFile`, `StoryInfo`, `WatcherError`, `BotConfig`, deps functions
+  - [x] 1.2 Import required types: `Watcher`, `SprintStatusFile`, `WatcherError`, `DependencyGraph` (for Task 5), `build_full_dependency_map`, `derive_dependencies`, `find_cascade_blocks` (for Task 3.5 cascade proofs). Note: `StoryInfo` and `BotConfig` are inferred via type inference — no explicit imports needed.
 
 - [x] Task 2: Write watcher poll with dependency filtering test (AC: #1)
   - [x] 2.1 Create temp dir, use `write_sprint_status()` from helpers with 5 stories (1-1 done, 1-2 ready-for-dev, 1-3 ready-for-dev, 2-1 ready-for-dev, 2-2 backlog)
@@ -55,7 +55,7 @@ So that I'm confident the daemon picks the right stories in the right order.
   - [x] 3.2 Poll via `Watcher` → assert 1-2 and 1-3 are NOT in eligible results (cascade-blocked)
   - [x] 3.3 Add 2-1 as `ready-for-dev` with no deps → assert it IS returned (independent epic unaffected)
   - [x] 3.4 Test with `needs-clarification` status → verify same cascade behavior as `blocked`
-  - [x] 3.5 **Negative test:** Write sprint-status with 1-1 as `in-progress`, 1-2 as `ready-for-dev` → assert 1-2 is NOT cascade-blocked (just skipped because dep not done). Repeat with `review` status. This confirms only `BLOCKING_STATUSES` (`blocked`, `needs-clarification`) trigger cascade — transient statuses do not.
+  - [x] 3.5 **Negative test:** Write sprint-status with 1-1 as `in-progress`, 1-2 as `ready-for-dev` → assert 1-2 is NOT cascade-blocked (just skipped because dep not done). Repeat with `review` status. This confirms only `BLOCKING_STATUSES` (`blocked`, `needs-clarification`) trigger cascade — transient statuses do not. Each test also calls `find_cascade_blocks()` directly after `poll()` to explicitly assert zero cascade blocks (distinguishing "cascade-blocked" from "dep-not-satisfied" at the integration level).
 
 - [x] Task 4: Write all-done scenario test (AC: #3)
   - [x] 4.1 Write sprint-status with all stories as `done`
@@ -76,6 +76,8 @@ So that I'm confident the daemon picks the right stories in the right order.
   - [x] 7.2 Test `stories()` filters out epic and retrospective entries
   - [x] 7.3 Test `eligible_stories()` returns only `ready-for-dev` stories
   - [x] 7.4 Test malformed YAML → assert `WatcherError::SprintStatusParse`
+  - [x] 7.5 Test `entries()` returns all raw entries including epics and retrospectives (unfiltered)
+  - [x] 7.6 Test `entry_count()` equals `entries().len()` — consistent raw entry view
 
 ## Dev Notes
 
@@ -305,20 +307,21 @@ tests/
 Claude Sonnet 4 (Anthropic)
 
 ### Debug Log References
-No issues encountered. All 13 integration tests passed on first run. Full regression suite (63 tests) green.
+No issues on original run. Code review (CR) applied fixes: H1 (imports + direct cascade proof), H2 (negative cascade tests strengthened with `find_cascade_blocks()` assertions), M4 (`entries()`/`entry_count()` tests added), L6 (comment fixed), L7 (redundant mutation removed). All 65 tests pass.
 
 ### Completion Notes List
-- Task 1: Created `tests/integration/test_watcher.rs`, added `#[path]` declaration in `tests/integration.rs`. Imports: `Watcher`, `SprintStatusFile`, `WatcherError`, `DependencyGraph`, fixtures (`make_test_config`, `make_test_story`, `write_sprint_status`).
+- Task 1: Created `tests/integration/test_watcher.rs`, added `#[path]` declaration in `tests/integration.rs`. Imports: `Watcher`, `SprintStatusFile`, `WatcherError`, `DependencyGraph`, `build_full_dependency_map`, `derive_dependencies`, `find_cascade_blocks`, fixtures (`make_test_config`, `make_test_story`, `write_sprint_status`).
 - Task 2: Two tests — `test_watcher_poll_returns_eligible_with_deps_satisfied` (asserts exactly [1-2, 2-1] eligible) and `test_watcher_poll_dependency_valid_ordering` (asserts sprint-order tiebreaker: 1-2 before 2-1).
-- Task 3: Four tests — `test_watcher_cascade_blocks_transitive_dependents` (blocked → cascade), `test_watcher_cascade_blocks_needs_clarification` (needs-clarification → cascade), `test_watcher_in_progress_does_not_cascade_block` (in-progress → no cascade), `test_watcher_review_does_not_cascade_block` (review → no cascade). Covers 3.1-3.5.
+- Task 3: Four tests — `test_watcher_cascade_blocks_transitive_dependents` (blocked → cascade), `test_watcher_cascade_blocks_needs_clarification` (needs-clarification → cascade), `test_watcher_in_progress_does_not_cascade_block` (in-progress → no cascade, verified via direct `find_cascade_blocks()` call), `test_watcher_review_does_not_cascade_block` (review → no cascade, verified via direct `find_cascade_blocks()` call). Covers 3.1-3.5.
 - Task 4: `test_watcher_poll_all_done_returns_no_eligible` — all stories done → `NoEligibleStories`.
 - Task 5: `test_watcher_cyclic_dependency_detected` — manual circular deps via `make_test_story` → `DependencyGraph::topological_sort()` → `CyclicDependency` with both keys.
 - Task 6: `test_watcher_poll_missing_file_returns_error` — empty tempdir → `SprintStatusNotFound` containing "sprint-status.yaml".
-- Task 7: Four supplementary tests — `test_sprint_status_load_valid_yaml_correct_story_count` (3 stories, order preserved), `test_sprint_status_stories_filters_out_epics_and_retros`, `test_sprint_status_eligible_stories_returns_only_ready_for_dev`, `test_sprint_status_malformed_yaml_returns_parse_error`.
+- Task 7: Six supplementary tests — `test_sprint_status_load_valid_yaml_correct_story_count` (3 stories, order preserved), `test_sprint_status_stories_filters_out_epics_and_retros`, `test_sprint_status_eligible_stories_returns_only_ready_for_dev`, `test_sprint_status_malformed_yaml_returns_parse_error`, `test_sprint_status_entries_returns_all_raw_entries` (all 6 raw entries including epics/retros), `test_sprint_status_entry_count_matches_raw_entries` (entry_count == entries().len()).
 
 ### Change Log
 - 2026-03-02: Story 7.3 implemented — 13 integration tests covering AC #1–#5 plus supplementary SprintStatusFile tests. All 63 tests pass.
+- 2026-03-02: Code review fixes applied — imports expanded, negative cascade tests strengthened with direct `find_cascade_blocks()` assertions, `entries()`/`entry_count()` tests added (Tasks 7.5/7.6), misleading comment fixed, redundant mutation removed. 15 integration tests. All 65 tests pass.
 
 ### File List
 - `tests/integration.rs` (modified — added `test_watcher` module declaration)
-- `tests/integration/test_watcher.rs` (new — 13 integration tests, 355 lines)
+- `tests/integration/test_watcher.rs` (modified — 15 integration tests, 433 lines)
