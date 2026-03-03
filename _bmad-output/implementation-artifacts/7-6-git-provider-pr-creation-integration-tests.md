@@ -1,6 +1,6 @@
 # Story 7.6: Git Provider & PR Creation Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -448,9 +448,9 @@ Claude Sonnet 4 (Anthropic)
 
 ### Debug Log References
 - `cargo build` passes (lib warnings: 3 pre-existing, unrelated to this story)
-- `cargo test --test integration` → 97 passed (10 new git_provider tests)
-- `cargo test` → 886 unit + 104 e2e-infra + 97 integration = all passing, no regressions
-- `cargo clippy --test integration` → zero new warnings from test_git_provider.rs
+- `cargo test --test integration` → 99 passed (12 new git_provider tests after CR fixes)
+- `cargo test` → 886 unit + 104 main.rs unit + 99 integration = all passing, no regressions
+- `cargo clippy --test integration` → zero new warnings in test_git_provider.rs (7 pre-existing warnings in other test files, unrelated to this story)
 
 ### Completion Notes List
 - Task 0: All prerequisites verified — `src/lib.rs` already exists with `pub mod git_provider;` and `pub mod supervisor;`. All public types accessible from integration tests. `cargo build` succeeds.
@@ -462,12 +462,16 @@ Claude Sonnet 4 (Anthropic)
 - Task 6: Escalation PR description test uses empty-answer `DecisionRecord` with `DecisionSource::Escalation` and escalation-style failure details (question, reason, partial work). All fields present in output.
 - Task 7: End-to-end factory→trait method chain: `create_provider("gitlab")` → `get_pr_url("42")` returns correct URL. Invalid PR ID "not-a-number" → `Err(InvalidPrId)`. Validates full dynamic dispatch through `Box<dyn GitProvider>`.
 - Task 8: All tests pass, no regressions, no new clippy warnings.
+- CR Fix (MEDIUM): Tightened escalation OR assertion into two precise asserts — `contains("Escalation")` + `contains("⚠️ Escalated")` — eliminating the OR shortcut.
+- CR Fix (MEDIUM): Added `test_git_provider_pr_description_enriched_with_pr_summary` to cover the `PrSummary` enriched path in `build_pr_description()`, verifying agent-generated context/how_to_test/additional_info replace fallback constants.
+- CR Fix (LOW): Sharpened story header assertion to `contains("# 📋 Story:")` (h1 prefix) instead of just `contains("📋 Story:")` to catch heading level regressions.
+- CR Fix (LOW): Split `test_git_provider_factory_github_and_gitlab_returns_ok` into two independent tests — `test_git_provider_factory_github_returns_ok` (AC#1) and `test_git_provider_factory_gitlab_returns_ok` (AC#2) — one assertion per test.
+- CR Fix (LOW): Corrected Completion Notes: 104 tests are `src/main.rs` binary unit tests, not "e2e-infra".
 - Decision: Used `#[tokio::test]` for GitHub factory test instead of `#[test]` because `GitHubProvider::new()` internally constructs an Octocrab client requiring a Tokio runtime. Story notes suggested `#[test]` but this is impossible for GitHub provider construction.
 - Decision: Removed `GitHubProvider` and `GitProvider` from imports since they were unused (error path tests use pattern matching, not `unwrap_err()` which would require `Debug` on `Box<dyn GitProvider>`).
-- Decision: `PrDescriptionParams` has an additional `pr_summary: Option<PrSummary>` field not mentioned in story Dev Notes (added by Story 5.4). All tests set it to `None` to use fallback defaults.
 
 ### File List
-- `tests/integration/test_git_provider.rs` — NEW: 10 integration tests for git_provider module (Tasks 2-7)
-- `tests/integration.rs` — MODIFIED: Added `#[path = "integration/test_git_provider.rs"] mod test_git_provider;`
+- `tests/integration/test_git_provider.rs` — MODIFIED (CR): 12 integration tests (split AC#1/#2 factories, tightened escalation asserts, added enriched PrSummary test)
+- `tests/integration.rs` — MODIFIED: Added `#[path]` module declaration in `tests/integration.rs`.
 - `_bmad-output/implementation-artifacts/7-6-git-provider-pr-creation-integration-tests.md` — MODIFIED: Story file updated (status, tasks, dev record)
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED: Story status updated to in-progress → review

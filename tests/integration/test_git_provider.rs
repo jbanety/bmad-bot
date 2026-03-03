@@ -40,17 +40,18 @@ fn test_config(provider: &str) -> GitProviderConfig {
 // Task 2: Provider factory integration tests (AC #1, #2, #3)
 // ===========================================================================
 
-/// AC #1 + #2: `create_provider()` with "github" and "gitlab" + valid token → Ok
+/// AC #1: `create_provider()` with "github" + valid token → Ok(Box<dyn GitProvider>)
 #[tokio::test]
-async fn test_git_provider_factory_github_and_gitlab_returns_ok() {
+async fn test_git_provider_factory_github_returns_ok() {
     install_crypto_provider();
-
-    // GitHub
     let config = test_config("github");
     let result = create_provider(&config, "ghp_valid_token_123");
     assert!(result.is_ok(), "GitHub factory should return Ok");
+}
 
-    // GitLab
+/// AC #2: `create_provider()` with "gitlab" + valid token → Ok(Box<dyn GitProvider>)
+#[test]
+fn test_git_provider_factory_gitlab_returns_ok() {
     let config = test_config("gitlab");
     let result = create_provider(&config, "glpat-valid-token-456");
     assert!(result.is_ok(), "GitLab factory should return Ok");
@@ -149,8 +150,8 @@ fn test_git_provider_pr_description_with_real_decisions() {
 
     // AC #5 assertions
     assert!(
-        description.contains("📋 Story:"),
-        "Description should contain story header"
+        description.contains("# 📋 Story:"),
+        "Description should contain h1 story header"
     );
     assert!(
         description.contains("5-1-git-provider"),
@@ -276,8 +277,69 @@ fn test_git_provider_pr_description_escalation_includes_fields() {
         "Should contain partial work summary"
     );
     assert!(
-        description.contains("Escalation") || description.contains("Escalated"),
-        "Should reference escalation in decisions"
+        description.contains("Escalation"),
+        "Decisions table should list 'Escalation' as source"
+    );
+    assert!(
+        description.contains("\u{26a0}\u{fe0f} Escalated"),
+        "Answer cell should show '⚠️ Escalated' for empty-answer DecisionRecord"
+    );
+}
+
+// ===========================================================================
+// CR Fix: enriched PrSummary path in build_pr_description()
+// ===========================================================================
+
+/// Verify build_pr_description() uses PrSummary fields when Some, not fallback constants.
+#[test]
+fn test_git_provider_pr_description_enriched_with_pr_summary() {
+    use bmad_bot::git_provider::PrSummary;
+
+    let summary = PrSummary {
+        context: "Implemented the git provider trait with full GitHub/GitLab support.".to_string(),
+        how_to_test: "Run `cargo test --test integration` and inspect test_git_provider results.".to_string(),
+        additional_info: "Added rustls dev-dependency for crypto provider in integration tests.".to_string(),
+    };
+
+    let params = PrDescriptionParams {
+        story_key: "5-1-git-provider".to_string(),
+        story_title: "Git Provider Trait".to_string(),
+        outcome_summary: "completed successfully".to_string(),
+        decisions_section: format_pr_decisions_section(&[]),
+        failure_details: None,
+        pr_summary: Some(summary),
+    };
+
+    let description = build_pr_description(&params);
+
+    // Agent context replaces the fallback constant
+    assert!(
+        description.contains("Implemented the git provider trait"),
+        "Should use PrSummary.context, not default fallback"
+    );
+    assert!(
+        !description.contains("Development session completed. No detailed context was captured."),
+        "Default context fallback must NOT appear when PrSummary is provided"
+    );
+
+    // How-to-test replaces the fallback constant
+    assert!(
+        description.contains("cargo test --test integration"),
+        "Should use PrSummary.how_to_test, not default fallback"
+    );
+    assert!(
+        !description.contains("Run `cargo test` to verify all tests pass."),
+        "Default how_to_test fallback must NOT appear when PrSummary is provided"
+    );
+
+    // Additional info replaces the fallback constant
+    assert!(
+        description.contains("Added rustls dev-dependency"),
+        "Should use PrSummary.additional_info, not default fallback"
+    );
+    assert!(
+        !description.contains("No additional information available."),
+        "Default additional_info fallback must NOT appear when PrSummary is provided"
     );
 }
 
