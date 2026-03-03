@@ -1,6 +1,6 @@
 # Story 7.7: Notification Flow Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -199,7 +199,7 @@ pub struct StoryNotification {
     pub reason: Option<String>,
 }
 
-// RunSummary — L95-106
+// RunSummary — L95-109
 #[derive(Debug, Clone)]
 pub struct RunSummary {
     pub stories: Vec<StoryNotification>,
@@ -207,6 +207,7 @@ pub struct RunSummary {
     pub completed: usize,
     pub blocked: usize,
     pub errored: usize,
+    pub fatal: bool,  // true when a fatal error occurred (e.g. auth failure) — halts daemon
 }
 
 // Notifier trait — L125-131
@@ -250,11 +251,11 @@ pub struct NotificationConfig {
     pub telegram: TelegramConfig,
 }
 
-// BotSecrets — L380-395
+// BotSecrets — L453-466
 pub struct BotSecrets {
     pub anthropic_api_key: Option<String>,
     pub openai_api_key: Option<String>,
-    pub github_models_api_key: Option<String>,
+    pub github_copilot_oauth_token: Option<String>,  // actual field name (spec listed github_models_api_key)
     pub github_token: Option<String>,
     pub gitlab_token: Option<String>,
     pub telegram_bot_token: Option<String>,
@@ -520,3 +521,26 @@ N/A — all 16 tests passed on first run.
 - `tests/integration.rs` (modified) — added `#[path]` module registration for `test_notifier`
 - `_bmad-output/implementation-artifacts/7-7-notification-flow-integration-tests.md` (modified) — task checkboxes, status, dev agent record
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified) — status updated to review
+
+### Senior Developer Review (AI)
+
+**Reviewer:** JB (AI Code Review) | **Date:** 2025  
+**Story:** `7-7-notification-flow-integration-tests`  
+**Status after review:** done
+
+#### Findings
+
+1. **[MEDIUM] `test_notifier_factory_enabled_with_token_returns_telegram` weak error assertion** — Original assertion `result.is_err()` did not verify the error *type*, allowing false passes from `Disabled`/`ResponseParse` variants or future regressions. Additionally, in a networked environment the actual error is `ApiError` (Telegram 404), not `HttpRequest` — the original comment was factually wrong. **Fixed** by strengthening to `matches!(result, Err(NotifierError::HttpRequest { .. }) | Err(NotifierError::ApiError { .. }))` with explanatory comment covering both connected/air-gapped CI scenarios.
+
+2. **[LOW] Dev Notes `BotSecrets` struct — wrong field name** — Dev Notes spec listed `github_models_api_key` but actual codebase field is `github_copilot_oauth_token`. **Fixed** in Dev Notes with corrected field name and line reference.
+
+3. **[LOW] Dev Notes `RunSummary` struct — missing `fatal: bool` field** — The spec in Dev Notes omitted the `fatal: bool` field present in the actual struct. **Fixed** in Dev Notes with the field documented.
+
+4. **[MEDIUM — Remaining] AC1 message content coverage gap** — AC1 requires verifying "the formatted message contains the story ID, 'completed' status, and the PR URL". No integration test verifies message content because `format_story_message()` is intentionally private. Coverage relies on 4 dedicated unit tests in `src/notifier/mod.rs`. This is an accepted design decision documented in Dev Notes — not fixable without making private functions public or adding HTTP mock infrastructure (out of scope).
+
+5. **[LOW — Remaining] AC3 warning logging not tested** — AC3 requires "a warning is logged". No test captures `tracing` output to assert the WARN event. Would require a custom `Layer` with shared buffer or `tracing_test` crate (neither available in current dev-dependencies). Accepted limitation.
+
+#### Fixes Applied
+
+- `tests/integration/test_notifier.rs` — strengthened Task 5.1 assertion: `matches!(result, Err(NotifierError::HttpRequest { .. }) | Err(NotifierError::ApiError { .. }))`
+- Story Dev Notes — corrected `BotSecrets` field name and `RunSummary` struct to match actual codebase

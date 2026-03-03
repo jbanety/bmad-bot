@@ -211,9 +211,16 @@ async fn test_notifier_factory_enabled_with_token_returns_telegram() {
         reason: None,
     };
     let result = notifier.notify_story(&notification).await;
+    // TelegramNotifier attempts a real HTTP send:
+    // - In environments with network access: Telegram API returns 404 ApiError (invalid dummy token)
+    // - In air-gapped CI: reqwest returns HttpRequest error (connection refused)
+    // Either way, Err confirms this is a TelegramNotifier — NoopNotifier would return Ok(()).
     assert!(
-        result.is_err(),
-        "TelegramNotifier should fail with HTTP error (no real Telegram server)"
+        matches!(
+            result,
+            Err(NotifierError::HttpRequest { .. }) | Err(NotifierError::ApiError { .. })
+        ),
+        "TelegramNotifier should fail with HttpRequest or ApiError (confirming it attempted a real send, not a NoopNotifier Ok); got: {result:?}"
     );
 }
 
