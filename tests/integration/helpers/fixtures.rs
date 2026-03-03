@@ -384,12 +384,15 @@ impl PipelineTestBuilder {
 
     /// Build the pipeline and return handles for assertions.
     ///
-    /// Returns `(StoryPipeline, MockNotifier, MockGitProvider)` where the mock
-    /// handles share internal state with the copies inside the pipeline.
+    /// Returns `(StoryPipeline, MockNotifier, MockGitProvider, PipelineTestEnv)` where:
+    /// - The mock handles share internal `Arc<Mutex<...>>` capture buffers with the
+    ///   copies inside the pipeline (all calls are visible for assertion).
+    /// - `PipelineTestEnv` holds the temp git directories — the caller MUST bind it
+    ///   (e.g. `let _env = env;`) so the tempdirs live for the full test.
     ///
     /// Also creates required story branches in the test git repo so that
     /// `push_branch()` can succeed during `process_story()`.
-    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider) {
+    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider, PipelineTestEnv) {
         // Create story branches in the test repo
         let repo_dir = self.env.work_dir.path();
         for branch in &self.branches {
@@ -404,7 +407,10 @@ impl PipelineTestBuilder {
         let notifier_for_assertions = self.mock_notifier.clone();
         let git_for_assertions = self.mock_git.clone();
 
-        let dev_runner: Box<dyn DevRunner> = if self.session_outcomes.len() <= 1 {
+        // Wire the shared event log from git → reviewer for ordering assertions.
+        let event_log = self.mock_git.shared_event_log();
+
+        let dev_runner: Box<dyn DevRunner> = if self.session_outcomes.len() == 1 {
             let outcome = self
                 .session_outcomes
                 .into_iter()
@@ -416,8 +422,8 @@ impl PipelineTestBuilder {
         };
 
         let code_reviewer: Box<dyn CodeReviewer> = match self.review_outcome {
-            Some(o) => Box::new(MockCodeReviewer::with_outcome(o)),
-            None => Box::new(MockCodeReviewer::never_called()),
+            Some(o) => Box::new(MockCodeReviewer::with_outcome(o).with_event_log(event_log)),
+            None => Box::new(MockCodeReviewer::never_called().with_event_log(event_log)),
         };
 
         let pipeline = StoryPipeline::new_with_components(
@@ -428,11 +434,6 @@ impl PipelineTestBuilder {
             code_reviewer,
         );
 
-        // Keep env alive — drop it after pipeline is done (caller owns the tuple)
-        // We need to leak the env to keep tempdir alive for the test duration.
-        // The PipelineTestEnv will be dropped at end of test since the builder is consumed.
-        std::mem::forget(self.env);
-
-        (pipeline, notifier_for_assertions, git_for_assertions)
+        (pipeline, notifier_for_assertions, git_for_assertions, self.env)
     }
 }

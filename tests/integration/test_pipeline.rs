@@ -68,7 +68,7 @@ fn completed_review() -> ReviewOutcome {
 #[tokio::test]
 async fn test_pipeline_happy_path_completed() {
     // Arrange
-    let (pipeline, notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, git, _env) = PipelineTestBuilder::new()
         .with_session(completed_session())
         .with_review(completed_review())
         .build();
@@ -89,12 +89,12 @@ async fn test_pipeline_happy_path_completed() {
     assert_eq!(notifications[0].story_id, "4.1");
     assert!(notifications[0].pr_url.is_some());
 
-    // Assert — MockGitProvider: create_pr title starts with "feat("
+    // Assert — MockGitProvider: create_pr title is feat({story_key}): ...
     let pr_params = git.captured_create_pr_params();
     assert_eq!(pr_params.len(), 1, "exactly 1 create_pr call");
     assert!(
-        pr_params[0].title.starts_with("feat("),
-        "PR title should start with 'feat(' — got: {}",
+        pr_params[0].title.starts_with("feat(4-1-rig-tools)"),
+        "PR title should start with 'feat(4-1-rig-tools)' — got: {}",
         pr_params[0].title
     );
 
@@ -105,6 +105,21 @@ async fn test_pipeline_happy_path_completed() {
         comments[0].1.contains("LGTM"),
         "comment body should contain review report"
     );
+
+    // Assert — ordering: create_pr happened BEFORE run_review (AC #1)
+    let events = git.call_events();
+    let create_pr_pos = events
+        .iter()
+        .position(|e| e == "create_pr")
+        .expect("create_pr event not found");
+    let run_review_pos = events
+        .iter()
+        .position(|e| e == "run_review")
+        .expect("run_review event not found");
+    assert!(
+        create_pr_pos < run_review_pos,
+        "create_pr must be called before run_review — positions: create_pr={create_pr_pos}, run_review={run_review_pos}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +129,7 @@ async fn test_pipeline_happy_path_completed() {
 #[tokio::test]
 async fn test_pipeline_session_failed_creates_failure_pr() {
     // Arrange
-    let (pipeline, notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, git, _env) = PipelineTestBuilder::new()
         .with_session(failed_session("LLM timeout"))
         .build();
     let story = test_story();
@@ -156,7 +171,7 @@ async fn test_pipeline_session_failed_creates_failure_pr() {
 #[tokio::test]
 async fn test_pipeline_escalated_no_pr_blocked_status() {
     // Arrange — escalation now creates a PR (push + create_pr)
-    let (pipeline, notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, git, _env) = PipelineTestBuilder::new()
         .with_session(escalated_session())
         .build();
     let story = test_story();
@@ -184,6 +199,17 @@ async fn test_pipeline_escalated_no_pr_blocked_status() {
         1,
         "escalation should create a PR in current codebase"
     );
+    // Escalation PR uses wip({story_key}): ... [NEEDS REVIEW] title format (Task 6.2)
+    assert!(
+        pr_params[0].title.starts_with("wip(4-1-rig-tools)"),
+        "escalation PR title should start with 'wip(4-1-rig-tools)' — got: {}",
+        pr_params[0].title
+    );
+    assert!(
+        pr_params[0].title.contains("[NEEDS REVIEW]"),
+        "escalation PR title should contain '[NEEDS REVIEW]' — got: {}",
+        pr_params[0].title
+    );
 
     // Assert — MockNotifier: notification with Blocked status
     let notifications = notifier.story_calls();
@@ -198,7 +224,7 @@ async fn test_pipeline_escalated_no_pr_blocked_status() {
 #[tokio::test]
 async fn test_pipeline_review_disabled_skips_review() {
     // Arrange
-    let (pipeline, notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, git, _env) = PipelineTestBuilder::new()
         .with_code_review(false)
         .with_session(completed_session())
         // No review outcome — review should not be called
@@ -221,6 +247,14 @@ async fn test_pipeline_review_disabled_skips_review() {
 
     // Assert — PR was created
     assert_eq!(git.create_pr_call_count(), 1, "PR should still be created");
+
+    // Assert — MockCodeReviewer was NOT called (Task 7.2 / AC #4)
+    let events = git.call_events();
+    assert!(
+        !events.contains(&"run_review".to_string()),
+        "MockCodeReviewer.run_review should not be called when review is disabled"
+    );
+    let _ = notifier; // bind to suppress unused warning
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +269,7 @@ async fn test_pipeline_pr_creation_failure() {
         message: "Internal server error".to_string(),
     }));
 
-    let (pipeline, notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, git, _env) = PipelineTestBuilder::new()
         .with_session(completed_session())
         .with_review(completed_review())
         .with_git_provider(failing_git)
@@ -267,7 +301,7 @@ async fn test_pipeline_pr_creation_failure() {
 #[tokio::test]
 async fn test_pipeline_review_failed_still_completes() {
     // Arrange
-    let (pipeline, _notifier, git) = PipelineTestBuilder::new()
+    let (pipeline, _notifier, git, _env) = PipelineTestBuilder::new()
         .with_session(completed_session())
         .with_review(ReviewOutcome::Failed {
             story_key: "4-1-rig-tools".to_string(),
@@ -301,7 +335,7 @@ async fn test_pipeline_review_failed_still_completes() {
 #[tokio::test]
 async fn test_pipeline_notification_failure_non_blocking() {
     // Arrange
-    let (pipeline, _notifier, _git) = PipelineTestBuilder::new()
+    let (pipeline, _notifier, _git, _env) = PipelineTestBuilder::new()
         .with_session(completed_session())
         .with_review(completed_review())
         .with_notifier(MockNotifier::failing())
@@ -347,7 +381,7 @@ async fn test_pipeline_process_eligible_stories_batch() {
         },
     ];
 
-    let (pipeline, notifier, _git) = PipelineTestBuilder::new()
+    let (pipeline, notifier, _git, _env) = PipelineTestBuilder::new()
         .with_sessions(outcomes)
         .with_code_review(false) // simplify — skip review
         .build();

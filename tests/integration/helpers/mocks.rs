@@ -5,7 +5,6 @@
 //! All mocks are `Send + Sync` and use `Arc<Mutex<...>>` for interior mutability.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -40,12 +39,18 @@ pub enum GitProviderCall {
 ///
 /// Configurable via builder methods (`with_create_pr`, `with_add_comment`, `with_get_pr_url`).
 /// Every call is recorded for later assertion.
+///
+/// Also maintains a shared `event_log` used for cross-mock ordering assertions.
+/// [`MockCodeReviewer`] writes `"run_review"` to the same log when review runs,
+/// allowing tests to assert `create_pr` happened before `run_review`.
 #[derive(Clone)]
 pub struct MockGitProvider {
     create_pr_result: Arc<Mutex<Result<PrInfo, GitProviderError>>>,
     add_comment_result: Arc<Mutex<Result<(), GitProviderError>>>,
     get_pr_url_result: Arc<Mutex<Result<String, GitProviderError>>>,
     calls: Arc<Mutex<Vec<GitProviderCall>>>,
+    /// Shared event log for cross-mock ordering assertions.
+    event_log: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockGitProvider {
@@ -62,6 +67,7 @@ impl MockGitProvider {
                 "https://github.com/test/test/pull/1".into()
             ))),
             calls: Arc::new(Mutex::new(Vec::new())),
+            event_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -134,6 +140,23 @@ impl MockGitProvider {
             .iter()
             .filter(|c| matches!(c, GitProviderCall::AddComment { .. }))
             .count()
+    }
+
+    /// Return a clone of the shared event log Arc for injection into [`MockCodeReviewer`].
+    ///
+    /// Both mocks write to the same log, enabling ordering assertions like
+    /// `create_pr` happened before `run_review`.
+    pub fn shared_event_log(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.event_log)
+    }
+
+    /// Return a snapshot of the shared event log entries.
+    ///
+    /// Entries are appended in call order. Possible values:
+    /// - `"create_pr"` — from `MockGitProvider::create_pr`
+    /// - `"run_review"` — from `MockCodeReviewer::run_review` (when event log is shared)
+    pub fn call_events(&self) -> Vec<String> {
+        self.event_log.lock().unwrap().clone()
     }
 }
 
@@ -213,6 +236,10 @@ impl GitProvider for MockGitProvider {
             .lock()
             .unwrap()
             .push(GitProviderCall::CreatePr(params));
+        self.event_log
+            .lock()
+            .unwrap()
+            .push("create_pr".to_string());
         let guard = self.create_pr_result.lock().unwrap();
         clone_pr_result(&guard)
     }
@@ -544,7 +571,6 @@ impl MockReviewRunner {
 /// `SessionOutcome` does NOT derive `Clone`, so outcomes are consumed via `pop_front()`.
 pub struct MockDevRunner {
     outcomes: Mutex<VecDeque<SessionOutcome>>,
-    call_count: AtomicUsize,
 }
 
 impl MockDevRunner {
@@ -554,7 +580,6 @@ impl MockDevRunner {
         q.push_back(outcome);
         Self {
             outcomes: Mutex::new(q),
-            call_count: AtomicUsize::new(0),
         }
     }
 
@@ -562,19 +587,13 @@ impl MockDevRunner {
     pub fn with_outcomes(outcomes: Vec<SessionOutcome>) -> Self {
         Self {
             outcomes: Mutex::new(outcomes.into()),
-            call_count: AtomicUsize::new(0),
         }
-    }
-
-    pub fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
 impl DevRunner for MockDevRunner {
     async fn run_dev_session(&self, _story: &StoryInfo) -> SessionOutcome {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
         self.outcomes
             .lock()
             .unwrap()
@@ -590,7 +609,9 @@ impl DevRunner for MockDevRunner {
 /// Mock implementation of [`CodeReviewer`] for pipeline integration tests.
 pub struct MockCodeReviewer {
     outcomes: Mutex<VecDeque<ReviewOutcome>>,
-    call_count: AtomicUsize,
+    /// Shared event log — wired to [`MockGitProvider::shared_event_log()`] by
+    /// [`PipelineTestBuilder`] so ordering assertions work across mock boundaries.
+    event_log: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockCodeReviewer {
@@ -599,26 +620,33 @@ impl MockCodeReviewer {
         q.push_back(outcome);
         Self {
             outcomes: Mutex::new(q),
-            call_count: AtomicUsize::new(0),
+            event_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn never_called() -> Self {
         Self {
             outcomes: Mutex::new(VecDeque::new()),
-            call_count: AtomicUsize::new(0),
+            event_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    pub fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::SeqCst)
+    /// Wire this reviewer to the git provider's shared event log for ordering assertions.
+    ///
+    /// Call this before boxing into `Box<dyn CodeReviewer>`.
+    pub fn with_event_log(mut self, log: Arc<Mutex<Vec<String>>>) -> Self {
+        self.event_log = log;
+        self
     }
 }
 
 #[async_trait]
 impl CodeReviewer for MockCodeReviewer {
     async fn run_review(&self, _story: &StoryInfo) -> ReviewOutcome {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.event_log
+            .lock()
+            .unwrap()
+            .push("run_review".to_string());
         self.outcomes
             .lock()
             .unwrap()
