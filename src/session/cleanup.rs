@@ -1,6 +1,6 @@
 //! Session cleanup: partial work preservation and sprint-status updates.
 //!
-//! This module contains two key functions used during escalation cleanup:
+//! This module contains key functions used during session cleanup:
 //!
 //! - [`preserve_partial_work`] — best-effort git operations to commit WIP changes
 //!   and build a summary. Returns `String` (never errors) so the escalation flow
@@ -9,10 +9,14 @@
 //! - [`mark_story_needs_clarification`] — updates a story's status in
 //!   `sprint-status.yaml` using string-based replacement to preserve comments.
 //!
-//! Both functions are designed for reuse in SIGTERM/SIGINT graceful shutdown (FR34).
+//! - [`unstick_orphan_stories`] — detects `in-progress` stories with no WAL file
+//!   and no other daemon running, resets them to `ready-for-dev`.
+//!
+//! All functions are designed for reuse in SIGTERM/SIGINT graceful shutdown (FR34).
 
 use std::path::Path;
 
+use crate::cli::state::DaemonState;
 use crate::session::SessionError;
 
 /// Preserves partial work on the story branch during escalation.
@@ -347,6 +351,111 @@ pub async fn unblock_dependents(
     }
 
     Ok(unblocked)
+}
+
+/// Detect `in-progress` stories that have no WAL file and no running daemon,
+/// then reset them to `ready-for-dev` so the watcher can pick them up.
+///
+/// This handles the "stuck story" scenario: a daemon was killed (or a bug
+/// deleted the WAL) while a story was `in-progress`. Without a WAL, crash
+/// recovery cannot trigger, and the watcher ignores non-`ready-for-dev`
+/// stories — leaving the story permanently stuck.
+///
+/// **Safety checks before resetting:**
+/// 1. No WAL file exists at `wal_path` (otherwise crash recovery handles it)
+/// 2. No other daemon instance is alive (`bmad-bot.state.json` PID check)
+///
+/// Returns the list of story keys that were unstuck (may be empty).
+/// Best-effort: errors are logged but never block daemon startup.
+pub async fn unstick_orphan_stories(
+    sprint_status_path: &Path,
+    wal_path: &Path,
+    state_file_path: &Path,
+) -> Vec<String> {
+    // Guard 1 — if a WAL exists, crash recovery will handle it
+    if wal_path.exists() {
+        return vec![];
+    }
+
+    // Guard 2 — if another daemon is still running, the story may be legitimately in-progress
+    if let Ok(Some(state)) = DaemonState::read(state_file_path) {
+        if state.status == "running" && DaemonState::is_process_alive(state.pid) {
+            tracing::debug!(
+                action = "unstick_skip_daemon_alive",
+                pid = state.pid,
+                "Another daemon is running — skipping orphan detection"
+            );
+            return vec![];
+        }
+    }
+
+    // Read sprint-status.yaml and find in-progress stories
+    let content = match tokio::fs::read_to_string(sprint_status_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                action = "unstick_read_failed",
+                error = %e,
+                "Failed to read sprint-status.yaml for orphan detection"
+            );
+            return vec![];
+        }
+    };
+
+    // Find all story keys with status "in-progress" (skip epic lines).
+    // Pattern: "  <story-key>: in-progress" where story-key starts with digits.
+    let pattern = r"(?m)^\s*(\d+\S+)\s*:\s*in-progress";
+    let re = match regex::Regex::new(pattern) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+
+    let orphans: Vec<String> = re
+        .captures_iter(&content)
+        .filter_map(|cap| {
+            let key = cap.get(1)?.as_str().to_string();
+            // Skip epic-level entries (e.g., "epic-1")
+            if key.starts_with("epic-") {
+                return None;
+            }
+            Some(key)
+        })
+        .collect();
+
+    if orphans.is_empty() {
+        return vec![];
+    }
+
+    tracing::warn!(
+        action = "unstick_orphans_detected",
+        count = orphans.len(),
+        stories = %orphans.join(", "),
+        "Detected in-progress stories with no WAL and no running daemon — resetting to ready-for-dev"
+    );
+
+    let mut unstuck = Vec::new();
+    for key in &orphans {
+        match update_story_status(sprint_status_path, key, "ready-for-dev").await {
+            Ok(()) => {
+                tracing::info!(
+                    action = "unstick_story_reset",
+                    story_key = %key,
+                    "Orphan story reset: in-progress → ready-for-dev"
+                );
+                unstuck.push(key.clone());
+            }
+            Err(e) => {
+                tracing::error!(
+                    action = "unstick_story_failed",
+                    story_key = %key,
+                    error = %e,
+                    "Failed to reset orphan story"
+                );
+            }
+        }
+    }
+
+    unstuck
 }
 
 #[cfg(test)]
@@ -1073,5 +1182,222 @@ development_status:
 
         let updated = tokio::fs::read_to_string(&path).await.expect("read");
         assert!(updated.contains("7-10-extra: blocked # depends-on: 7-10-other"));
+    }
+
+    // -----------------------------------------------------------------------
+    // unstick_orphan_stories tests
+    // -----------------------------------------------------------------------
+
+    fn sprint_status_with_in_progress() -> String {
+        r#"generated: 2026-02-08
+project: test-project
+
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: done
+  1-2-cli: in-progress
+  1-3-init: ready-for-dev
+  epic-2: in-progress
+  2-1-polling: in-progress
+  2-2-deps: done
+  2-3-cascade: blocked # depends-on: 2-2
+"#
+        .to_string()
+    }
+
+    fn sprint_status_no_in_progress() -> String {
+        r#"generated: 2026-02-08
+project: test-project
+
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: done
+  1-2-cli: ready-for-dev
+  1-3-init: backlog
+"#
+        .to_string()
+    }
+
+    fn write_daemon_state(path: &std::path::Path, pid: u32, status: &str) {
+        let state = serde_json::json!({
+            "pid": pid,
+            "started_at": "2026-02-07T10:00:00+01:00",
+            "last_activity": "2026-02-07T10:05:00+01:00",
+            "status": status,
+            "log_file": "bmad-bot.log",
+            "bmad_discovery": null,
+            "stories_processed": 0
+        });
+        std::fs::write(path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unstick_skips_when_wal_exists() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        tokio::fs::write(&sprint_path, sprint_status_with_in_progress())
+            .await
+            .unwrap();
+        // Create a WAL file — crash recovery should handle this, not unstick
+        tokio::fs::write(&wal_path, "story_id: '1.2'\nstory_key: '1-2-cli'\n")
+            .await
+            .unwrap();
+
+        let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+        assert!(result.is_empty(), "Should skip when WAL exists");
+
+        // Verify sprint-status unchanged
+        let content = tokio::fs::read_to_string(&sprint_path).await.unwrap();
+        assert!(content.contains("1-2-cli: in-progress"));
+        assert!(content.contains("2-1-polling: in-progress"));
+    }
+
+    #[tokio::test]
+    async fn test_unstick_skips_when_daemon_alive() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        tokio::fs::write(&sprint_path, sprint_status_with_in_progress())
+            .await
+            .unwrap();
+        // No WAL, but write a state file with current PID (alive)
+        write_daemon_state(&state_path, std::process::id(), "running");
+
+        let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+        assert!(
+            result.is_empty(),
+            "Should skip when another daemon is running"
+        );
+
+        // Verify sprint-status unchanged
+        let content = tokio::fs::read_to_string(&sprint_path).await.unwrap();
+        assert!(content.contains("1-2-cli: in-progress"));
+    }
+
+    #[tokio::test]
+    async fn test_unstick_resets_orphan_stories() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        tokio::fs::write(&sprint_path, sprint_status_with_in_progress())
+            .await
+            .unwrap();
+        // No WAL, no state file → orphans should be reset
+
+        let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+        assert_eq!(result.len(), 2, "Should unstick 1-2-cli and 2-1-polling");
+        assert!(result.contains(&"1-2-cli".to_string()));
+        assert!(result.contains(&"2-1-polling".to_string()));
+
+        // Verify sprint-status updated
+        let content = tokio::fs::read_to_string(&sprint_path).await.unwrap();
+        assert!(
+            content.contains("1-2-cli: ready-for-dev"),
+            "1-2-cli should be ready-for-dev, got: {content}"
+        );
+        assert!(
+            content.contains("2-1-polling: ready-for-dev"),
+            "2-1-polling should be ready-for-dev, got: {content}"
+        );
+        // Other statuses should be untouched
+        assert!(content.contains("1-1-scaffolding: done"));
+        assert!(content.contains("1-3-init: ready-for-dev"));
+        assert!(content.contains("2-2-deps: done"));
+        assert!(content.contains("2-3-cascade: blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_unstick_no_orphans_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        tokio::fs::write(&sprint_path, sprint_status_no_in_progress())
+            .await
+            .unwrap();
+
+        let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+        assert!(result.is_empty(), "No in-progress stories → nothing to do");
+    }
+
+    #[tokio::test]
+    async fn test_unstick_dead_daemon_allows_reset() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        tokio::fs::write(&sprint_path, sprint_status_with_in_progress())
+            .await
+            .unwrap();
+        // State file with a dead PID (99999999 is almost certainly not alive)
+        write_daemon_state(&state_path, 99999999, "running");
+
+        let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+        assert_eq!(result.len(), 2, "Dead daemon PID → should unstick orphans");
+    }
+
+    #[tokio::test]
+    async fn test_unstick_stopped_daemon_allows_reset() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        tokio::fs::write(&sprint_path, sprint_status_with_in_progress())
+            .await
+            .unwrap();
+        // State file with current PID but status "stopped"
+        write_daemon_state(&state_path, std::process::id(), "stopped");
+
+        let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+        assert_eq!(result.len(), 2, "Stopped daemon → should unstick orphans");
+    }
+
+    #[tokio::test]
+    async fn test_unstick_missing_sprint_status_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("nonexistent-sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        let result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+        assert!(
+            result.is_empty(),
+            "Missing sprint-status → graceful empty return"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unstick_preserves_epic_in_progress() {
+        let dir = TempDir::new().unwrap();
+        let sprint_path = dir.path().join("sprint-status.yaml");
+        let wal_path = dir.path().join(".bmad-bot-session.yaml");
+        let state_path = dir.path().join("bmad-bot.state.json");
+
+        tokio::fs::write(&sprint_path, sprint_status_with_in_progress())
+            .await
+            .unwrap();
+
+        let _result = unstick_orphan_stories(&sprint_path, &wal_path, &state_path).await;
+
+        // Epic-level "in-progress" must NOT be touched
+        let content = tokio::fs::read_to_string(&sprint_path).await.unwrap();
+        assert!(
+            content.contains("epic-1: in-progress"),
+            "Epic status should be preserved, got: {content}"
+        );
+        assert!(
+            content.contains("epic-2: in-progress"),
+            "Epic status should be preserved, got: {content}"
+        );
     }
 }

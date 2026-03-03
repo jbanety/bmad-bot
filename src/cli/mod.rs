@@ -1350,6 +1350,28 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
         );
     }
 
+    // Unstick orphan stories — detect `in-progress` with no WAL and no running daemon.
+    // This handles the case where a previous daemon was killed and the WAL was lost,
+    // leaving stories permanently stuck (watcher only picks up `ready-for-dev`).
+    {
+        let wal_path = std::path::Path::new(&config.bmad_paths.implementation_artifacts)
+            .join(".bmad-bot-session.yaml");
+        let unstuck = crate::session::cleanup::unstick_orphan_stories(
+            watcher.sprint_status_path(),
+            &wal_path,
+            state_path,
+        )
+        .await;
+        if !unstuck.is_empty() {
+            tracing::info!(
+                action = "unstick_complete",
+                count = unstuck.len(),
+                stories = %unstuck.join(", "),
+                "Orphan stories reset to ready-for-dev"
+            );
+        }
+    }
+
     // Polling loop with graceful shutdown — pass state for touch updates
     run_polling_loop(
         &config,
