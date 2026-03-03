@@ -117,9 +117,10 @@ pub async fn preserve_partial_work(repo_path: &Path, story_key: &str, question: 
             _ => {}
         }
 
-        // Commit with WIP message
-        let message =
-            format!("chore: WIP — escalated for human clarification\n\nQuestion: {question}");
+        // Commit with WIP message — include story_key so the commit is traceable
+        let message = format!(
+            "chore: WIP [{story_key}] — escalated for human clarification\n\nQuestion: {question}"
+        );
         let commit_result = tokio::process::Command::new("git")
             .arg("-C")
             .arg(repo_path)
@@ -381,18 +382,17 @@ pub async fn unstick_orphan_stories(
     // Compare against our own PID: the current daemon writes the state file before calling
     // this function, so we must ignore our own PID to avoid blocking ourselves.
     let my_pid = std::process::id();
-    if let Ok(Some(state)) = DaemonState::read(state_file_path) {
-        if state.status == "running"
-            && state.pid != my_pid
-            && DaemonState::is_process_alive(state.pid)
-        {
-            tracing::debug!(
-                action = "unstick_skip_daemon_alive",
-                pid = state.pid,
-                "Another daemon is running — skipping orphan detection"
-            );
-            return vec![];
-        }
+    if let Ok(Some(state)) = DaemonState::read(state_file_path)
+        && state.status == "running"
+        && state.pid != my_pid
+        && DaemonState::is_process_alive(state.pid)
+    {
+        tracing::debug!(
+            action = "unstick_skip_daemon_alive",
+            pid = state.pid,
+            "Another daemon is running — skipping orphan detection"
+        );
+        return vec![];
     }
 
     // Read sprint-status.yaml and find in-progress stories

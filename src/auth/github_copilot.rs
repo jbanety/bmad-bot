@@ -185,6 +185,12 @@ pub struct ReqwestCopilotHttpClient {
     client: reqwest::Client,
 }
 
+impl Default for ReqwestCopilotHttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReqwestCopilotHttpClient {
     /// Create a new HTTP client for Copilot auth endpoints.
     ///
