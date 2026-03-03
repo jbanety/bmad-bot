@@ -13,8 +13,6 @@
 pub mod architect;
 /// Decision logging and traceability types for supervisor decisions.
 pub mod decisions;
-/// Minimal read-only file tool for the supervisor Architect session.
-pub mod read_tool;
 /// Deterministic rule engine for pattern-based question matching.
 pub mod rules;
 

@@ -6,8 +6,12 @@
 //!
 //! 0. Activate the agent by sending `architect.md` as a user message (BMAD activation)
 //! 1. Send `"Execute [CH]"` with English language override to enter free chat mode
-//! 2. Send `"Load the project context"` so the Architect loads docs via `ReadFile`
+//! 2. Send `"Load the project context"` so the Architect loads docs via tools
 //! 3. Send the developer's question — capture and return the Architect's answer
+//!
+//! The Architect agent is equipped with the same tools as the dev agent
+//! (read_file, edit_file, grep, find_path, list_directory, git, terminal,
+//! ThinkTool) minus `ask_supervisor` (would cause infinite recursion).
 //!
 //! Each `ask()` call creates an entirely fresh session (no persistence).
 
@@ -20,7 +24,14 @@ use rig::completion::Message;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::read_tool::ReadFile;
+use crate::tools::{
+    EditFileTool, FindPathTool, GrepTool, ListDirectoryTool, ReadFileTool, git::GitTool,
+    terminal::TerminalTool,
+};
+use rig::tools::think::ThinkTool;
+
+/// Terminal tool timeout in seconds — same as `SessionRunner`.
+const TERMINAL_TIMEOUT_SECS: u64 = 30;
 
 /// Relative path from project root to the architect agent file.
 const ARCHITECT_AGENT_PATH: &str = "_bmad/bmm/agents/architect.md";
@@ -343,7 +354,14 @@ impl AnswerProvider for ArchitectSession {
         question: &str,
         context: Option<&str>,
     ) -> Result<String, ArchitectSessionError> {
-        let read_tool = ReadFile::new(self.project_root.clone());
+        // All standard tools except ask_supervisor (would recurse).
+        let git = GitTool::new(self.project_root.clone());
+        let read_file = ReadFileTool::new(self.project_root.clone());
+        let edit_file = EditFileTool::new(self.project_root.clone());
+        let grep = GrepTool::new(self.project_root.clone());
+        let find_path = FindPathTool::new(self.project_root.clone());
+        let list_dir = ListDirectoryTool::new(self.project_root.clone());
+        let terminal = TerminalTool::new(self.project_root.clone(), TERMINAL_TIMEOUT_SECS);
         let project_root_str = self.project_root.display().to_string();
 
         // Build the agent via AgentFactory with the generic preamble (tool rules,
@@ -361,7 +379,10 @@ impl AnswerProvider for ArchitectSession {
             .build(
                 LlmRole::Supervisor,
                 &preamble,
-                crate::configure_agent_tools!(read_tool).with_mcp(mcp_data),
+                crate::configure_agent_tools!(
+                    git, read_file, edit_file, grep, find_path, list_dir, terminal, ThinkTool
+                )
+                .with_mcp(mcp_data),
             )
             .await
             .map_err(|e| ArchitectSessionError::ProviderInit {

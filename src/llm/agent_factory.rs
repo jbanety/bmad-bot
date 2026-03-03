@@ -617,127 +617,86 @@ impl<T> ToolConfigurator<T> {
     }
 }
 
-/// Implement [`AgentConfigurator`] for a 9-tool tuple (the standard tool set).
+/// Generate [`AgentConfigurator`] implementations for any tuple arity.
 ///
-/// This covers the common case: 7 custom tools + AskSupervisor + ThinkTool.
-impl<T1, T2, T3, T4, T5, T6, T7, T8, T9> AgentConfigurator
-    for ToolConfigurator<(T1, T2, T3, T4, T5, T6, T7, T8, T9)>
-where
-    T1: rig::tool::Tool + Send + Sync + 'static,
-    T2: rig::tool::Tool + Send + Sync + 'static,
-    T3: rig::tool::Tool + Send + Sync + 'static,
-    T4: rig::tool::Tool + Send + Sync + 'static,
-    T5: rig::tool::Tool + Send + Sync + 'static,
-    T6: rig::tool::Tool + Send + Sync + 'static,
-    T7: rig::tool::Tool + Send + Sync + 'static,
-    T8: rig::tool::Tool + Send + Sync + 'static,
-    T9: rig::tool::Tool + Send + Sync + 'static,
-{
-    fn configure_anthropic(
-        self,
-        builder: AgentBuilder<anthropic::completion::CompletionModel>,
-    ) -> Agent<anthropic::completion::CompletionModel> {
-        let (t1, t2, t3, t4, t5, t6, t7, t8, t9) = self.tools;
-        let mut simple = builder
-            .tool(t1)
-            .tool(t2)
-            .tool(t3)
-            .tool(t4)
-            .tool(t5)
-            .tool(t6)
-            .tool(t7)
-            .tool(t8)
-            .tool(t9);
-        for (tools, sink) in self.mcp_servers {
-            simple = simple.rmcp_tools(tools, sink);
-        }
-        simple.build()
-    }
+/// Each invocation produces an `impl AgentConfigurator for ToolConfigurator<(T1, T2, …)>`
+/// that registers the tools on all three provider builder types (Anthropic, OpenAI
+/// Responses, OpenAI Completions). Adding or removing tools from a call-site
+/// requires zero changes here — the macro already covers arities 1 through 12.
+macro_rules! impl_agent_configurator {
+    ([$($T:ident),+], [$($t:ident),+]) => {
+        impl<$($T),+> AgentConfigurator for ToolConfigurator<($($T,)+)>
+        where
+            $($T: rig::tool::Tool + Send + Sync + 'static,)+
+        {
+            fn configure_anthropic(
+                self,
+                builder: AgentBuilder<anthropic::completion::CompletionModel>,
+            ) -> Agent<anthropic::completion::CompletionModel> {
+                let ($($t,)+) = self.tools;
+                let mut simple = builder$(.tool($t))+;
+                for (tools, sink) in self.mcp_servers {
+                    simple = simple.rmcp_tools(tools, sink);
+                }
+                simple.build()
+            }
 
-    fn configure_openai_responses(
-        self,
-        builder: AgentBuilder<openai::responses_api::ResponsesCompletionModel>,
-    ) -> Agent<openai::responses_api::ResponsesCompletionModel> {
-        let (t1, t2, t3, t4, t5, t6, t7, t8, t9) = self.tools;
-        let mut simple = builder
-            .tool(t1)
-            .tool(t2)
-            .tool(t3)
-            .tool(t4)
-            .tool(t5)
-            .tool(t6)
-            .tool(t7)
-            .tool(t8)
-            .tool(t9);
-        for (tools, sink) in self.mcp_servers {
-            simple = simple.rmcp_tools(tools, sink);
-        }
-        simple.build()
-    }
+            fn configure_openai_responses(
+                self,
+                builder: AgentBuilder<openai::responses_api::ResponsesCompletionModel>,
+            ) -> Agent<openai::responses_api::ResponsesCompletionModel> {
+                let ($($t,)+) = self.tools;
+                let mut simple = builder$(.tool($t))+;
+                for (tools, sink) in self.mcp_servers {
+                    simple = simple.rmcp_tools(tools, sink);
+                }
+                simple.build()
+            }
 
-    fn configure_openai_completions(
-        self,
-        builder: AgentBuilder<openai::completion::CompletionModel>,
-    ) -> Agent<openai::completion::CompletionModel> {
-        let (t1, t2, t3, t4, t5, t6, t7, t8, t9) = self.tools;
-        let mut simple = builder
-            .tool(t1)
-            .tool(t2)
-            .tool(t3)
-            .tool(t4)
-            .tool(t5)
-            .tool(t6)
-            .tool(t7)
-            .tool(t8)
-            .tool(t9);
-        for (tools, sink) in self.mcp_servers {
-            simple = simple.rmcp_tools(tools, sink);
+            fn configure_openai_completions(
+                self,
+                builder: AgentBuilder<openai::completion::CompletionModel>,
+            ) -> Agent<openai::completion::CompletionModel> {
+                let ($($t,)+) = self.tools;
+                let mut simple = builder$(.tool($t))+;
+                for (tools, sink) in self.mcp_servers {
+                    simple = simple.rmcp_tools(tools, sink);
+                }
+                simple.build()
+            }
         }
-        simple.build()
-    }
+    };
 }
 
-/// Implement [`AgentConfigurator`] for a 1-tool tuple (supervisor/architect use case).
-impl<T1> AgentConfigurator for ToolConfigurator<(T1,)>
-where
-    T1: rig::tool::Tool + Send + Sync + 'static,
-{
-    fn configure_anthropic(
-        self,
-        builder: AgentBuilder<anthropic::completion::CompletionModel>,
-    ) -> Agent<anthropic::completion::CompletionModel> {
-        let (t1,) = self.tools;
-        let mut simple = builder.tool(t1);
-        for (tools, sink) in self.mcp_servers {
-            simple = simple.rmcp_tools(tools, sink);
-        }
-        simple.build()
-    }
-
-    fn configure_openai_responses(
-        self,
-        builder: AgentBuilder<openai::responses_api::ResponsesCompletionModel>,
-    ) -> Agent<openai::responses_api::ResponsesCompletionModel> {
-        let (t1,) = self.tools;
-        let mut simple = builder.tool(t1);
-        for (tools, sink) in self.mcp_servers {
-            simple = simple.rmcp_tools(tools, sink);
-        }
-        simple.build()
-    }
-
-    fn configure_openai_completions(
-        self,
-        builder: AgentBuilder<openai::completion::CompletionModel>,
-    ) -> Agent<openai::completion::CompletionModel> {
-        let (t1,) = self.tools;
-        let mut simple = builder.tool(t1);
-        for (tools, sink) in self.mcp_servers {
-            simple = simple.rmcp_tools(tools, sink);
-        }
-        simple.build()
-    }
-}
+// Generate AgentConfigurator impls for arities 1–12.
+// Any number of tools in configure_agent_tools!() just works.
+impl_agent_configurator!([T1], [t1]);
+impl_agent_configurator!([T1, T2], [t1, t2]);
+impl_agent_configurator!([T1, T2, T3], [t1, t2, t3]);
+impl_agent_configurator!([T1, T2, T3, T4], [t1, t2, t3, t4]);
+impl_agent_configurator!([T1, T2, T3, T4, T5], [t1, t2, t3, t4, t5]);
+impl_agent_configurator!([T1, T2, T3, T4, T5, T6], [t1, t2, t3, t4, t5, t6]);
+impl_agent_configurator!([T1, T2, T3, T4, T5, T6, T7], [t1, t2, t3, t4, t5, t6, t7]);
+impl_agent_configurator!(
+    [T1, T2, T3, T4, T5, T6, T7, T8],
+    [t1, t2, t3, t4, t5, t6, t7, t8]
+);
+impl_agent_configurator!(
+    [T1, T2, T3, T4, T5, T6, T7, T8, T9],
+    [t1, t2, t3, t4, t5, t6, t7, t8, t9]
+);
+impl_agent_configurator!(
+    [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10],
+    [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10]
+);
+impl_agent_configurator!(
+    [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11],
+    [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11]
+);
+impl_agent_configurator!(
+    [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12],
+    [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12]
+);
 
 // ---------------------------------------------------------------------------
 // Copilot API format heuristic
