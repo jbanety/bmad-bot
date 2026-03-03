@@ -24,7 +24,7 @@ use rig::tools::think::ThinkTool;
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
-use crate::session::agent::{self, ShutdownFlag};
+use crate::session::agent::{self, ShutdownFlag, TERMINAL_TIMEOUT_SECS};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::provider::ProviderError;
 use crate::supervisor::decisions::DecisionLog;
@@ -58,9 +58,6 @@ const MAX_REVIEW_TURNS: usize = 100;
 /// all subsequent turns with 400 "invalid_tool_call_format". The only recovery is to
 /// retry with a fresh session (clean history). This constant limits how many times we retry.
 const MAX_SESSION_RETRIES: usize = 2;
-
-/// Terminal tool timeout in seconds for commands executed by the review agent.
-const TERMINAL_TIMEOUT_SECS: u64 = 30;
 
 /// Build the post-review message sent after the CR workflow completes.
 ///

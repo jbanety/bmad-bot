@@ -18,7 +18,7 @@
 use crate::config::BotConfig;
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
-use crate::session::agent::build_preamble;
+use crate::session::agent::{TERMINAL_TIMEOUT_SECS, build_preamble};
 use async_trait::async_trait;
 use rig::completion::Message;
 use std::path::PathBuf;
@@ -29,9 +29,6 @@ use crate::tools::{
     terminal::TerminalTool,
 };
 use rig::tools::think::ThinkTool;
-
-/// Terminal tool timeout in seconds — same as `SessionRunner`.
-const TERMINAL_TIMEOUT_SECS: u64 = 30;
 
 /// Relative path from project root to the architect agent file.
 const ARCHITECT_AGENT_PATH: &str = "_bmad/bmm/agents/architect.md";

@@ -52,13 +52,13 @@ so that adding or changing tools requires editing one place instead of three, an
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Rename `dev_agent.rs` → `agent.rs` (AC: #1)
-  - [ ] 1.1 `git mv src/session/dev_agent.rs src/session/agent.rs`
-  - [ ] 1.2 Update `src/session/mod.rs`: `pub mod dev_agent` → `pub mod agent`
-  - [ ] 1.3 Update all imports across the codebase (see exhaustive list in Dev Notes)
-  - [ ] 1.4 `cargo build` — verify compiles
-  - [ ] 1.5 `cargo test` — verify all tests pass
-  - [ ] 1.6 Commit: `refactor(session): rename dev_agent module to agent`
+- [x] Task 1: Rename `dev_agent.rs` → `agent.rs` (AC: #1)
+  - [x] 1.1 `git mv src/session/dev_agent.rs src/session/agent.rs`
+  - [x] 1.2 Update `src/session/mod.rs`: `pub mod dev_agent` → `pub mod agent`
+  - [x] 1.3 Update all imports across the codebase (see exhaustive list in Dev Notes)
+  - [x] 1.4 `cargo build` — verify compiles
+  - [x] 1.5 `cargo test` — verify all tests pass (1004 pass, 0 fail)
+  - [x] 1.6 Commit: `refactor(session): rename dev_agent module to agent`
 
 - [ ] Task 2: Centralize `TERMINAL_TIMEOUT_SECS` (AC: #4)
   - [ ] 2.1 Add `pub const TERMINAL_TIMEOUT_SECS: u64 = 30` to `session/agent.rs`

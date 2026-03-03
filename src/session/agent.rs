@@ -1,19 +1,15 @@
-//! Shared BMAD dev agent activation — preamble, activation, and streaming chat.
+//! Shared agent activation — preamble, tool construction, activation, and streaming chat.
 //!
-//! This module contains the common logic used by both [`SessionRunner`](super::runner::SessionRunner)
-//! and [`ReviewRunner`](crate::review::ReviewRunner) to set up and activate the
-//! BMAD dev agent (Amelia). The activation flow is identical for both:
+//! This module contains the common logic used by [`SessionRunner`](super::runner::SessionRunner),
+//! [`ReviewRunner`](crate::review::ReviewRunner), and
+//! [`ArchitectSession`](crate::supervisor::architect::ArchitectSession) to set up
+//! and run BMAD agents. The activation flow is identical for all roles:
 //!
 //! 1. Build a generic preamble with tool usage rules and English override
-//! 2. Send `dev.md` as a user message (Zed-style XML context) to trigger BMAD activation
-//! 3. The agent processes activation steps: loads `config.yaml`, greets user, shows menu
-//! 4. Caller sends a menu command (`DS` for dev, `CR` for review)
-//!
-//! ## Why a shared module?
-//!
-//! The dev session and code review session both need the same agent persona with the
-//! same activation flow. The only difference is the menu command sent after activation.
-//! Extracting the common logic avoids duplication and ensures both flows stay in sync.
+//! 2. Create the standard tool set via [`create_base_tools()`] or [`create_tools_with_supervisor()`]
+//! 3. Send the agent file as a user message (Zed-style XML context) to trigger BMAD activation
+//! 4. The agent processes activation steps: loads `config.yaml`, greets user, shows menu
+//! 5. Caller sends a menu command (`DS` for dev, `CR` for review, `CH` for supervisor)
 
 use crate::llm::context::ContextBuilder;
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
@@ -27,6 +23,9 @@ use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Terminal tool timeout in seconds — shared by all agent roles.
+pub const TERMINAL_TIMEOUT_SECS: u64 = 30;
 
 /// Shared shutdown flag — set to `true` when Ctrl+C or SIGTERM is received.
 ///

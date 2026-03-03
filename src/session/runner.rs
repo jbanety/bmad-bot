@@ -20,7 +20,7 @@ use crate::llm::logging::{
 use crate::session::SessionOutcome;
 /// Re-export [`ShutdownFlag`] so existing callers (`pipeline.rs`, `cli/mod.rs`) keep working.
 pub use crate::session::agent::ShutdownFlag;
-use crate::session::agent::{self};
+use crate::session::agent::{self, TERMINAL_TIMEOUT_SECS};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
 use crate::session::cleanup::{mark_story_needs_clarification, preserve_partial_work};
@@ -59,9 +59,6 @@ use std::sync::atomic::Ordering;
 /// Prevents infinite loops if the agent never signals completion. A future
 /// improvement could make this configurable via `BotConfig`.
 const MAX_CHAT_TURNS: usize = 300;
-
-/// Terminal tool timeout in seconds for commands executed by the agent.
-const TERMINAL_TIMEOUT_SECS: u64 = 30;
 
 /// Number of recent exchanges (user+assistant pairs) to keep verbatim in the
 /// recovery message after a context window limit error.
