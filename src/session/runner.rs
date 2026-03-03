@@ -598,8 +598,19 @@ impl SessionRunner {
             }
         };
 
-        // Phase 4 — ALWAYS delete WAL after recovery attempt (prevents infinite loops)
-        let _ = SessionState::delete(&self.state_file_path).await;
+        // Phase 4 — Delete WAL after recovery, UNLESS this was a graceful shutdown.
+        // On Ctrl+C the session saves the WAL so the daemon can resume on next start.
+        // Deleting it here would leave the story stuck in `in-progress` with no WAL
+        // to trigger crash recovery — the watcher only picks up `ready-for-dev`.
+        let is_shutdown = self.shutdown.load(Ordering::Relaxed);
+        if is_shutdown {
+            tracing::info!(
+                action = "crash_recovery_wal_preserved",
+                "Shutdown requested — preserving WAL for next restart"
+            );
+        } else {
+            let _ = SessionState::delete(&self.state_file_path).await;
+        }
 
         outcome
     }
