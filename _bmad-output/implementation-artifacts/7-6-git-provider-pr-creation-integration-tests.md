@@ -329,12 +329,16 @@ URL pattern: `https://github.com/{owner}/{repo}/pull/{number}`
 
 ### Previous Story Intelligence (Stories 7.4, 7.5)
 
-**Story 7.5 (Session WAL Crash Recovery):**
+**Story 7.5 (Session WAL Crash Recovery — IMPLEMENTED):**
 - Established the "Cross-Module Integration Value" section pattern — use it here
-- Used full struct literal for `BotConfig` instead of `_test_minimal()` — follow same pattern if config needed
-- `wal_path()` helper pattern for deriving private internal paths
+- **Config pattern (corrected):** Did NOT use a full struct literal for `BotConfig`. Instead reused shared `make_test_config()` from `tests/integration/helpers/fixtures.rs` (Story 7.1), with a thin wrapper `make_wal_test_config()` that overrides `implementation_artifacts` to point at the temp dir. Follow the same reuse pattern if config needed.
+- `wal_path()` helper pattern for deriving private internal paths — implemented as described
+- Made `process_recovered_session` `pub` in `src/pipeline.rs` (was private) — enables integration tests to call it directly via `StoryPipeline`. PR creation for recovered sessions is now testable from external crate.
+- `make_session_runner()` helper constructs a real `SessionRunner` with `AgentFactory` + empty `McpManager::empty()` + `ShutdownFlag`. Only `check_and_recover_wal()` is called (no LLM interaction).
+- Used `PipelineTestBuilder` from Story 7.1/7.4 for pipeline-level recovery tests (AC #5)
+- 12 tests added in `tests/integration/test_session_wal.rs`
 
-**Story 7.4 (Pipeline Orchestration):**
+**Story 7.4 (Pipeline Orchestration — IMPLEMENTED):**
 - Defines `MockGitProvider` with builder pattern for test setup
 - `PipelineTestBuilder` pattern — not needed here (no pipeline interaction)
 - Tracing is a no-op in tests — silent without a subscriber
