@@ -267,7 +267,7 @@ Story 7.1 has been implemented. Key patterns from that implementation:
 
 4. **Mock infrastructure (7.1):** `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner` — these are NOT needed for Story 7.8. Branch management and git tool tests use **real Git CLI operations on temp repos** (no mocking needed).
 
-5. **Story 7.6 (Git Provider)** tests PR creation via mock HTTP — different from this story which tests local git operations via Git CLI subprocess. No overlap.
+5. **Story 7.6 (Git Provider — IMPLEMENTED)** tests factory construction, pure functions (`build_pr_description`, `build_pr_title`), and local trait methods (`get_pr_url`) — NO mock HTTP involved. Different from this story which tests local git operations via Git CLI subprocess. No overlap.
 
 6. **Fixture builders available from 7.1:** `create_test_repo(dir)` and `make_test_story(key, label, deps)` are in `tests/integration/helpers/fixtures.rs`. Import via `use crate::helpers::fixtures::{create_test_repo, make_test_story};`
 

@@ -303,12 +303,14 @@ Since `create_notifier()` returns `Box<dyn Notifier>` (trait object), we cannot 
 
 ### Previous Story Intelligence (Story 7.6)
 
-**Story 7.6 (Git Provider & PR Creation Integration Tests):**
-- Established the `lib.rs` BLOCKER pattern — copy same prerequisite check
+**Story 7.6 (Git Provider & PR Creation Integration Tests — IMPLEMENTED):**
+- `lib.rs` already existed from Story 7.1 — Story 7.6 only verified it. No "BLOCKER" pattern to copy; lib.rs prerequisite is fully resolved for all downstream stories.
 - Established the "Cross-Module Integration Value" section pattern — used here
-- Used `tests/integration/test_git_provider.rs` location convention — follow same for `test_notifier.rs`
-- Rustls crypto provider was needed for GitHub provider — **NOT needed for notifier tests** (notifier uses `reqwest_middleware`, no crypto init required)
-- Module visibility already verified pattern — followed here
+- Used `tests/integration/test_git_provider.rs` with 12 tests. Module registered via `#[path = "integration/test_git_provider.rs"] mod test_git_provider;` in `tests/integration.rs` (Rust 2024 `#[path]` attribute pattern, NOT plain `mod`).
+- Rustls crypto provider was needed for GitHub provider — **NOT needed for notifier tests**. Note: GitHub factory test required `#[tokio::test]` (not `#[test]`) because `GitHubProvider::new()` internally builds an Octocrab client that needs a Tokio runtime, even though `create_provider()` is synchronous.
+- `GitHubProvider` and `GitLabProvider` do NOT implement `Debug` — cannot use `{:?}` on `Result` values containing them. Use explicit `match` arms with separate `Err(e) => panic!("...: {e}")` and `Ok(_) => panic!("...")` instead.
+- `GitProvider` trait import is unnecessary when calling methods on `Box<dyn GitProvider>` — methods resolve through the dyn type. Importing it triggers `unused_imports` warning.
+- Total integration tests after 7.6: 108 (12 new git provider tests).
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `MockNotifier` with `Arc<Mutex<Vec<...>>>` for captured notifications — Task 6 depends on this
