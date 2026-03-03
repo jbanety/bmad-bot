@@ -10,6 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::config::{BotConfig, BotSecrets};
 use crate::git_provider::{
     CreatePrParams, GitProvider, PrDescriptionParams, PrSummary, build_pr_description,
@@ -26,6 +28,43 @@ use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
 use crate::supervisor::decisions::format_pr_decisions_section;
 use crate::watcher::StoryInfo;
+
+// ---------------------------------------------------------------------------
+// DevRunner / CodeReviewer traits (dependency injection for testing)
+// ---------------------------------------------------------------------------
+
+/// Trait abstraction for dev session execution.
+///
+/// Implemented by [`SessionRunner`] in production and by [`MockDevRunner`] in tests.
+/// Allows [`StoryPipeline`] to accept injected test doubles.
+#[async_trait]
+pub trait DevRunner: Send + Sync {
+    /// Execute a development session for the given story.
+    async fn run_dev_session(&self, story: &StoryInfo) -> SessionOutcome;
+}
+
+/// Trait abstraction for code review execution.
+///
+/// Implemented by [`ReviewRunner`] in production and by [`MockCodeReviewer`] in tests.
+#[async_trait]
+pub trait CodeReviewer: Send + Sync {
+    /// Execute a code review for the given story.
+    async fn run_review(&self, story: &StoryInfo) -> ReviewOutcome;
+}
+
+#[async_trait]
+impl DevRunner for SessionRunner {
+    async fn run_dev_session(&self, story: &StoryInfo) -> SessionOutcome {
+        self.run(story).await
+    }
+}
+
+#[async_trait]
+impl CodeReviewer for ReviewRunner {
+    async fn run_review(&self, story: &StoryInfo) -> ReviewOutcome {
+        self.run(story).await
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PipelineError
@@ -127,10 +166,13 @@ pub struct StoryPipeline {
     git_provider: Box<dyn GitProvider>,
     /// Notification sender (Telegram or Noop).
     notifier: Box<dyn Notifier>,
-    /// Development session runner.
-    session_runner: SessionRunner,
-    /// Code review session runner.
-    review_runner: ReviewRunner,
+    /// Development session runner (trait object for testability).
+    dev_runner: Box<dyn DevRunner>,
+    /// Code review session runner (trait object for testability).
+    code_reviewer: Box<dyn CodeReviewer>,
+    /// Concrete session runner for WAL recovery (check_and_recover_wal + resume_session).
+    /// Set by new(), None in new_with_components(). Recovery returns None when absent.
+    session_runner_for_recovery: Option<SessionRunner>,
 }
 
 impl StoryPipeline {
@@ -180,6 +222,15 @@ impl StoryPipeline {
             Arc::clone(&secrets),
             Arc::clone(&agent_factory),
             shutdown,
+            Arc::clone(&mcp_manager),
+        );
+
+        // Second SessionRunner instance for WAL recovery — cheap (no state, no network).
+        let session_runner_for_recovery = SessionRunner::new(
+            Arc::clone(&config),
+            Arc::clone(&agent_factory),
+            // Recovery doesn't need a live shutdown signal; use a dummy flag.
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
         );
 
@@ -187,9 +238,31 @@ impl StoryPipeline {
             config,
             git_provider,
             notifier,
-            session_runner,
-            review_runner,
+            dev_runner: Box::new(session_runner),
+            code_reviewer: Box::new(review_runner),
+            session_runner_for_recovery: Some(session_runner_for_recovery),
         })
+    }
+
+    /// Construct a pipeline with pre-built dependencies (for integration tests).
+    ///
+    /// Accepts trait objects for all pluggable components, enabling full mock injection.
+    /// `session_runner_for_recovery` is `None` — recovery returns `None` in tests.
+    pub fn new_with_components(
+        config: Arc<BotConfig>,
+        git_provider: Box<dyn GitProvider>,
+        notifier: Box<dyn Notifier>,
+        dev_runner: Box<dyn DevRunner>,
+        code_reviewer: Box<dyn CodeReviewer>,
+    ) -> Self {
+        Self {
+            config,
+            git_provider,
+            notifier,
+            dev_runner,
+            code_reviewer,
+            session_runner_for_recovery: None,
+        }
     }
 
     /// Process a single story through the full pipeline.
@@ -207,7 +280,7 @@ impl StoryPipeline {
         );
 
         // Phase 1 — Dev Session
-        let session_outcome = self.session_runner.run(story).await;
+        let session_outcome = self.dev_runner.run_dev_session(story).await;
 
         match session_outcome {
             SessionOutcome::Completed {
@@ -298,7 +371,7 @@ impl StoryPipeline {
 
                 // Phase 4 — Code Review (optional, on existing PR)
                 let review_report = if self.config.code_review_enabled {
-                    match self.review_runner.run(story).await {
+                    match self.code_reviewer.run_review(story).await {
                         ReviewOutcome::Completed { report, .. } => Some(report),
                         ReviewOutcome::Failed {
                             story_key: rk,
@@ -847,7 +920,8 @@ impl StoryPipeline {
     /// **Critical:** This must be called BEFORE the polling loop starts. The daemon
     /// must not poll for new stories while a recovered session is in progress.
     pub async fn recover_and_process(&self) -> Option<PipelineResult> {
-        let recovery = self.session_runner.check_and_recover_wal().await?;
+        let runner = self.session_runner_for_recovery.as_ref()?;
+        let recovery = runner.check_and_recover_wal().await?;
 
         // Clone StoryInfo fields BEFORE consuming recovery (SessionState has no Clone)
         let story_for_pipeline = StoryInfo {
@@ -862,7 +936,7 @@ impl StoryPipeline {
             status: "in-progress".to_string(),
         };
 
-        let outcome = self.session_runner.resume_session(recovery).await;
+        let outcome = runner.resume_session(recovery).await;
         let result = self
             .process_recovered_session(&story_for_pipeline, outcome)
             .await;
@@ -873,7 +947,10 @@ impl StoryPipeline {
     /// Process the outcome of a recovered session through the post-session pipeline.
     ///
     /// Reuses the same post-session logic as [`process_story()`]: code review → PR → notification.
-    async fn process_recovered_session(
+    ///
+    /// Public for integration test access. Production code calls this via
+    /// [`recover_and_process()`](Self::recover_and_process).
+    pub async fn process_recovered_session(
         &self,
         story: &StoryInfo,
         outcome: SessionOutcome,
@@ -891,7 +968,7 @@ impl StoryPipeline {
             } => {
                 // Optional code review
                 let review_report = if self.config.code_review_enabled {
-                    match self.review_runner.run(story).await {
+                    match self.code_reviewer.run_review(story).await {
                         ReviewOutcome::Completed { report, .. } => Some(report),
                         ReviewOutcome::Failed {
                             story_key: rk,

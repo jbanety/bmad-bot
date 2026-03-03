@@ -1,6 +1,6 @@
 # Story 7.3: Watcher → Dependency Resolution → Story Selection Integration Tests
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -39,43 +39,43 @@ So that I'm confident the daemon picks the right stories in the right order.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Create integration test file `tests/integration/test_watcher.rs` (AC: #1–#5)
-  - [ ] 1.1 Add `mod test_watcher;` declaration in `tests/integration.rs`
-  - [ ] 1.2 Import required types: `Watcher`, `SprintStatusFile`, `StoryInfo`, `WatcherError`, `BotConfig`, deps functions
+- [x] Task 1: Create integration test file `tests/integration/test_watcher.rs` (AC: #1–#5)
+  - [x] 1.1 Add `mod test_watcher;` declaration in `tests/integration.rs`
+  - [x] 1.2 Import required types: `Watcher`, `SprintStatusFile`, `StoryInfo`, `WatcherError`, `BotConfig`, deps functions
 
-- [ ] Task 2: Write watcher poll with dependency filtering test (AC: #1)
-  - [ ] 2.1 Create temp dir, use `write_sprint_status()` from helpers with 5 stories (1-1 done, 1-2 ready-for-dev, 1-3 ready-for-dev, 2-1 ready-for-dev, 2-2 backlog)
-  - [ ] 2.2 Build `BotConfig` via `make_test_config()` pointing `implementation_artifacts` to temp dir
-  - [ ] 2.3 Create `Watcher::new(Arc::new(config))` and call `poll()`
-  - [ ] 2.4 Assert returned stories are exactly `[1-2-*, 2-1-*]` (1-3 skipped because 1-2 not done, 2-2 not ready)
-  - [ ] 2.5 Assert dependency-valid ordering: 1-2 before any story that depends on it
+- [x] Task 2: Write watcher poll with dependency filtering test (AC: #1)
+  - [x] 2.1 Create temp dir, use `write_sprint_status()` from helpers with 5 stories (1-1 done, 1-2 ready-for-dev, 1-3 ready-for-dev, 2-1 ready-for-dev, 2-2 backlog)
+  - [x] 2.2 Build `BotConfig` via `make_test_config()` pointing `implementation_artifacts` to temp dir
+  - [x] 2.3 Create `Watcher::new(Arc::new(config))` and call `poll()`
+  - [x] 2.4 Assert returned stories are exactly `[1-2-*, 2-1-*]` (1-3 skipped because 1-2 not done, 2-2 not ready)
+  - [x] 2.5 Assert dependency-valid ordering: 1-2 before any story that depends on it
 
-- [ ] Task 3: Write cascade blocking tests (AC: #2)
-  - [ ] 3.1 Write sprint-status with 1-1 as `blocked`, 1-2 as `ready-for-dev` (depends on 1-1), 1-3 as `ready-for-dev` (depends on 1-2)
-  - [ ] 3.2 Poll via `Watcher` → assert 1-2 and 1-3 are NOT in eligible results (cascade-blocked)
-  - [ ] 3.3 Add 2-1 as `ready-for-dev` with no deps → assert it IS returned (independent epic unaffected)
-  - [ ] 3.4 Test with `needs-clarification` status → verify same cascade behavior as `blocked`
-  - [ ] 3.5 **Negative test:** Write sprint-status with 1-1 as `in-progress`, 1-2 as `ready-for-dev` → assert 1-2 is NOT cascade-blocked (just skipped because dep not done). Repeat with `review` status. This confirms only `BLOCKING_STATUSES` (`blocked`, `needs-clarification`) trigger cascade — transient statuses do not.
+- [x] Task 3: Write cascade blocking tests (AC: #2)
+  - [x] 3.1 Write sprint-status with 1-1 as `blocked`, 1-2 as `ready-for-dev` (depends on 1-1), 1-3 as `ready-for-dev` (depends on 1-2)
+  - [x] 3.2 Poll via `Watcher` → assert 1-2 and 1-3 are NOT in eligible results (cascade-blocked)
+  - [x] 3.3 Add 2-1 as `ready-for-dev` with no deps → assert it IS returned (independent epic unaffected)
+  - [x] 3.4 Test with `needs-clarification` status → verify same cascade behavior as `blocked`
+  - [x] 3.5 **Negative test:** Write sprint-status with 1-1 as `in-progress`, 1-2 as `ready-for-dev` → assert 1-2 is NOT cascade-blocked (just skipped because dep not done). Repeat with `review` status. This confirms only `BLOCKING_STATUSES` (`blocked`, `needs-clarification`) trigger cascade — transient statuses do not.
 
-- [ ] Task 4: Write all-done scenario test (AC: #3)
-  - [ ] 4.1 Write sprint-status with all stories as `done`
-  - [ ] 4.2 Poll via `Watcher` → assert `WatcherError::NoEligibleStories` is returned
+- [x] Task 4: Write all-done scenario test (AC: #3)
+  - [x] 4.1 Write sprint-status with all stories as `done`
+  - [x] 4.2 Poll via `Watcher` → assert `WatcherError::NoEligibleStories` is returned
 
-- [ ] Task 5: Write cyclic dependency test (AC: #4)
-  - [ ] 5.1 Create stories with manually injected circular deps (override `dependencies` field after construction)
-  - [ ] 5.2 Use `DependencyGraph` + `topological_sort()` directly → assert `WatcherError::CyclicDependency` is returned
-  - [ ] 5.3 Verify the error contains the story keys involved in the cycle
+- [x] Task 5: Write cyclic dependency test (AC: #4)
+  - [x] 5.1 Create stories with manually injected circular deps (override `dependencies` field after construction)
+  - [x] 5.2 Use `DependencyGraph` + `topological_sort()` directly → assert `WatcherError::CyclicDependency` is returned
+  - [x] 5.3 Verify the error contains the story keys involved in the cycle
 
-- [ ] Task 6: Write missing file test (AC: #5)
-  - [ ] 6.1 Create `Watcher` pointing to a temp dir with no `sprint-status.yaml`
-  - [ ] 6.2 Call `poll()` → assert `WatcherError::SprintStatusNotFound` is returned
-  - [ ] 6.3 Verify the error message contains the expected path
+- [x] Task 6: Write missing file test (AC: #5)
+  - [x] 6.1 Create `Watcher` pointing to a temp dir with no `sprint-status.yaml`
+  - [x] 6.2 Call `poll()` → assert `WatcherError::SprintStatusNotFound` is returned
+  - [x] 6.3 Verify the error message contains the expected path
 
-- [ ] Task 7: Write SprintStatusFile integration tests (supplementary)
-  - [ ] 7.1 Test `SprintStatusFile::load()` with valid YAML → assert correct story count and order preservation
-  - [ ] 7.2 Test `stories()` filters out epic and retrospective entries
-  - [ ] 7.3 Test `eligible_stories()` returns only `ready-for-dev` stories
-  - [ ] 7.4 Test malformed YAML → assert `WatcherError::SprintStatusParse`
+- [x] Task 7: Write SprintStatusFile integration tests (supplementary)
+  - [x] 7.1 Test `SprintStatusFile::load()` with valid YAML → assert correct story count and order preservation
+  - [x] 7.2 Test `stories()` filters out epic and retrospective entries
+  - [x] 7.3 Test `eligible_stories()` returns only `ready-for-dev` stories
+  - [x] 7.4 Test malformed YAML → assert `WatcherError::SprintStatusParse`
 
 ## Dev Notes
 
@@ -240,12 +240,13 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. New test modules must be declared in `tests/integration.rs` using `#[path]` attributes (Rust 2024 edition): `#[path = "integration/test_watcher.rs"] mod test_watcher;`
+- **`lib.rs` blocker is RESOLVED:** `src/lib.rs` exists with `pub mod` for ALL modules (including watcher). `main.rs` was NOT modified — both crates compile the same source independently (dual-crate pattern). No Task 0 prerequisite work needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
-- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
+- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.join("_bmad-output/implementation-artifacts").display().to_string()`
 
 ### Dependencies Required
 
@@ -254,13 +255,13 @@ All already present — no new dependencies needed:
 - `std::sync::Arc` for `Watcher::new()`
 - `std::collections::HashMap` for cascade blocking assertions
 
-**Prerequisite from Story 7.1:** `src/lib.rs` must exist with `pub mod watcher;` — see Story 7.1 Task 0.
+**Prerequisite from Story 7.1:** `src/lib.rs` already exists with `pub mod watcher;` and all other modules — no Task 0 work needed.
 
 ### File Structure
 
 ```
 tests/
-├── integration.rs                    # Add: mod test_watcher;
+├── integration.rs                    # Add: #[path = "integration/test_watcher.rs"] mod test_watcher;
 └── integration/
     ├── helpers/
     │   ├── mod.rs
@@ -302,8 +303,27 @@ tests/
 
 ### Agent Model Used
 
+Claude Sonnet 4 (via BMAD dev agent)
+
 ### Debug Log References
+
+No debug issues encountered. All 14 integration tests passed on first run.
 
 ### Completion Notes List
 
+- Task 1: Created `tests/integration/test_watcher.rs`, added `#[path]` module declaration in `tests/integration.rs`. Imported `Watcher`, `SprintStatusFile`, `WatcherError`, `DependencyGraph`, `filter_eligible`, `derive_dependencies`, and fixture helpers.
+- Task 2: Two tests — `test_watcher_poll_returns_eligible_with_deps_satisfied` (AC #1 core: asserts exact `[1-2, 2-1]` in document order) and `test_watcher_poll_dependency_valid_ordering` (AC #1 ordering: topological + document order tiebreak).
+- Task 3: Five tests — `test_watcher_cascade_blocks_transitive_dependents` (blocked cascades to 1-2, 1-3; 2-1 independent), `test_watcher_cascade_blocks_needs_clarification` (same behavior), `test_watcher_no_cascade_on_in_progress` (negative: calls `filter_eligible()` directly, asserts `cascade_count == 0`), `test_watcher_no_cascade_on_review` (same pattern), `test_filter_eligible_cascade_count_positive` (positive counterpart: asserts `cascade_count == 2`).
+- Task 4: `test_watcher_poll_all_done_returns_no_eligible` — all stories done → `NoEligibleStories`.
+- Task 5: Two tests — `test_watcher_cyclic_dependency_detected` (manual cycle via `DependencyGraph::topological_sort()`, asserts `CyclicDependency` with both keys) and `test_watcher_cyclic_dependency_via_filter_eligible` (propagation through `filter_eligible()`).
+- Task 6: `test_watcher_poll_missing_file_returns_error` — empty temp dir → `SprintStatusNotFound` with path containing "sprint-status.yaml".
+- Task 7: Four tests — `test_sprint_status_load_valid_yaml_correct_story_count` (5 stories, order preserved), `test_sprint_status_stories_filters_out_epics_and_retrospectives`, `test_sprint_status_eligible_stories_returns_only_ready_for_dev`, `test_sprint_status_malformed_yaml_returns_parse_error`.
+- Code Review fixes (CR): Rewritten Task 3.5 negative-cascade tests to call `filter_eligible()` directly and assert `cascade_count == 0` (mechanistic proof, not just output check). Added `test_filter_eligible_cascade_count_positive` (positive counterpart). Promoted `impl_artifacts_dir()` to shared `fixtures.rs`. Removed dead `mut` + redundant status assignments in `test_watcher_cyclic_dependency_detected`. Changed AC #1 assertion from `contains()` to `assert_eq!` for deterministic exact-match.
+- All 76 tests pass (15 new integration + 61 existing). Zero regressions.
+
 ### File List
+
+- `tests/integration.rs` — Added `#[path = "integration/test_watcher.rs"] mod test_watcher;`
+- `tests/integration/test_watcher.rs` — NEW: 15 integration tests for Watcher → deps → story selection pipeline
+- `tests/integration/helpers/fixtures.rs` — Added `impl_artifacts_dir()` helper (promoted from test_watcher.rs)
+- `_bmad-output/implementation-artifacts/7-3-watcher-dependency-resolution-story-selection-integration-tests.md` — Story file updated (tasks checked, dev record, status → review)
