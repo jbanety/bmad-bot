@@ -388,7 +388,7 @@ let slot: EscalationSlot = Arc::new(Mutex::new(Some(EscalationInfo {
 **Story 7.1 (Integration Test Infrastructure — IMPLEMENTED):**
 - `tests/integration.rs` uses `#[path = "integration/..."]` attributes (Rust 2024 edition) — new test modules must use `#[path = "integration/test_response_analyzer_supervisor.rs"] mod test_response_analyzer_supervisor;`
 - `src/lib.rs` exposes 12 public modules including `supervisor` and `session`. All integration test imports use `bmad_bot::{module}::{Type}`.
-- `tests/integration/` directory exists with helpers (mocks + fixtures) and 29 passing tests
+- `tests/integration/` directory exists with helpers (mocks + fixtures) and 120 passing integration tests (stories 7.1–7.7 all done)
 
 1. **`lib.rs` blocker is resolved** — `src/lib.rs` exists with all needed modules. No Task 0 needed.
 
@@ -405,6 +405,8 @@ let slot: EscalationSlot = Arc::new(Mutex::new(Some(EscalationInfo {
 7. **Story 7.9 established pattern:** Confirmed module visibility definitively (✅) and provided Quick API Reference tables. This story follows the same pattern.
 
 8. **`rig::tool::Tool` trait `call()` is async** — use `#[tokio::test]` for any test invoking `AskSupervisor::call()`.
+
+9. **Story 7.7 (Notification Flow — DONE):** Added `tracing-test = { version = "0.2", features = ["no-env-filter"] }` to `[dev-dependencies]`. If any tests need to verify `tracing::warn!`/`tracing::info!` log output from library code, the `#[traced_test]` attribute + `logs_contain()` pattern is available. **Critical:** the `no-env-filter` feature is required for integration tests to capture cross-crate tracing events.
 
 ### Git Intelligence
 

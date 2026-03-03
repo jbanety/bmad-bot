@@ -269,6 +269,8 @@ fn make_story(key: &str, deps: Vec<&str>) -> bmad_bot::watcher::StoryInfo {
 
 3. **Story 7.6 (Git Provider)** tests PR creation via mock HTTP — different from this story which tests local git operations via Git CLI subprocess. No overlap.
 
+4. **Story 7.7 (Notification Flow — DONE):** Added `tracing-test = { version = "0.2", features = ["no-env-filter"] }` to `[dev-dependencies]`. If any tests in this story need to verify `tracing::warn!`/`tracing::info!` log output from library code, the `#[traced_test]` attribute + `logs_contain()` pattern is available. **Critical:** the `no-env-filter` feature is required for integration tests to capture logs from the `bmad_bot` crate (not just the test crate). Also exposed `format_story_message` as `#[doc(hidden)] pub` in `src/notifier/mod.rs` — not relevant to branch/git tests. Total integration tests: 120 (all passing).
+
 ### Git Intelligence
 
 Recent commits (last 10):

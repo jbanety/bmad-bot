@@ -305,6 +305,8 @@ Key patterns:
 
 5. **Story 7.8 (Branch Management)** established the pattern of confirming module visibility definitively (✅ instead of ⚠️) and providing a Quick API Reference table. This story follows the same pattern.
 
+6. **Story 7.7 (Notification Flow — DONE):** Added `tracing-test = { version = "0.2", features = ["no-env-filter"] }` to `[dev-dependencies]`. If any tests need to verify `tracing::warn!`/`tracing::info!` log output from library code, the `#[traced_test]` attribute + `logs_contain()` pattern is available. **Critical:** the `no-env-filter` feature is required for integration tests to capture cross-crate tracing events. Total integration tests: 120 (all passing, stories 7.1–7.7 are done).
+
 ### Git Intelligence
 
 Recent commits (last 5):
