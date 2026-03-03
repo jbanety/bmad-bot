@@ -385,7 +385,12 @@ let slot: EscalationSlot = Arc::new(Mutex::new(Some(EscalationInfo {
 
 ### Previous Story Intelligence (Stories 7.1 through 7.9)
 
-1. **`lib.rs` blocker is universal** — every integration test story needs it. Story 7.1 defines the creation; all subsequent stories assume it exists. If Task 0 finds it missing, follow the exact spec from Story 7.1.
+**Story 7.1 (Integration Test Infrastructure — IMPLEMENTED):**
+- `tests/integration.rs` uses `#[path = "integration/..."]` attributes (Rust 2024 edition) — new test modules must use `#[path = "integration/test_response_analyzer_supervisor.rs"] mod test_response_analyzer_supervisor;`
+- `src/lib.rs` exposes 12 public modules including `supervisor` and `session`. All integration test imports use `bmad_bot::{module}::{Type}`.
+- `tests/integration/` directory exists with helpers (mocks + fixtures) and 29 passing tests
+
+1. **`lib.rs` blocker is resolved** — `src/lib.rs` exists with all needed modules. No Task 0 needed.
 
 2. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_response_analyzer_supervisor.rs`.
 

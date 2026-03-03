@@ -442,11 +442,15 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 
 ### Previous Story Intelligence (Stories 7.1, 7.4, 6.3)
 
-**Story 7.1 (Integration Test Infrastructure):**
-- Defines `tests/integration.rs` entry point with `mod helpers;` + individual test modules
-- Defines `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, etc.)
-- Defines `lib.rs` creation and session::state re-export as Task 0
-- All mock implementations must be `Send + Sync`
+**Story 7.1 (Integration Test Infrastructure) — IMPLEMENTED:**
+- `tests/integration.rs` entry point uses `#[path = "integration/..."]` attributes (Rust 2024 edition requirement — plain `mod foo;` does NOT resolve to `tests/integration/foo.rs`)
+- `tests/integration/helpers/mod.rs` re-exports `mocks` and `fixtures`
+- Mocks: `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner` — all `Send + Sync`
+- Mock API uses factory closures: `MockGitProvider::new().with_create_pr(|| Ok(PrInfo{...}))` because `GitProviderError` is not `Clone`
+- `MockSessionRunner::completed()` / `.escalated()` / `.failed(error)` / `.with_factory(closure)` — named constructors
+- `MockSessionRunner::check_and_recover_wal()` returns `Option<()>` (always `None`), NOT `Option<RecoveryInfo>`
+- Fixtures: `make_test_config(dir)`, `make_test_secrets()`, `make_test_story(key, label, deps)`, `write_sprint_status(dir, entries)`, `write_wal_file(dir, state)`, `make_test_session_state(story_key)`, `create_test_repo(dir)`
+- `src/lib.rs` exposes 12 modules; `src/session/mod.rs` re-exports `SessionState` and `ChatMessage` via `pub use state::{SessionState, ChatMessage};`
 - Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
 - Uses `tempfile::tempdir()` for filesystem isolation
 

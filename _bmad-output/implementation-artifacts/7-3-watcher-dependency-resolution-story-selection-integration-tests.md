@@ -240,12 +240,13 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **Rust 2024 edition requires `#[path]` attributes** — new test modules must be declared as `#[path = "integration/test_watcher.rs"] mod test_watcher;` in `tests/integration.rs` (plain `mod test_watcher;` will NOT resolve correctly).
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
+- **lib.rs is implemented:** `src/lib.rs` exposes 12 public modules including `watcher`. All integration test imports use `bmad_bot::watcher::{Type}`.
 
 ### Dependencies Required
 

@@ -288,9 +288,14 @@ assert_eq!(loaded.llm.dev.provider, config.llm.dev.provider);
 
 ### Previous Story Intelligence (Stories 7.1 through 7.8)
 
-Key patterns from reviewing all previous stories:
+**Story 7.1 (Integration Test Infrastructure — IMPLEMENTED):**
+- `tests/integration.rs` uses `#[path = "integration/..."]` attributes (Rust 2024 edition) — new test modules must use `#[path = "integration/test_cli_lifecycle.rs"] mod test_cli_lifecycle;`
+- `src/lib.rs` exposes 12 public modules (auth, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). **`cli` is NOT in lib.rs** — it remains `mod cli;` in `main.rs` (binary-only). To access `DaemonState` from integration tests, this story will need to either move relevant types to lib.rs or use a `#[path]` import.
+- `tests/integration/` directory exists with 29 passing tests covering mocks and fixtures
+- Fixtures available: `make_test_config(dir)`, `make_test_secrets()`, `make_test_story(key, label, deps)`, etc.
 
-1. **`lib.rs` blocker is universal** — Every story needs it. This story adds `pub mod cli;` which previous stories explicitly excluded. This is the correct resolution for accessing `DaemonState`.
+Key patterns:
+1. **`lib.rs` blocker is resolved for all modules except `cli`** — this story may need to add `pub mod cli;` to lib.rs or extract `DaemonState` to a separate public module.
 
 2. **Test file naming convention:** `test_{module_name}.rs`. For this story: `test_cli_lifecycle.rs`.
 

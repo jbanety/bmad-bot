@@ -947,6 +947,7 @@ bmad-bot/
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
 │   ├── main.rs                       # Entry point, CLI dispatch, rustls init
+│   ├── lib.rs                        # Library crate — pub mod for all modules (enables integration test imports via bmad_bot::*)
 │   ├── auth/
 │   │   ├── mod.rs                    # Auth module root
 │   │   └── github_copilot.rs         # OAuth Device Flow, token exchange, CopilotTokenCache
@@ -999,6 +1000,14 @@ bmad-bot/
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
+    ├── integration.rs                 # Integration test binary entry point (cargo test --test integration)
+    ├── integration/
+    │   ├── helpers/
+    │   │   ├── mod.rs                 # Re-exports: pub mod mocks; pub mod fixtures;
+    │   │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+    │   │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+    │   ├── test_mocks.rs             # Self-verification tests for mock implementations
+    │   └── test_fixtures.rs          # Self-verification tests for fixture builders
     └── e2e/
         └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
 ```

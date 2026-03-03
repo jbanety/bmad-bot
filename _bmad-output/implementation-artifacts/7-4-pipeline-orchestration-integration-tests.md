@@ -668,12 +668,20 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. **Rust 2024 edition requires `#[path]` attributes** — new test modules must be declared as `#[path = "integration/test_pipeline.rs"] mod test_pipeline;` in `tests/integration.rs` (plain `mod test_pipeline;` will NOT resolve correctly).
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
 - **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
+- **Mock API (from 7.1 implementation):** Mocks use factory closures, not stored values:
+  - `MockGitProvider::new().with_create_pr(|| Ok(PrInfo{...}))` — closures required because `GitProviderError` is not `Clone`
+  - `MockNotifier::new()` — captures calls; use `.story_calls()` / `.summary_calls()` for assertions
+  - `MockSessionRunner::completed()` / `.escalated()` / `.failed(error)` / `.with_factory(closure)` — named constructors, NOT `::new(outcome)`
+  - `MockReviewRunner::completed()` / `.skipped(reason)` / `.failed(error)` / `.with_factory(closure)`
+  - `MockSessionRunner::check_and_recover_wal()` returns `Option<()>` (always `None`), not `Option<RecoveryInfo>`
+- **Additional fixture:** `make_test_session_state(story_key)` builds a valid `SessionState` for WAL tests
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one
+- **lib.rs is implemented:** `src/lib.rs` exposes 12 public modules. All integration test imports use `bmad_bot::{module}::{Type}`.
 
 ### Git Intelligence
 

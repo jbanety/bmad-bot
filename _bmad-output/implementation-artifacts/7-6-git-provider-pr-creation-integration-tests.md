@@ -329,13 +329,19 @@ URL pattern: `https://github.com/{owner}/{repo}/pull/{number}`
 
 ### Previous Story Intelligence (Stories 7.4, 7.5)
 
+**Story 7.1 (Integration Test Infrastructure — IMPLEMENTED):**
+- `tests/integration.rs` uses `#[path = "integration/..."]` attributes (Rust 2024 edition)
+- `MockGitProvider::new().with_create_pr(|| Ok(PrInfo{...}))` — factory closures, not stored values (`GitProviderError` is not `Clone`)
+- `MockNotifier::new()` captures calls; `.story_calls()` / `.summary_calls()` for assertions
+- `src/lib.rs` exposes 12 modules including `git_provider` with all public types
+
 **Story 7.5 (Session WAL Crash Recovery):**
 - Established the "Cross-Module Integration Value" section pattern — use it here
 - Used full struct literal for `BotConfig` instead of `_test_minimal()` — follow same pattern if config needed
 - `wal_path()` helper pattern for deriving private internal paths
 
 **Story 7.4 (Pipeline Orchestration):**
-- Defines `MockGitProvider` with builder pattern for test setup
+- Defines `MockGitProvider` with builder pattern (closures) for test setup
 - `PipelineTestBuilder` pattern — not needed here (no pipeline interaction)
 - Tracing is a no-op in tests — silent without a subscriber
 
