@@ -1,6 +1,6 @@
 # Story 7.9: CLI Lifecycle Integration Tests
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -39,40 +39,40 @@ So that I'm confident the user experience of init → start → status → logs 
 
 ## Tasks / Subtasks
 
-- [ ] Task 0: Ensure `src/lib.rs` prerequisite + resolve `cli` module accessibility (AC: ALL — BLOCKER)
-  - [ ] 0.1 If `src/lib.rs` does not exist (Story 7.1 Task 0 not yet done), create it with `pub mod` declarations for all modules. See Story `7-1-integration-test-infrastructure-fixtures.md` Task 0.
-  - [ ] 0.2 🚨 CRITICAL: Add `pub mod cli;` to `src/lib.rs` so that `DaemonState` is accessible from integration tests (see Architecture Compliance section for full rationale)
-  - [ ] 0.3 Remove `mod cli;` from `src/main.rs` (it now comes from `bmad_bot::cli`)
-  - [ ] 0.4 Update `src/main.rs` to import CLI types from `bmad_bot::cli::*` instead of the local `mod cli;`
-  - [ ] 0.5 Verify `cargo build` + `cargo test` pass with all existing unit tests
+- [x] Task 0: Ensure `src/lib.rs` prerequisite + resolve `cli` module accessibility (AC: ALL — BLOCKER)
+  - [x] 0.1 If `src/lib.rs` does not exist (Story 7.1 Task 0 not yet done), create it with `pub mod` declarations for all modules. See Story `7-1-integration-test-infrastructure-fixtures.md` Task 0.
+  - [x] 0.2 🚨 CRITICAL: Add `pub mod cli;` to `src/lib.rs` so that `DaemonState` is accessible from integration tests (see Architecture Compliance section for full rationale)
+  - [x] 0.3 Remove `mod cli;` from `src/main.rs` (it now comes from `bmad_bot::cli`)
+  - [x] 0.4 Update `src/main.rs` to import CLI types from `bmad_bot::cli::*` instead of the local `mod cli;`
+  - [x] 0.5 Verify `cargo build` + `cargo test` pass with all existing unit tests
 
-- [ ] Task 1: Create integration test file structure (AC: ALL)
-  - [ ] 1.1 If `tests/integration.rs` does not exist yet, create it as the Cargo test binary entry point
-  - [ ] 1.2 If `tests/integration/helpers/` does not exist, create the directory structure
-  - [ ] 1.3 Create `tests/integration/test_cli_lifecycle.rs` for all Story 7.9 tests
-  - [ ] 1.4 Declare `mod test_cli_lifecycle;` in `tests/integration.rs`
+- [x] Task 1: Create integration test file structure (AC: ALL)
+  - [x] 1.1 If `tests/integration.rs` does not exist yet, create it as the Cargo test binary entry point
+  - [x] 1.2 If `tests/integration/helpers/` does not exist, create the directory structure
+  - [x] 1.3 Create `tests/integration/test_cli_lifecycle.rs` for all Story 7.9 tests
+  - [x] 1.4 Declare `mod test_cli_lifecycle;` in `tests/integration.rs`
 
-- [ ] Task 2: Implement DaemonState read/write roundtrip tests (AC: #1, #2)
-  - [ ] 2.1 Test: `read()` on non-existent file returns `Ok(None)`
-  - [ ] 2.2 Test: construct `DaemonState` manually → `write()` → `read()` → verify all fields match (pid, started_at, status, stories_processed, log_file)
-  - [ ] 2.3 Test: `new_running()` → `write()` → `read()` → verify pid matches `std::process::id()`, status is "running", stories_processed is 0
+- [x] Task 2: Implement DaemonState read/write roundtrip tests (AC: #1, #2)
+  - [x] 2.1 Test: `read()` on non-existent file returns `Ok(None)`
+  - [x] 2.2 Test: construct `DaemonState` manually → `write()` → `read()` → verify all fields match (pid, started_at, status, stories_processed, log_file)
+  - [x] 2.3 Test: `new_running()` → `write()` → `read()` → verify pid matches `std::process::id()`, status is "running", stories_processed is 0
 
-- [ ] Task 3: Implement DaemonState mutation + persistence tests (AC: #3, #4)
-  - [ ] 3.1 Test: `new_running()` → `touch()` → `record_story_processed()` × 2 → `write()` → `read()` → assert `stories_processed == 2` and `last_activity` differs from `started_at`
-  - [ ] 3.2 Test: `new_running()` → `write()` → re-read → `mark_stopped()` → `write()` → re-read → assert status is "stopped" and `last_activity` is updated
-  - [ ] 3.3 Test: verify `touch()` updates `last_activity` but not `status` or `stories_processed`
+- [x] Task 3: Implement DaemonState mutation + persistence tests (AC: #3, #4)
+  - [x] 3.1 Test: `new_running()` → `touch()` → `record_story_processed()` × 2 → `write()` → `read()` → assert `stories_processed == 2` and `last_activity` differs from `started_at`
+  - [x] 3.2 Test: `new_running()` → `write()` → re-read → `mark_stopped()` → `write()` → re-read → assert status is "stopped" and `last_activity` is updated
+  - [x] 3.3 Test: verify `touch()` updates `last_activity` but not `status` or `stories_processed`
 
-- [ ] Task 4: Implement DaemonState cleanup tests (AC: #5)
-  - [ ] 4.1 Test: `write()` state → verify file exists → `cleanup()` → verify file removed → `read()` returns `Ok(None)`
-  - [ ] 4.2 Test: `cleanup()` on non-existent file does not error (idempotent)
+- [x] Task 4: Implement DaemonState cleanup tests (AC: #5)
+  - [x] 4.1 Test: `write()` state → verify file exists → `cleanup()` → verify file removed → `read()` returns `Ok(None)`
+  - [x] 4.2 Test: `cleanup()` on non-existent file does not error (idempotent)
 
-- [ ] Task 5: Implement BotConfig load roundtrip test (AC: #6)
-  - [ ] 5.1 Test: construct valid `BotConfig` programmatically → serialize to YAML with `serde_yml::to_string()` → write to temp file → `BotConfig::load()` → `validate()` → assert all fields match
-  - [ ] 5.2 Test: load from a malformed YAML file → verify `ConfigError` is returned (not a panic) — NOTE: this overlaps with unit test `test_config_invalid_yaml_returns_parse_error` (config/mod.rs L989); keep as a lightweight sanity check from the integration test binary, don't over-specify
+- [x] Task 5: Implement BotConfig load roundtrip test (AC: #6)
+  - [x] 5.1 Test: construct valid `BotConfig` programmatically → serialize to YAML with `serde_yml::to_string()` → write to temp file → `BotConfig::load()` → `validate()` → assert all fields match
+  - [x] 5.2 Test: load from a malformed YAML file → verify `ConfigError` is returned (not a panic) — NOTE: this overlaps with unit test `test_config_invalid_yaml_returns_parse_error` (config/mod.rs L989); keep as a lightweight sanity check from the integration test binary, don't over-specify
 
-- [ ] Task 6: Implement cross-concern integration tests (AC: ALL)
-  - [ ] 6.1 Test: full lifecycle — create state → write → touch → record 3 stories → mark_stopped → write → read → verify final state is coherent (stopped, 3 stories, timestamps monotonically ordered)
-  - [ ] 6.2 Test: state file is valid JSON — write state → read raw file content → parse as `serde_json::Value` → verify all expected keys exist
+- [x] Task 6: Implement cross-concern integration tests (AC: ALL)
+  - [x] 6.1 Test: full lifecycle — create state → write → touch → record 3 stories → mark_stopped → write → read → verify final state is coherent (stopped, 3 stories, timestamps monotonically ordered)
+  - [x] 6.2 Test: state file is valid JSON — write state → read raw file content → parse as `serde_json::Value` → verify all expected keys exist
 
 ## Dev Notes
 
@@ -424,10 +424,30 @@ tests/
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Sonnet 4 (Anthropic)
 
 ### Debug Log References
 
+None — no issues encountered.
+
 ### Completion Notes List
 
+- Task 0 (0.1–0.5): All prerequisites already satisfied by prior Story 7.1 implementation. `src/lib.rs` exists with `pub mod cli;`, `src/main.rs` uses `bmad_bot::cli`. Verified with `cargo build` + `cargo test` (121 pass).
+- Task 1 (1.1–1.4): `tests/integration.rs` and `tests/integration/helpers/` existed. Created `tests/integration/test_cli_lifecycle.rs` and added `#[path]` module declaration.
+- Task 2 (2.1–2.3): 3 tests — read nonexistent returns None, manual construct roundtrip, new_running roundtrip.
+- Task 3 (3.1–3.3): 3 tests — touch+record stories persist, mark_stopped persists, touch only updates last_activity.
+- Task 4 (4.1–4.2): 2 tests — cleanup removes file + read returns None, cleanup on nonexistent is idempotent.
+- Task 5 (5.1–5.2): 2 tests — BotConfig YAML roundtrip with validate, malformed YAML returns error.
+- Task 6 (6.1–6.2): 2 tests — full lifecycle coherence, state file valid JSON with expected keys.
+- Total: 12 new integration tests, all passing. Full suite: 133 tests pass (121 existing + 12 new).
+
+### Change Log
+
+- Created `tests/integration/test_cli_lifecycle.rs` with 12 integration tests covering all 6 ACs
+- Updated `tests/integration.rs` to declare `test_cli_lifecycle` module
+
 ### File List
+
+- `tests/integration/test_cli_lifecycle.rs` (NEW)
+- `tests/integration.rs` (MODIFIED)
+- `_bmad-output/implementation-artifacts/7-9-cli-lifecycle-integration-tests.md` (MODIFIED)
