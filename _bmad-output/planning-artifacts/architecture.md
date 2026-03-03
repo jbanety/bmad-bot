@@ -909,7 +909,9 @@ mod tests {
 - Structure: Arrange → Act → Assert, always in that order
 - LLM responses mocked with static data — never call real providers
 - Each new module must include at least basic unit tests before being considered complete
-- E2E tests in `tests/` directory, gated behind `BMAD_E2E=1` env var
+- E2E tests in `tests/e2e/` directory, gated behind `BMAD_E2E=1` env var
+- Integration tests in `tests/integration/` directory, run via `cargo test --test integration` — deterministic, no real API calls, safe for CI
+- Integration test modules declared in `tests/integration.rs` using `#[path]` attributes (Rust 2024 edition): `#[path = "integration/test_foo.rs"] mod test_foo;`
 
 ### Enforcement Guidelines
 
@@ -947,6 +949,7 @@ bmad-bot/
 ├── bmad-bot.yaml.example             # Template config (committed)
 ├── src/
 │   ├── main.rs                       # Entry point, CLI dispatch, rustls init
+│   ├── lib.rs                        # Library crate — pub mod for all modules (enables integration test imports)
 │   ├── auth/
 │   │   ├── mod.rs                    # Auth module root
 │   │   └── github_copilot.rs         # OAuth Device Flow, token exchange, CopilotTokenCache
@@ -999,8 +1002,16 @@ bmad-bot/
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
-    └── e2e/
-        └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+    ├── e2e/
+    │   └── mod.rs                    # E2E tests (gated behind BMAD_E2E=1)
+    ├── integration.rs                # Integration test binary entry point (cargo test --test integration)
+    └── integration/
+        ├── helpers/
+        │   ├── mod.rs                # Re-exports: pub mod mocks; pub mod fixtures;
+        │   ├── mocks.rs              # MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner
+        │   └── fixtures.rs           # make_test_config, make_test_secrets, make_test_story, write_sprint_status, write_wal_file, create_test_repo
+        ├── test_mocks.rs             # Self-verification tests for mock implementations
+        └── test_fixtures.rs          # Self-verification tests for fixture builders
 ```
 
 ### Requirements to Structure Mapping

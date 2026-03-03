@@ -220,6 +220,12 @@ const STORY_SELECTION_PATTERNS: &[&str] = &[
 #[derive(Debug)]
 pub struct ResponseAnalyzer;
 
+impl Default for ResponseAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResponseAnalyzer {
     /// Create a new `ResponseAnalyzer`.
     pub fn new() -> Self {

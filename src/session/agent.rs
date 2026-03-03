@@ -139,6 +139,12 @@ pub struct ChatHistoryHook {
     inner: Arc<Mutex<HistorySnapshot>>,
 }
 
+impl Default for ChatHistoryHook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChatHistoryHook {
     /// Create a new hook with no captured state.
     pub fn new() -> Self {
