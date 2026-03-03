@@ -2,9 +2,7 @@
 
 use crate::helpers::mocks::*;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
-use bmad_bot::notifier::{
-    Notifier, NotifierError, RunSummary, StoryNotification, StoryStatus,
-};
+use bmad_bot::notifier::{Notifier, RunSummary, StoryNotification, StoryStatus};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
 

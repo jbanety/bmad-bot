@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
 use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::runner::RecoveryInfo;
 use bmad_bot::session::SessionOutcome;
 use bmad_bot::watcher::StoryInfo;
 
@@ -331,7 +332,7 @@ impl MockSessionRunner {
     }
 
     /// Simulates `SessionRunner::check_and_recover_wal` — always returns `None`.
-    pub async fn check_and_recover_wal(&self) -> Option<()> {
+    pub async fn check_and_recover_wal(&self) -> Option<RecoveryInfo> {
         None
     }
 
