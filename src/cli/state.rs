@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use bmad_bot::config::discovery::BmadDiscovery;
+use crate::config::discovery::BmadDiscovery;
 
 /// Default state file name, written in the current working directory.
 pub const STATE_FILE_NAME: &str = "bmad-bot.state.json";

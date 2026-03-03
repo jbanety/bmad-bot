@@ -8,6 +8,7 @@
 #![warn(dead_code)]
 
 pub mod auth;
+pub mod cli;
 pub mod config;
 pub mod git_provider;
 pub mod llm;

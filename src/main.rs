@@ -1,7 +1,7 @@
 #![deny(clippy::all)]
 #![warn(dead_code)] // FIXME: Change to #![deny(dead_code)] once all modules have real implementations
 
-mod cli;
+use bmad_bot::cli;
 
 use anyhow::Result;
 use clap::Parser;
@@ -13,11 +13,11 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls CryptoProvider");
 
-    let cli = cli::Cli::parse();
+    let cli_args = cli::Cli::parse();
 
-    match cli.command {
+    match cli_args.command {
         cli::Commands::Start => {
-            cli::run_start(&cli.config).await?;
+            cli::run_start(&cli_args.config).await?;
         }
         cli::Commands::Init { copilot_login } => {
             // Tracing is global — main.rs owns the subscriber for non-start commands
@@ -25,16 +25,16 @@ async fn main() -> Result<()> {
             if copilot_login {
                 cli::run_copilot_login().await?;
             } else {
-                cli::run_init(&cli.config).await?;
+                cli::run_init(&cli_args.config).await?;
             }
         }
         cli::Commands::Status => {
             let _ = tracing_subscriber::fmt::try_init();
-            cli::run_status(&cli.config).await?;
+            cli::run_status(&cli_args.config).await?;
         }
         cli::Commands::Logs { level, tail } => {
             let _ = tracing_subscriber::fmt::try_init();
-            cli::run_logs(&cli.config, level, Some(tail)).await?;
+            cli::run_logs(&cli_args.config, level, Some(tail)).await?;
         }
     }
 
