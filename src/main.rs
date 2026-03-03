@@ -1,19 +1,22 @@
 #![deny(clippy::all)]
 #![warn(dead_code)] // FIXME: Change to #![deny(dead_code)] once all modules have real implementations
 
-mod auth;
 mod cli;
-mod config;
-mod git_provider;
-mod llm;
-mod mcp;
-mod notifier;
-mod pipeline;
-mod review;
-mod session;
-mod supervisor;
-mod tools;
-mod watcher;
+
+// Re-export library crate modules so `crate::X` paths in CLI submodules resolve correctly.
+// These were previously `mod X;` declarations — now sourced from the library crate.
+use bmad_bot::auth;
+use bmad_bot::config;
+use bmad_bot::git_provider;
+use bmad_bot::llm;
+use bmad_bot::mcp;
+use bmad_bot::notifier;
+use bmad_bot::pipeline;
+use bmad_bot::review;
+use bmad_bot::session;
+use bmad_bot::supervisor;
+use bmad_bot::tools;
+use bmad_bot::watcher;
 
 use anyhow::Result;
 use clap::Parser;
