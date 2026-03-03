@@ -1,6 +1,6 @@
 # Story 4.7: Agent Module Centralization
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -67,24 +67,24 @@ so that adding or changing tools requires editing one place instead of three, an
   - [x] 2.4 `cargo build` + `cargo test` — 1004 pass, 0 fail
   - [x] 2.5 Commit: `refactor: centralize TERMINAL_TIMEOUT_SECS in session::agent`
 
-- [ ] Task 3: Centralize tool creation (AC: #2, #3, #5)
-  - [ ] 3.1 Add `create_base_tools()` and `create_tools_with_supervisor()` to `session/agent.rs` (see Dev Notes for signatures)
-  - [ ] 3.2 Refactor `SessionRunner::create_tools()` in `runner.rs` to call `agent::create_tools_with_supervisor()`
-  - [ ] 3.3 Refactor `ReviewRunner::create_tools()` in `review/mod.rs` to call `agent::create_tools_with_supervisor()`
-  - [ ] 3.4 Refactor `ArchitectSession::ask()` in `supervisor/architect.rs` to call `agent::create_base_tools()`
-  - [ ] 3.5 Remove `type ToolSet` from `runner.rs` and `type ReviewToolSet` from `review/mod.rs`
-  - [ ] 3.6 Remove the per-module `create_tools()` methods from `runner.rs` and `review/mod.rs`
-  - [ ] 3.7 Remove now-unused direct tool type imports (`GitTool`, `ReadFileTool`, `EditFileTool`, `GrepTool`, `FindPathTool`, `ListDirectoryTool`, `TerminalTool`) from `runner.rs`, `review/mod.rs`, and `supervisor/architect.rs`
-  - [ ] 3.8 Add unit tests for `create_base_tools()` in `session/agent.rs` (see Dev Notes)
-  - [ ] 3.9 `cargo build` + `cargo test` + `cargo clippy`
-  - [ ] 3.10 Commit: `refactor: centralize tool creation in session::agent`
+- [x] Task 3: Centralize tool creation (AC: #2, #3, #5)
+  - [x] 3.1 Add `create_base_tools()` and `create_tools_with_supervisor()` to `session/agent.rs` (with `BaseToolSet` and `FullToolSet` type aliases for clippy)
+  - [x] 3.2 Refactor `SessionRunner::create_tools()` in `runner.rs` to call `agent::create_tools_with_supervisor()`
+  - [x] 3.3 Refactor `ReviewRunner::create_tools()` in `review/mod.rs` to call `agent::create_tools_with_supervisor()`
+  - [x] 3.4 Refactor `ArchitectSession::ask()` in `supervisor/architect.rs` to call `agent::create_base_tools()`
+  - [x] 3.5 Remove `type ToolSet` from `runner.rs` and `type ReviewToolSet` from `review/mod.rs`
+  - [x] 3.6 Remove the per-module `create_tools()` methods from `runner.rs` and `review/mod.rs`
+  - [x] 3.7 Remove now-unused direct tool type imports from `runner.rs`, `review/mod.rs`, and `supervisor/architect.rs`
+  - [x] 3.8 Add unit tests for `create_base_tools()` in `session/agent.rs` — 2 tests added (7-tuple construction, arbitrary path)
+  - [x] 3.9 `cargo build` + `cargo test` (1006 pass, 0 fail) + `cargo clippy` (0 new errors; 1 preexisting in cleanup.rs)
+  - [x] 3.10 Commit: `refactor: centralize tool creation in session::agent`
 
-- [ ] Task 4: Final validation (AC: #6, #7)
-  - [ ] 4.1 `cargo fmt --check` — clean
-  - [ ] 4.2 `cargo clippy` — zero new warnings
-  - [ ] 4.3 `cargo test` — all tests pass (947+ expected)
-  - [ ] 4.4 Verify no remaining references to `dev_agent` in src/ (grep check)
-  - [ ] 4.5 Update story status to complete
+- [x] Task 4: Final validation (AC: #6, #7)
+  - [x] 4.1 `cargo fmt --check` — clean
+  - [x] 4.2 `cargo clippy` — zero new warnings (1 preexisting error in cleanup.rs:384, not ours)
+  - [x] 4.3 `cargo test` — 1006 pass, 0 fail (exceeded 947+ target)
+  - [x] 4.4 `grep -rn "dev_agent" src/` — zero matches confirmed
+  - [x] 4.5 Update story status to review
 
 ## Dev Notes
 
@@ -437,9 +437,26 @@ src/
 ## Dev Agent Record
 
 ### Agent Model Used
+Claude Opus 4.6
 
 ### Debug Log References
+N/A — pure refactoring, no runtime debugging needed.
 
 ### Completion Notes List
+- **Task 1:** `git mv src/session/dev_agent.rs src/session/agent.rs` + updated all 6 files with `dev_agent` references (session/mod.rs, session/runner.rs, session/analyzer.rs, review/mod.rs, supervisor/architect.rs, llm/agent_factory.rs). Updated module doc comment to role-agnostic description. 1004 tests pass. Commit: `refactor(session): rename dev_agent module to agent`
+- **Task 2:** Added `pub const TERMINAL_TIMEOUT_SECS: u64 = 30` to `session/agent.rs`, removed from runner.rs, review/mod.rs, architect.rs. Updated imports. 1004 tests pass. Commit: `refactor: centralize TERMINAL_TIMEOUT_SECS in session::agent`
+- **Task 3:** Added `create_base_tools()` and `create_tools_with_supervisor()` with `BaseToolSet`/`FullToolSet` type aliases (clippy `type_complexity`). Replaced `SessionRunner::create_tools()`, `ReviewRunner::create_tools()`, and inline construction in `ArchitectSession::ask()`. Removed `type ToolSet`, `type ReviewToolSet`, and now-unused tool type imports from 3 files. Added 2 unit tests. 1006 tests pass. Commit: `refactor: centralize tool creation in session::agent`
+- **Task 4:** `cargo fmt --check` clean. `cargo clippy` zero new errors. `cargo test` 1006 pass. `grep -rn "dev_agent" src/` returns zero matches.
+- **Decision:** Added `BaseToolSet` and `FullToolSet` type aliases in `agent.rs` (not in original story spec) to satisfy clippy `type_complexity` lint on the 7/8-element tuples. This replaces the removed `ToolSet`/`ReviewToolSet` aliases from caller modules with centralized equivalents.
+
+### Change Log
+- 2026-03-02: Story 4.7 implemented — rename dev_agent→agent, centralize TERMINAL_TIMEOUT_SECS, centralize tool creation (3 commits)
 
 ### File List
+- `src/session/agent.rs` — RENAMED from `dev_agent.rs`; updated module doc comment; added `TERMINAL_TIMEOUT_SECS`, `BaseToolSet`, `FullToolSet`, `create_base_tools()`, `create_tools_with_supervisor()`, 2 unit tests
+- `src/session/mod.rs` — `pub mod dev_agent` → `pub mod agent`, updated doc comment
+- `src/session/runner.rs` — Updated imports (`dev_agent` → `agent`), removed `ToolSet` type alias, removed `create_tools()` method, removed `TERMINAL_TIMEOUT_SECS` constant, removed unused tool type imports, replaced with `agent::create_tools_with_supervisor()` call
+- `src/session/analyzer.rs` — Updated doc comment reference (`dev_agent::build_preamble` → `agent::build_preamble`)
+- `src/review/mod.rs` — Updated imports (`dev_agent` → `agent`), removed `ReviewToolSet` type alias, removed `create_tools()` method, removed `TERMINAL_TIMEOUT_SECS` constant, removed unused tool type imports and `Path`, replaced with `agent::create_tools_with_supervisor()` call
+- `src/supervisor/architect.rs` — Updated import (`dev_agent::build_preamble` → `agent::{build_preamble, create_base_tools}`), removed `TERMINAL_TIMEOUT_SECS` constant, removed direct tool type imports, replaced inline tool construction with `create_base_tools()` call, updated inline comment
+- `src/llm/agent_factory.rs` — Updated all `dev_agent` references to `agent` (imports, doc comments, 3 `activate_agent` call paths)
