@@ -130,7 +130,7 @@ const COMPLETION_SIGNALS: &[&str] = &[
     "all acceptance criteria met",
     "story is ready for review",
     "all tasks and subtasks are marked",
-    "ready for review",
+    "is ready for review",
     "proceed with the next story",
     "move on to the next story",
     "next story or a code review",
@@ -199,7 +199,7 @@ const STORY_SELECTION_PATTERNS: &[&str] = &[
     "provide the story",
     "story file path",
     "which story to develop",
-    "story would you like",
+    "story would you like me",
 ];
 
 /// Stateless response analyzer for the session chat loop.

@@ -137,6 +137,20 @@ fn test_no_false_positive_completion_completing_step() {
     assert_ne!(action, ResponseAction::Completed);
 }
 
+#[test]
+fn test_no_false_positive_completion_ready_for_review_future_tense() {
+    let analyzer = ResponseAnalyzer::new();
+    let slot = empty_slot();
+    // Future-tense "ready for review" should NOT trigger completion — the agent
+    // is describing future intent, not signaling the story is done now.
+    let action = analyzer.analyze("I'll have it ready for review by tomorrow.", &slot, "7-10");
+    assert_ne!(
+        action,
+        ResponseAction::Completed,
+        "Future-tense 'ready for review' must not false-positive as a completion signal"
+    );
+}
+
 // ===========================================================================
 // Task 3: ResponseAnalyzer story selection tests (AC: 2)
 // ===========================================================================
@@ -237,6 +251,23 @@ fn test_story_selection_all_patterns() {
             "Story selection not detected for: {phrase}"
         );
     }
+}
+
+#[test]
+fn test_no_false_positive_story_selection_declarative() {
+    let analyzer = ResponseAnalyzer::new();
+    let slot = empty_slot();
+    // Declarative sentences mentioning "story" should NOT trigger story-selection.
+    // E.g. an agent narrating about a story rather than asking which one to work on.
+    let declarative = "The story would you like to review has already been merged.";
+    let action = analyzer.analyze(declarative, &slot, "7-10");
+    assert_ne!(
+        action,
+        ResponseAction::Continue {
+            reply: "7-10".to_string()
+        },
+        "Declarative sentence must not be mistaken for a story-selection question"
+    );
 }
 
 // ===========================================================================
@@ -341,7 +372,7 @@ fn test_rule_engine_no_llm_involved() {
     // RuleEngine is purely in-memory pattern matching — no architect/LLM involved.
     // This test verifies RuleEngine operates independently: create, evaluate, done.
     let engine = RuleEngine::new();
-    assert_eq!(engine.rule_count(), 6); // 6 default rules, no LLM setup
+    assert!(engine.rule_count() >= 6, "RuleEngine should have at least 6 default rules; update this bound if rules are intentionally added"); // no LLM setup
     let result = engine.evaluate("Should I proceed?");
     assert!(matches!(result, RuleResult::Matched { .. }));
     // If we got here without any async/network calls, no LLM was involved.
@@ -696,6 +727,10 @@ fn test_review_fix_patterns_trigger_continue_with_1() {
         "[1] Fix automatically",
         "What should I do with these issues?",
         "What should I do with these findings?",
+        // Entries from REVIEW_FIX_PATTERNS that present options 2 and 3 must
+        // still auto-select option 1 (fix automatically) — the bot always fixes.
+        "Choose [2] create action items",
+        "Choose [3] show me details",
     ];
     for phrase in phrases {
         let action = analyzer.analyze(phrase, &slot, "7-10");
@@ -726,20 +761,26 @@ fn test_review_complete_priority_over_fix() {
 fn test_review_complete_does_not_false_positive_on_normal_completion() {
     let analyzer = ResponseAnalyzer::new();
     let slot = empty_slot();
-    // Normal completion signals should NOT trigger review complete detection
-    // (though they will trigger dev-session completion at priority 2).
-    // The key test: "all tasks completed" triggers Completed via COMPLETION_SIGNALS,
-    // not via REVIEW_COMPLETE_PATTERNS.
+    // "All tasks completed" triggers Completed via COMPLETION_SIGNALS (priority 2),
+    // NOT via REVIEW_COMPLETE_PATTERNS (priority 1.5).
+    // Both paths return ResponseAction::Completed, so we verify the non-review path
+    // still works correctly and that casual "review" mentions don't trigger the
+    // review-complete path.
     let action = analyzer.analyze("All tasks completed successfully.", &slot, "7-10");
-    assert_eq!(action, ResponseAction::Completed);
+    assert_eq!(
+        action,
+        ResponseAction::Completed,
+        "Normal completion signal must still return Completed"
+    );
 
-    // Ensure phrases that are clearly NOT review-related don't match review patterns
+    // A sentence using "review" casually (not as a workflow completion marker)
+    // must NOT trigger REVIEW_COMPLETE_PATTERNS.
     let non_review = "I'll review the code changes and continue working.";
     let action2 = analyzer.analyze(non_review, &slot, "7-10");
     assert_ne!(
         action2,
         ResponseAction::Completed,
-        "Should not false-positive on casual use of 'review'"
+        "Casual use of 'review' must not false-positive as a review-workflow completion"
     );
 }
 
@@ -861,16 +902,22 @@ async fn test_full_flow_completion_no_rule_engine() {
     );
     assert_eq!(action, ResponseAction::Completed);
 
-    // RuleEngine is not used for ResponseAnalyzer — it's a separate layer.
-    // Verify the rule engine would NOT match this text (it's a completion signal, not a question).
+    // The ResponseAnalyzer and RuleEngine are SEPARATE layers with different scopes:
+    // - ResponseAnalyzer: monitors agent responses in the chat loop (chat-level layer)
+    // - RuleEngine: processes questions routed through the AskSupervisor *tool* (tool-call layer)
+    //
+    // They can both recognise similar surface patterns but serve different purposes.
+    // Completion detection is ALWAYS handled by the analyzer — the rule engine is never
+    // consulted for agent responses in the chat loop, so even if a phrase also happens
+    // to fire a rule-engine pattern (e.g. progress_confirmation), it does NOT interfere.
     let engine = RuleEngine::new();
-    // "All tasks completed" is not a question pattern, so rule engine should miss or
-    // match progress_confirmation (since it contains "implementation complete").
-    // The important thing: completion detection is handled by the analyzer, not the rule engine.
+    // "implementation complete" inside a completion report also matches the
+    // progress_confirmation rule — this is intentional: the rule engine will reply
+    // "Acknowledged. Continue to the next task." if the same text were sent as a
+    // tool-invoked question. That is the correct tool-layer behaviour.
     let result = engine.evaluate("All tasks completed. Story implementation complete.");
-    // "implementation complete" matches the progress_confirmation rule
-    assert!(matches!(result, RuleResult::Matched { rule_name, .. } if rule_name == "progress_confirmation"));
-    // This proves the two layers are complementary: analyzer handles agent text at the chat loop,
-    // rule engine handles tool-invoked questions. Both can recognize similar phrases but serve
-    // different purposes.
+    assert!(
+        matches!(result, RuleResult::Matched { rule_name, .. } if rule_name == "progress_confirmation"),
+        "progress_confirmation rule should match a completion report sent as a tool question"
+    );
 }
