@@ -1,6 +1,6 @@
 # Story 7.2: Config → Startup Validation Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -295,7 +295,13 @@ Claude Sonnet 4 (via Anthropic API)
 ### Change Log
 - Created `tests/integration/test_config.rs` — 17 integration tests for config/secrets/discovery/http-client pipeline
 - Modified `tests/integration.rs` — added `#[path] mod test_config` declaration
+- **CR Fix 1:** `test_config_unknown_llm_provider_rejected` — switched from `.replace()` (replaces all 3 LLM roles) to `.replacen(..., 1)` and tightened assertion to exact field `llm.dev.provider`
+- **CR Fix 2:** `test_config_error_messages_contain_field_names` — expanded from 2 to 4 error cases; added `git_provider.provider` and `llm.dev.provider` field-name checks to satisfy Task 3.7 "for each error"
+- **CR Fix 3:** `test_secrets_error_contains_env_var_name` — expanded from 1 to 3 providers; added `GITHUB_TOKEN` and `TELEGRAM_BOT_TOKEN` error-string assertions to satisfy Task 4.4 "verify each error"
+- **CR Fix 4:** `test_build_http_client_returns_successfully` — added explicit `ClientWithMiddleware` type annotation, added comment documenting retry verification limitation (no public introspection API)
+- **CR Fix 5:** Story File List — added `_bmad-output/implementation-artifacts/sprint-status.yaml` (was modified in commit but missing from File List)
 
 ### File List
 - `tests/integration/test_config.rs` (new)
 - `tests/integration.rs` (modified)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified)

@@ -120,16 +120,17 @@ fn test_config_unknown_git_provider_rejected() {
 
 #[test]
 fn test_config_unknown_llm_provider_rejected() {
+    // Replace only the dev-role provider to get a deterministic field path.
     let tmp = tempfile::tempdir().unwrap();
-    let yaml = BASE_YAML.replace("provider: anthropic", "provider: deepseek");
+    let yaml = BASE_YAML.replacen("provider: anthropic", "provider: deepseek", 1);
     let path = write_raw_yaml(tmp.path(), &yaml);
 
     let config = BotConfig::load(&path).expect("load");
     let err = config.validate().unwrap_err();
 
     assert!(
-        matches!(err, ConfigError::InvalidField { ref field, .. } if field.contains("provider")),
-        "expected InvalidField for llm provider, got: {err:?}"
+        matches!(err, ConfigError::InvalidField { ref field, .. } if field == "llm.dev.provider"),
+        "expected InvalidField for llm.dev.provider, got: {err:?}"
     );
 }
 
@@ -194,6 +195,22 @@ fn test_config_error_messages_contain_field_names() {
     let err2 = config2.validate().unwrap_err();
     let msg2 = err2.to_string();
     assert!(msg2.contains("project_root"), "error msg should contain field name: {msg2}");
+
+    // Unknown git provider
+    let yaml3 = BASE_YAML.replace("provider: github", "provider: bitbucket");
+    let path3 = write_raw_yaml(tmp.path(), &yaml3);
+    let config3 = BotConfig::load(&path3).expect("load");
+    let err3 = config3.validate().unwrap_err();
+    let msg3 = err3.to_string();
+    assert!(msg3.contains("git_provider.provider"), "error msg should contain field name: {msg3}");
+
+    // Unknown LLM provider (dev role only)
+    let yaml4 = BASE_YAML.replacen("provider: anthropic", "provider: deepseek", 1);
+    let path4 = write_raw_yaml(tmp.path(), &yaml4);
+    let config4 = BotConfig::load(&path4).expect("load");
+    let err4 = config4.validate().unwrap_err();
+    let msg4 = err4.to_string();
+    assert!(msg4.contains("llm.dev.provider"), "error msg should contain field name: {msg4}");
 }
 
 // ---------------------------------------------------------------------------
@@ -258,15 +275,33 @@ fn test_secrets_missing_telegram_token_rejected_when_enabled() {
 
 #[test]
 fn test_secrets_error_contains_env_var_name() {
-    // Verify the error Display output contains the env var name
+    // Verify the error Display output contains the env var name — one test per provider
     let tmp = tempfile::tempdir().unwrap();
     let config = make_test_config(tmp.path());
+
+    // Anthropic API key
     let mut secrets = make_test_secrets();
     secrets.anthropic_api_key = None;
-
     let err = secrets.validate_for_config(&config).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ANTHROPIC_API_KEY"), "error msg should contain env var name: {msg}");
+
+    // GitHub token
+    let mut secrets2 = make_test_secrets();
+    secrets2.github_token = None;
+    let err2 = secrets2.validate_for_config(&config).unwrap_err();
+    let msg2 = err2.to_string();
+    assert!(msg2.contains("GITHUB_TOKEN"), "error msg should contain env var name: {msg2}");
+
+    // Telegram token (when enabled)
+    let mut config3 = make_test_config(tmp.path());
+    config3.notifications.telegram.enabled = true;
+    config3.notifications.telegram.chat_id = "12345".to_string();
+    let mut secrets3 = make_test_secrets();
+    secrets3.telegram_bot_token = None;
+    let err3 = secrets3.validate_for_config(&config3).unwrap_err();
+    let msg3 = err3.to_string();
+    assert!(msg3.contains("TELEGRAM_BOT_TOKEN"), "error msg should contain env var name: {msg3}");
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +369,14 @@ fn test_discovery_partial_bmad_no_config() {
 
 #[test]
 fn test_build_http_client_returns_successfully() {
+    use reqwest_middleware::ClientWithMiddleware;
     // Act — should not panic
-    let _client = build_http_client();
-    // Assert: binding succeeds → type is ClientWithMiddleware
+    let client: ClientWithMiddleware = build_http_client();
+    // Assert: explicit type annotation confirms ClientWithMiddleware is returned.
+    // Structural verification only: the retry policy (3 retries, exponential backoff) is
+    // configured inside build_http_client() but reqwest-middleware provides no public
+    // introspection API. Full retry behaviour is tested by integration with a live/mock
+    // HTTP server (out of scope for this story). The source in src/config/mod.rs’s
+    // build_http_client() documents the policy.
+    drop(client);
 }
