@@ -1,6 +1,6 @@
 # Story 7.6: Git Provider & PR Creation Integration Tests
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -445,6 +445,7 @@ Claude Sonnet 4 (Anthropic)
 - `GitHubProvider` and `GitLabProvider` do not implement `Debug`, so `Result` debug formatting was replaced with explicit match arms.
 - `GitProvider` trait import not needed for calling methods on `Box<dyn GitProvider>` — trait is resolved through the dyn type.
 - Pre-existing clippy errors in library code (4 errors: `Default` impl, `if` collapse, etc.) are NOT from this story's changes. Our test file compiles with zero warnings.
+- **[CR fix]** Pre-existing clippy errors were resolved: added `Default` impls for `ReqwestCopilotHttpClient`, `ChatHistoryHook`, `ResponseAnalyzer`; collapsed nested `if` in `session/cleanup.rs`.
 
 ### Completion Notes List
 
@@ -456,10 +457,15 @@ Claude Sonnet 4 (Anthropic)
 - **Task 5:** `test_git_provider_pr_description_failure_includes_details` — asserts "⚠️ Failure Details" section. `test_git_provider_pr_title_failure` — verifies `wip()` format with `[NEEDS REVIEW]`.
 - **Task 6:** `test_git_provider_pr_description_escalation_includes_all_fields` — builds escalation-style failure_details with question/reason/partial work, asserts all fields present including `⚠️ Escalated` marker.
 - **Task 7:** `test_git_provider_factory_to_get_pr_url_gitlab` — full factory→trait dispatch→`get_pr_url("42")` chain. `test_git_provider_get_pr_url_invalid_id_returns_error` — non-numeric ID returns `InvalidPrId`.
-- **Task 8:** `cargo test --test integration` — 108 passed, 0 failed (12 git provider tests). `cargo test` — 108 integration + all unit tests pass, no regressions. Clippy errors are pre-existing in library code, not from this story.
+- **Task 8:** `cargo test --test integration` — 110 passed, 0 failed (14 git provider tests after CR additions). `cargo test` — 110 integration + all unit tests pass, no regressions. `cargo clippy` — zero errors after fixing pre-existing Default impl and collapsible-if lints.
 
 ### File List
 
-- `tests/integration/test_git_provider.rs` — **NEW** — 12 integration tests for git_provider module
+- `tests/integration/test_git_provider.rs` — **MODIFIED** — 14 integration tests (added 2 new pr_summary tests; strengthened header assertion to `# 📋 Story:`)
 - `tests/integration.rs` — **MODIFIED** — added `mod test_git_provider` declaration
-- `_bmad-output/implementation-artifacts/7-6-git-provider-pr-creation-integration-tests.md` — **MODIFIED** — story status updates
+- `src/auth/github_copilot.rs` — **MODIFIED** — added `Default` impl for `ReqwestCopilotHttpClient` (CR fix)
+- `src/session/agent.rs` — **MODIFIED** — added `Default` impl for `ChatHistoryHook` (CR fix)
+- `src/session/analyzer.rs` — **MODIFIED** — added `Default` impl for `ResponseAnalyzer` (CR fix)
+- `src/session/cleanup.rs` — **MODIFIED** — collapsed nested `if` per clippy::collapsible_if (CR fix)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — **MODIFIED** — status updated to review
+- `_bmad-output/implementation-artifacts/7-6-git-provider-pr-creation-integration-tests.md` — **MODIFIED** — story status updates and CR fixes recorded

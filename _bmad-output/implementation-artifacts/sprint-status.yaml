@@ -103,7 +103,7 @@ development_status:
   7-3-watcher-dependency-resolution-story-selection-integration-tests: done # depends-on: 7-1
   7-4-pipeline-orchestration-integration-tests: done # depends-on: 7-1
   7-5-session-wal-crash-recovery-integration-tests: done # depends-on: 7-1
-  7-6-git-provider-pr-creation-integration-tests: review # depends-on: 7-1
+  7-6-git-provider-pr-creation-integration-tests: done # depends-on: 7-1
   7-7-notification-flow-integration-tests: ready-for-dev # depends-on: 7-1
   7-8-branch-management-git-surgical-development-tools-integration-tests: ready-for-dev # depends-on: 7-1
   7-9-cli-lifecycle-integration-tests: ready-for-dev # depends-on: 7-1
