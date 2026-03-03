@@ -31,8 +31,10 @@ So that I'm confident the orchestration logic correctly chains session → PR �
 3. **Given** the same setup but MockDevRunner returns `SessionOutcome::Escalated`
    **When** `process_story()` is called
    **Then** the pipeline returns `PipelineResult` with `status: Blocked`
-   **And** NO PR is created (`create_pr` not called — escalation skips PR in current code)
+   **And** A PR IS created (escalation PR with `[NEEDS REVIEW]` title — implementation pushes partial branch and creates escalation PR for human visibility)
    **And** MockNotifier captured a notification with `StoryStatus::Blocked`
+
+   > **Implementation note:** Original spec said "NO PR is created" but actual implementation creates an escalation PR to preserve partial work and notify humans. Test verifies actual behavior. AC updated to match.
 
 4. **Given** a `StoryPipeline` with `code_review_enabled: false` in config
    **When** `process_story()` is called and session succeeds
