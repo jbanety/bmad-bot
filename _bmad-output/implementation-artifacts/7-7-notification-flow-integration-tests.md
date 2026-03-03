@@ -1,6 +1,6 @@
 # Story 7.7: Notification Flow Integration Tests
 
-Status: review
+Status: in-progress
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -26,9 +26,9 @@ So that I'm confident the daemon sends correct, well-formatted notifications.
    **Then** a `NoopNotifier` is returned as graceful fallback
    **And** a warning is logged (not an error — notifications are non-blocking)
 
-4. **Given** a list of `PipelineResult` items (2 completed, 1 failed, 1 blocked)
-   **When** `build_run_summary()` constructs the `RunSummary`
-   **Then** the summary correctly counts: 4 total, 2 completed, 1 failed, 1 blocked
+4. **Given** a list of `StoryNotification` items (2 completed, 1 errored, 1 blocked)
+   **When** `RunSummary` is constructed with those items
+   **Then** the summary correctly counts: 4 total, 2 completed, 1 errored, 1 blocked
    **And** `notify_run_summary()` on MockNotifier captures a message with all counts
 
 ## Tasks / Subtasks
@@ -72,6 +72,12 @@ So that I'm confident the daemon sends correct, well-formatted notifications.
 - [x] Task 8: Test `NotifierError` variants (AC: ALL)
   - [x] 8.1 `test_notifier_error_disabled_display` — verify `NotifierError::Disabled` display message
   - [x] 8.2 `test_notifier_error_types_are_send_sync` — static assert that `NotifierError` is `Send + Sync`
+
+### Review Follow-ups (AI)
+
+- [ ] [AI-Review][High] AC #1 partial coverage — `format_story_message()` is private so the integration test cannot assert the rendered string contains story ID, status, and PR URL. Consider adding a `pub(crate)` or `#[cfg(test)]`-gated helper in `src/notifier/mod.rs` that exposes formatted output, OR expose a thin `format_story_message` as `pub` with a doc note explaining it is test-facing. [tests/integration/test_notifier.rs — no assertion on message content]
+- [ ] [AI-Review][Medium] AC #3 warning log unverified — `create_notifier()` issues `tracing::warn!` when token is absent, but no integration test captures or asserts on that log output. Add `tracing-test` to `[dev-dependencies]` and a `#[traced_test]` assertion in tests 4.1/4.2. [tests/integration/test_notifier.rs:168-196]
+- [ ] [AI-Review][Medium] AC #4 `build_run_summary()` untestable from integration — AC originally referenced `build_run_summary()` (private to `src/pipeline/mod.rs`). Either expose the function as `pub(crate)` + re-export from `lib.rs`, or document in the story that manual RunSummary construction is the accepted substitute. [src/pipeline/mod.rs]
 
 ## Dev Notes
 
