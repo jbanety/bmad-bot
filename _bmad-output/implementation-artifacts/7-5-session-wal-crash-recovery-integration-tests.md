@@ -442,13 +442,15 @@ If rig provides `Message` content accessors, prefer those over debug formatting.
 
 ### Previous Story Intelligence (Stories 7.1, 7.4, 6.3)
 
-**Story 7.1 (Integration Test Infrastructure):**
-- Defines `tests/integration.rs` entry point with `mod helpers;` + individual test modules
-- Defines `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, etc.)
-- Defines `lib.rs` creation and session::state re-export as Task 0
-- All mock implementations must be `Send + Sync`
+**Story 7.1 (Integration Test Infrastructure — IMPLEMENTED):**
+- `tests/integration.rs` entry point uses `#[path]` attributes (Rust 2024 edition): `#[path = "integration/test_session_wal.rs"] mod test_session_wal;`
+- `tests/integration/helpers/mod.rs` with shared fixtures (MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner)
+- `lib.rs` RESOLVED: exposes ALL modules (auth, cli, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). `main.rs` NOT modified (dual-crate pattern).
+- `pub use state::{SessionState, ChatMessage};` added to `src/session/mod.rs` — accessible via `bmad_bot::session::{SessionState, ChatMessage}`
+- All mock implementations are `Send + Sync`
 - Uses `Arc<Mutex<Vec<...>>>` for interior mutability in mock state
 - Uses `tempfile::tempdir()` for filesystem isolation
+- Fixture builders: `make_test_config(dir)`, `make_test_secrets()`, `make_test_story(key, label, deps)`, `write_wal_file(dir, state)`, `create_test_repo(dir)`
 
 **Story 7.4 (Pipeline Orchestration):**
 - Defines `DevRunner` and `CodeReviewer` traits for DI
@@ -505,12 +507,14 @@ tests/
 If Story 7.1 infrastructure is not yet built, create the minimal structure:
 ```
 tests/
-├── integration.rs                           # mod helpers; mod test_session_wal;
+├── integration.rs                           # #[path = "integration/test_session_wal.rs"] mod test_session_wal;
 ├── integration/
 │   ├── helpers/
 │   │   └── mod.rs                           # Inline fixtures for this story
 │   └── test_session_wal.rs                  # This story's tests
 ```
+
+**Note:** Story 7.1 infrastructure IS built. The fallback structure above is not needed.
 
 ### Testing Standards
 

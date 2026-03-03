@@ -668,9 +668,11 @@ For AC #7 (notification failure test), `MockNotifier` must support a mode where 
 
 ### Previous Story Intelligence (Stories 7.1, 7.2, 7.3)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. New test modules must be declared in `tests/integration.rs` using `#[path]` attributes (Rust 2024 edition): `#[path = "integration/test_pipeline.rs"] mod test_pipeline;`
+- **`lib.rs` blocker is RESOLVED:** `src/lib.rs` exists with `pub mod` for ALL modules (including pipeline, session, review). `main.rs` was NOT modified — both crates compile the same source independently (dual-crate pattern). No Task 0 prerequisite work needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story};`
-- **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier};` + new mocks
+- **Mock imports:** `use crate::helpers::mocks::{MockGitProvider, MockNotifier, MockSessionRunner, MockReviewRunner};`
+- **Mock API (from 7.1):** `MockGitProvider::new().with_create_pr(...)`, `MockNotifier::new()`, `MockSessionRunner::new_completed()` / `new_failed(msg)` / `with_outcome(closure)`, `MockReviewRunner::new_completed()` / `new_failed(msg)` / `new_skipped(reason)`
 - **Test naming:** `test_pipeline_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
 - **Tracing is a no-op in tests** — silent without a subscriber, no need to install one
@@ -689,9 +691,9 @@ All present — no new crate dependencies:
 - `tempfile = "3"` (dev-dependency) — if filesystem fixtures needed
 
 **Prerequisite from Story 7.1:**
-- `src/lib.rs` with `pub mod pipeline;` and all module re-exports
-- `tests/integration.rs` + `tests/integration/helpers/` structure
-- `MockGitProvider`, `MockNotifier`, `make_test_config()`, `make_test_story()`
+- `src/lib.rs` already exists with `pub mod pipeline;` and all module re-exports — no Task 0 work needed
+- `tests/integration.rs` + `tests/integration/helpers/` structure already in place
+- `MockGitProvider`, `MockNotifier`, `MockSessionRunner`, `MockReviewRunner`, `make_test_config()`, `make_test_story()` all implemented
 
 ### File Structure
 
@@ -699,7 +701,7 @@ All present — no new crate dependencies:
 src/
 ├── pipeline.rs                       ← MODIFIED (add traits, new_with_components, refactor struct)
 tests/
-├── integration.rs                    # Add: mod test_pipeline;
+├── integration.rs                    # Add: #[path = "integration/test_pipeline.rs"] mod test_pipeline;
 └── integration/
     ├── helpers/
     │   ├── mod.rs

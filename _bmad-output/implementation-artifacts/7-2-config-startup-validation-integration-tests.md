@@ -216,7 +216,8 @@ Known modules scanned by discovery: `bmm`, `core`, `_config`, `_memory`.
 
 ### Previous Story Intelligence (Story 7.1)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. All test modules are declared in `tests/integration.rs` via `mod test_config;` etc.
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. New test modules must be declared in `tests/integration.rs` using `#[path]` attributes (Rust 2024 edition requires explicit paths): `#[path = "integration/test_config.rs"] mod test_config;`
+- **`lib.rs` blocker is RESOLVED:** `src/lib.rs` exists with `pub mod` for ALL modules (auth, cli, config, git_provider, llm, mcp, notifier, pipeline, review, session, supervisor, tools, watcher). `main.rs` was NOT modified — both crates compile the same source independently (dual-crate pattern). No Task 0 prerequisite work needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_secrets};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
@@ -228,13 +229,13 @@ All already present — no new dependencies needed:
 - `tempfile = "3"` (dev-dependency)
 - `serde_yml = "0.0.12"` (main dependency, used for YAML serialization in tests)
 
-**Prerequisite from Story 7.1:** `src/lib.rs` must exist with `pub mod config;` — see Story 7.1 Task 0.
+**Prerequisite from Story 7.1:** `src/lib.rs` already exists with `pub mod config;` and all other modules — no Task 0 work needed.
 
 ### File Structure
 
 ```
 tests/
-├── integration.rs                    # Add: mod test_config;
+├── integration.rs                    # Add: #[path = "integration/test_config.rs"] mod test_config;
 └── integration/
     ├── helpers/
     │   ├── mod.rs
