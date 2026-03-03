@@ -10,8 +10,12 @@ use bmad_bot::config::{
     BmadPathsConfig, BotConfig, BotSecrets, GitProviderConfig, LlmConfig, LlmRoleConfig,
     NotificationConfig, TelegramConfig,
 };
-use bmad_bot::session::{ChatMessage, SessionState};
+use bmad_bot::pipeline::{CodeReviewer, DevRunner, StoryPipeline};
+use bmad_bot::review::ReviewOutcome;
+use bmad_bot::session::{ChatMessage, SessionOutcome, SessionState};
 use bmad_bot::watcher::StoryInfo;
+
+use super::mocks::{MockCodeReviewer, MockDevRunner, MockGitProvider, MockNotifier};
 
 /// Build a valid `BotConfig` with sensible test defaults.
 ///
@@ -186,4 +190,149 @@ pub fn create_test_repo(dir: &Path) {
     run(&["config", "user.email", "test@test.com"]);
     run(&["config", "user.name", "Test"]);
     run(&["commit", "--allow-empty", "-m", "initial commit"]);
+}
+
+/// Initialize a git repo with a bare remote so `git push origin <branch>` works.
+///
+/// Creates:
+/// - `dir/` — working repo with an initial commit on `main`
+/// - `dir/../{dir_name}-bare.git/` — bare repo set as `origin`
+///
+/// Also creates the story branch and checks it out so `push_branch` succeeds.
+pub fn create_test_repo_with_remote(dir: &Path, story_branch: &str) {
+    let bare_dir = dir.with_file_name(
+        format!("{}-bare.git", dir.file_name().unwrap().to_str().unwrap()),
+    );
+    std::fs::create_dir_all(&bare_dir).expect("Failed to create bare repo dir");
+
+    let run = |cwd: &Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command failed to execute");
+        assert!(
+            output.status.success(),
+            "git {} in {} failed: {}",
+            args.join(" "),
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    // Create bare remote
+    run(&bare_dir, &["init", "--bare", "-b", "main"]);
+
+    // Create working repo
+    run(dir, &["init", "-b", "main"]);
+    run(dir, &["config", "user.email", "test@test.com"]);
+    run(dir, &["config", "user.name", "Test"]);
+    run(dir, &["commit", "--allow-empty", "-m", "initial commit"]);
+
+    // Add bare repo as origin
+    run(
+        dir,
+        &["remote", "add", "origin", bare_dir.to_str().unwrap()],
+    );
+
+    // Push main to origin
+    run(dir, &["push", "-u", "origin", "main"]);
+
+    // Create and checkout story branch
+    run(dir, &["checkout", "-b", story_branch]);
+    run(
+        dir,
+        &["commit", "--allow-empty", "-m", "story work in progress"],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PipelineTestBuilder (Story 7.4 Task 2)
+// ---------------------------------------------------------------------------
+
+/// Builder for integration tests that constructs a `StoryPipeline` with mocks.
+///
+/// After `build()`, returns `(StoryPipeline, MockNotifier, MockGitProvider)` where
+/// the handles share capture buffers with the pipeline's copies via `Arc`.
+pub struct PipelineTestBuilder {
+    config: BotConfig,
+    session_outcomes: Vec<SessionOutcome>,
+    review_outcome: Option<ReviewOutcome>,
+    mock_git: MockGitProvider,
+    mock_notifier: MockNotifier,
+}
+
+impl PipelineTestBuilder {
+    /// New builder with sensible defaults (code review enabled, happy-path mocks).
+    pub fn new(dir: &std::path::Path) -> Self {
+        Self {
+            config: make_test_config(dir),
+            session_outcomes: vec![],
+            review_outcome: None,
+            mock_git: MockGitProvider::new(),
+            mock_notifier: MockNotifier::new(),
+        }
+    }
+
+    pub fn with_code_review(mut self, enabled: bool) -> Self {
+        self.config.code_review_enabled = enabled;
+        self
+    }
+
+    pub fn with_session(mut self, outcome: SessionOutcome) -> Self {
+        self.session_outcomes = vec![outcome];
+        self
+    }
+
+    pub fn with_sessions(mut self, outcomes: Vec<SessionOutcome>) -> Self {
+        self.session_outcomes = outcomes;
+        self
+    }
+
+    pub fn with_review(mut self, outcome: ReviewOutcome) -> Self {
+        self.review_outcome = Some(outcome);
+        self
+    }
+
+    pub fn with_git_provider(mut self, mock: MockGitProvider) -> Self {
+        self.mock_git = mock;
+        self
+    }
+
+    pub fn with_notifier(mut self, mock: MockNotifier) -> Self {
+        self.mock_notifier = mock;
+        self
+    }
+
+    /// Build the pipeline and return assertion handles.
+    pub fn build(self) -> (StoryPipeline, MockNotifier, MockGitProvider) {
+        let notifier_for_assertions = self.mock_notifier.clone();
+        let git_for_assertions = self.mock_git.clone();
+
+        let dev_runner: Box<dyn DevRunner> = if self.session_outcomes.len() <= 1 {
+            let outcome = self
+                .session_outcomes
+                .into_iter()
+                .next()
+                .expect("PipelineTestBuilder: must set at least one session outcome");
+            Box::new(MockDevRunner::with_outcome(outcome))
+        } else {
+            Box::new(MockDevRunner::with_outcomes(self.session_outcomes))
+        };
+
+        let code_reviewer: Box<dyn CodeReviewer> = match self.review_outcome {
+            Some(o) => Box::new(MockCodeReviewer::with_outcome(o)),
+            None => Box::new(MockCodeReviewer::never_called()),
+        };
+
+        let pipeline = StoryPipeline::new_with_components(
+            std::sync::Arc::new(self.config),
+            Box::new(self.mock_git),
+            Box::new(self.mock_notifier),
+            dev_runner,
+            code_reviewer,
+        );
+
+        (pipeline, notifier_for_assertions, git_for_assertions)
+    }
 }

@@ -2,11 +2,16 @@
 //!
 //! All mocks are `Send + Sync` and use `Arc<Mutex<...>>` for interior mutability.
 
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use bmad_bot::git_provider::{CreatePrParams, GitProvider, GitProviderError, PrInfo};
 use bmad_bot::notifier::{Notifier, NotifierError, RunSummary, StoryNotification};
+use bmad_bot::pipeline::{CodeReviewer, DevRunner};
 use bmad_bot::review::ReviewOutcome;
 use bmad_bot::session::SessionOutcome;
 use bmad_bot::session::runner::RecoveryInfo;
@@ -28,11 +33,25 @@ type GitProviderFactory<T> = Box<dyn Fn() -> Result<T, GitProviderError> + Send>
 
 /// Mock implementation of [`GitProvider`] with configurable return values and
 /// call tracking.
+///
+/// Implements `Clone` by cloning inner `Arc` handles — both copies share the
+/// same capture buffers.
 pub struct MockGitProvider {
     create_pr_factory: Arc<Mutex<GitProviderFactory<PrInfo>>>,
     add_comment_factory: Arc<Mutex<GitProviderFactory<()>>>,
     get_pr_url_factory: Arc<Mutex<GitProviderFactory<String>>>,
     calls: Arc<Mutex<Vec<GitProviderCall>>>,
+}
+
+impl Clone for MockGitProvider {
+    fn clone(&self) -> Self {
+        Self {
+            create_pr_factory: Arc::clone(&self.create_pr_factory),
+            add_comment_factory: Arc::clone(&self.add_comment_factory),
+            get_pr_url_factory: Arc::clone(&self.get_pr_url_factory),
+            calls: Arc::clone(&self.calls),
+        }
+    }
 }
 
 impl Default for MockGitProvider {
@@ -91,6 +110,44 @@ impl MockGitProvider {
     pub fn calls(&self) -> Vec<GitProviderCall> {
         self.calls.lock().unwrap().clone()
     }
+
+    /// Return all `create_pr` call parameters.
+    pub fn captured_create_pr_params(&self) -> Vec<CreatePrParams> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                GitProviderCall::CreatePr(params) => Some(params.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Return all `add_comment` calls as `(pr_id, body)` pairs.
+    pub fn captured_add_comment_calls(&self) -> Vec<(String, String)> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                GitProviderCall::AddComment { pr_id, body } => {
+                    Some((pr_id.clone(), body.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Count of `create_pr` calls.
+    pub fn create_pr_call_count(&self) -> usize {
+        self.captured_create_pr_params().len()
+    }
+
+    /// Count of `add_comment` calls.
+    pub fn add_comment_call_count(&self) -> usize {
+        self.captured_add_comment_calls().len()
+    }
 }
 
 #[async_trait]
@@ -138,8 +195,22 @@ pub enum NotifierCall {
 }
 
 /// Mock implementation of [`Notifier`] that captures all calls for assertion.
+///
+/// Implements `Clone` by cloning inner `Arc` handles — both copies share the
+/// same capture buffers.
 pub struct MockNotifier {
     calls: Arc<Mutex<Vec<NotifierCall>>>,
+    /// When `Some`, `notify_story` returns this error instead of `Ok(())`.
+    story_error: Arc<Mutex<Option<Box<dyn Fn() -> NotifierError + Send>>>>,
+}
+
+impl Clone for MockNotifier {
+    fn clone(&self) -> Self {
+        Self {
+            calls: Arc::clone(&self.calls),
+            story_error: Arc::clone(&self.story_error),
+        }
+    }
 }
 
 impl Default for MockNotifier {
@@ -152,6 +223,18 @@ impl MockNotifier {
     pub fn new() -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
+            story_error: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Create a mock where `notify_story` always returns the given error.
+    pub fn failing_story<F>(f: F) -> Self
+    where
+        F: Fn() -> NotifierError + Send + 'static,
+    {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            story_error: Arc::new(Mutex::new(Some(Box::new(f)))),
         }
     }
 
@@ -185,6 +268,16 @@ impl MockNotifier {
             })
             .collect()
     }
+
+    /// Count of `notify_story` calls.
+    pub fn story_notification_count(&self) -> usize {
+        self.story_calls().len()
+    }
+
+    /// Count of `notify_run_summary` calls.
+    pub fn run_summary_count(&self) -> usize {
+        self.summary_calls().len()
+    }
 }
 
 #[async_trait]
@@ -197,6 +290,10 @@ impl Notifier for MockNotifier {
             .lock()
             .unwrap()
             .push(NotifierCall::Story(notification.clone()));
+        // Check if we should return an error
+        if let Some(err_factory) = self.story_error.lock().unwrap().as_ref() {
+            return Err(err_factory());
+        }
         Ok(())
     }
 
@@ -375,5 +472,99 @@ impl MockReviewRunner {
     /// Return all recorded calls.
     pub fn calls(&self) -> Vec<ReviewRunCall> {
         self.calls.lock().unwrap().clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockDevRunner — implements DevRunner trait (Story 7.4 Task 1)
+// ---------------------------------------------------------------------------
+
+/// Mock dev runner for integration tests — implements [`DevRunner`].
+///
+/// Uses `VecDeque<SessionOutcome>` to support multi-call scenarios
+/// (e.g., `process_eligible_stories`). `SessionOutcome` is NOT Clone,
+/// so outcomes are consumed (popped) on each call.
+pub struct MockDevRunner {
+    outcomes: Mutex<VecDeque<SessionOutcome>>,
+    call_count: AtomicUsize,
+}
+
+impl MockDevRunner {
+    /// Single-call mock.
+    pub fn with_outcome(outcome: SessionOutcome) -> Self {
+        let mut q = VecDeque::new();
+        q.push_back(outcome);
+        Self {
+            outcomes: Mutex::new(q),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Multi-call mock — pops outcomes in order per call.
+    pub fn with_outcomes(outcomes: Vec<SessionOutcome>) -> Self {
+        Self {
+            outcomes: Mutex::new(outcomes.into()),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl DevRunner for MockDevRunner {
+    async fn run_dev_session(&self, _story: &StoryInfo) -> SessionOutcome {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("MockDevRunner: no more outcomes — add more via with_outcomes()")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockCodeReviewer — implements CodeReviewer trait (Story 7.4 Task 1)
+// ---------------------------------------------------------------------------
+
+/// Mock code reviewer for integration tests — implements [`CodeReviewer`].
+pub struct MockCodeReviewer {
+    outcomes: Mutex<VecDeque<ReviewOutcome>>,
+    call_count: AtomicUsize,
+}
+
+impl MockCodeReviewer {
+    pub fn with_outcome(outcome: ReviewOutcome) -> Self {
+        let mut q = VecDeque::new();
+        q.push_back(outcome);
+        Self {
+            outcomes: Mutex::new(q),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn never_called() -> Self {
+        Self {
+            outcomes: Mutex::new(VecDeque::new()),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CodeReviewer for MockCodeReviewer {
+    async fn run_review(&self, _story: &StoryInfo) -> ReviewOutcome {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("MockCodeReviewer: no more outcomes (or never_called() was used)")
     }
 }
