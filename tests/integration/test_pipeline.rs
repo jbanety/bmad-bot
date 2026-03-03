@@ -12,7 +12,7 @@ use bmad_bot::session::escalation::EscalationReport;
 use crate::helpers::fixtures::{
     create_test_repo_with_remote, make_test_story, PipelineTestBuilder,
 };
-use crate::helpers::mocks::{MockGitProvider, MockNotifier};
+use crate::helpers::mocks::{GitProviderCall, MockGitProvider, MockNotifier};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -114,12 +114,31 @@ async fn test_pipeline_happy_path_completed_with_review() {
         "PR title should contain story_key"
     );
 
-    // AC 1: add_comment called with review report
+    // AC 1: MockGitProvider received create_pr call BEFORE MockCodeReviewer was called.
+    // Since the pipeline is sequential, create_pr (Phase 3) must appear in the call log
+    // before add_comment (Phase 6, which only runs after review completes in Phase 4).
+    let all_git_calls = git.calls();
+    let create_pr_idx = all_git_calls
+        .iter()
+        .position(|c| matches!(c, GitProviderCall::CreatePr(_)))
+        .expect("create_pr should appear in git call log");
+    let add_comment_idx = all_git_calls
+        .iter()
+        .position(|c| matches!(c, GitProviderCall::AddComment { .. }))
+        .expect("add_comment should appear in git call log");
+    assert!(
+        create_pr_idx < add_comment_idx,
+        "create_pr (idx {create_pr_idx}) must be called before add_comment (idx {add_comment_idx}): \
+         AC #1 requires PR is created before review runs"
+    );
+
+    // AC 1: add_comment body contains the review report
     let comments = git.captured_add_comment_calls();
     assert_eq!(comments.len(), 1, "exactly 1 add_comment call");
     assert!(
         comments[0].1.contains("LGTM"),
-        "comment body should contain review report"
+        "comment body should contain review report, got: {}",
+        comments[0].1
     );
 }
 
