@@ -237,6 +237,44 @@ bmad_paths: { project_root: ".", output_folder: "o", planning_artifacts: "p", im
         msg2.contains("git_provider.provider"),
         "error message should contain field name: {msg2}"
     );
+
+    // Unknown LLM provider
+    let yaml3 = r#"
+polling_interval_secs: 60
+git_provider: { provider: github, repo_owner: t, repo_name: t }
+llm:
+  dev: { provider: unknown-llm, model: t }
+  review: { provider: anthropic, model: t }
+  supervisor: { provider: anthropic, model: t }
+notifications: { telegram: { enabled: false } }
+bmad_paths: { project_root: ".", output_folder: "o", planning_artifacts: "p", implementation_artifacts: "i" }
+"#;
+    std::fs::write(&file, yaml3).expect("write");
+    let err3 = BotConfig::load(&file).unwrap().validate().unwrap_err();
+    let msg3 = err3.to_string();
+    assert!(
+        msg3.contains("llm.dev.provider"),
+        "error message should contain field name: {msg3}"
+    );
+
+    // Empty project_root
+    let yaml4 = r#"
+polling_interval_secs: 60
+git_provider: { provider: github, repo_owner: t, repo_name: t }
+llm:
+  dev: { provider: anthropic, model: t }
+  review: { provider: anthropic, model: t }
+  supervisor: { provider: anthropic, model: t }
+notifications: { telegram: { enabled: false } }
+bmad_paths: { project_root: "", output_folder: "o", planning_artifacts: "p", implementation_artifacts: "i" }
+"#;
+    std::fs::write(&file, yaml4).expect("write");
+    let err4 = BotConfig::load(&file).unwrap().validate().unwrap_err();
+    let msg4 = err4.to_string();
+    assert!(
+        msg4.contains("bmad_paths.project_root"),
+        "error message should contain field name: {msg4}"
+    );
 }
 
 // ===========================================================================
@@ -296,14 +334,36 @@ fn test_secrets_error_contains_env_var_name() {
     let tmp = tempfile::tempdir().unwrap();
     let config = make_test_config(tmp.path());
 
+    // Anthropic key error message contains env var name
     let mut secrets = make_test_secrets();
     secrets.anthropic_api_key = None;
-
     let err = secrets.validate_for_config(&config).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("ANTHROPIC_API_KEY"),
-        "error message should contain env var name: {msg}"
+        "error message should contain ANTHROPIC_API_KEY: {msg}"
+    );
+
+    // GitHub token error message contains env var name
+    let mut secrets2 = make_test_secrets();
+    secrets2.github_token = None;
+    let err2 = secrets2.validate_for_config(&config).unwrap_err();
+    let msg2 = err2.to_string();
+    assert!(
+        msg2.contains("GITHUB_TOKEN"),
+        "error message should contain GITHUB_TOKEN: {msg2}"
+    );
+
+    // Telegram token error message contains env var name
+    let mut config3 = make_test_config(tmp.path());
+    config3.notifications.telegram.enabled = true;
+    let mut secrets3 = make_test_secrets();
+    secrets3.telegram_bot_token = None;
+    let err3 = secrets3.validate_for_config(&config3).unwrap_err();
+    let msg3 = err3.to_string();
+    assert!(
+        msg3.contains("TELEGRAM_BOT_TOKEN"),
+        "error message should contain TELEGRAM_BOT_TOKEN: {msg3}"
     );
 }
 

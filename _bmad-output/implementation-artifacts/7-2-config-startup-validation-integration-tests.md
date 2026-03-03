@@ -1,6 +1,6 @@
 # Story 7.2: Config → Startup Validation Integration Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -52,13 +52,13 @@ So that I'm confident the daemon rejects bad configs and accepts good ones end-t
   - [x] 3.4 Test empty `bmad_paths.project_root` → `ConfigError::MissingField`
   - [x] 3.5 Test invalid YAML syntax → `ConfigError::YamlParse`
   - [x] 3.6 Test `BotConfig::load()` on nonexistent file → `ConfigError::FileRead`
-  - [x] 3.7 For each error, assert the error message contains the offending field name
+  - [x] 3.7 For each error, assert the error message contains the offending field name *(extended in CR: added llm.dev.provider and bmad_paths.project_root assertions)*
 
 - [x] Task 4: Write secrets validation tests (AC: #3)
   - [x] 4.1 Build valid config with `provider: "anthropic"`, construct `BotSecrets` with `anthropic_api_key: None` → assert `ConfigError::MissingSecret`
   - [x] 4.2 Build valid config with `provider: "github"`, construct `BotSecrets` with `github_token: None` → assert `ConfigError::MissingSecret`
   - [x] 4.3 Build valid config with Telegram enabled, construct `BotSecrets` with `telegram_bot_token: None` → assert `ConfigError::MissingSecret`
-  - [x] 4.4 Verify each error contains the expected env var name
+  - [x] 4.4 Verify each error contains the expected env var name *(extended in CR: added GITHUB_TOKEN and TELEGRAM_BOT_TOKEN assertions)*
 
 - [x] Task 5: Write BMAD discovery integration tests (AC: #4)
   - [x] 5.1 Create temp dir with `_bmad/bmm/config.yaml` (version comment) and `_bmad/core/` → assert `bmad_detected: true`, modules found, version extracted
@@ -300,3 +300,6 @@ Claude Sonnet 4 (via Anthropic API)
 
 ### Change Log
 - Story 7.2 implemented: 14 integration tests for config/startup validation pipeline (all ACs satisfied)
+- Code review (CR): Fixed M1 — extended `test_config_error_messages_contain_field_names` to cover `llm.dev.provider` and `bmad_paths.project_root` (task 3.7 was partial)
+- Code review (CR): Fixed M2 — extended `test_secrets_error_contains_env_var_name` to cover `GITHUB_TOKEN` and `TELEGRAM_BOT_TOKEN` env var names in error messages (task 4.4 was partial)
+- All 50 tests pass post-CR fixes
