@@ -392,26 +392,51 @@ impl StoryPipeline {
                         let commit_msg = format!(
                             "chore(sprint-status): mark {story_key} done, unblock dependents"
                         );
-                        if let Err(e) = commit_sprint_status(
+                        match commit_sprint_status(
                             &self.config.bmad_paths.project_root,
                             &sprint_status_path,
                             &commit_msg,
                         )
                         .await
                         {
-                            tracing::error!(
-                                action = "sprint_status_commit_failed",
-                                story_key = %story_key,
-                                error = %e,
-                                "CRITICAL: sprint-status commit failed — next checkout will lose 'done' status, risking infinite loop"
-                            );
-                        } else if let Err(e) = self.push_branch(&branch).await {
-                            tracing::warn!(
-                                action = "sprint_status_push_failed",
-                                story_key = %story_key,
-                                error = %e,
-                                "Failed to push sprint-status commit — PR may not reflect done status"
-                            );
+                            Ok(()) => {
+                                if let Err(e) = self.push_branch(&branch).await {
+                                    tracing::warn!(
+                                        action = "sprint_status_push_failed",
+                                        story_key = %story_key,
+                                        error = %e,
+                                        "Failed to push sprint-status commit — PR may not reflect done status"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                // Cannot persist "done" status — halt pipeline to prevent
+                                // infinite loop (next checkout would discard changes, watcher
+                                // would re-select already-completed stories).
+                                tracing::error!(
+                                    action = "sprint_status_commit_failed",
+                                    story_key = %story_key,
+                                    error = %e,
+                                    "CRITICAL: sprint-status commit failed — halting pipeline to prevent infinite loop"
+                                );
+                                self.notify_story_result(&PipelineResult {
+                                    story_key: story_key.clone(),
+                                    status: StoryStatus::Error,
+                                    pr_url: Some(pr_info.url.clone()),
+                                    error_detail: Some(format!(
+                                        "Story completed and PR created, but sprint-status commit failed: {e}. \
+                                         Pipeline halted to prevent infinite loop. Fix git config and restart."
+                                    )),
+                                    fatal: true,
+                                }).await;
+                                return PipelineResult {
+                                    story_key: story_key.clone(),
+                                    status: StoryStatus::Error,
+                                    pr_url: Some(pr_info.url.clone()),
+                                    error_detail: Some(format!("sprint-status commit failed: {e}")),
+                                    fatal: true,
+                                };
+                            }
                         }
                     }
                 }
@@ -642,14 +667,14 @@ impl StoryPipeline {
 
         for story in &stories {
             let result = self.process_story(story).await;
-            let is_fatal = result.fatal;
+            let mut is_fatal = result.fatal;
             let story_key = &result.story_key;
 
             // Safety net: if sprint-status.yaml has uncommitted changes after
             // processing a story, commit them NOW before the next story's
             // `git checkout` discards them. This prevents the infinite loop
             // where completed stories revert to ready-for-dev.
-            if sprint_status_path.exists() {
+            if sprint_status_path.exists() && !is_fatal {
                 let repo_path = &self.config.bmad_paths.project_root;
                 if has_uncommitted_sprint_status(repo_path, &sprint_status_path).await {
                     let commit_msg =
@@ -663,12 +688,14 @@ impl StoryPipeline {
                             );
                         }
                         Err(e) => {
+                            // Safety net also failed — halt to prevent infinite loop
                             tracing::error!(
                                 action = "sprint_status_safety_commit_failed",
                                 story_key = %story_key,
                                 error = %e,
-                                "Safety net failed: sprint-status changes may be lost on next checkout"
+                                "CRITICAL: safety net commit also failed — halting pipeline"
                             );
+                            is_fatal = true;
                         }
                     }
                 }
