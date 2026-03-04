@@ -32,6 +32,14 @@ use super::{StoryInfo, WatcherError};
 /// are transient and do NOT trigger cascade blocking.
 const BLOCKING_STATUSES: &[&str] = &["blocked", "needs-clarification"];
 
+/// Statuses that indicate a dependency is resolved and its dependents can proceed.
+///
+/// - `"done"` — Story completed normally
+/// - `"superseded"` — Story replaced by another approach; considered resolved
+///   for dependency purposes so downstream stories are not blocked
+/// - `"absorbed"` — Story's scope was absorbed into another story; considered resolved
+const RESOLVED_STATUSES: &[&str] = &["done", "superseded", "absorbed"];
+
 /// Resolves story dependencies and computes execution order.
 ///
 /// The dependency graph is a directed acyclic graph (DAG) where edges
@@ -157,9 +165,10 @@ impl DependencyGraph {
         Ok(sorted)
     }
 
-    /// Check if all dependencies of a story are satisfied (status == "done").
+    /// Check if all dependencies of a story are resolved.
     ///
-    /// A dependency is satisfied when its status in sprint-status.yaml is `done`.
+    /// A dependency is satisfied when its status in sprint-status.yaml is one
+    /// of [`RESOLVED_STATUSES`] (`done` or `superseded`).
     /// Dependencies not found in all_statuses are treated as unmet.
     pub fn deps_satisfied(&self, story_key: &str) -> (bool, Option<(String, String)>) {
         if let Some(deps) = self.adjacency.get(story_key) {
@@ -169,7 +178,7 @@ impl DependencyGraph {
                     .get(dep)
                     .map(|s| s.as_str())
                     .unwrap_or("unknown");
-                if status != "done" {
+                if !RESOLVED_STATUSES.contains(&status) {
                     return (false, Some((dep.clone(), status.to_string())));
                 }
             }
@@ -243,12 +252,13 @@ fn find_root_blocker(
             return Some((dep_key, dep_status.to_string()));
         }
 
-        // If dep is "done", stop traversal: a completed story succeeded regardless
-        // of its ancestors' current status — its dependents are not affected.
-        // Only traverse deeper for non-done, non-blocking statuses (transient states
-        // like "in-progress", "backlog", "ready-for-dev", "review") to find a
-        // potential blocking ancestor further up the chain.
-        if dep_status != "done"
+        // If dep is resolved (done/superseded), stop traversal: a resolved story
+        // succeeded regardless of its ancestors' current status — its dependents
+        // are not affected. Only traverse deeper for non-resolved, non-blocking
+        // statuses (transient states like "in-progress", "backlog",
+        // "ready-for-dev", "review") to find a potential blocking ancestor
+        // further up the chain.
+        if !RESOLVED_STATUSES.contains(&dep_status)
             && let Some(transitive_deps) = all_deps.get(&dep_key)
         {
             for td in transitive_deps {
@@ -1212,5 +1222,157 @@ development_status:
         assert!(display.contains("1-3-init cascade-blocked by 1-1-scaffolding"));
         assert!(display.contains("status: blocked"));
         assert!(display.contains("1-1-scaffolding → 1-2-cli → 1-3-init"));
+    }
+
+    // --- superseded status tests ---
+
+    #[test]
+    fn test_deps_satisfied_when_dep_is_superseded() {
+        let stories = vec![
+            make_story("1-1-old-approach", "superseded"),
+            make_story("1-2-next-step", "ready-for-dev"),
+        ];
+        let all_statuses = vec![
+            ("1-1-old-approach".into(), "superseded".into()),
+            ("1-2-next-step".into(), "ready-for-dev".into()),
+        ];
+        let mut stories_with_deps = stories.clone();
+        derive_dependencies(&mut stories_with_deps, &all_statuses);
+        let graph = DependencyGraph::new(&stories_with_deps, &all_statuses);
+
+        let (satisfied, unmet) = graph.deps_satisfied("1-2-next-step");
+        assert!(satisfied, "superseded dep should satisfy dependency");
+        assert!(unmet.is_none());
+    }
+
+    #[test]
+    fn test_filter_eligible_includes_story_after_superseded_dep() {
+        let stories = vec![
+            make_story("1-1-old-approach", "superseded"),
+            make_story("1-2-next-step", "ready-for-dev"),
+        ];
+        let all_statuses = vec![
+            ("epic-1".into(), "in-progress".into()),
+            ("1-1-old-approach".into(), "superseded".into()),
+            ("1-2-next-step".into(), "ready-for-dev".into()),
+        ];
+        let (eligible, _) = filter_eligible(stories, &all_statuses).unwrap();
+        let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
+        assert!(
+            keys.contains(&"1-2-next-step"),
+            "story after superseded dep should be eligible, got: {:?}",
+            keys
+        );
+    }
+
+    #[test]
+    fn test_find_cascade_stops_at_superseded() {
+        // 1-1 is blocked, 1-2 is superseded (resolved), 1-3 depends on 1-2.
+        // Cascade should NOT propagate through superseded — 1-3 is safe.
+        let stories = vec![
+            make_story("1-1-broken", "blocked"),
+            make_story("1-2-replaced", "superseded"),
+            make_story("1-3-next", "ready-for-dev"),
+        ];
+        let all_statuses_map: HashMap<String, String> = vec![
+            ("1-1-broken".into(), "blocked".into()),
+            ("1-2-replaced".into(), "superseded".into()),
+            ("1-3-next".into(), "ready-for-dev".into()),
+        ]
+        .into_iter()
+        .collect();
+        let full_dep_map: HashMap<String, Vec<String>> = vec![
+            ("1-2-replaced".into(), vec!["1-1-broken".into()]),
+            ("1-3-next".into(), vec!["1-2-replaced".into()]),
+        ]
+        .into_iter()
+        .collect();
+
+        let cascades = find_cascade_blocks(&stories, &all_statuses_map, &full_dep_map);
+        let blocked_keys: Vec<&str> = cascades
+            .iter()
+            .map(|cb| cb.blocked_story.as_str())
+            .collect();
+        assert!(
+            !blocked_keys.contains(&"1-3-next"),
+            "superseded should stop cascade propagation, but 1-3-next was blocked: {:?}",
+            cascades
+        );
+    }
+
+    #[test]
+    fn test_filter_eligible_superseded_mixed_with_done() {
+        // 1-1 done, 1-2 superseded, 1-3 ready-for-dev — both deps resolved
+        let stories = vec![
+            make_story("1-1-first", "done"),
+            make_story("1-2-replaced", "superseded"),
+            make_story("1-3-final", "ready-for-dev"),
+        ];
+        let all_statuses = vec![
+            ("epic-1".into(), "in-progress".into()),
+            ("1-1-first".into(), "done".into()),
+            ("1-2-replaced".into(), "superseded".into()),
+            ("1-3-final".into(), "ready-for-dev".into()),
+        ];
+        let (eligible, cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        assert_eq!(cascade_count, 0);
+        let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
+        assert!(
+            keys.contains(&"1-3-final"),
+            "story after done + superseded deps should be eligible, got: {:?}",
+            keys
+        );
+    }
+
+    #[test]
+    fn test_deps_satisfied_when_dep_is_absorbed() {
+        let stories = vec![
+            make_story("1-1-absorbed-story", "absorbed"),
+            make_story("1-2-next-step", "ready-for-dev"),
+        ];
+        let all_statuses = vec![
+            ("1-1-absorbed-story".into(), "absorbed".into()),
+            ("1-2-next-step".into(), "ready-for-dev".into()),
+        ];
+        let mut stories_with_deps = stories.clone();
+        derive_dependencies(&mut stories_with_deps, &all_statuses);
+        let graph = DependencyGraph::new(&stories_with_deps, &all_statuses);
+
+        let (satisfied, unmet) = graph.deps_satisfied("1-2-next-step");
+        assert!(satisfied, "absorbed dep should satisfy dependency");
+        assert!(unmet.is_none());
+    }
+
+    #[test]
+    fn test_find_cascade_stops_at_absorbed() {
+        let stories = vec![
+            make_story("1-1-broken", "blocked"),
+            make_story("1-2-absorbed", "absorbed"),
+            make_story("1-3-next", "ready-for-dev"),
+        ];
+        let all_statuses_map: HashMap<String, String> = vec![
+            ("1-1-broken".into(), "blocked".into()),
+            ("1-2-absorbed".into(), "absorbed".into()),
+            ("1-3-next".into(), "ready-for-dev".into()),
+        ]
+        .into_iter()
+        .collect();
+        let full_dep_map: HashMap<String, Vec<String>> = vec![
+            ("1-2-absorbed".into(), vec!["1-1-broken".into()]),
+            ("1-3-next".into(), vec!["1-2-absorbed".into()]),
+        ]
+        .into_iter()
+        .collect();
+
+        let cascades = find_cascade_blocks(&stories, &all_statuses_map, &full_dep_map);
+        let blocked_keys: Vec<&str> = cascades
+            .iter()
+            .map(|cb| cb.blocked_story.as_str())
+            .collect();
+        assert!(
+            !blocked_keys.contains(&"1-3-next"),
+            "absorbed should stop cascade propagation, but 1-3-next was blocked: {:?}",
+            cascades
+        );
     }
 }
