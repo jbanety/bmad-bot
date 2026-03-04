@@ -304,6 +304,10 @@ fn parse_https_url(url: &str) -> Option<(String, String, String)> {
 
 /// Extracts `(host, owner, repo_name)` from a host string and a `owner/repo[.git]` path.
 ///
+/// Supports GitLab nested groups (subgroups): for a path like
+/// `group/subgroup/repo.git`, owner = `group/subgroup`, repo = `repo`.
+/// The last segment is always the repo name; all preceding segments form the owner.
+///
 /// Strips `.git` suffix and trailing slashes from repo name.
 fn parse_owner_repo_from_path(host: &str, path: &str) -> Option<(String, String, String)> {
     let path = path.trim_end_matches('/');
@@ -319,8 +323,9 @@ fn parse_owner_repo_from_path(host: &str, path: &str) -> Option<(String, String,
         return None;
     }
 
-    let owner = segments[0];
-    let repo_raw = segments[1];
+    // Last segment is always the repo; everything before is the owner/namespace
+    let repo_raw = segments[segments.len() - 1];
+    let owner = segments[..segments.len() - 1].join("/");
 
     // Strip .git suffix
     let repo_name = repo_raw
@@ -332,7 +337,7 @@ fn parse_owner_repo_from_path(host: &str, path: &str) -> Option<(String, String,
         return None;
     }
 
-    Some((host.to_string(), owner.to_string(), repo_name.to_string()))
+    Some((host.to_string(), owner, repo_name.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +754,60 @@ mod tests {
             Some((
                 "github.com".to_string(),
                 "owner".to_string(),
+                "repo".to_string()
+            ))
+        );
+    }
+
+    // --- GitLab nested groups (subgroups) tests ---
+
+    #[test]
+    fn test_parse_ssh_scp_gitlab_nested_group() {
+        let result = parse_git_remote_url("git@gitlab.com:acme/clients/my-project.git");
+        assert_eq!(
+            result,
+            Some((
+                "gitlab.com".to_string(),
+                "acme/clients".to_string(),
+                "my-project".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_https_gitlab_nested_group() {
+        let result = parse_git_remote_url("https://gitlab.com/acme/clients/my-project.git");
+        assert_eq!(
+            result,
+            Some((
+                "gitlab.com".to_string(),
+                "acme/clients".to_string(),
+                "my-project".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_ssh_scheme_gitlab_nested_group() {
+        let result = parse_git_remote_url("ssh://git@gitlab.com/group/sub1/sub2/repo.git");
+        assert_eq!(
+            result,
+            Some((
+                "gitlab.com".to_string(),
+                "group/sub1/sub2".to_string(),
+                "repo".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_deeply_nested_group_no_git_suffix() {
+        let result = parse_git_remote_url("https://gitlab.com/a/b/c/d/repo");
+        assert_eq!(
+            result,
+            Some((
+                "gitlab.com".to_string(),
+                "a/b/c/d".to_string(),
                 "repo".to_string()
             ))
         );
