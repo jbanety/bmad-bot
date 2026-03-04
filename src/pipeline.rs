@@ -1306,8 +1306,17 @@ async fn commit_sprint_status(
 /// These errors mean no partial work exists on the branch — creating a failure
 /// PR would be pointless noise. Covers auth failures, config errors, branch setup
 /// failures, and provider setup issues.
+///
+/// **Exception:** "token expired" is NOT an infra error — it's a transient
+/// Copilot token refresh issue that the session runner retries with backoff.
 fn is_infra_error(error: &str) -> bool {
     let lower = error.to_lowercase();
+
+    // Copilot token expiry is transient, not infrastructure failure
+    if lower.contains("token expired") {
+        return false;
+    }
+
     lower.contains("token exchange failed")
         || lower.contains("authentication failed")
         || lower.contains("bad credentials")
@@ -1329,8 +1338,18 @@ fn is_infra_error(error: &str) -> bool {
 ///
 /// If credentials are invalid, every subsequent story will fail the same way.
 /// The daemon should stop, notify the human, and wait for creds to be fixed.
+///
+/// **Exception:** "token expired" is NOT an auth error — it's a transient
+/// Copilot token refresh issue (short-lived session token expired mid-session).
+/// The session runner retries these with exponential backoff.
 fn is_auth_error(error: &str) -> bool {
     let lower = error.to_lowercase();
+
+    // Copilot token expiry ≠ bad credentials — it's transient
+    if lower.contains("token expired") {
+        return false;
+    }
+
     lower.contains("token exchange failed")
         || lower.contains("authentication failed")
         || lower.contains("bad credentials")
@@ -1495,6 +1514,14 @@ mod tests {
     }
 
     #[test]
+    fn test_is_infra_error_false_for_token_expired() {
+        // "token expired" contains "401" but is transient, not infra
+        assert!(!is_infra_error(
+            "Initial chat failed: CompletionError: ProviderError: Invalid status code 401 Unauthorized with message: unauthorized: token expired"
+        ));
+    }
+
+    #[test]
     fn test_is_infra_error_false_for_session_crashes() {
         assert!(!is_infra_error("Maximum turn limit exceeded (300)"));
         assert!(!is_infra_error("Chat loop failed: connection lost"));
@@ -1514,6 +1541,15 @@ mod tests {
         assert!(!is_auth_error("Agent build failed: timeout"));
         assert!(!is_auth_error("Branch setup failed: conflict"));
         assert!(!is_auth_error("Unsupported provider in WAL: xyz"));
+    }
+
+    #[test]
+    fn test_is_auth_error_false_for_token_expired() {
+        // "token expired" contains "401" but is NOT permanent bad creds — it's transient
+        assert!(!is_auth_error(
+            "Invalid status code 401 Unauthorized with message: unauthorized: token expired"
+        ));
+        assert!(!is_auth_error("unauthorized: token expired"));
     }
 
     #[test]

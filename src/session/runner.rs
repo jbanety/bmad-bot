@@ -125,6 +125,8 @@ fn is_transient_llm_error(error: &str) -> bool {
         || lower.contains("connection closed")
         || lower.contains("error sending request")
         || lower.contains("http client error")
+        || lower.contains("token expired")
+        || lower.contains("unauthorized")
 }
 
 /// Maximum number of retries for transient LLM errors during activation.
@@ -132,6 +134,9 @@ const ACTIVATION_MAX_RETRIES: usize = 3;
 
 /// Initial backoff delay in seconds for transient error retries.
 const ACTIVATION_BACKOFF_BASE_SECS: u64 = 5;
+
+/// Initial backoff delay in seconds for chat loop transient retries.
+const CHAT_LOOP_BACKOFF_BASE_SECS: u64 = 5;
 
 /// Build the impact analysis prompt sent to the agent after story completion.
 ///
@@ -1837,14 +1842,19 @@ impl SessionRunner {
                                 return outcome;
                             }
 
-                            // Non-context-limit error — existing retry logic
+                            // Non-context-limit error — retry with exponential backoff
                             retries += 1;
+                            let backoff_secs =
+                                CHAT_LOOP_BACKOFF_BASE_SECS * (1 << (retries - 1).min(5));
                             tracing::warn!(
                                 action = "chat_error",
                                 turn = %turn,
                                 retries = %retries,
+                                max_retries = %MAX_RETRIES,
+                                backoff_secs = %backoff_secs,
+                                transient = %is_transient_llm_error(&error_str),
                                 error = %error_str,
-                                "Chat error, will retry"
+                                "Chat error — retrying after {backoff_secs}s"
                             );
                             if retries >= MAX_RETRIES {
                                 let _ = self.handle_failure(story).await;
@@ -1857,6 +1867,7 @@ impl SessionRunner {
                                     decisions: decision_log.records(),
                                 };
                             }
+                            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                             // Retry with the same response (don't add to history)
                             // Remove the user message we just added
                             state.chat_history.pop();
@@ -2864,10 +2875,19 @@ mod tests {
     }
 
     #[test]
-    fn test_is_transient_llm_error_false_for_auth() {
-        assert!(!is_transient_llm_error("HTTP 401 Unauthorized"));
+    fn test_is_transient_llm_error_false_for_permanent_auth() {
         assert!(!is_transient_llm_error("Bad credentials"));
         assert!(!is_transient_llm_error("Authentication failed"));
+    }
+
+    #[test]
+    fn test_is_transient_llm_error_token_expired() {
+        // Copilot "token expired" is transient — token refresh + retry should fix it
+        assert!(is_transient_llm_error(
+            "Invalid status code 401 Unauthorized with message: unauthorized: token expired"
+        ));
+        assert!(is_transient_llm_error("token expired"));
+        assert!(is_transient_llm_error("unauthorized: token expired"));
     }
 
     #[test]
