@@ -240,12 +240,13 @@ assert_eq!(eligible[0].story_key, "2-1-polling");
 
 ### Previous Story Intelligence (Story 7.1, 7.2)
 
-- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory
+- **Cargo test convention:** `tests/integration.rs` is the binary entry point, `tests/integration/` is the submodule directory. New test modules must be declared in `tests/integration.rs` using `#[path]` attributes (Rust 2024 edition): `#[path = "integration/test_watcher.rs"] mod test_watcher;`
+- **`lib.rs` blocker is RESOLVED:** `src/lib.rs` exists with `pub mod` for ALL modules (including watcher). `main.rs` was NOT modified — both crates compile the same source independently (dual-crate pattern). No Task 0 prerequisite work needed.
 - **Fixture imports:** `use crate::helpers::fixtures::{make_test_config, make_test_story, write_sprint_status};`
 - **Temp dir pattern:** Always use `tempfile::tempdir()` — cleanup is automatic via `Drop`
 - **Test naming:** `test_{module}_{behavior}_{scenario}` in snake_case
 - **Structure:** Arrange → Act → Assert
-- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.display().to_string()`
+- **Config helper:** `make_test_config(dir)` sets `bmad_paths.implementation_artifacts` to `dir.join("_bmad-output/implementation-artifacts").display().to_string()`
 
 ### Dependencies Required
 
@@ -254,13 +255,13 @@ All already present — no new dependencies needed:
 - `std::sync::Arc` for `Watcher::new()`
 - `std::collections::HashMap` for cascade blocking assertions
 
-**Prerequisite from Story 7.1:** `src/lib.rs` must exist with `pub mod watcher;` — see Story 7.1 Task 0.
+**Prerequisite from Story 7.1:** `src/lib.rs` already exists with `pub mod watcher;` and all other modules — no Task 0 work needed.
 
 ### File Structure
 
 ```
 tests/
-├── integration.rs                    # Add: mod test_watcher;
+├── integration.rs                    # Add: #[path = "integration/test_watcher.rs"] mod test_watcher;
 └── integration/
     ├── helpers/
     │   ├── mod.rs
