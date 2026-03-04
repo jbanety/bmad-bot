@@ -123,6 +123,8 @@ fn is_transient_llm_error(error: &str) -> bool {
         || lower.contains("sse error")
         || lower.contains("broken pipe")
         || lower.contains("connection closed")
+        || lower.contains("error sending request")
+        || lower.contains("http client error")
 }
 
 /// Maximum number of retries for transient LLM errors during activation.
@@ -2880,6 +2882,17 @@ mod tests {
         assert!(is_transient_llm_error("Broken pipe"));
         assert!(is_transient_llm_error(
             "connection closed before message completed"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_llm_error_http_client_error_sending_request() {
+        // Real-world Copilot connection timeout pattern
+        assert!(is_transient_llm_error(
+            "CompletionError: ResponseError: CompletionError: ProviderError: Http client error: error sending request for url (https://api.enterprise.githubcopilot.com/chat/completions)"
+        ));
+        assert!(is_transient_llm_error(
+            "Http client error: error sending request for url"
         ));
     }
 

@@ -543,25 +543,30 @@ impl StoryPipeline {
                 error,
                 decisions,
             } => {
-                let fatal = is_auth_error(&error);
                 let infra = is_infra_error(&error);
 
                 if infra {
-                    // Infrastructure failure — session never started, no partial work.
-                    // Skip PR creation entirely (there's nothing on the branch).
-                    if fatal {
+                    // Infrastructure failure — session never started or couldn't
+                    // proceed. Always fatal: the session runner already retries
+                    // transient errors (timeouts, 429, 503) with exponential
+                    // backoff internally. If we get here, retries were exhausted
+                    // or the error is permanent. Continuing to the next story
+                    // would either hit the same infra issue or build on top of
+                    // incomplete predecessor work.
+                    let is_auth = is_auth_error(&error);
+                    if is_auth {
                         tracing::error!(
-                            action = "session_failed_fatal",
+                            action = "session_failed_fatal_auth",
                             story_key = %story_key,
                             error = %error,
-                            "Fatal infrastructure error — daemon should halt"
+                            "Fatal auth error — credentials invalid, daemon should halt"
                         );
                     } else {
                         tracing::error!(
-                            action = "session_failed_infra",
+                            action = "session_failed_fatal_infra",
                             story_key = %story_key,
                             error = %error,
-                            "Infrastructure error — no partial work, skipping failure PR"
+                            "Fatal infrastructure error — retries exhausted, halting pipeline"
                         );
                     }
 
@@ -570,7 +575,7 @@ impl StoryPipeline {
                         status: StoryStatus::Error,
                         pr_url: None,
                         error_detail: Some(error),
-                        fatal,
+                        fatal: true,
                     };
                     self.notify_story_result(&result).await;
                     result
