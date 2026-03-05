@@ -13,7 +13,6 @@ mod review;
 mod session;
 mod supervisor;
 mod tools;
-#[allow(dead_code)]
 mod ui;
 mod watcher;
 

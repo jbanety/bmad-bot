@@ -441,4 +441,3 @@ mod tests {
         r.phase_error("Ghost Phase", "never started");
     }
 }
-

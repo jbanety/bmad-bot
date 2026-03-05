@@ -12,6 +12,11 @@ log_format: pretty            # "pretty" or "json" (default: pretty)
 log_level: info               # "trace", "debug", "info", "warn", "error" (default: info)
 log_file: bmad-bot.log        # Path to log file for `bmad-bot logs` command (default: bmad-bot.log)
 
+# Terminal UI mode for foreground daemon output.
+# "fancy" — animated spinners + colors (default), "plain" — no colors/spinners, "silent" — no terminal output
+# Non-TTY environments (pipes, CI) automatically use silent mode regardless of this setting.
+# ui_mode: fancy
+
 # Git hosting provider for PR creation
 git_provider:
   provider: github            # "github" or "gitlab"

@@ -22,6 +22,12 @@ use renderer::UiRenderer;
 #[derive(Clone)]
 pub(crate) struct UiHandle(Arc<dyn UiRenderer>);
 
+impl std::fmt::Debug for UiHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UiHandle").finish_non_exhaustive()
+    }
+}
+
 impl UiHandle {
     /// Creates a `UiHandle` backed by [`null::NullRenderer`] (zero I/O).
     ///

@@ -99,6 +99,14 @@ pub struct BotConfig {
     #[serde(default = "default_log_file")]
     pub log_file: String,
 
+    /// Terminal UI mode for foreground daemon output.
+    /// `"fancy"` — animated spinners + colors (default),
+    /// `"plain"` — no colors/spinners,
+    /// `"silent"` — no terminal output.
+    /// Non-TTY environments automatically use silent mode regardless of this setting.
+    #[serde(default = "default_ui_mode")]
+    pub ui_mode: String,
+
     /// Whether to run automated code review after dev sessions.
     /// When enabled, a separate LLM runs the BMAD CR workflow before PR creation.
     /// Default: `true`.
@@ -114,6 +122,11 @@ pub struct BotConfig {
 /// Default code review enabled — true (review runs by default).
 fn default_code_review_enabled() -> bool {
     true
+}
+
+/// Default UI mode — fancy (animated spinners + colors).
+fn default_ui_mode() -> String {
+    "fancy".to_string()
 }
 
 /// Default polling interval — 5 minutes.
@@ -292,6 +305,15 @@ impl BotConfig {
             });
         }
 
+        // ui_mode
+        let valid_ui_modes = ["fancy", "plain", "silent"];
+        if !valid_ui_modes.contains(&self.ui_mode.as_str()) {
+            return Err(ConfigError::InvalidField {
+                field: "ui_mode".to_string(),
+                reason: format!("must be one of: {}", valid_ui_modes.join(", ")),
+            });
+        }
+
         // log_format
         let valid_log_formats = ["json", "pretty"];
         if !valid_log_formats.contains(&self.log_format.as_str()) {
@@ -401,6 +423,7 @@ impl BotConfig {
         Self {
             polling_interval_secs: 300,
             code_review_enabled: true,
+            ui_mode: "fancy".to_string(),
             git_provider: GitProviderConfig {
                 provider: "github".to_string(),
                 repo_owner: "test".to_string(),
@@ -601,6 +624,7 @@ mod tests {
 polling_interval_secs: 60
 log_format: pretty
 log_level: info
+ui_mode: fancy
 git_provider:
   provider: github
   repo_owner: test-org
@@ -673,6 +697,41 @@ bmad_paths:
         let mut config = valid_config();
         config.log_format = "json".to_string();
         assert!(config.validate().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // ui_mode tests (Story 10.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_default_ui_mode_is_fancy() {
+        // YAML without ui_mode — should default to "fancy"
+        let yaml = VALID_YAML.replace("ui_mode: fancy\n", "");
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        assert_eq!(config.ui_mode, "fancy");
+    }
+
+    #[test]
+    fn test_config_ui_mode_accepts_valid_values() {
+        for mode in &["fancy", "plain", "silent"] {
+            let mut config = valid_config();
+            config.ui_mode = mode.to_string();
+            assert!(
+                config.validate().is_ok(),
+                "ui_mode '{mode}' should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_config_ui_mode_rejects_invalid_value() {
+        let mut config = valid_config();
+        config.ui_mode = "verbose".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidField { ref field, .. } if field == "ui_mode"),
+            "Expected InvalidField for ui_mode, got: {err}"
+        );
     }
 
     #[test]

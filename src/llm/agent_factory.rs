@@ -915,6 +915,7 @@ mod tests {
             log_level: "info".to_string(),
             log_format: "pretty".to_string(),
             log_file: "test.log".to_string(),
+            ui_mode: "fancy".to_string(),
             mcp_servers: vec![],
         }
     }

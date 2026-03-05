@@ -162,7 +162,7 @@ fn default_model_for_provider(provider: &str) -> &str {
 /// - **file**: always JSON (machine-parseable for `bmad-bot logs`)
 ///
 /// Uses `RUST_LOG` env var as override if set, otherwise `config.log_level`.
-pub fn init_tracing(config: &BotConfig) -> Result<(), CliError> {
+pub fn init_tracing(config: &BotConfig, ui_active: bool) -> Result<(), CliError> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(format!(
             "{},rustls=off,h2=off,hyper_util=off,reqwest::connect=off",
@@ -189,28 +189,38 @@ pub fn init_tracing(config: &BotConfig) -> Result<(), CliError> {
         .with_writer(file_writer)
         .with_ansi(false); // No ANSI colors in file output
 
-    // Stdout layer — config-driven format.
-    // The two branches produce different types; `.boxed()` erases the type.
-    let stdout_layer = match config.log_format.as_str() {
-        "json" => fmt::layer()
-            .json()
-            .with_target(true)
-            .with_thread_ids(false)
-            .boxed(),
-        _ => fmt::layer()
-            .with_target(true)
-            .with_thread_ids(false)
-            .boxed(),
-    };
+    if ui_active {
+        // UI is rendering to terminal — only log to file
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .try_init()
+            .map_err(|e| CliError::TracingInit {
+                reason: e.to_string(),
+            })?;
+    } else {
+        // No UI — preserve stdout layer for backward compatibility
+        let stdout_layer = match config.log_format.as_str() {
+            "json" => fmt::layer()
+                .json()
+                .with_target(true)
+                .with_thread_ids(false)
+                .boxed(),
+            _ => fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .boxed(),
+        };
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(file_layer)
-        .with(stdout_layer)
-        .try_init()
-        .map_err(|e| CliError::TracingInit {
-            reason: e.to_string(),
-        })?;
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .with(stdout_layer)
+            .try_init()
+            .map_err(|e| CliError::TracingInit {
+                reason: e.to_string(),
+            })?;
+    }
 
     Ok(())
 }
@@ -724,6 +734,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
         log_format: LOG_FORMATS[log_format_idx].to_string(),
         log_level: LOG_LEVELS[log_level_idx].to_string(),
         log_file: "bmad-bot.log".to_string(),
+        ui_mode: "fancy".to_string(),
         mcp_servers: vec![],
     })
 }
@@ -1252,7 +1263,22 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     let config = BotConfig::load(config_path)?;
     config.validate()?;
 
-    init_tracing(&config)?;
+    // Determine if ConsoleRenderer should be active
+    let is_tty = console::Term::stdout().is_term();
+    let ui_active = is_tty && config.ui_mode != "silent";
+
+    // Init tracing FIRST — conditionally omit stdout layer if UI is active
+    init_tracing(&config, ui_active)?;
+
+    // Create UiHandle AFTER tracing (so ConsoleRenderer doesn't fight with tracing stdout)
+    let ui = if ui_active {
+        if config.ui_mode == "plain" {
+            console::set_colors_enabled(false);
+        }
+        crate::ui::UiHandle::console()
+    } else {
+        crate::ui::UiHandle::null()
+    };
 
     // Validate git is installed and >= 2.30 before proceeding
     validate_git_version()?;
@@ -1325,6 +1351,7 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
         Arc::clone(&secrets),
         std::sync::Arc::clone(&shutdown),
         Arc::clone(&mcp_manager),
+        ui.clone(),
     )
     .map_err(|e| CliError::Init {
         reason: format!("Failed to create story pipeline: {e}"),
@@ -1339,6 +1366,20 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
         log_file = %config.log_file,
         "bmad-bot daemon started"
     );
+
+    // Emit daemon_start after all initialization
+    ui.daemon_start(&format!(
+        "polling={}s, git={}, llm_dev={}/{}, review={}",
+        config.polling_interval_secs,
+        config.git_provider.provider,
+        config.llm.dev.provider,
+        config.llm.dev.model,
+        if config.code_review_enabled {
+            "on"
+        } else {
+            "off"
+        },
+    ));
 
     // Crash recovery — check for interrupted session WAL before polling
     if let Some(result) = pipeline.recover_and_process().await {
@@ -1380,8 +1421,12 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
         &mut daemon_state,
         state_path,
         &shutdown,
+        &ui,
     )
     .await?;
+
+    // Emit shutdown event before cleanup
+    ui.shutdown_requested();
 
     // Shutdown MCP servers before marking daemon stopped (Story 9.1)
     mcp_manager.shutdown().await;
@@ -1412,9 +1457,11 @@ async fn run_polling_loop(
     daemon_state: &mut state::DaemonState,
     state_path: &Path,
     shutdown: &crate::session::runner::ShutdownFlag,
+    ui: &crate::ui::UiHandle,
 ) -> Result<(), CliError> {
     let mut interval_timer =
         tokio::time::interval(Duration::from_secs(config.polling_interval_secs));
+    let mut cycle_num: u32 = 0;
 
     loop {
         // Check shutdown flag at top of loop (covers case where flag was set
@@ -1432,9 +1479,12 @@ async fn run_polling_loop(
                     tracing::warn!(error = %e, "Failed to update daemon state file");
                 }
 
+                cycle_num = cycle_num.saturating_add(1);
+
                 // Poll for eligible stories (Story 2.1)
                 match watcher.poll() {
                     Ok(stories) => {
+                        ui.stories_found(stories.len());
                         tracing::info!(
                             eligible_count = stories.len(),
                             "Found eligible stories — launching pipeline"
@@ -1461,6 +1511,7 @@ async fn run_polling_loop(
                         }
                     }
                     Err(crate::watcher::WatcherError::NoEligibleStories) => {
+                        ui.poll_cycle(cycle_num);
                         tracing::info!("No eligible stories in this cycle — waiting for next poll");
                     }
                     Err(crate::watcher::WatcherError::SprintStatusNotFound { ref path }) => {
@@ -1511,6 +1562,7 @@ mod tests {
         BotConfig {
             polling_interval_secs: 300,
             code_review_enabled: true,
+            ui_mode: "fancy".to_string(),
             git_provider: GitProviderConfig {
                 provider: "github".to_string(),
                 repo_owner: "test-org".to_string(),
@@ -1689,7 +1741,7 @@ mod tests {
     #[test]
     fn test_init_tracing_pretty_does_not_panic() {
         let config = BotConfig::_test_minimal("pretty", "info");
-        let result = init_tracing(&config);
+        let result = init_tracing(&config, false);
         // Either succeeds (first test to run) or fails gracefully (subscriber already set)
         match result {
             Ok(()) => {}                            // success
@@ -1702,7 +1754,7 @@ mod tests {
     #[test]
     fn test_init_tracing_json_does_not_panic() {
         let config = BotConfig::_test_minimal("json", "debug");
-        let result = init_tracing(&config);
+        let result = init_tracing(&config, false);
         match result {
             Ok(()) => {}
             Err(CliError::TracingInit { .. }) => {}

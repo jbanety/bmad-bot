@@ -307,6 +307,9 @@ pub struct ReviewRunner {
     shutdown: ShutdownFlag,
     /// MCP server manager — provides external tool capabilities (Story 9.2 usage).
     mcp_manager: Arc<crate::mcp::McpManager>,
+    /// UI handle for rendering terminal output (fire-and-forget, Story 10.2).
+    #[allow(dead_code)]
+    ui: crate::ui::UiHandle,
 }
 
 impl ReviewRunner {
@@ -317,6 +320,7 @@ impl ReviewRunner {
         agent_factory: Arc<AgentFactory>,
         shutdown: ShutdownFlag,
         mcp_manager: Arc<crate::mcp::McpManager>,
+        ui: crate::ui::UiHandle,
     ) -> Self {
         Self {
             config,
@@ -325,6 +329,7 @@ impl ReviewRunner {
             analyzer: ResponseAnalyzer::new(),
             shutdown,
             mcp_manager,
+            ui,
         }
     }
 
@@ -862,6 +867,7 @@ mod tests {
             agent_factory,
             shutdown,
             mcp_manager,
+            crate::ui::UiHandle::null(),
         );
         // Verify config is stored by checking a known field
         assert_eq!(runner.config.llm.review.provider, "anthropic");

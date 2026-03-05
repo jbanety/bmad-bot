@@ -1,6 +1,6 @@
 # Story 10.2: Pipeline Integration — UI Events in Story Lifecycle
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -472,10 +472,42 @@ All commits are planning/documentation only. No implementation code for Epic 10 
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (via Copilot)
 
 ### Debug Log References
 
+None — clean implementation, no debug sessions required.
+
 ### Completion Notes List
 
+- All 14 tasks implemented across 7 modified files + 1 YAML example
+- Task 1: Added `ui_mode` field to `BotConfig` with `#[serde(default = "default_ui_mode")]`, `default_ui_mode()` returning `"fancy"`, validation rejecting values not in `["fancy", "plain", "silent"]`, 3 unit tests, and `bmad-bot.yaml.example` entry
+- Task 2: Removed `#[allow(dead_code)]` from `mod ui;` in `main.rs`
+- Task 3: Verified `UiHandle::null()` already exists from Story 10.1
+- Task 4: Wired `UiHandle` into `StoryPipeline` — field, constructor param (last after `mcp_manager`), cloned to `SessionRunner` and `ReviewRunner`
+- Task 5: Wired `UiHandle` into `SessionRunner` — field with `#[allow(dead_code)]`, constructor param, stored (no emissions, deferred to 10.3). Updated 7 test call sites.
+- Task 6: Wired `UiHandle` into `ReviewRunner` — field with `#[allow(dead_code)]`, constructor param, stored (no emissions, deferred to 10.4). Updated 1 test call site.
+- Task 7: Created `UiHandle` in `run_start()` based on TTY detection (`console::Term::stdout().is_term()`) + `ui_mode` config. Plain mode disables colors via `console::set_colors_enabled(false)`. Emits `ui.daemon_start()` with config summary.
+- Task 8: Modified `init_tracing()` to accept `ui_active: bool` — when `true`, omits stdout layer (file-only). Updated 2 test call sites to pass `false`.
+- Task 9: Emitted all pipeline UI events in `process_story()` — `story_start`, `phase_start/complete/error` for Dev Session, Push Branch, Create PR, Code Review, Notification phases, and `story_complete/error/escalated` on all exit paths. Duration tracked with `Instant::now()`.
+- Task 9b: Emitted UI events in `process_recovered_session()` — same pattern, adapted to recovery flow (no Dev Session phase, Code Review before Push in Completed arm)
+- Task 10: Emitted `batch_start(count)` and `batch_complete(summary)` in `process_eligible_stories()`
+- Task 11: Emitted `crash_recovery_start()` and `crash_recovery_complete(story_key)` in `recover_and_process()`
+- Task 12: Emitted `poll_cycle(cycle_num)` and `stories_found(count)` in `run_polling_loop()` with `u32` cycle counter
+- Task 13: Emitted `shutdown_requested()` in `run_start()` before MCP shutdown
+- Task 14: All existing tests pass (1082 passed, 0 failed). Clippy clean for new code (3 pre-existing errors in unrelated files). `cargo fmt --check` passes.
+- Added `Debug` impl for `UiHandle` (required by `ReviewRunner`'s `#[derive(Debug)]`)
+- Added `ui_mode` field to all 5 test `BotConfig` struct literals across codebase (config/mod.rs, cli/mod.rs, session/runner.rs, review/mod.rs via _test_minimal, llm/agent_factory.rs, watcher/mod.rs)
+
 ### File List
+
+- `src/config/mod.rs` — added `ui_mode` field, `default_ui_mode()`, validation, `_test_minimal` update, `VALID_YAML` update, 3 new tests
+- `src/main.rs` — removed `#[allow(dead_code)]` from `mod ui;`
+- `src/ui/mod.rs` — added `Debug` impl for `UiHandle`
+- `src/pipeline.rs` — added `ui: UiHandle` field, constructor param, all pipeline/batch/recovery UI event emissions in `process_story()`, `process_recovered_session()`, `process_eligible_stories()`, `recover_and_process()`
+- `src/session/runner.rs` — added `ui: UiHandle` field + constructor param (store only), updated 7 test `SessionRunner::new()` calls, added `ui_mode` to test config
+- `src/review/mod.rs` — added `ui: UiHandle` field + constructor param (store only), updated 1 test `ReviewRunner::new()` call
+- `src/cli/mod.rs` — modified `init_tracing()` to accept `ui_active: bool`, created `UiHandle` in `run_start()`, emitted `daemon_start`/`shutdown_requested`, added `ui` param to `run_polling_loop()` with `poll_cycle`/`stories_found` events, added `ui_mode` to test configs and `collect_config_interactively`, updated `init_tracing` test calls
+- `src/llm/agent_factory.rs` — added `ui_mode` to test config
+- `src/watcher/mod.rs` — added `ui_mode` to test config
+- `bmad-bot.yaml.example` — added `ui_mode` entry with documentation comment
