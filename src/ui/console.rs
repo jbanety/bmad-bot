@@ -51,7 +51,8 @@ pub(crate) struct ConsoleRenderer {
     /// Thread-safe multi-progress bar manager (renders to stderr).
     multi: MultiProgress,
     /// Active phase spinners indexed by phase name.
-    spinners: Mutex<HashMap<String, ProgressBar>>,
+    /// The `bool` indicates whether this is a sub-phase (nested inside another phase).
+    spinners: Mutex<HashMap<String, (ProgressBar, bool)>>,
     /// When `true`, use ASCII fallback glyphs and disable spinner animation.
     plain_mode: bool,
     /// When `true`, display truncated content previews for LLM exchanges.
@@ -77,10 +78,15 @@ impl ConsoleRenderer {
     /// Creates a new spinner `ProgressBar`, adds it to `MultiProgress`, and
     /// returns it. In fancy mode uses the animated cyan `◉`; in plain mode
     /// uses a static `...` prefix with no tick animation.
-    fn create_spinner(&self, message: String) -> ProgressBar {
+    ///
+    /// When `sub` is `true`, the spinner is indented by 4 spaces instead of 2
+    /// to visually nest under a parent phase.
+    fn create_spinner(&self, message: String, sub: bool) -> ProgressBar {
         let pb = ProgressBar::new_spinner();
         let pb = self.multi.add(pb);
-        let spinner_style = ProgressStyle::with_template("  {spinner} {msg}")
+        let indent = if sub { "    " } else { "  " };
+        let template = format!("{indent}{{spinner}} {{msg}}");
+        let spinner_style = ProgressStyle::with_template(&template)
             .unwrap_or_else(|_| ProgressStyle::default_spinner());
         pb.set_style(spinner_style);
         if self.plain_mode {
@@ -219,8 +225,8 @@ impl ConsoleRenderer {
     }
 
     /// Finishes and removes a tracked phase spinner by name.
-    /// Returns `Some(ProgressBar)` if one was active, `None` otherwise.
-    fn take_spinner(&self, phase_name: &str) -> Option<ProgressBar> {
+    /// Returns `Some((ProgressBar, is_sub))` if one was active, `None` otherwise.
+    fn take_spinner(&self, phase_name: &str) -> Option<(ProgressBar, bool)> {
         match self.spinners.lock() {
             Ok(mut map) => map.remove(phase_name),
             Err(poisoned) => {
@@ -237,7 +243,7 @@ impl ConsoleRenderer {
     fn clear_all_spinners(&self) {
         match self.spinners.lock() {
             Ok(mut map) => {
-                for (_, pb) in map.drain() {
+                for (_, (pb, _)) in map.drain() {
                     pb.finish_and_clear();
                 }
             }
@@ -252,18 +258,26 @@ impl ConsoleRenderer {
     /// If a spinner already exists for `phase_name` (duplicate `phase_start`),
     /// the previous spinner is finished and cleared before the new one is stored,
     /// preventing orphaned spinners in `MultiProgress`.
-    fn store_spinner(&self, phase_name: String, pb: ProgressBar) {
+    /// Returns `true` if there are active spinners (used to detect sub-phase nesting).
+    fn has_active_spinners(&self) -> bool {
+        match self.spinners.lock() {
+            Ok(map) => !map.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    fn store_spinner(&self, phase_name: String, pb: ProgressBar, sub: bool) {
         match self.spinners.lock() {
             Ok(mut map) => {
                 // H3 fix: finish any existing spinner for this phase before replacing it
-                if let Some(existing) = map.remove(&phase_name) {
+                if let Some((existing, _)) = map.remove(&phase_name) {
                     existing.finish_and_clear();
                     tracing::debug!(
                         "ConsoleRenderer: phase_start called twice for '{phase_name}', \
                          previous spinner cleared"
                     );
                 }
-                map.insert(phase_name, pb);
+                map.insert(phase_name, (pb, sub));
             }
             Err(poisoned) => {
                 tracing::debug!("ConsoleRenderer: spinner lock poisoned: {poisoned}");
@@ -331,16 +345,22 @@ impl UiRenderer for ConsoleRenderer {
     // ── Phase events ────────────────────────────────────────────────
 
     fn phase_start(&self, phase_name: &str) {
-        let pb = self.create_spinner(phase_name.to_string());
-        self.store_spinner(phase_name.to_string(), pb);
+        let sub = self.has_active_spinners();
+        let pb = self.create_spinner(phase_name.to_string(), sub);
+        self.store_spinner(phase_name.to_string(), pb, sub);
     }
 
     fn phase_complete(&self, phase_name: &str, duration: Duration) {
-        if let Some(pb) = self.take_spinner(phase_name) {
-            pb.finish_and_clear();
-        }
+        let indent = match self.take_spinner(phase_name) {
+            Some((pb, sub)) => {
+                pb.finish_and_clear();
+                if sub { "    " } else { "  " }
+            }
+            None => "  ",
+        };
         self.println(&format!(
-            "  {} {} [{}]",
+            "{}{} {} [{}]",
+            indent,
             self.glyph_ok(),
             phase_name,
             format_duration(duration),
@@ -348,11 +368,16 @@ impl UiRenderer for ConsoleRenderer {
     }
 
     fn phase_error(&self, phase_name: &str, error: &str) {
-        if let Some(pb) = self.take_spinner(phase_name) {
-            pb.finish_and_clear();
-        }
+        let indent = match self.take_spinner(phase_name) {
+            Some((pb, sub)) => {
+                pb.finish_and_clear();
+                if sub { "    " } else { "  " }
+            }
+            None => "  ",
+        };
         self.println(&format!(
-            "  {} {} — {}",
+            "{}{} {} — {}",
+            indent,
             self.glyph_err(),
             phase_name,
             error,
