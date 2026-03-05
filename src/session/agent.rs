@@ -27,7 +27,9 @@ use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, StreamingPromptHook};
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
 use rig::message::Text;
-use rig::streaming::{StreamedAssistantContent, StreamingChat};
+use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
+
+use crate::ui::UiHandle;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -278,6 +280,7 @@ pub async fn streaming_chat<A, M>(
     prompt: impl Into<Message> + Send,
     history: Vec<Message>,
     shutdown: Option<&ShutdownFlag>,
+    ui: Option<&UiHandle>,
 ) -> Result<(String, Vec<Message>), rig::completion::PromptError>
 where
     A: StreamingChat<M, M::StreamingResponse>,
@@ -294,6 +297,9 @@ where
         .await;
 
     let mut acc = String::new();
+    // Track tool call IDs → tool names so we can label tool results.
+    let mut tool_call_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     loop {
         // Cooperative shutdown check — between every chunk/tool-call round
@@ -321,6 +327,32 @@ where
             ))) => {
                 acc.push_str(&text);
             }
+            // ── Tool call visibility (AC #8) ────────────────────────
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
+                tool_call,
+                internal_call_id,
+            })) => {
+                let tool_name = &tool_call.function.name;
+                let detail = extract_tool_call_detail(tool_name, &tool_call.function.arguments);
+                tool_call_names.insert(internal_call_id, tool_name.clone());
+                if let Some(ui) = ui {
+                    ui.tool_call(tool_name, &detail);
+                }
+            }
+            // ── Tool result visibility (AC #9) ──────────────────────
+            Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                tool_result,
+                internal_call_id,
+            })) => {
+                let tool_name = tool_call_names
+                    .get(&internal_call_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let brief = extract_tool_result_brief(&tool_result.content);
+                if let Some(ui) = ui {
+                    ui.tool_result(tool_name, &brief);
+                }
+            }
             Ok(MultiTurnStreamItem::FinalResponse(_)) => {
                 // FinalResponse signals the end of the stream.
                 // acc already contains the full accumulated text.
@@ -347,6 +379,133 @@ where
     Ok((acc, full_history))
 }
 
+/// Extract a human-readable detail string from a tool call's arguments.
+///
+/// Each tool type has a specific detail format (see story Dev Notes):
+/// - `edit_file` → `"{path} ({mode})"`
+/// - `read_file` → `"{path}"` or `"{path} L{start}-{end}"`
+/// - `grep` → `"/{pattern}/"`
+/// - `find_path` → `"{glob}"`
+/// - `list_directory` → `"{path}"`
+/// - `git` → `"{sub_action} {key_arg}"`
+/// - `terminal` → first 80 chars of the command
+/// - `ask_supervisor` → first 80 chars of the question
+/// - `think` → `"(reasoning)"`
+fn extract_tool_call_detail(tool_name: &str, args: &serde_json::Value) -> String {
+    match tool_name {
+        "edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("edit");
+            format!("{path} ({mode})")
+        }
+        "read_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let start = args.get("start_line").and_then(|v| v.as_u64());
+            let end = args.get("end_line").and_then(|v| v.as_u64());
+            match (start, end) {
+                (Some(s), Some(e)) => format!("{path} L{s}-{e}"),
+                (Some(s), None) => format!("{path} L{s}-"),
+                _ => path.to_string(),
+            }
+        }
+        "grep" => {
+            let pattern = args.get("regex").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("/{pattern}/")
+        }
+        "find_path" => {
+            let glob = args.get("glob").and_then(|v| v.as_str()).unwrap_or("?");
+            glob.to_string()
+        }
+        "list_directory" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            path.to_string()
+        }
+        "git" => {
+            let sub = args
+                .get("sub_action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            // Pick the most descriptive argument for the sub-action
+            let key_arg = args
+                .get("message")
+                .or_else(|| args.get("branch"))
+                .or_else(|| args.get("args"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if key_arg.is_empty() {
+                sub.to_string()
+            } else {
+                format!("{sub} \"{key_arg}\"")
+            }
+        }
+        "terminal" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("?");
+            truncate_str(cmd, 80)
+        }
+        "ask_supervisor" => {
+            let q = args.get("question").and_then(|v| v.as_str()).unwrap_or("?");
+            truncate_str(q, 80)
+        }
+        "think" => "(reasoning)".to_string(),
+        _other => {
+            // MCP or unknown tool — show first 80 chars of serialized args
+            let s = args.to_string();
+            truncate_str(&s, 80)
+        }
+    }
+}
+
+/// Extract a brief summary string from a tool result's content.
+///
+/// Returns a short string suitable for `ui.tool_result()`: file size, line
+/// count, match count, exit code, or a truncated text snippet.
+fn extract_tool_result_brief(
+    content: &rig::one_or_many::OneOrMany<rig::message::ToolResultContent>,
+) -> String {
+    // Get the first text content item
+    let text = content.iter().find_map(|c| {
+        if let rig::message::ToolResultContent::Text(t) = c {
+            Some(t.text.as_str())
+        } else {
+            None
+        }
+    });
+
+    let Some(text) = text else {
+        return "(no text)".to_string();
+    };
+
+    // Heuristic: detect common result patterns and produce brief summaries
+    if text.starts_with("Error") || text.starts_with("error") {
+        return truncate_str(text, 80);
+    }
+
+    // Line-count heuristic: count newlines for multi-line output
+    let line_count = text.chars().filter(|&c| c == '\n').count();
+    if line_count > 3 {
+        let byte_len = text.len();
+        return format!("{line_count} lines, {byte_len} bytes");
+    }
+
+    // Short result — return truncated
+    truncate_str(text, 120)
+}
+
+/// Truncate a string to `max` characters, appending `…` if truncated.
+///
+/// Uses `char_indices` to find a safe Unicode boundary — never slices by byte
+/// index directly.
+fn truncate_str(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((byte_idx, _)) => {
+            let mut t = s[..byte_idx].to_string();
+            t.push('…');
+            t
+        }
+        None => s.to_string(),
+    }
+}
+
 /// Activate a BMAD agent by sending the agent file as the first user message.
 ///
 /// Returns `(rig_history, chat_history)` — the rig `Message` vec for subsequent
@@ -364,12 +523,14 @@ where
 ///   (e.g. `"_bmad/bmm/agents/dev.md"` or `"_bmad/bmm/agents/architect.md"`)
 /// - `label` — logging label (e.g. `"dev-session"`, `"code-review"`, `"supervisor"`)
 /// - `shutdown` — optional shutdown flag for cooperative cancellation
+/// - `ui` — optional UI handle for emitting tool call events during activation
 pub async fn activate_agent<A, M>(
     agent: &A,
     project_root: &str,
     agent_relative_path: &str,
     label: &str,
     shutdown: Option<&ShutdownFlag>,
+    ui: Option<&UiHandle>,
 ) -> Result<(Vec<Message>, Vec<ChatMessage>), String>
 where
     A: Chat + StreamingChat<M, M::StreamingResponse>,
@@ -398,7 +559,7 @@ where
         rig_history.len(),
     );
     let (response, new_history) =
-        streaming_chat(agent, activation_msg.as_str(), rig_history, shutdown)
+        streaming_chat(agent, activation_msg.as_str(), rig_history, shutdown, ui)
             .await
             .map_err(|e| {
                 log_llm_error(label, 0, &e);

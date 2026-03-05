@@ -105,12 +105,15 @@ impl BuiltAgent {
         prompt: impl Into<Message> + Send,
         history: Vec<Message>,
         shutdown: Option<&ShutdownFlag>,
+        ui: Option<&crate::ui::UiHandle>,
     ) -> Result<(String, Vec<Message>), rig::completion::PromptError> {
         match self {
-            Self::Anthropic(agent) => streaming_chat(agent, prompt, history, shutdown).await,
-            Self::OpenAiResponses(agent) => streaming_chat(agent, prompt, history, shutdown).await,
+            Self::Anthropic(agent) => streaming_chat(agent, prompt, history, shutdown, ui).await,
+            Self::OpenAiResponses(agent) => {
+                streaming_chat(agent, prompt, history, shutdown, ui).await
+            }
             Self::OpenAiCompletions(agent) => {
-                streaming_chat(agent, prompt, history, shutdown).await
+                streaming_chat(agent, prompt, history, shutdown, ui).await
             }
         }
     }
@@ -132,6 +135,7 @@ impl BuiltAgent {
         agent_relative_path: &str,
         label: &str,
         shutdown: Option<&ShutdownFlag>,
+        ui: Option<&crate::ui::UiHandle>,
     ) -> Result<(Vec<Message>, Vec<crate::session::state::ChatMessage>), String> {
         match self {
             Self::Anthropic(agent) => {
@@ -141,6 +145,7 @@ impl BuiltAgent {
                     agent_relative_path,
                     label,
                     shutdown,
+                    ui,
                 )
                 .await
             }
@@ -151,6 +156,7 @@ impl BuiltAgent {
                     agent_relative_path,
                     label,
                     shutdown,
+                    ui,
                 )
                 .await
             }
@@ -161,6 +167,7 @@ impl BuiltAgent {
                     agent_relative_path,
                     label,
                     shutdown,
+                    ui,
                 )
                 .await
             }

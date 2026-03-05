@@ -1,6 +1,6 @@
 # Story 10.3: Session Integration — Tool Calls & Chat Turns Visible
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -36,85 +36,85 @@ So that I understand what the agent is doing without reading debug logs.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add UI event emissions to `streaming_chat()` in `src/session/agent.rs` for tool call visibility (AC: #8, #9, #10)
-  - [ ] 1.1 Add an optional `ui: Option<&UiHandle>` parameter to `streaming_chat()` — passing `None` preserves backward compatibility for supervisor/review callers
-  - [ ] 1.2 In the `match chunk` loop, add a new arm for `MultiTurnStreamItem::ToolCallStart` (or equivalent rig stream item variant that carries the tool name and arguments) — emit `ui.tool_call(tool_name, detail)` with the appropriate detail extraction
-  - [ ] 1.3 If rig does not expose a `ToolCallStart` variant, use approach 3 from the epics: inspect `MultiTurnStreamItem` variants for tool call deltas. The `_ => continue` catch-all currently swallows these — add explicit matching for tool-related variants
-  - [ ] 1.4 For tool result visibility: if rig provides a `ToolResult` stream item variant, match it and emit `ui.tool_result(tool_name, brief_result)`. If not, emit `ui.tool_result` from the `ChatHistoryHook::on_completion_call` by inspecting the history for new tool result messages since the last snapshot
-  - [ ] 1.5 **FALLBACK approach if rig stream items don't carry tool info:** Extend `ChatHistoryHook` to detect tool calls/results by comparing successive history snapshots in `on_completion_call`. Each new tool call/result message in the history diff triggers a `ui.tool_call` or `ui.tool_result` emission. This requires adding `ui: Option<UiHandle>` to `ChatHistoryHook`
-  - [ ] 1.6 Add `use crate::ui::UiHandle;` import to `src/session/agent.rs`
-  - [ ] 1.7 Verify `cargo check` passes
+- [x] Task 1: Add UI event emissions to `streaming_chat()` in `src/session/agent.rs` for tool call visibility (AC: #8, #9, #10)
+  - [x] 1.1 Add an optional `ui: Option<&UiHandle>` parameter to `streaming_chat()` — passing `None` preserves backward compatibility for supervisor/review callers
+  - [x] 1.2 In the `match chunk` loop, add a new arm for `MultiTurnStreamItem::ToolCallStart` (or equivalent rig stream item variant that carries the tool name and arguments) — emit `ui.tool_call(tool_name, detail)` with the appropriate detail extraction
+  - [x] 1.3 If rig does not expose a `ToolCallStart` variant, use approach 3 from the epics: inspect `MultiTurnStreamItem` variants for tool call deltas. The `_ => continue` catch-all currently swallows these — add explicit matching for tool-related variants
+  - [x] 1.4 For tool result visibility: if rig provides a `ToolResult` stream item variant, match it and emit `ui.tool_result(tool_name, brief_result)`. If not, emit `ui.tool_result` from the `ChatHistoryHook::on_completion_call` by inspecting the history for new tool result messages since the last snapshot
+  - [x] 1.5 **FALLBACK approach if rig stream items don't carry tool info:** Extend `ChatHistoryHook` to detect tool calls/results by comparing successive history snapshots in `on_completion_call`. Each new tool call/result message in the history diff triggers a `ui.tool_call` or `ui.tool_result` emission. This requires adding `ui: Option<UiHandle>` to `ChatHistoryHook`
+  - [x] 1.6 Add `use crate::ui::UiHandle;` import to `src/session/agent.rs`
+  - [x] 1.7 Verify `cargo check` passes
 
-- [ ] Task 2: Add `ui` parameter to `activate_agent()` in `src/session/agent.rs` for tool call forwarding (AC: #8)
-  - [ ] 2.1 Add an optional `ui: Option<&UiHandle>` parameter to `activate_agent()`
-  - [ ] 2.2 Pass `ui` through to the inner `streaming_chat()` call so tool calls during activation are also visible
-  - [ ] 2.3 Do NOT emit `activation_start()` / `activation_complete()` / `phase_error()` here — `activate_agent()` is a shared utility used by dev session, review, and supervisor. Activation lifecycle events are emitted at the **caller level** (Tasks 4, 9, 10) where the context is known
+- [x] Task 2: Add `ui` parameter to `activate_agent()` in `src/session/agent.rs` for tool call forwarding (AC: #8)
+  - [x] 2.1 Add an optional `ui: Option<&UiHandle>` parameter to `activate_agent()`
+  - [x] 2.2 Pass `ui` through to the inner `streaming_chat()` call so tool calls during activation are also visible
+  - [x] 2.3 Do NOT emit `activation_start()` / `activation_complete()` / `phase_error()` here — `activate_agent()` is a shared utility used by dev session, review, and supervisor. Activation lifecycle events are emitted at the **caller level** (Tasks 4, 9, 10) where the context is known
 
-- [ ] Task 3: Update `BuiltAgent` wrapper methods in `src/llm/agent_factory.rs` (AC: #2, #8)
-  - [ ] 3.1 Add optional `ui: Option<&UiHandle>` parameter to `BuiltAgent::stream_chat()` — forward to `streaming_chat()`
-  - [ ] 3.2 Add optional `ui: Option<&UiHandle>` parameter to `BuiltAgent::activate_agent()` — forward to `activate_agent()`
-  - [ ] 3.3 Add `use crate::ui::UiHandle;` import
-  - [ ] 3.4 Update all match arms in both methods to pass `ui` through
+- [x] Task 3: Update `BuiltAgent` wrapper methods in `src/llm/agent_factory.rs` (AC: #2, #8)
+  - [x] 3.1 Add optional `ui: Option<&UiHandle>` parameter to `BuiltAgent::stream_chat()` — forward to `streaming_chat()`
+  - [x] 3.2 Add optional `ui: Option<&UiHandle>` parameter to `BuiltAgent::activate_agent()` — forward to `activate_agent()`
+  - [x] 3.3 Add `use crate::ui::UiHandle;` import
+  - [x] 3.4 Update all match arms in both methods to pass `ui` through
 
-- [ ] Task 4: Emit activation UI events in `run_session()` normal path (AC: #2, #5)
-  - [ ] 4.1 Before the activation retry loop: emit `self.ui.activation_start()`
-  - [ ] 4.2 After successful activation (after the loop breaks): emit `self.ui.activation_complete()`
-  - [ ] 4.3 On activation failure (permanent): emit `self.ui.phase_error("Agent Activation", &error)` before returning `SessionOutcome::Failed`
-  - [ ] 4.4 Pass `Some(&self.ui)` to all `agent.activate_agent()` and `agent.stream_chat()` calls in the normal initialization path
+- [x] Task 4: Emit activation UI events in `run_session()` normal path (AC: #2, #5)
+  - [x] 4.1 Before the activation retry loop: emit `self.ui.activation_start()`
+  - [x] 4.2 After successful activation (after the loop breaks): emit `self.ui.activation_complete()`
+  - [x] 4.3 On activation failure (permanent): emit `self.ui.phase_error("Agent Activation", &error)` before returning `SessionOutcome::Failed`
+  - [x] 4.4 Pass `Some(&self.ui)` to all `agent.activate_agent()` and `agent.stream_chat()` calls in the normal initialization path
 
-- [ ] Task 5: Emit LLM request/response/error UI events in `run_session()` chat loop (AC: #3, #4, #5)
-  - [ ] 5.1 After every `log_llm_request()` call: add `self.ui.llm_request(label, turn)` — this starts a thinking spinner in `ConsoleRenderer`
-  - [ ] 5.2 After every `log_llm_response()` call: add `self.ui.llm_response(label, turn, response.len())` — this resolves the spinner
-  - [ ] 5.3 After every `log_llm_error()` call: add `self.ui.llm_error(label, turn, &error_string)` — this shows error in UI
-  - [ ] 5.4 Pass `Some(&self.ui)` to all `agent.stream_chat()` calls in the chat loop so tool calls are visible
+- [x] Task 5: Emit LLM request/response/error UI events in `run_session()` chat loop (AC: #3, #4, #5)
+  - [x] 5.1 After every `log_llm_request()` call: add `self.ui.llm_request(label, turn)` — this starts a thinking spinner in `ConsoleRenderer`
+  - [x] 5.2 After every `log_llm_response()` call: add `self.ui.llm_response(label, turn, response.len())` — this resolves the spinner
+  - [x] 5.3 After every `log_llm_error()` call: add `self.ui.llm_error(label, turn, &error_string)` — this shows error in UI
+  - [x] 5.4 Pass `Some(&self.ui)` to all `agent.stream_chat()` calls in the chat loop so tool calls are visible
 
-- [ ] Task 6: Emit chat turn and completion UI events in `run_session()` (AC: #3)
-  - [ ] 6.1 After the `tracing::debug!(action = "chat_turn", ...)` at the bottom of each loop iteration (inside the main `loop {}`): emit `self.ui.chat_turn(turn, &truncated_summary)` where `truncated_summary` = first 80 chars of `current_response` + `"…"` if longer. **Note:** The initial DS response (turn 0) is emitted BEFORE the loop starts, so `chat_turn` is naturally only emitted for turn 1+ inside the loop — this is correct and avoids noise from the activation response
-  - [ ] 6.2 In the `ResponseAction::Completed` match arm, before the final commit phase: emit `self.ui.completion_detected(&story.story_key)`
+- [x] Task 6: Emit chat turn and completion UI events in `run_session()` (AC: #3)
+  - [x] 6.1 After the `tracing::debug!(action = "chat_turn", ...)` at the bottom of each loop iteration (inside the main `loop {}`): emit `self.ui.chat_turn(turn, &truncated_summary)` where `truncated_summary` = first 80 chars of `current_response` + `"…"` if longer. **Note:** The initial DS response (turn 0) is emitted BEFORE the loop starts, so `chat_turn` is naturally only emitted for turn 1+ inside the loop — this is correct and avoids noise from the activation response
+  - [x] 6.2 In the `ResponseAction::Completed` match arm, before the final commit phase: emit `self.ui.completion_detected(&story.story_key)`
 
-- [ ] Task 7: Emit post-completion phase UI events in `run_session()` (AC: #4)
-  - [ ] 7.1 Before the final commit `stream_chat()` call: emit `self.ui.phase_start("Final Commit")`, capture `Instant::now()`
-  - [ ] 7.2 After final commit succeeds: emit `self.ui.phase_complete("Final Commit", elapsed)`
-  - [ ] 7.3 After final commit fails (non-fatal): emit `self.ui.phase_error("Final Commit", &error)` — session continues
-  - [ ] 7.4 Before the impact analysis `stream_chat()` call: emit `self.ui.phase_start("Impact Analysis")`, capture `Instant::now()`
-  - [ ] 7.5 After impact analysis succeeds: emit `self.ui.phase_complete("Impact Analysis", elapsed)`
-  - [ ] 7.6 After impact analysis fails (non-fatal): emit `self.ui.phase_error("Impact Analysis", &error)` — session continues
-  - [ ] 7.7 Before the PR summary `stream_chat()` call: emit `self.ui.phase_start("PR Summary")`, capture `Instant::now()`
-  - [ ] 7.8 After PR summary succeeds: emit `self.ui.phase_complete("PR Summary", elapsed)`
-  - [ ] 7.9 After PR summary fails (non-fatal): emit `self.ui.phase_error("PR Summary", &error)`
+- [x] Task 7: Emit post-completion phase UI events in `run_session()` (AC: #4)
+  - [x] 7.1 Before the final commit `stream_chat()` call: emit `self.ui.phase_start("Final Commit")`, capture `Instant::now()`
+  - [x] 7.2 After final commit succeeds: emit `self.ui.phase_complete("Final Commit", elapsed)`
+  - [x] 7.3 After final commit fails (non-fatal): emit `self.ui.phase_error("Final Commit", &error)` — session continues
+  - [x] 7.4 Before the impact analysis `stream_chat()` call: emit `self.ui.phase_start("Impact Analysis")`, capture `Instant::now()`
+  - [x] 7.5 After impact analysis succeeds: emit `self.ui.phase_complete("Impact Analysis", elapsed)`
+  - [x] 7.6 After impact analysis fails (non-fatal): emit `self.ui.phase_error("Impact Analysis", &error)` — session continues
+  - [x] 7.7 Before the PR summary `stream_chat()` call: emit `self.ui.phase_start("PR Summary")`, capture `Instant::now()`
+  - [x] 7.8 After PR summary succeeds: emit `self.ui.phase_complete("PR Summary", elapsed)`
+  - [x] 7.9 After PR summary fails (non-fatal): emit `self.ui.phase_error("PR Summary", &error)`
 
-- [ ] Task 8: Emit retry and token refresh UI events (AC: #6, #7)
-  - [ ] 8.0 **FIRST:** Verify the actual `UiRenderer::llm_retry()` signature in `src/ui/renderer.rs` (implemented by Story 10.1). The type casts below (`as u32`, `as f64`) are indicative — adapt to match the trait's actual parameter types. If the trait uses `usize` for turn/retry_count (like other methods), use those types directly without casting
-  - [ ] 8.1 In the activation retry loop: after `tracing::warn!(action = "activation_transient_retry", ...)`, emit `self.ui.llm_retry("dev-session", 0, activation_retries as u32, delay as f64)`
-  - [ ] 8.2 In the DS send retry loop: after the transient retry `tracing::warn!`, emit `self.ui.llm_retry("dev-session", 0, ds_retries as u32, delay as f64)`
-  - [ ] 8.3 In the main chat loop retry path: after `tracing::warn!(action = "chat_error", ...)`, emit `self.ui.llm_retry("dev-session", turn as u32, retries as u32, backoff_secs as f64)`
-  - [ ] 8.4 On every Copilot token expired rebuild (activation, DS, chat loop, final commit, impact analysis, PR summary): emit `self.ui.llm_retry(label, turn as u32, token_refreshes as u32, 0.0)` — `delay_secs=0` signals token refresh, not backoff
+- [x] Task 8: Emit retry and token refresh UI events (AC: #6, #7)
+  - [x] 8.0 **FIRST:** Verify the actual `UiRenderer::llm_retry()` signature in `src/ui/renderer.rs` (implemented by Story 10.1). The type casts below (`as u32`, `as f64`) are indicative — adapt to match the trait's actual parameter types. If the trait uses `usize` for turn/retry_count (like other methods), use those types directly without casting
+  - [x] 8.1 In the activation retry loop: after `tracing::warn!(action = "activation_transient_retry", ...)`, emit `self.ui.llm_retry("dev-session", 0, activation_retries as u32, delay as f64)`
+  - [x] 8.2 In the DS send retry loop: after the transient retry `tracing::warn!`, emit `self.ui.llm_retry("dev-session", 0, ds_retries as u32, delay as f64)`
+  - [x] 8.3 In the main chat loop retry path: after `tracing::warn!(action = "chat_error", ...)`, emit `self.ui.llm_retry("dev-session", turn as u32, retries as u32, backoff_secs as f64)`
+  - [x] 8.4 On every Copilot token expired rebuild (activation, DS, chat loop, final commit, impact analysis, PR summary): emit `self.ui.llm_retry(label, turn as u32, token_refreshes as u32, 0.0)` — `delay_secs=0` signals token refresh, not backoff
 
-- [ ] Task 9: Emit UI events in `drive_activation_and_recover()` for context limit recovery (AC: #2, #5)
-  - [ ] 9.1 At the start of `drive_activation_and_recover()`: emit `self.ui.activation_start()`
-  - [ ] 9.2 After the activation `activate_agent()` succeeds: emit `self.ui.activation_complete()`
-  - [ ] 9.3 On activation failure: emit `self.ui.phase_error("Agent Activation", &error)`
-  - [ ] 9.4 Add `self.ui.llm_request` / `self.ui.llm_response` / `self.ui.llm_error` around the CH and "Load project context" `stream_chat()` calls (steps 4b and 4c)
-  - [ ] 9.5 Pass `Some(&self.ui)` to all `agent.stream_chat()` and `agent.activate_agent()` calls
+- [x] Task 9: Emit UI events in `drive_activation_and_recover()` for context limit recovery (AC: #2, #5)
+  - [x] 9.1 At the start of `drive_activation_and_recover()`: emit `self.ui.activation_start()`
+  - [x] 9.2 After the activation `activate_agent()` succeeds: emit `self.ui.activation_complete()`
+  - [x] 9.3 On activation failure: emit `self.ui.phase_error("Agent Activation", &error)`
+  - [x] 9.4 Add `self.ui.llm_request` / `self.ui.llm_response` / `self.ui.llm_error` around the CH and "Load project context" `stream_chat()` calls (steps 4b and 4c)
+  - [x] 9.5 Pass `Some(&self.ui)` to all `agent.stream_chat()` and `agent.activate_agent()` calls
 
-- [ ] Task 10: Emit UI events in recovery path of `run_session()` (AC: #2, #5)
-  - [ ] 10.1 In `Some(mut state)` recovery branch — empty history sub-case: emit `self.ui.activation_start()` before activation, `self.ui.activation_complete()` after, and LLM request/response around `stream_chat`
-  - [ ] 10.2 In sub-case B (last message is user — re-send): emit `self.ui.llm_request` before and `self.ui.llm_response` / `self.ui.llm_error` after the re-send
-  - [ ] 10.3 Pass `Some(&self.ui)` to all `agent.stream_chat()` and `agent.activate_agent()` calls in recovery paths
+- [x] Task 10: Emit UI events in recovery path of `run_session()` (AC: #2, #5)
+  - [x] 10.1 In `Some(mut state)` recovery branch — empty history sub-case: emit `self.ui.activation_start()` before activation, `self.ui.activation_complete()` after, and LLM request/response around `stream_chat`
+  - [x] 10.2 In sub-case B (last message is user — re-send): emit `self.ui.llm_request` before and `self.ui.llm_response` / `self.ui.llm_error` after the re-send
+  - [x] 10.3 Pass `Some(&self.ui)` to all `agent.stream_chat()` and `agent.activate_agent()` calls in recovery paths
 
-- [ ] Task 11: Update all callers of `streaming_chat()` and `activate_agent()` (AC: #11)
-  - [ ] 11.1 In `src/supervisor/architect.rs`: pass `None` for `ui` in `streaming_chat()` and `activate_agent()` calls — supervisor does not emit session-level UI events
-  - [ ] 11.2 In `src/review/mod.rs`: pass `None` for `ui` in `activate_agent()` and `streaming_chat()` calls — review UI events are deferred to Story 10.4
-  - [ ] 11.3 Verify all other callers (grep for `streaming_chat` and `activate_agent` usage) pass the correct `ui` value
+- [x] Task 11: Update all callers of `streaming_chat()` and `activate_agent()` (AC: #11)
+  - [x] 11.1 In `src/supervisor/architect.rs`: pass `None` for `ui` in `streaming_chat()` and `activate_agent()` calls — supervisor does not emit session-level UI events
+  - [x] 11.2 In `src/review/mod.rs`: pass `None` for `ui` in `activate_agent()` and `streaming_chat()` calls — review UI events are deferred to Story 10.4
+  - [x] 11.3 Verify all other callers (grep for `streaming_chat` and `activate_agent` usage) pass the correct `ui` value
 
-- [ ] Task 12: Add helper function for truncating response summaries (AC: #3)
-  - [ ] 12.1 Add a `fn truncate_summary(text: &str, max_len: usize) -> String` utility in `src/session/runner.rs` (private) that returns first `max_len` chars + `"…"` if truncated, or the full string if within limit. **Use `text.char_indices().nth(max_len)` to find the correct Unicode boundary — NEVER slice by byte index** (e.g., `&text[..80]` panics on multi-byte chars)
-  - [ ] 12.2 Add unit tests: `test_truncate_summary_short_text`, `test_truncate_summary_exact_limit`, `test_truncate_summary_long_text`, `test_truncate_summary_empty`, `test_truncate_summary_unicode_boundary`
+- [x] Task 12: Add helper function for truncating response summaries (AC: #3)
+  - [x] 12.1 Add a `fn truncate_summary(text: &str, max_len: usize) -> String` utility in `src/session/runner.rs` (private) that returns first `max_len` chars + `"…"` if truncated, or the full string if within limit. **Use `text.char_indices().nth(max_len)` to find the correct Unicode boundary — NEVER slice by byte index** (e.g., `&text[..80]` panics on multi-byte chars)
+  - [x] 12.2 Add unit tests: `test_truncate_summary_short_text`, `test_truncate_summary_exact_limit`, `test_truncate_summary_long_text`, `test_truncate_summary_empty`, `test_truncate_summary_unicode_boundary`
 
-- [ ] Task 13: Run full test suite and linting (AC: #11)
-  - [ ] 13.1 Run `cargo test` — ALL existing tests must pass with zero failures
-  - [ ] 13.2 Run `cargo clippy` — zero warnings
-  - [ ] 13.3 Run `cargo fmt --check` — no formatting issues
+- [x] Task 13: Run full test suite and linting (AC: #11)
+  - [x] 13.1 Run `cargo test` — ALL existing tests must pass with zero failures
+  - [x] 13.2 Run `cargo clippy` — zero warnings from our changes (3 pre-existing clippy errors in `session/cleanup.rs` and `watcher/deps.rs` unrelated to this story)
+  - [x] 13.3 Run `cargo fmt --check` — no formatting issues
 
 ## Dev Notes
 
@@ -341,10 +341,31 @@ All Epic 10 commits are planning/documentation only. No implementation code exis
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- ✅ Task 1: Added tool call/result visibility to `streaming_chat()`. Rig's `MultiTurnStreamItem` exposes `StreamedAssistantContent::ToolCall { tool_call, internal_call_id }` and `StreamUserItem(StreamedUserContent::ToolResult { tool_result, internal_call_id })`. Primary approach used — no ChatHistoryHook fallback needed. Added `extract_tool_call_detail()` (per-tool format from Dev Notes), `extract_tool_result_brief()` (heuristic: error prefix, line count, or truncated text), and `truncate_str()` helper. HashMap tracks `internal_call_id → tool_name` for correlating results back to their tool. All 15 call sites in runner.rs updated to pass `Some(&self.ui)`. Supervisor and review callers pass `None`. 1082 tests pass, 0 failures.
+- ✅ Task 2: `activate_agent()` already received `ui: Option<&UiHandle>` in Task 1 — forwarded to inner `streaming_chat()`. No activation lifecycle events emitted here (shared utility).
+- ✅ Task 3: `BuiltAgent::stream_chat()` and `BuiltAgent::activate_agent()` in `agent_factory.rs` both received `ui` param and forward through all match arms (Anthropic, OpenAiResponses, OpenAiCompletions).
+- ✅ Task 4: Emitted `activation_start()` before activation retry loop, `activation_complete()` after successful activation, `phase_error("Agent Activation", &e)` on permanent failure in normal path.
+- ✅ Task 5: Added `self.ui.llm_request()` after every `log_llm_request()`, `self.ui.llm_response()` after every `log_llm_response()`, `self.ui.llm_error()` after every `log_llm_error()` across DS send, main chat loop, final commit, impact analysis, PR summary, and all recovery paths.
+- ✅ Task 6: Added `self.ui.chat_turn(turn, &summary)` with `truncate_summary()` at end of main loop iteration. Added `self.ui.completion_detected(&story.story_key)` in `ResponseAction::Completed` arm.
+- ✅ Task 7: Added `phase_start`/`phase_complete`/`phase_error` for "Final Commit", "Impact Analysis", and "PR Summary" phases with `Instant::now()` duration tracking. Both primary and token-refresh-retry paths emit correct phase events.
+- ✅ Task 8: Added `self.ui.llm_retry()` for: activation transient retries (delay > 0), DS send transient retries (delay > 0), chat loop backoff retries (delay > 0), and all Copilot token expired rebuilds (delay_secs=0.0 to signal token refresh). Covers activation, DS, chat loop, final commit, impact analysis, and PR summary token refresh paths.
+- ✅ Task 9: Added `activation_start()`/`activation_complete()`/`phase_error()` in `drive_activation_and_recover()`. Added `llm_request`/`llm_response`/`llm_error` around CH and "Load project context" `stream_chat()` calls. All calls pass `Some(&self.ui)`.
+- ✅ Task 10: Added activation lifecycle events and LLM request/response/error events in all recovery paths: empty history sub-case (activation + DS), sub-case B (re-send last user message). All calls pass `Some(&self.ui)`.
+- ✅ Task 11: All callers updated — supervisor (3 `stream_chat` + 1 `activate_agent` → `None`), review (2 `stream_chat` + 1 `activate_agent` → `None`), runner (12 `stream_chat` + 3 `activate_agent` → `Some(&self.ui)`). Verified via grep — no remaining callers missing the `ui` parameter.
+- ✅ Task 12: Added `truncate_summary()` utility in `runner.rs`. Uses `char_indices().nth(max_len)` for safe Unicode boundary detection. 5 unit tests pass: short text, exact limit, long text, empty, unicode boundary.
+- ✅ Task 13: `cargo test` → 1087 passed (1082 existing + 5 new), 0 failed. `cargo clippy` → 0 new warnings (3 pre-existing in cleanup.rs/deps.rs). `cargo fmt --check` → clean.
+
 ### File List
+
+- `src/session/agent.rs` — added `ui: Option<&UiHandle>` to `streaming_chat()` and `activate_agent()`, added `StreamedUserContent` import, explicit ToolCall/ToolResult match arms in streaming loop, `extract_tool_call_detail()` (per-tool detail format), `extract_tool_result_brief()` (heuristic summary), `truncate_str()` helper, HashMap for internal_call_id→tool_name correlation
+- `src/llm/agent_factory.rs` — added `ui: Option<&crate::ui::UiHandle>` to `BuiltAgent::stream_chat()` and `BuiltAgent::activate_agent()`, forwarded through all 3 provider match arms
+- `src/session/runner.rs` — removed `#[allow(dead_code)]` on `ui` field, added `truncate_summary()` utility function, added 5 unit tests for `truncate_summary`, emitted UI events throughout `run_session()` (activation lifecycle, LLM request/response/error, chat turn, completion detected, phase start/complete/error for Final Commit/Impact Analysis/PR Summary, retry/token refresh), emitted UI events in `drive_activation_and_recover()` (activation lifecycle, LLM request/response/error for CH and context load), emitted UI events in all recovery paths (empty history, last-user re-send), passed `Some(&self.ui)` to all 15 `stream_chat()`/`activate_agent()` call sites
+- `src/supervisor/architect.rs` — passed `None` for `ui` in 3 `stream_chat()` + 1 `activate_agent()` calls
+- `src/review/mod.rs` — passed `None` for `ui` in 2 `stream_chat()` + 1 `activate_agent()` calls
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — updated 10-3 status to in-progress

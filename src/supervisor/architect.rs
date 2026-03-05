@@ -266,7 +266,7 @@ impl ArchitectSession {
         );
         log_llm_request("supervisor", 1, ch_msg, chat_history.len());
         let (response, _) = agent
-            .stream_chat(ch_msg, chat_history.clone(), None)
+            .stream_chat(ch_msg, chat_history.clone(), None, None)
             .await
             .map_err(|e| {
                 log_llm_error("supervisor", 1, &e);
@@ -292,7 +292,7 @@ impl ArchitectSession {
             chat_history.len(),
         );
         let (response, _) = agent
-            .stream_chat("Load the project context", chat_history.clone(), None)
+            .stream_chat("Load the project context", chat_history.clone(), None, None)
             .await
             .map_err(|e| {
                 log_llm_error("supervisor", 2, &e);
@@ -315,7 +315,7 @@ impl ArchitectSession {
         );
         log_llm_request("supervisor", 3, &question_msg, chat_history.len());
         let (answer, _) = agent
-            .stream_chat(question_msg.as_str(), chat_history, None)
+            .stream_chat(question_msg.as_str(), chat_history, None, None)
             .await
             .map_err(|e| {
                 log_llm_error("supervisor", 3, &e);
@@ -379,7 +379,13 @@ impl AnswerProvider for ArchitectSession {
 
         // Activate: send architect.md as user message (BMAD activation flow)
         let (activation_history, _chat_history) = agent
-            .activate_agent(&project_root_str, ARCHITECT_AGENT_PATH, "supervisor", None)
+            .activate_agent(
+                &project_root_str,
+                ARCHITECT_AGENT_PATH,
+                "supervisor",
+                None,
+                None,
+            )
             .await
             .map_err(|e| ArchitectSessionError::ChatFailed {
                 turn: 0,

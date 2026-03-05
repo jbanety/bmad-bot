@@ -520,6 +520,7 @@ impl ReviewRunner {
                 "_bmad/bmm/agents/dev.md",
                 "code-review",
                 Some(&self.shutdown),
+                None,
             )
             .await
             .map_err(|e| {
@@ -545,6 +546,7 @@ impl ReviewRunner {
                 &initial_message,
                 activation_rig_history,
                 Some(&self.shutdown),
+                None,
             )
             .await
             .map_err(|e| {
@@ -675,7 +677,12 @@ impl ReviewRunner {
 
             log_llm_request("code-review", turn, &reply, full_history.len());
             match agent
-                .stream_chat(reply.as_str(), full_history.clone(), Some(&self.shutdown))
+                .stream_chat(
+                    reply.as_str(),
+                    full_history.clone(),
+                    Some(&self.shutdown),
+                    None,
+                )
                 .await
             {
                 Ok((r, new_hist)) => {
