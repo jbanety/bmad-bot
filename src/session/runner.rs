@@ -174,28 +174,47 @@ pub fn build_impact_analysis_prompt(
     format!(
         "You have just completed story {story_key}. Perform a post-implementation \
         impact analysis on downstream dependent stories.\n\n\
+        GOAL: Ensure every downstream story has accurate context about what was \
+        actually built, so the agent starting that story works from reality — not \
+        stale assumptions.\n\n\
         INSTRUCTIONS:\n\
         1. Read `{impl_artifacts}/sprint-status.yaml` and identify stories whose \
            `depends-on` references `{story_key}` (full key or short key). \
            Also check subsequent stories in the same epic (document order) as a \
            secondary criterion.\n\
-        2. For each downstream story file found in `{impl_artifacts}/`, read its \
-           Dev Notes and compare the \"Previous Story Intelligence\" sections against \
-           what was actually implemented.\n\
-        3. Update ONLY \"Previous Story Intelligence\" sections where actual \
-           implementation deviates from planned assumptions. Include: what changed \
-           vs the original plan, new APIs/patterns/modules to use, obsolete \
-           assumptions to discard. Sections must be REPLACED (idempotent), not \
-           appended.\n\
-        4. Check if `{planning_artifacts}/architecture.md` exists. If it does AND \
+        2. For each downstream story file found in `{impl_artifacts}/`, read the \
+           ENTIRE file. Compare ALL sections against what was actually implemented \
+           in {story_key}.\n\
+        3. Update any section in Dev Notes where actual implementation deviates \
+           from planned assumptions. This includes but is not limited to:\n\
+           - \"Previous Story Intelligence\" — replace with accurate post-implementation context\n\
+           - \"Technical Requirements\" — fix stale API signatures, module paths, patterns\n\
+           - \"Architecture Compliance\" — correct module locations, import paths\n\
+           - \"Dependencies Required\" — add/remove deps based on what was actually used\n\
+           - \"Testing Standards\" — update if test patterns or helpers changed\n\
+           - \"File Structure\" — correct if actual file layout differs from planned\n\
+           Sections must be REPLACED (idempotent), not appended.\n\
+        4. Update Tasks / Subtasks where they reference specific implementation \
+           details that are now stale (e.g., wrong function names, wrong module \
+           paths, wrong API patterns, wrong file locations). Fix the concrete \
+           details but preserve the task structure and intent.\n\
+        5. Check if `{planning_artifacts}/architecture.md` exists. If it does AND \
            this story introduced new modules or changed interfaces, update the \
            relevant architecture references. If the file does not exist, skip.\n\
-        5. If ANY story files or architecture were updated, commit with message: \
+        6. If ANY story files or architecture were updated, commit with message: \
            `docs(stories): update downstream specs after {story_key}`\n\
-        6. If nothing needs updating, report that and move on — do NOT invent changes.\n\n\
-        SCOPE GUARD: Only modify \"Previous Story Intelligence\" sections in \
-        downstream story Dev Notes and architecture references. Do NOT modify any \
-        other sections of any story file.",
+        7. If nothing needs updating, report that and move on — do NOT invent changes.\n\n\
+        SCOPE GUARD — DO NOT MODIFY:\n\
+        - The \"Story\" section (user story text)\n\
+        - The \"Acceptance Criteria\" section (owned by the PM)\n\
+        - The \"Dev Agent Record\" section (filled at execution time)\n\
+        - Any story that is already `done` or `review` in sprint-status.yaml\n\
+        - Stories that do NOT depend on {story_key}\n\n\
+        QUALITY RULES:\n\
+        - Only update what genuinely needs it — do not invent changes\n\
+        - When updating, include concrete details: actual function names, actual \
+          module paths, actual struct fields — not vague summaries\n\
+        - If a section is accurate as-is, leave it alone",
     )
 }
 
