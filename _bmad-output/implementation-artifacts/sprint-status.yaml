@@ -1,4 +1,4 @@
-# generated: 2026-02-08
+# generated: 2026-03-05
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -44,82 +44,90 @@
 # - SM typically creates next story after previous one is 'done' to incorporate learnings
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
-generated: 2026-02-08
+generated: 2026-03-05
 project: bmad-bot
 project_key: NOKEY
 tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
 
 development_status:
-  epic-1: in-progress
-  1-1-project-scaffolding-configuration-validation: done
-  1-2-cli-framework-daemon-lifecycle: done
-  1-3-interactive-init-command: done
-  1-4-status-logs-bmad-discovery: done
-  1-5-git-remote-auto-detection-init: done
-  1-6-github-copilot-oauth-device-flow-authentication: done
-  epic-1-retrospective: optional
+    epic-1: done
+    1-1-project-scaffolding-configuration-validation: done
+    1-2-cli-framework-daemon-lifecycle: done
+    1-3-interactive-init-command: done
+    1-4-status-logs-bmad-discovery: done
+    1-5-git-remote-auto-detection-init: done
+    1-6-github-copilot-oauth-device-flow-authentication: done
+    epic-1-retrospective: optional
 
-  epic-2: in-progress
-  2-1-sprint-status-polling-story-detection: done
-  2-2-dependency-resolution-execution-order: done
-  2-3-cascade-blocking: done
-  epic-2-retrospective: optional
+    epic-2: done
+    2-1-sprint-status-polling-story-detection: done
+    2-2-dependency-resolution-execution-order: done
+    2-3-cascade-blocking: done
+    epic-2-retrospective: optional
 
-  epic-3: in-progress
-  3-1-supervisor-tool-skeleton-rule-engine: done
-  3-2-llm-fallback-with-project-context: done
-  3-3-human-escalation: done
-  3-4-decision-logging-traceability: done
-  epic-3-retrospective: optional
+    epic-3: done
+    3-1-supervisor-tool-skeleton-rule-engine: done
+    3-2-llm-fallback-with-project-context: done
+    3-3-human-escalation: done
+    3-4-decision-logging-traceability: done
+    epic-3-retrospective: optional
 
-  epic-4: in-progress
-  4-1-rig-tools-implementation-git-filesystem-terminal: done
-  4-2-agent-session-setup-chat-loop: done # depends-on: 4-1
-  4-3-pre-development-preparation-branch-management: done # depends-on: 4-2
-  4-4-migrate-git-operations-to-cli: done
-  4-5-llm-provider-abstraction-agent-factory: done # depends-on: 4-2
-  4-6-post-implementation-impact-analysis: review # depends-on: 4-5
-  4-7-agent-module-centralization: review
-  epic-4-retrospective: optional
+    epic-4: in-progress
+    4-1-rig-tools-implementation-git-filesystem-terminal: done
+    4-2-agent-session-setup-chat-loop: done # depends-on: 4-1
+    4-3-pre-development-preparation-branch-management: done # depends-on: 4-2
+    4-4-migrate-git-operations-to-cli: done
+    4-5-llm-provider-abstraction-agent-factory: done # depends-on: 4-2
+    4-6-post-implementation-impact-analysis: review # depends-on: 4-5
+    4-7-agent-module-centralization: review
+    epic-4-retrospective: optional
 
-  epic-5: in-progress
-  5-1-git-provider-trait-github-pr-creation: done
-  5-2-automated-code-review-session: done
-  5-3-gitlab-merge-request-support: done
-  5-4-enriched-pr-description-agent-generated-context: review
-  epic-5-retrospective: optional
+    epic-5: in-progress
+    5-1-git-provider-trait-github-pr-creation: done
+    5-2-automated-code-review-session: done
+    5-3-gitlab-merge-request-support: done
+    5-4-enriched-pr-description-agent-generated-context: review
+    epic-5-retrospective: optional
 
-  epic-6: in-progress
-  6-1-telegram-notifications: done
-  6-2-http-retry-error-resilience: done
-  6-3-crash-recovery-via-session-wal: done
-  6-4-context-window-limit-recovery: done
-  epic-6-retrospective: optional
+    epic-6: done
+    6-1-telegram-notifications: done
+    6-2-http-retry-error-resilience: done
+    6-3-crash-recovery-via-session-wal: done
+    6-4-context-window-limit-recovery: done
+    epic-6-retrospective: optional
 
-  epic-7: in-progress # was blocked by epic-8 — epic-8 now in review, tooling surface finalized
-  7-1-integration-test-infrastructure-fixtures: ready-for-dev # depends-on: epic-8 (resolved)
-  7-2-config-startup-validation-integration-tests: blocked # depends-on: 7-1
-  7-3-watcher-dependency-resolution-story-selection-integration-tests: blocked # depends-on: 7-1
-  7-4-pipeline-orchestration-integration-tests: blocked # depends-on: 7-1
-  7-5-session-wal-crash-recovery-integration-tests: blocked # depends-on: 7-1
-  7-6-git-provider-pr-creation-integration-tests: blocked # depends-on: 7-1
-  7-7-notification-flow-integration-tests: blocked # depends-on: 7-1
-  7-8-branch-management-git-surgical-development-tools-integration-tests: blocked # depends-on: 7-1
-  7-9-cli-lifecycle-integration-tests: blocked # depends-on: 7-1
-  7-10-response-analyzer-supervisor-rules-integration-tests: blocked # depends-on: 7-1
-  epic-7-retrospective: optional
+    epic-7: in-progress # was blocked by epic-8 — epic-8 now done, tooling surface finalized
+    7-1-integration-test-infrastructure-fixtures: ready-for-dev # depends-on: epic-8 (resolved)
+    7-2-config-startup-validation-integration-tests: ready-for-dev # depends-on: 7-1
+    7-3-watcher-dependency-resolution-story-selection-integration-tests: ready-for-dev # depends-on: 7-1
+    7-4-pipeline-orchestration-integration-tests: ready-for-dev # depends-on: 7-1
+    7-5-session-wal-crash-recovery-integration-tests: ready-for-dev # depends-on: 7-1
+    7-6-git-provider-pr-creation-integration-tests: ready-for-dev # depends-on: 7-1
+    7-7-notification-flow-integration-tests: ready-for-dev # depends-on: 7-1
+    7-8-branch-management-git-surgical-development-tools-integration-tests: ready-for-dev # depends-on: 7-1
+    7-9-cli-lifecycle-integration-tests: ready-for-dev # depends-on: 7-1
+    7-10-response-analyzer-supervisor-rules-integration-tests: ready-for-dev # depends-on: 7-1
+    epic-7-retrospective: optional
 
-  epic-8: in-progress # depends-on: epic-4 (Story 4.1 as baseline)
-  8-1-read-file-tool-partial-reading-outline-mode: done
-  8-2-edit-file-tool-surgical-search-replace-editing: done # depends-on: 8-1
-  8-3-grep-tool-find-path-tool-codebase-search-navigation: done # depends-on: 8-1
-  8-4-list-directory-tool-fstool-removal-complete-migration: done # depends-on: 8-3
-  8-5-agent-integration-preamble-registration-session-update: done # depends-on: 8-4
-  epic-8-retrospective: optional
+    epic-8: done # depends-on: epic-4 (Story 4.1 as baseline)
+    8-1-read-file-tool-partial-reading-outline-mode: done
+    8-2-edit-file-tool-surgical-search-replace-editing: done # depends-on: 8-1
+    8-3-grep-tool-find-path-tool-codebase-search-navigation: done # depends-on: 8-1
+    8-4-list-directory-tool-fstool-removal-complete-migration: done # depends-on: 8-3
+    8-5-agent-integration-preamble-registration-session-update: done # depends-on: 8-4
+    epic-8-retrospective: optional
 
-  epic-9: in-progress
-  9-1-mcp-server-lifecycle-management-config: review
-  9-2-agent-integration-register-mcp-tools-on-session-build: review # depends-on: 9-1
-  9-3-playwright-mcp-validation-documentation: review # depends-on: 9-2
-  epic-9-retrospective: optional
+    epic-9: in-progress
+    9-1-mcp-server-lifecycle-management-config: review
+    9-2-agent-integration-register-mcp-tools-on-session-build: review # depends-on: 9-1
+    9-3-playwright-mcp-validation-documentation: review # depends-on: 9-2
+    epic-9-retrospective: optional
+
+    epic-10: backlog # depends-on: epics 1-6 (all implemented — retroactive UI event insertion)
+    10-1-module-ui-foundation-trait-console-renderer: backlog
+    10-2-pipeline-integration-ui-events-in-story-lifecycle: backlog # depends-on: 10-1
+    10-3-session-integration-tool-calls-chat-turns-visible: backlog # depends-on: 10-2
+    10-4-review-integration-ui-events-in-code-review: backlog # depends-on: 10-3
+    10-5-polish-visual-vocabulary-colors-final-formatting: backlog # depends-on: 10-4
+    epic-10-retrospective: optional
