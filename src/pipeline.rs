@@ -815,7 +815,8 @@ fn re_poll_eligible(sprint_status_path: &Path, story_dir: &Path) -> Result<Vec<S
     }
 
     let entries = sprint_status.entries();
-    let (filtered, cascade_count) = watcher_deps::filter_eligible(eligible, entries)
+    let comment_deps = sprint_status.comment_deps();
+    let (filtered, cascade_count) = watcher_deps::filter_eligible(eligible, entries, comment_deps)
         .map_err(|e| format!("dependency filter failed: {e}"))?;
 
     if cascade_count > 0 {

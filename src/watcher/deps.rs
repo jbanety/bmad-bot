@@ -3,9 +3,14 @@
 //! This module implements the daemon's pre-gate: a cheap, deterministic
 //! dependency check that prevents token burn on stories that cannot proceed.
 //!
-//! **Dependency rule:** Within an epic, stories are sequential — story N.M
-//! depends on story N.(M-1) being `done`. Cross-epic dependencies are NOT
-//! enforced here (handled by the BMAD agent as a second layer).
+//! **Dependency rules:**
+//! 1. **Intra-epic sequential:** Story N.M depends on story N.(M-1) being resolved.
+//! 2. **Cross-epic explicit:** `# depends-on:` inline comments in sprint-status.yaml
+//!    declare additional dependencies. Supported formats:
+//!    - `# depends-on: 4-1` — story shorthand (matched to full key `4-1-*`)
+//!    - `# depends-on: epic-8` — depends on the last story of epic 8
+//!    - `# depends-on: epics 1-6` — depends on the last story of epics 1 through 6
+//!    - Parenthetical annotations like `(resolved)` are stripped automatically.
 //!
 //! **Cascade blocking:** When a prerequisite story has a blocking status
 //! (`blocked` or `needs-clarification`), all direct and transitive dependents
@@ -383,6 +388,7 @@ pub fn find_cascade_blocks(
 /// slice in-place (Story 2.2 API contract), while this returns a standalone `HashMap`.
 pub fn build_full_dependency_map(
     all_statuses: &[(String, String)],
+    comment_deps: &HashMap<String, Vec<String>>,
 ) -> HashMap<String, Vec<String>> {
     let dummy_dir = Path::new("");
     let key_lookup: HashMap<(u32, u32), String> = all_statuses
@@ -392,6 +398,9 @@ pub fn build_full_dependency_map(
             Some(((info.epic_num, info.story_num), key.clone()))
         })
         .collect();
+
+    // Pre-resolve comment deps once for the entire map
+    let resolved_comment = resolve_comment_deps(comment_deps, all_statuses);
 
     let mut dep_map: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -407,23 +416,151 @@ pub fn build_full_dependency_map(
         {
             deps.push(pred_key.clone());
         }
+
+        // Merge resolved comment deps
+        if let Some(extra) = resolved_comment.get(key) {
+            for dep in extra {
+                if !deps.contains(dep) {
+                    deps.push(dep.clone());
+                }
+            }
+        }
+
         dep_map.insert(key.clone(), deps);
     }
 
     dep_map
 }
 
-/// Derive intra-epic sequential dependencies for a set of stories.
+/// Resolve raw `# depends-on:` comment specs into actual story keys.
 ///
-/// **Rule:** Within an epic, story N.M depends on story N.(M-1).
-/// The first story in each epic (story_num == 1) has no dependency.
-/// Cross-epic dependencies are NOT enforced at the pre-gate level.
+/// Handles three dependency target formats:
+/// - **Story shorthand** (`4-1`): matched to the first full story key starting with `4-1-`
+/// - **Epic reference** (`epic-8`): resolved to the last story of that epic (by document order)
+/// - **Epic range** (`epics 1-6`): resolved to the last story of each epic 1 through 6
+///
+/// Unknown or unresolvable specs are logged and skipped.
+pub fn resolve_comment_deps(
+    comment_deps: &HashMap<String, Vec<String>>,
+    all_statuses: &[(String, String)],
+) -> HashMap<String, Vec<String>> {
+    if comment_deps.is_empty() {
+        return HashMap::new();
+    }
+
+    let dummy_dir = Path::new("");
+
+    // Build epic_num → last story key (by document order = position in all_statuses)
+    let mut last_story_per_epic: HashMap<u32, String> = HashMap::new();
+    for (key, status) in all_statuses {
+        if let Some(info) = StoryInfo::from_key_and_status(key, status, dummy_dir) {
+            // Later entries overwrite earlier ones → keeps the last story in doc order
+            last_story_per_epic.insert(info.epic_num, key.clone());
+        }
+    }
+
+    // Build story shorthand lookup: "4-1" → "4-1-atomic-state-writer"
+    // Uses the `epic_num-story_num` prefix to match full keys.
+    let shorthand_lookup: HashMap<String, String> = all_statuses
+        .iter()
+        .filter_map(|(key, status)| {
+            let info = StoryInfo::from_key_and_status(key, status, dummy_dir)?;
+            let shorthand = format!("{}-{}", info.epic_num, info.story_num);
+            Some((shorthand, key.clone()))
+        })
+        .collect();
+
+    let mut resolved: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (source_key, specs) in comment_deps {
+        let mut deps_for_key: Vec<String> = Vec::new();
+
+        for spec in specs {
+            let spec_trimmed = spec.trim();
+
+            if let Some(rest) = spec_trimmed.strip_prefix("epics ") {
+                // Range format: "epics 1-6"
+                let parts: Vec<&str> = rest.splitn(2, '-').collect();
+                if parts.len() == 2
+                    && let (Ok(start), Ok(end)) = (
+                        parts[0].trim().parse::<u32>(),
+                        parts[1].trim().parse::<u32>(),
+                    )
+                {
+                    for epic_n in start..=end {
+                        if let Some(last_key) = last_story_per_epic.get(&epic_n) {
+                            if !deps_for_key.contains(last_key) {
+                                deps_for_key.push(last_key.clone());
+                            }
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        source = %source_key,
+                        spec = %spec_trimmed,
+                        "Unresolvable epic range in depends-on comment — skipping"
+                    );
+                }
+            } else if let Some(rest) = spec_trimmed.strip_prefix("epic-") {
+                // Single epic: "epic-8"
+                if let Ok(epic_n) = rest.trim().parse::<u32>() {
+                    if let Some(last_key) = last_story_per_epic.get(&epic_n) {
+                        if !deps_for_key.contains(last_key) {
+                            deps_for_key.push(last_key.clone());
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        source = %source_key,
+                        spec = %spec_trimmed,
+                        "Unresolvable epic ref in depends-on comment — skipping"
+                    );
+                }
+            } else {
+                // Story shorthand: "4-1" → look up full key
+                // Also try as a full key directly (e.g., "4-1-atomic-state-writer")
+                if let Some(full_key) = shorthand_lookup.get(spec_trimmed) {
+                    if !deps_for_key.contains(full_key) {
+                        deps_for_key.push(full_key.clone());
+                    }
+                } else if all_statuses.iter().any(|(k, _)| k == spec_trimmed) {
+                    // Full key match
+                    if !deps_for_key.contains(&spec_trimmed.to_string()) {
+                        deps_for_key.push(spec_trimmed.to_string());
+                    }
+                } else {
+                    tracing::debug!(
+                        source = %source_key,
+                        spec = %spec_trimmed,
+                        "Unresolvable story ref in depends-on comment — skipping"
+                    );
+                }
+            }
+        }
+
+        if !deps_for_key.is_empty() {
+            resolved.insert(source_key.clone(), deps_for_key);
+        }
+    }
+
+    resolved
+}
+
+/// Derive dependencies for a set of stories: intra-epic sequential + explicit comment deps.
+///
+/// **Rules:**
+/// 1. Within an epic, story N.M depends on story N.(M-1).
+/// 2. `# depends-on:` comment deps are resolved and merged.
 ///
 /// # Arguments
 /// * `stories` — Mutable slice of stories; their `dependencies` field will be populated
 /// * `all_statuses` — Complete (key, status) pairs from sprint-status.yaml
-///   (needed to find the predecessor story key)
-pub fn derive_dependencies(stories: &mut [StoryInfo], all_statuses: &[(String, String)]) {
+/// * `comment_deps` — Raw comment dependency specs parsed from YAML comments
+pub fn derive_dependencies(
+    stories: &mut [StoryInfo],
+    all_statuses: &[(String, String)],
+    comment_deps: &HashMap<String, Vec<String>>,
+) {
     // Build a lookup: (epic_num, story_num) → story_key for ALL entries in sprint-status.
     // Reuses StoryInfo::from_key_and_status() to parse keys (DRY — single source of
     // truth for what constitutes a valid story key vs epic/retrospective entry).
@@ -436,44 +573,56 @@ pub fn derive_dependencies(stories: &mut [StoryInfo], all_statuses: &[(String, S
         })
         .collect();
 
+    // Resolve comment deps once
+    let resolved_comment = resolve_comment_deps(comment_deps, all_statuses);
+
     for story in stories.iter_mut() {
-        // First story in epic → no dependency
-        if story.story_num <= 1 {
-            continue;
+        // Intra-epic sequential: story N.M depends on N.(M-1)
+        if story.story_num > 1 {
+            let predecessor_key = (story.epic_num, story.story_num - 1);
+            if let Some(dep_key) = key_lookup.get(&predecessor_key)
+                && !story.dependencies.contains(dep_key)
+            {
+                story.dependencies.push(dep_key.clone());
+            }
         }
 
-        // Look up predecessor: same epic, story_num - 1
-        let predecessor_key = (story.epic_num, story.story_num - 1);
-        if let Some(dep_key) = key_lookup.get(&predecessor_key)
-            && !story.dependencies.contains(dep_key)
-        {
-            story.dependencies.push(dep_key.clone());
+        // Cross-epic / explicit comment deps
+        if let Some(extra) = resolved_comment.get(&story.story_key) {
+            for dep in extra {
+                if !story.dependencies.contains(dep) {
+                    story.dependencies.push(dep.clone());
+                }
+            }
         }
     }
 }
 
 /// Pre-gate filter: resolve dependencies, detect cascade blocks, return eligible stories.
 ///
-/// This is the main entry point for the dependency pre-gate (updated for cascade blocking).
-/// It derives dependencies, builds the graph, checks for cycles, detects cascade blocks,
-/// and filters out stories with unmet or blocked dependencies.
+/// This is the main entry point for the dependency pre-gate (updated for cascade blocking
+/// and cross-epic comment deps). It derives dependencies (intra-epic sequential + explicit
+/// comment deps), builds the graph, checks for cycles, detects cascade blocks, and filters
+/// out stories with unmet or blocked dependencies.
 ///
 /// # Arguments
 /// * `stories` — Eligible stories from the watcher (status == `ready-for-dev`)
 /// * `all_statuses` — Complete (key, status) pairs from sprint-status.yaml
+/// * `comment_deps` — Raw dependency specs parsed from `# depends-on:` YAML comments
 ///
 /// # Returns
 /// Tuple of (filtered eligible stories in topological order, cascade-blocked count).
 pub fn filter_eligible(
     mut stories: Vec<StoryInfo>,
     all_statuses: &[(String, String)],
+    comment_deps: &HashMap<String, Vec<String>>,
 ) -> Result<(Vec<StoryInfo>, usize), WatcherError> {
     if stories.is_empty() {
         return Ok((stories, 0));
     }
 
-    // Step 1: Derive dependencies from sprint-status ordering
-    derive_dependencies(&mut stories, all_statuses);
+    // Step 1: Derive dependencies from sprint-status ordering + comment deps
+    derive_dependencies(&mut stories, all_statuses, comment_deps);
 
     // Step 2: Build dependency graph
     let graph = DependencyGraph::new(&stories, all_statuses);
@@ -483,7 +632,7 @@ pub fn filter_eligible(
 
     // Step 4: Build full dependency map for transitive cascade detection
     let all_statuses_map: HashMap<String, String> = all_statuses.iter().cloned().collect();
-    let full_dep_map = build_full_dependency_map(all_statuses);
+    let full_dep_map = build_full_dependency_map(all_statuses, comment_deps);
 
     // Step 5: Detect cascade blocks
     let cascade_blocks = find_cascade_blocks(&stories, &all_statuses_map, &full_dep_map);
@@ -539,6 +688,8 @@ pub fn filter_eligible(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::watcher::StoryInfo;
     use std::path::Path;
@@ -563,7 +714,7 @@ mod tests {
             make_story("1-3-init", "ready-for-dev"),
         ];
 
-        derive_dependencies(&mut stories, &all_statuses);
+        derive_dependencies(&mut stories, &all_statuses, &HashMap::new());
 
         assert_eq!(stories[0].dependencies, vec!["1-1-scaffolding"]);
         assert_eq!(stories[1].dependencies, vec!["1-2-cli"]);
@@ -574,7 +725,7 @@ mod tests {
         let all_statuses = vec![("1-1-scaffolding".to_string(), "ready-for-dev".to_string())];
         let mut stories = vec![make_story("1-1-scaffolding", "ready-for-dev")];
 
-        derive_dependencies(&mut stories, &all_statuses);
+        derive_dependencies(&mut stories, &all_statuses, &HashMap::new());
 
         assert!(
             stories[0].dependencies.is_empty(),
@@ -596,7 +747,7 @@ mod tests {
             make_story("2-2-deps", "ready-for-dev"),
         ];
 
-        derive_dependencies(&mut stories, &all_statuses);
+        derive_dependencies(&mut stories, &all_statuses, &HashMap::new());
 
         // 1-2 depends on 1-1 (same epic)
         assert_eq!(stories[0].dependencies, vec!["1-1-scaffolding"]);
@@ -619,7 +770,7 @@ mod tests {
             make_story("1-2-b", "ready-for-dev"),
             make_story("1-3-c", "ready-for-dev"),
         ];
-        derive_dependencies(&mut stories, &all_statuses);
+        derive_dependencies(&mut stories, &all_statuses, &HashMap::new());
         let graph = DependencyGraph::new(&stories, &all_statuses);
 
         let sorted = graph.topological_sort().unwrap();
@@ -713,7 +864,8 @@ mod tests {
         ];
         let stories = vec![make_story("1-2-cli", "ready-for-dev")];
 
-        let (result, _cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, _cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].story_key, "1-2-cli");
     }
@@ -729,7 +881,8 @@ mod tests {
             make_story("1-2-cli", "ready-for-dev"),
         ];
 
-        let (result, _cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, _cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         // Only 1-1 should be eligible (no deps), 1-2 skipped (dep 1-1 not done)
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].story_key, "1-1-scaffolding");
@@ -743,7 +896,8 @@ mod tests {
         ];
         let stories = vec![make_story("1-2-cli", "ready-for-dev")];
 
-        let (result, _cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, _cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         assert!(
             result.is_empty(),
             "1-2 should be skipped because 1-1 is in-progress, not done"
@@ -755,7 +909,8 @@ mod tests {
         let all_statuses = vec![("1-1-scaffolding".to_string(), "ready-for-dev".to_string())];
         let stories = vec![make_story("1-1-scaffolding", "ready-for-dev")];
 
-        let (result, _cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, _cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         assert_eq!(
             result.len(),
             1,
@@ -775,7 +930,8 @@ mod tests {
             make_story("1-3-init", "ready-for-dev"),
         ];
 
-        let (result, _cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, _cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         assert!(result.is_empty(), "All stories have unmet deps");
     }
 
@@ -793,7 +949,8 @@ mod tests {
             make_story("2-1-x", "ready-for-dev"),
         ];
 
-        let (result, _cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, _cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         assert_eq!(result.len(), 2);
         // Both should be eligible: 1-3 (deps 1-2 done) and 2-1 (no deps)
         let keys: Vec<&str> = result.iter().map(|s| s.story_key.as_str()).collect();
@@ -803,7 +960,7 @@ mod tests {
 
     #[test]
     fn test_filter_eligible_empty_input_returns_empty() {
-        let (result, cascade_count) = filter_eligible(vec![], &[]).unwrap();
+        let (result, cascade_count) = filter_eligible(vec![], &[], &HashMap::new()).unwrap();
         assert!(result.is_empty());
         assert_eq!(cascade_count, 0);
     }
@@ -812,6 +969,7 @@ mod tests {
 
     #[test]
     fn test_watcher_poll_with_deps_filtering() {
+        // Note: poll() passes comment_deps from SprintStatusFile automatically.
         use std::fs;
         let tmp = tempfile::tempdir().unwrap();
         let artifacts_dir = tmp.path();
@@ -1007,7 +1165,8 @@ development_status:
             make_story("2-1-polling", "ready-for-dev"),
         ];
 
-        let (result, cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         // 1-2 is cascade-blocked (dep 1-1 is "blocked")
         // 2-1 has no deps → eligible
         assert_eq!(cascade_count, 1);
@@ -1030,7 +1189,8 @@ development_status:
             make_story("1-3-init", "ready-for-dev"),
         ];
 
-        let (result, cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         // Both 1-2 and 1-3 cascade-blocked (1-1 is needs-clarification)
         // 1-2 directly blocked, 1-3 transitively blocked through 1-2
         assert_eq!(cascade_count, 2);
@@ -1045,7 +1205,8 @@ development_status:
             ("1-2-cli".to_string(), "ready-for-dev".to_string()),
         ];
         let stories1 = vec![make_story("1-2-cli", "ready-for-dev")];
-        let (result1, cc1) = filter_eligible(stories1, &all_statuses_blocked).unwrap();
+        let (result1, cc1) =
+            filter_eligible(stories1, &all_statuses_blocked, &HashMap::new()).unwrap();
         assert!(result1.is_empty());
         assert_eq!(cc1, 1);
 
@@ -1055,7 +1216,8 @@ development_status:
             ("1-2-cli".to_string(), "ready-for-dev".to_string()),
         ];
         let stories2 = vec![make_story("1-2-cli", "ready-for-dev")];
-        let (result2, cc2) = filter_eligible(stories2, &all_statuses_resolved).unwrap();
+        let (result2, cc2) =
+            filter_eligible(stories2, &all_statuses_resolved, &HashMap::new()).unwrap();
         assert_eq!(result2.len(), 1);
         assert_eq!(result2[0].story_key, "1-2-cli");
         assert_eq!(cc2, 0);
@@ -1075,7 +1237,8 @@ development_status:
             make_story("2-2-deps", "ready-for-dev"),
         ];
 
-        let (result, cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (result, cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         // Epic 1: 1-2 cascade-blocked
         // Epic 2: 2-1 eligible (no deps), 2-2 skipped (dep 2-1 not done — but NOT cascade-blocked)
         assert_eq!(cascade_count, 1);
@@ -1125,7 +1288,7 @@ development_status:
             ("2-1-polling".to_string(), "backlog".to_string()),
         ];
 
-        let dep_map = build_full_dependency_map(&all_statuses);
+        let dep_map = build_full_dependency_map(&all_statuses, &HashMap::new());
 
         // Skips epics and retrospectives
         assert!(!dep_map.contains_key("epic-1"));
@@ -1237,7 +1400,7 @@ development_status:
             ("1-2-next-step".into(), "ready-for-dev".into()),
         ];
         let mut stories_with_deps = stories.clone();
-        derive_dependencies(&mut stories_with_deps, &all_statuses);
+        derive_dependencies(&mut stories_with_deps, &all_statuses, &HashMap::new());
         let graph = DependencyGraph::new(&stories_with_deps, &all_statuses);
 
         let (satisfied, unmet) = graph.deps_satisfied("1-2-next-step");
@@ -1256,7 +1419,7 @@ development_status:
             ("1-1-old-approach".into(), "superseded".into()),
             ("1-2-next-step".into(), "ready-for-dev".into()),
         ];
-        let (eligible, _) = filter_eligible(stories, &all_statuses).unwrap();
+        let (eligible, _) = filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
         assert!(
             keys.contains(&"1-2-next-step"),
@@ -1314,7 +1477,8 @@ development_status:
             ("1-2-replaced".into(), "superseded".into()),
             ("1-3-final".into(), "ready-for-dev".into()),
         ];
-        let (eligible, cascade_count) = filter_eligible(stories, &all_statuses).unwrap();
+        let (eligible, cascade_count) =
+            filter_eligible(stories, &all_statuses, &HashMap::new()).unwrap();
         assert_eq!(cascade_count, 0);
         let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
         assert!(
@@ -1335,7 +1499,7 @@ development_status:
             ("1-2-next-step".into(), "ready-for-dev".into()),
         ];
         let mut stories_with_deps = stories.clone();
-        derive_dependencies(&mut stories_with_deps, &all_statuses);
+        derive_dependencies(&mut stories_with_deps, &all_statuses, &HashMap::new());
         let graph = DependencyGraph::new(&stories_with_deps, &all_statuses);
 
         let (satisfied, unmet) = graph.deps_satisfied("1-2-next-step");
@@ -1344,6 +1508,151 @@ development_status:
     }
 
     #[test]
+    // -----------------------------------------------------------------------
+    // resolve_comment_deps tests
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_resolve_comment_deps_story_shorthand() {
+        let all_statuses = vec![
+            ("1-1-scaffolding".into(), "done".into()),
+            ("1-2-cli".into(), "ready-for-dev".into()),
+        ];
+        let mut comment = HashMap::new();
+        comment.insert("1-2-cli".to_string(), vec!["1-1".to_string()]);
+
+        let resolved = resolve_comment_deps(&comment, &all_statuses);
+        assert_eq!(
+            resolved.get("1-2-cli").unwrap(),
+            &vec!["1-1-scaffolding".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_resolve_comment_deps_epic_ref() {
+        let all_statuses = vec![
+            ("epic-1".into(), "done".into()),
+            ("1-1-scaffolding".into(), "done".into()),
+            ("1-2-cli".into(), "done".into()),
+            ("epic-2".into(), "in-progress".into()),
+            ("2-1-auth".into(), "ready-for-dev".into()),
+        ];
+        let mut comment = HashMap::new();
+        comment.insert("2-1-auth".to_string(), vec!["epic-1".to_string()]);
+
+        let resolved = resolve_comment_deps(&comment, &all_statuses);
+        // Last story of epic 1 is 1-2-cli
+        assert_eq!(
+            resolved.get("2-1-auth").unwrap(),
+            &vec!["1-2-cli".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_resolve_comment_deps_epic_range() {
+        let all_statuses = vec![
+            ("epic-1".into(), "done".into()),
+            ("1-1-scaffolding".into(), "done".into()),
+            ("1-2-cli".into(), "done".into()),
+            ("epic-2".into(), "done".into()),
+            ("2-1-auth".into(), "done".into()),
+            ("2-2-sessions".into(), "done".into()),
+            ("epic-3".into(), "in-progress".into()),
+            ("3-1-data".into(), "ready-for-dev".into()),
+        ];
+        let mut comment = HashMap::new();
+        comment.insert("3-1-data".to_string(), vec!["epics 1-2".to_string()]);
+
+        let resolved = resolve_comment_deps(&comment, &all_statuses);
+        let deps = resolved.get("3-1-data").unwrap();
+        assert!(deps.contains(&"1-2-cli".to_string()));
+        assert!(deps.contains(&"2-2-sessions".to_string()));
+        assert_eq!(deps.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_comment_deps_unknown_spec_skipped() {
+        let all_statuses = vec![("1-1-scaffolding".into(), "done".into())];
+        let mut comment = HashMap::new();
+        comment.insert(
+            "1-1-scaffolding".to_string(),
+            vec!["nonexistent".to_string()],
+        );
+
+        let resolved = resolve_comment_deps(&comment, &all_statuses);
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_comment_deps_empty_input() {
+        let all_statuses = vec![("1-1-scaffolding".into(), "done".into())];
+        let resolved = resolve_comment_deps(&HashMap::new(), &all_statuses);
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_filter_eligible_with_cross_epic_comment_dep() {
+        // 2-1 depends on epic-1 (last story = 1-2). Epic 1 not done → 2-1 not eligible.
+        let stories = vec![
+            make_story("1-1-scaffolding", "ready-for-dev"),
+            make_story("2-1-auth", "ready-for-dev"),
+        ];
+        let all_statuses = vec![
+            ("epic-1".into(), "in-progress".into()),
+            ("1-1-scaffolding".into(), "ready-for-dev".into()),
+            ("1-2-cli".into(), "ready-for-dev".into()),
+            ("epic-2".into(), "in-progress".into()),
+            ("2-1-auth".into(), "ready-for-dev".into()),
+        ];
+        let mut comment = HashMap::new();
+        comment.insert("2-1-auth".to_string(), vec!["epic-1".to_string()]);
+
+        let (eligible, _) = filter_eligible(stories, &all_statuses, &comment).unwrap();
+        // Only 1-1 should be eligible; 2-1 is blocked by epic-1 (1-2 not done)
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].story_key, "1-1-scaffolding");
+    }
+
+    #[test]
+    fn test_filter_eligible_cross_epic_dep_satisfied() {
+        // 2-1 depends on epic-1 (last story = 1-2). Epic 1 all done → 2-1 eligible.
+        let stories = vec![make_story("2-1-auth", "ready-for-dev")];
+        let all_statuses = vec![
+            ("epic-1".into(), "done".into()),
+            ("1-1-scaffolding".into(), "done".into()),
+            ("1-2-cli".into(), "done".into()),
+            ("epic-2".into(), "in-progress".into()),
+            ("2-1-auth".into(), "ready-for-dev".into()),
+        ];
+        let mut comment = HashMap::new();
+        comment.insert("2-1-auth".to_string(), vec!["epic-1".to_string()]);
+
+        let (eligible, _) = filter_eligible(stories, &all_statuses, &comment).unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].story_key, "2-1-auth");
+    }
+
+    #[test]
+    fn test_filter_eligible_cross_epic_cascade_block() {
+        // 2-1 depends on epic-1 (last story = 1-2). 1-1 is blocked → 1-2 cascade → 2-1 cascade.
+        let stories = vec![
+            make_story("1-2-cli", "ready-for-dev"),
+            make_story("2-1-auth", "ready-for-dev"),
+        ];
+        let all_statuses = vec![
+            ("epic-1".into(), "in-progress".into()),
+            ("1-1-scaffolding".into(), "blocked".into()),
+            ("1-2-cli".into(), "ready-for-dev".into()),
+            ("epic-2".into(), "in-progress".into()),
+            ("2-1-auth".into(), "ready-for-dev".into()),
+        ];
+        let mut comment = HashMap::new();
+        comment.insert("2-1-auth".to_string(), vec!["epic-1".to_string()]);
+
+        let (eligible, cascade) = filter_eligible(stories, &all_statuses, &comment).unwrap();
+        assert!(eligible.is_empty());
+        assert!(cascade >= 2); // 1-2 cascade + 2-1 cascade
+    }
+
     fn test_find_cascade_stops_at_absorbed() {
         let stories = vec![
             make_story("1-1-broken", "blocked"),

@@ -9,6 +9,8 @@
 
 pub mod deps;
 
+use std::collections::HashMap;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -160,6 +162,14 @@ impl fmt::Display for StoryInfo {
 ///
 /// This struct is the watcher's primary data source. It loads the YAML file,
 /// extracts story entries, and identifies eligible stories for processing.
+///
+/// **Comment dependencies:** Sprint-status.yaml supports `# depends-on:` inline
+/// comments on story entries. These declare cross-epic or non-sequential
+/// dependencies that the daemon enforces at the pre-gate level. Example:
+/// ```text
+/// 7-1-test-infra: ready-for-dev  # depends-on: epic-8
+/// 4-2-session:    done           # depends-on: 4-1
+/// ```
 #[derive(Debug)]
 pub struct SprintStatusFile {
     /// Ordered list of (key, status) pairs from `development_status`.
@@ -167,6 +177,10 @@ pub struct SprintStatusFile {
     entries: Vec<(String, String)>,
     /// Directory where story spec files live (for building `specs_path`).
     story_dir: PathBuf,
+    /// Explicit dependencies parsed from `# depends-on:` inline comments.
+    /// Maps story_key → list of raw dependency specs (e.g., `["epic-8"]`, `["4-1"]`).
+    /// These are resolved to actual story keys by [`deps::resolve_comment_deps`].
+    comment_deps: HashMap<String, Vec<String>>,
 }
 
 impl SprintStatusFile {
@@ -186,6 +200,12 @@ impl SprintStatusFile {
                 WatcherError::SprintStatusRead(e)
             }
         })?;
+
+        // Pre-parse: extract `# depends-on:` comments from raw text BEFORE
+        // serde_yml strips them. Format:
+        //   story-key: status  # depends-on: dep-spec
+        let comment_deps = Self::parse_comment_deps(&content);
+
         let yaml: serde_yml::Value = serde_yml::from_str(&content)?;
 
         let mut entries = Vec::new();
@@ -203,7 +223,81 @@ impl SprintStatusFile {
         Ok(Self {
             entries,
             story_dir: story_dir.to_path_buf(),
+            comment_deps,
         })
+    }
+
+    /// Parse `# depends-on:` inline comments from raw YAML text.
+    ///
+    /// Scans each line for the pattern `key: value # depends-on: specs` and
+    /// extracts the dependency specs. Supports comma-separated specs.
+    ///
+    /// Parenthetical annotations like `(resolved)` are stripped from each spec.
+    ///
+    /// # Supported formats
+    /// - `# depends-on: 4-1` — story shorthand
+    /// - `# depends-on: epic-8` — depends on all stories in epic 8
+    /// - `# depends-on: epics 1-6` — depends on all stories in epics 1 through 6
+    /// - `# depends-on: epic-8 (resolved)` — annotation stripped
+    /// - `# depends-on: 4-1, 4-2` — comma-separated multiple deps
+    fn parse_comment_deps(content: &str) -> HashMap<String, Vec<String>> {
+        let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+
+            // Skip pure comment lines and empty lines
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Look for `key: value # depends-on: specs`
+            let Some(hash_pos) = trimmed.find('#') else {
+                continue;
+            };
+
+            let comment = trimmed[hash_pos + 1..].trim();
+            let dep_prefix = "depends-on:";
+            if !comment.to_lowercase().starts_with(dep_prefix) {
+                continue;
+            }
+
+            // Extract the key (first non-whitespace token before `:`)
+            let key_part = trimmed[..hash_pos].trim();
+            let Some(colon_pos) = key_part.find(':') else {
+                continue;
+            };
+            let key = key_part[..colon_pos].trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+
+            // Extract the raw dep specs after "depends-on:"
+            let raw_specs = comment[dep_prefix.len()..].trim();
+            if raw_specs.is_empty() {
+                continue;
+            }
+
+            // Split by comma for multiple deps, strip parenthetical annotations
+            let specs: Vec<String> = raw_specs
+                .split(',')
+                .map(|s| {
+                    let s = s.trim();
+                    // Strip parenthetical annotations: "epic-8 (resolved)" → "epic-8"
+                    match s.find('(') {
+                        Some(paren_pos) => s[..paren_pos].trim().to_string(),
+                        None => s.to_string(),
+                    }
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !specs.is_empty() {
+                deps.insert(key, specs);
+            }
+        }
+
+        deps
     }
 
     /// Extract all story entries as [`StoryInfo`] structs.
@@ -232,6 +326,15 @@ impl SprintStatusFile {
     /// non-eligible stories (e.g., whether a dependency is `done`).
     pub fn entries(&self) -> &[(String, String)] {
         &self.entries
+    }
+
+    /// Returns explicit dependencies parsed from `# depends-on:` inline comments.
+    ///
+    /// Maps story/epic key → list of raw dependency specs. These specs must be
+    /// resolved to actual story keys via [`deps::resolve_comment_deps`] before
+    /// they can be used in the dependency graph.
+    pub fn comment_deps(&self) -> &HashMap<String, Vec<String>> {
+        &self.comment_deps
     }
 
     /// Returns the total number of entries (including epics and retrospectives).
@@ -322,7 +425,8 @@ impl Watcher {
 
         // Pre-gate: dependency resolution, cascade detection, and filtering
         let entries = sprint_status.entries();
-        let (filtered, cascade_count) = deps::filter_eligible(eligible, entries)?;
+        let comment_deps = sprint_status.comment_deps();
+        let (filtered, cascade_count) = deps::filter_eligible(eligible, entries, comment_deps)?;
 
         tracing::info!(
             pre_gate_input = all_stories.len(),
@@ -492,6 +596,75 @@ pub(crate) mod tests {
     }
 
     // --- SprintStatusFile tests ---
+
+    // -----------------------------------------------------------------------
+    // parse_comment_deps tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_comment_deps_story_shorthand() {
+        let content = indoc(
+            "development_status:\n\
+             \x20   4-2-session: done # depends-on: 4-1\n",
+        );
+        let deps = SprintStatusFile::parse_comment_deps(content);
+        assert_eq!(deps.get("4-2-session").unwrap(), &vec!["4-1"]);
+    }
+
+    #[test]
+    fn test_parse_comment_deps_epic_with_annotation() {
+        let content = "  7-1-test-infra: ready-for-dev # depends-on: epic-8 (resolved)\n";
+        let deps = SprintStatusFile::parse_comment_deps(content);
+        assert_eq!(deps.get("7-1-test-infra").unwrap(), &vec!["epic-8"]);
+    }
+
+    #[test]
+    fn test_parse_comment_deps_epics_range() {
+        let content = "  epic-10: in-progress # depends-on: epics 1-6 (all implemented)\n";
+        let deps = SprintStatusFile::parse_comment_deps(content);
+        assert_eq!(deps.get("epic-10").unwrap(), &vec!["epics 1-6"]);
+    }
+
+    #[test]
+    fn test_parse_comment_deps_comma_separated() {
+        let content = "  5-3-live: ready-for-dev # depends-on: 5-1, 5-2\n";
+        let deps = SprintStatusFile::parse_comment_deps(content);
+        assert_eq!(deps.get("5-3-live").unwrap(), &vec!["5-1", "5-2"]);
+    }
+
+    #[test]
+    fn test_parse_comment_deps_ignores_pure_comments() {
+        let content = "# This is a header comment\n\
+                       # depends-on: something\n\
+                       1-1-foo: done\n";
+        let deps = SprintStatusFile::parse_comment_deps(content);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_parse_comment_deps_ignores_non_depends_on_comments() {
+        let content = "  1-1-foo: done # this is a normal comment\n";
+        let deps = SprintStatusFile::parse_comment_deps(content);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_parse_comment_deps_empty_content() {
+        let deps = SprintStatusFile::parse_comment_deps("");
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_parse_comment_deps_case_insensitive_prefix() {
+        let content = "  1-2-bar: ready-for-dev # Depends-On: 1-1\n";
+        let deps = SprintStatusFile::parse_comment_deps(content);
+        assert_eq!(deps.get("1-2-bar").unwrap(), &vec!["1-1"]);
+    }
+
+    // helper for readability in tests
+    fn indoc(s: &str) -> &str {
+        s
+    }
 
     fn write_test_sprint_status(dir: &Path, content: &str) -> PathBuf {
         let path = dir.join("sprint-status.yaml");
