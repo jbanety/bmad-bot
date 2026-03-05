@@ -282,7 +282,7 @@ fn is_context_limit_error(error_msg: &str) -> bool {
 ///
 /// Uses `char_indices` to find a safe Unicode boundary — never slices by byte
 /// index directly (e.g., `&text[..80]` panics on multi-byte chars).
-fn truncate_summary(text: &str, max_len: usize) -> String {
+pub(crate) fn truncate_summary(text: &str, max_len: usize) -> String {
     match text.char_indices().nth(max_len) {
         Some((byte_idx, _)) => {
             let mut t = text[..byte_idx].to_string();

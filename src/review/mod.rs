@@ -17,6 +17,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use rig::completion::Message;
 use rig::tools::think::ThinkTool;
@@ -27,6 +28,7 @@ use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
 use crate::session::agent::{self, ShutdownFlag};
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::provider::ProviderError;
+use crate::session::runner::truncate_summary;
 use crate::supervisor::EscalationSlot;
 use crate::supervisor::decisions::DecisionLog;
 use crate::watcher::StoryInfo;
@@ -308,7 +310,6 @@ pub struct ReviewRunner {
     /// MCP server manager — provides external tool capabilities (Story 9.2 usage).
     mcp_manager: Arc<crate::mcp::McpManager>,
     /// UI handle for rendering terminal output (fire-and-forget, Story 10.2).
-    #[allow(dead_code)]
     ui: crate::ui::UiHandle,
 }
 
@@ -358,6 +359,8 @@ impl ReviewRunner {
                             story_key = %story.story_key,
                             "Transient error — retrying with fresh session"
                         );
+                        self.ui
+                            .llm_retry("code-review", 0, (attempt + 1) as u32, 0.0);
                         continue;
                     }
 
@@ -514,21 +517,25 @@ impl ReviewRunner {
         let story_reply = story.specs_path.display().to_string();
 
         // Activate agent: send dev.md as user message (same flow as dev session)
+        self.ui.activation_start();
         let (activation_rig_history, _activation_chat_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
                 "_bmad/bmm/agents/dev.md",
                 "code-review",
                 Some(&self.shutdown),
-                None,
+                Some(&self.ui),
             )
             .await
             .map_err(|e| {
                 tracing::error!(action = "review_activation_failed", error = %e);
+                self.ui
+                    .phase_error("Agent Activation", &format!("Agent activation failed: {e}"));
                 ReviewError::AgentBuildFailed {
                     reason: format!("Agent activation failed: {e}"),
                 }
             })?;
+        self.ui.activation_complete();
 
         // Send "CR" with English language override (same pattern as DS in dev session)
         let initial_message = format!(
@@ -541,22 +548,27 @@ impl ReviewRunner {
             &initial_message,
             activation_rig_history.len(),
         );
+        self.ui.llm_request("code-review", 1);
         let (response, mut full_history) = agent
             .stream_chat(
                 &initial_message,
                 activation_rig_history,
                 Some(&self.shutdown),
-                None,
+                Some(&self.ui),
             )
             .await
             .map_err(|e| {
                 log_llm_error("code-review", 1, &e);
+                self.ui.llm_error("code-review", 1, &e.to_string());
                 ReviewError::ChatFailed {
                     turn: 1,
                     reason: e.to_string(),
                 }
             })?;
         log_llm_response("code-review", 1, &response);
+        self.ui.llm_response("code-review", 1, response.len());
+        self.ui
+            .chat_turn(1, &format!("[review] {}", truncate_summary(&response, 80)));
 
         tracing::debug!(
             action = "review_chat_turn",
@@ -569,6 +581,7 @@ impl ReviewRunner {
         let mut turn: usize = 2;
         let mut retries: usize = 0;
         let mut post_review_phase = false;
+        let mut post_review_start: Option<Instant> = None;
 
         // Safety: check shutdown before entering the loop
         if self.shutdown.load(Ordering::Relaxed) {
@@ -609,6 +622,7 @@ impl ReviewRunner {
 
             // Post-review phase: parse the agent's response into a structured report
             if post_review_phase {
+                let elapsed = post_review_start.map(|s| s.elapsed()).unwrap_or_default();
                 let formatted_report = match parse_review_report(&current_response) {
                     Some(parsed) => {
                         tracing::info!(
@@ -632,6 +646,7 @@ impl ReviewRunner {
                     }
                 };
 
+                self.ui.phase_complete("Post-Review Report", elapsed);
                 tracing::info!(
                     action = "review_report_captured",
                     story_key = %story.story_key,
@@ -658,6 +673,8 @@ impl ReviewRunner {
                         "CR workflow completion detected — entering post-review phase"
                     );
                     post_review_phase = true;
+                    self.ui.phase_start("Post-Review Report");
+                    post_review_start = Some(Instant::now());
                     build_post_review_message(&self.config.git_provider.repo_name, &story.story_key)
                 }
                 ResponseAction::Escalated => {
@@ -676,23 +693,27 @@ impl ReviewRunner {
             };
 
             log_llm_request("code-review", turn, &reply, full_history.len());
+            self.ui.llm_request("code-review", turn as u32);
             match agent
                 .stream_chat(
                     reply.as_str(),
                     full_history.clone(),
                     Some(&self.shutdown),
-                    None,
+                    Some(&self.ui),
                 )
                 .await
             {
                 Ok((r, new_hist)) => {
                     log_llm_response("code-review", turn, &r);
+                    self.ui.llm_response("code-review", turn as u32, r.len());
                     retries = 0;
                     full_history = new_hist;
                     current_response = r;
                 }
                 Err(e) => {
                     log_llm_error("code-review", turn, &e);
+                    self.ui
+                        .llm_error("code-review", turn as u32, &e.to_string());
                     retries += 1;
                     tracing::warn!(
                         action = "review_chat_error",
@@ -701,7 +722,15 @@ impl ReviewRunner {
                         error = %e,
                         "Review chat error, will retry"
                     );
+                    self.ui
+                        .llm_retry("code-review", turn as u32, retries as u32, 0.0);
                     if retries >= MAX_RETRIES {
+                        if post_review_phase {
+                            self.ui.phase_error(
+                                "Post-Review Report",
+                                &format!("Chat failed after {MAX_RETRIES} retries: {e}"),
+                            );
+                        }
                         return Ok(ReviewOutcome::Failed {
                             story_key: story.story_key.clone(),
                             error: format!("Review chat failed after {MAX_RETRIES} retries: {e}"),
@@ -710,6 +739,11 @@ impl ReviewRunner {
                     continue;
                 }
             }
+
+            self.ui.chat_turn(
+                turn as u32,
+                &format!("[review] {}", truncate_summary(&current_response, 80)),
+            );
 
             tracing::debug!(
                 action = "review_chat_turn",

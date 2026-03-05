@@ -384,15 +384,21 @@ impl StoryPipeline {
 
                 // Phase 6 — Post review comment on PR (non-blocking)
                 // Report is already formatted by build_review_comment() — no stripping needed.
-                if let Some(ref report) = review_report
-                    && let Err(e) = self.git_provider.add_comment(&pr_info.id, report).await
-                {
-                    tracing::error!(
-                        action = "pr_comment_failed",
-                        pr_id = %pr_info.id,
-                        error = %e,
-                        "Failed to post review comment — PR created successfully"
-                    );
+                if let Some(ref report) = review_report {
+                    match self.git_provider.add_comment(&pr_info.id, report).await {
+                        Ok(()) => {
+                            self.ui.tool_result("pr_comment", "Review posted");
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                action = "pr_comment_failed",
+                                pr_id = %pr_info.id,
+                                error = %e,
+                                "Failed to post review comment — PR created successfully"
+                            );
+                            self.ui.tool_result("pr_comment", &format!("Failed: {e}"));
+                        }
+                    }
                 }
 
                 // Phase 7 — Mark story done in sprint-status.yaml, commit & push
@@ -1187,18 +1193,25 @@ impl StoryPipeline {
                 match self.git_provider.create_pr(pr_params).await {
                     Ok(pr_info) => {
                         self.ui.phase_complete("Create PR", pr_start.elapsed());
-                        if let Some(ref report) = review_report
-                            && let Err(e) = self
+                        if let Some(ref report) = review_report {
+                            match self
                                 .git_provider
                                 .add_comment(&pr_info.id, &strip_agent_artifacts(report))
                                 .await
-                        {
-                            tracing::error!(
-                                action = "recovery_pr_comment_failed",
-                                pr_id = %pr_info.id,
-                                error = %e,
-                                "Failed to post review comment after recovery"
-                            );
+                            {
+                                Ok(()) => {
+                                    self.ui.tool_result("pr_comment", "Review posted");
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        action = "recovery_pr_comment_failed",
+                                        pr_id = %pr_info.id,
+                                        error = %e,
+                                        "Failed to post review comment after recovery"
+                                    );
+                                    self.ui.tool_result("pr_comment", &format!("Failed: {e}"));
+                                }
+                            }
                         }
 
                         let result = PipelineResult {

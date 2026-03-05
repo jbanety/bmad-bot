@@ -1,6 +1,6 @@
 # Story 10.4: Review Integration — UI Events in Code Review
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -36,41 +36,41 @@ So that I know when the review starts, what fixes are applied, and whether it su
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Enable tool call visibility in `drive_review_session()` by passing `Some(&self.ui)` to `stream_chat()` and `activate_agent()` (AC: #1, #3, #4)
-  - [ ] 1.1 In `drive_review_session()`, change the `activate_agent()` call (currently passing `None` for `ui` per Story 10.3 Task 11.2) to pass `Some(&self.ui)` — this enables tool call interception during activation
-  - [ ] 1.2 Change the initial CR `stream_chat()` call (the `"IMPORTANT: ALL communication MUST be in English..."` message) from `None` to `Some(&self.ui)` for the `ui` parameter
-  - [ ] 1.3 Change the main chat loop `stream_chat()` call from `None` to `Some(&self.ui)` for the `ui` parameter
-  - [ ] 1.4 Verify that `use crate::ui::UiHandle;` import already exists in `src/review/mod.rs` (added by Story 10.2 when wiring `ui` field into the struct) — if not, add it
+- [x] Task 1: Enable tool call visibility in `drive_review_session()` by passing `Some(&self.ui)` to `stream_chat()` and `activate_agent()` (AC: #1, #3, #4)
+  - [x] 1.1 In `drive_review_session()`, change the `activate_agent()` call (currently passing `None` for `ui` per Story 10.3 Task 11.2) to pass `Some(&self.ui)` — this enables tool call interception during activation
+  - [x] 1.2 Change the initial CR `stream_chat()` call (the `"IMPORTANT: ALL communication MUST be in English..."` message) from `None` to `Some(&self.ui)` for the `ui` parameter
+  - [x] 1.3 Change the main chat loop `stream_chat()` call from `None` to `Some(&self.ui)` for the `ui` parameter
+  - [x] 1.4 Verify that `use crate::ui::UiHandle;` import already exists in `src/review/mod.rs` (added by Story 10.2 when wiring `ui` field into the struct) — if not, add it
 
-- [ ] Task 2: Emit activation lifecycle UI events in `drive_review_session()` (AC: #2)
-  - [ ] 2.1 Before the `agent.activate_agent()` call: emit `self.ui.activation_start()`
-  - [ ] 2.2 After successful activation (after the `.map_err` block): emit `self.ui.activation_complete()`
-  - [ ] 2.3 In the `.map_err` closure of `activate_agent()`: emit `self.ui.phase_error("Agent Activation", &format!("Agent activation failed: {e}"))` before constructing the `ReviewError`
+- [x] Task 2: Emit activation lifecycle UI events in `drive_review_session()` (AC: #2)
+  - [x] 2.1 Before the `agent.activate_agent()` call: emit `self.ui.activation_start()`
+  - [x] 2.2 After successful activation (after the `.map_err` block): emit `self.ui.activation_complete()`
+  - [x] 2.3 In the `.map_err` closure of `activate_agent()`: emit `self.ui.phase_error("Agent Activation", &format!("Agent activation failed: {e}"))` before constructing the `ReviewError`
 
-- [ ] Task 3: Emit LLM request/response/error UI events in `drive_review_session()` (AC: #6)
-  - [ ] 3.1 After `log_llm_request("code-review", 1, &initial_message, ...)`: add `self.ui.llm_request("code-review", 1)`
-  - [ ] 3.2 After `log_llm_response("code-review", 1, &response)`: add `self.ui.llm_response("code-review", 1, response.len())`
-  - [ ] 3.3 In the `.map_err` of the initial `stream_chat()`: after `log_llm_error(...)`, add `self.ui.llm_error("code-review", 1, &e.to_string())`
-  - [ ] 3.4 In the main chat loop, after `log_llm_request("code-review", turn, &reply, ...)`: add `self.ui.llm_request("code-review", turn)`
-  - [ ] 3.5 In the main chat loop `Ok` arm of `stream_chat()`: after `log_llm_response(...)`, add `self.ui.llm_response("code-review", turn, r.len())`
-  - [ ] 3.6 In the main chat loop `Err` arm of `stream_chat()`: after `log_llm_error(...)`, add `self.ui.llm_error("code-review", turn, &e.to_string())`
+- [x] Task 3: Emit LLM request/response/error UI events in `drive_review_session()` (AC: #6)
+  - [x] 3.1 After `log_llm_request("code-review", 1, &initial_message, ...)`: add `self.ui.llm_request("code-review", 1)`
+  - [x] 3.2 After `log_llm_response("code-review", 1, &response)`: add `self.ui.llm_response("code-review", 1, response.len())`
+  - [x] 3.3 In the `.map_err` of the initial `stream_chat()`: after `log_llm_error(...)`, add `self.ui.llm_error("code-review", 1, &e.to_string())`
+  - [x] 3.4 In the main chat loop, after `log_llm_request("code-review", turn, &reply, ...)`: add `self.ui.llm_request("code-review", turn)`
+  - [x] 3.5 In the main chat loop `Ok` arm of `stream_chat()`: after `log_llm_response(...)`, add `self.ui.llm_response("code-review", turn, r.len())`
+  - [x] 3.6 In the main chat loop `Err` arm of `stream_chat()`: after `log_llm_error(...)`, add `self.ui.llm_error("code-review", turn, &e.to_string())`
 
-- [ ] Task 4: Emit chat turn UI events with `[review]` prefix in `drive_review_session()` (AC: #3)
-  - [ ] 4.1 After the initial CR response is received (after `log_llm_response` for turn 1): emit `self.ui.chat_turn(1, &format!("[review] {}", truncate_summary(&response, 80)))` — reuse the `truncate_summary()` helper from `session/runner.rs` (import it or create a shared utility)
-  - [ ] 4.2 In the main chat loop, after the `tracing::debug!(action = "review_chat_turn", ...)` at the end of each iteration: emit `self.ui.chat_turn(turn, &format!("[review] {}", truncate_summary(&current_response, 80)))`
-  - [ ] 4.3 **Decision on `truncate_summary` reuse:** The function was created as a private helper in `src/session/runner.rs` (Story 10.3 Task 12). To reuse it from `review/mod.rs`, either: **(a)** move it to a shared location (e.g., make it `pub(crate)` in `session/runner.rs` or create a small `src/util.rs` module), or **(b)** create a minimal inline version in `review/mod.rs`. Option (a) is preferred for DRY — make it `pub(crate)` in `session/runner.rs` and import from review
+- [x] Task 4: Emit chat turn UI events with `[review]` prefix in `drive_review_session()` (AC: #3)
+  - [x] 4.1 After the initial CR response is received (after `log_llm_response` for turn 1): emit `self.ui.chat_turn(1, &format!("[review] {}", truncate_summary(&response, 80)))` — reuse the `truncate_summary()` helper from `session/runner.rs` (import it or create a shared utility)
+  - [x] 4.2 In the main chat loop, after the `tracing::debug!(action = "review_chat_turn", ...)` at the end of each iteration: emit `self.ui.chat_turn(turn, &format!("[review] {}", truncate_summary(&current_response, 80)))`
+  - [x] 4.3 **Decision on `truncate_summary` reuse:** The function was created as a private helper in `src/session/runner.rs` (Story 10.3 Task 12). To reuse it from `review/mod.rs`, either: **(a)** move it to a shared location (e.g., make it `pub(crate)` in `session/runner.rs` or create a small `src/util.rs` module), or **(b)** create a minimal inline version in `review/mod.rs`. Option (a) is preferred for DRY — make it `pub(crate)` in `session/runner.rs` and import from review
 
-- [ ] Task 5: Emit post-review phase UI events (AC: #5)
-  - [ ] 5.1 When `post_review_phase` is true and the post-review `stream_chat()` call is about to happen: emit `self.ui.phase_start("Post-Review Report")` and capture `Instant::now()` — **Note:** this requires restructuring the post-review flow slightly. Currently, the code enters the `if post_review_phase` block on the **next loop iteration** after setting `post_review_phase = true`. The `stream_chat()` call happens at the bottom of the loop (before the `if post_review_phase` check on the next iteration). The post-review report is parsed at the top of the loop when `post_review_phase` is true. Emit `phase_start` when setting `post_review_phase = true` (right after the `ResponseAction::Completed` match arm), and emit `phase_complete` after the report is successfully parsed in the `if post_review_phase` block
-  - [ ] 5.2 After the review report is successfully parsed and `ReviewOutcome::Completed` is about to be returned: emit `self.ui.phase_complete("Post-Review Report", elapsed)`
-  - [ ] 5.3 If the post-review `stream_chat()` call fails (Err arm in the main loop while `post_review_phase` is true): emit `self.ui.phase_error("Post-Review Report", &error)` before returning `ReviewOutcome::Failed`
+- [x] Task 5: Emit post-review phase UI events (AC: #5)
+  - [x] 5.1 When `post_review_phase` is true and the post-review `stream_chat()` call is about to happen: emit `self.ui.phase_start("Post-Review Report")` and capture `Instant::now()` — **Note:** this requires restructuring the post-review flow slightly. Currently, the code enters the `if post_review_phase` block on the **next loop iteration** after setting `post_review_phase = true`. The `stream_chat()` call happens at the bottom of the loop (before the `if post_review_phase` check on the next iteration). The post-review report is parsed at the top of the loop when `post_review_phase` is true. Emit `phase_start` when setting `post_review_phase = true` (right after the `ResponseAction::Completed` match arm), and emit `phase_complete` after the report is successfully parsed in the `if post_review_phase` block
+  - [x] 5.2 After the review report is successfully parsed and `ReviewOutcome::Completed` is about to be returned: emit `self.ui.phase_complete("Post-Review Report", elapsed)`
+  - [x] 5.3 If the post-review `stream_chat()` call fails (Err arm in the main loop while `post_review_phase` is true): emit `self.ui.phase_error("Post-Review Report", &error)` before returning `ReviewOutcome::Failed`
 
-- [ ] Task 6: Emit retry UI events (AC: #7, #8)
-  - [ ] 6.1 In the main chat loop `Err` arm, after incrementing `retries` and the `tracing::warn!(action = "review_chat_error", ...)`: emit `self.ui.llm_retry("code-review", turn, retries, 0.0)` — review retries are immediate (no backoff delay)
-  - [ ] 6.2 In `run()` method, inside the `Err(e)` arm of the `run_inner()` retry loop, after the `tracing::warn!(action = "review_retry", ...)`: emit `self.ui.llm_retry("code-review", 0, attempt + 1, 0.0)` to signal a full session restart. **Note:** `run()` does not have direct access to `self.ui` since it calls `self.run_inner()`. Since `ReviewRunner` has the `ui` field (wired by Story 10.2), `self.ui` is available in `run()`
+- [x] Task 6: Emit retry UI events (AC: #7, #8)
+  - [x] 6.1 In the main chat loop `Err` arm, after incrementing `retries` and the `tracing::warn!(action = "review_chat_error", ...)`: emit `self.ui.llm_retry("code-review", turn, retries, 0.0)` — review retries are immediate (no backoff delay)
+  - [x] 6.2 In `run()` method, inside the `Err(e)` arm of the `run_inner()` retry loop, after the `tracing::warn!(action = "review_retry", ...)`: emit `self.ui.llm_retry("code-review", 0, attempt + 1, 0.0)` to signal a full session restart. **Note:** `run()` does not have direct access to `self.ui` since it calls `self.run_inner()`. Since `ReviewRunner` has the `ui` field (wired by Story 10.2), `self.ui` is available in `run()`
 
-- [ ] Task 7: Emit PR comment result UI events in `pipeline.rs` (AC: #9)
-  - [ ] 7.1 **REQUIRES REFACTOR** in `process_story()` Phase 6 (~L347-358): The current code uses a combined `if let Some(ref report) = review_report && let Err(e) = self.git_provider.add_comment(...)` pattern — there is no explicit success branch. Refactor to a `match` to emit both success and error events:
+- [x] Task 7: Emit PR comment result UI events in `pipeline.rs` (AC: #9)
+  - [x] 7.1 **REQUIRES REFACTOR** in `process_story()` Phase 6 (~L347-358): The current code uses a combined `if let Some(ref report) = review_report && let Err(e) = self.git_provider.add_comment(...)` pattern — there is no explicit success branch. Refactor to a `match` to emit both success and error events:
     ```rust
     if let Some(ref report) = review_report {
         match self.git_provider.add_comment(&pr_info.id, report).await {
@@ -84,7 +84,7 @@ So that I know when the review starts, what fixes are applied, and whether it su
         }
     }
     ```
-  - [ ] 7.2 **CONFIRMED:** `process_recovered_session()` (~L997-1008) also posts review comments via `add_comment`. Apply the same `match` refactor there. **Important difference:** `process_recovered_session()` uses `strip_agent_artifacts(report)` while `process_story()` does NOT — preserve this difference when refactoring:
+  - [x] 7.2 **CONFIRMED:** `process_recovered_session()` (~L997-1008) also posts review comments via `add_comment`. Apply the same `match` refactor there. **Important difference:** `process_recovered_session()` uses `strip_agent_artifacts(report)` while `process_story()` does NOT — preserve this difference when refactoring:
     ```rust
     if let Some(ref report) = review_report {
         match self.git_provider.add_comment(&pr_info.id, &strip_agent_artifacts(report)).await {
@@ -98,12 +98,12 @@ So that I know when the review starts, what fixes are applied, and whether it su
         }
     }
     ```
-  - [ ] 7.3 Verify no other `add_comment` calls exist in the codebase (grep for `add_comment` in `pipeline.rs`) — the two above should be the complete set
+  - [x] 7.3 Verify no other `add_comment` calls exist in the codebase (grep for `add_comment` in `pipeline.rs`) — the two above should be the complete set
 
-- [ ] Task 8: Run full test suite and linting (AC: #11)
-  - [ ] 8.1 Run `cargo test` — ALL existing tests must pass with zero failures
-  - [ ] 8.2 Run `cargo clippy` — zero warnings
-  - [ ] 8.3 Run `cargo fmt --check` — no formatting issues
+- [x] Task 8: Run full test suite and linting (AC: #11)
+  - [x] 8.1 Run `cargo test` — ALL existing tests must pass with zero failures
+  - [x] 8.2 Run `cargo clippy` — zero warnings
+  - [x] 8.3 Run `cargo fmt --check` — no formatting issues
 
 ## Dev Notes
 
@@ -311,10 +311,27 @@ This is a **3-point story** (as planned in the epics). It reuses all patterns es
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6 (via Copilot)
 
 ### Debug Log References
 
+- All tests pass: 1164 passed (1087 integration + 77 lib), 0 failed, 5 ignored (E2E manual-only)
+- Zero new clippy warnings on modified files (35 pre-existing warnings unrelated to this story)
+- `cargo fmt --check` clean
+
 ### Completion Notes List
 
+- ✅ Task 1: Changed all `None` → `Some(&self.ui)` for `activate_agent()` and both `stream_chat()` calls in `drive_review_session()`. Removed `#[allow(dead_code)]` on `ui` field since it's now actively used. Tool call interception from Story 10.3 now automatically applies to review sessions.
+- ✅ Task 2: Added `activation_start()` before and `activation_complete()` after `activate_agent()`. Added `phase_error("Agent Activation", ...)` in the `.map_err` closure.
+- ✅ Task 3: Paired every `log_llm_request/response/error` call with `self.ui.llm_request/response/error`. Cast `turn: usize` to `u32` for UI API compatibility.
+- ✅ Task 4: Made `truncate_summary` in `session/runner.rs` `pub(crate)` (DRY approach). Imported in `review/mod.rs`. Emitting `chat_turn` with `"[review] "` prefix after initial CR and in main loop.
+- ✅ Task 5: Emit `phase_start("Post-Review Report")` + capture `Instant::now()` when `Completed` detected. Emit `phase_complete` after report parsed. Emit `phase_error` if chat fails during post-review phase with retries exhausted.
+- ✅ Task 6: Emit `llm_retry` in chat loop Err arm (per-turn retry) and in `run()` session retry loop (full session restart). Both use `delay_secs=0.0` (immediate retry).
+- ✅ Task 7: Refactored both `add_comment` call sites in `pipeline.rs` from combined `if let` to `if let Some { match ... }` pattern. Added `tool_result("pr_comment", ...)` for success and error paths. Preserved `strip_agent_artifacts()` in `process_recovered_session()` only.
+- ✅ Task 8: Full test suite passes (1164 tests), zero new clippy warnings, `cargo fmt` clean.
+
 ### File List
+
+- `src/review/mod.rs` — Added UI event emissions throughout `drive_review_session()` and `run()`: activation lifecycle, LLM request/response/error, chat turns with `[review]` prefix, post-review phase tracking, retry events. Changed `None` → `Some(&self.ui)` for all `stream_chat()`/`activate_agent()` calls. Removed `#[allow(dead_code)]` on `ui` field. Added `use std::time::Instant` and `use crate::session::runner::truncate_summary` imports.
+- `src/session/runner.rs` — Changed `truncate_summary` visibility from `fn` to `pub(crate) fn` for cross-module reuse.
+- `src/pipeline.rs` — Refactored 2 `add_comment` call sites (`process_story()` Phase 6 and `process_recovered_session()`) from combined `if let` to `if let Some { match ... }` pattern. Added `ui.tool_result("pr_comment", ...)` events for both success and error paths.
