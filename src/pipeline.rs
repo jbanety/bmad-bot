@@ -5,7 +5,10 @@
 //! "never stop the run" principle: no single story failure halts the daemon.
 //!
 //! Use [`StoryPipeline::new`] to construct, then [`process_eligible_stories`] to
-//! run a batch of stories from the watcher.
+//! run eligible stories. After each story completes, the pipeline **re-polls**
+//! `sprint-status.yaml` and recomputes the eligible list so that dependency
+//! changes (e.g., story 1-1 done → 1-2 now eligible) are reflected immediately
+//! instead of processing a stale batch from the initial poll.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,7 +28,8 @@ use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
 use crate::supervisor::decisions::format_pr_decisions_section;
-use crate::watcher::StoryInfo;
+use crate::watcher::deps as watcher_deps;
+use crate::watcher::{SprintStatusFile, StoryInfo};
 
 // ---------------------------------------------------------------------------
 // PipelineError
@@ -656,22 +660,59 @@ impl StoryPipeline {
         }
     }
 
-    /// Process all eligible stories sequentially, then send a run summary.
+    /// Process eligible stories sequentially with re-polling between each story.
     ///
-    /// Stories are processed in the order received from the watcher (dependency-sorted).
-    /// After all stories are processed, a run summary notification is sent.
+    /// The initial `stories` list seeds the first iteration. After each story
+    /// completes, sprint-status.yaml is **re-read** and the eligible list is
+    /// recomputed via [`watcher_deps::filter_eligible`]. This ensures that
+    /// dependency changes (e.g., story 1-1 marked `done` → 1-2 now eligible)
+    /// are reflected immediately — the pipeline picks the correct next story
+    /// instead of blindly iterating a stale batch (which would jump across
+    /// epics).
     ///
-    /// If any story returns a fatal error (e.g. auth failure), processing stops
-    /// immediately — remaining stories are skipped. The [`RunSummary::fatal`] flag
-    /// is set so the caller can halt the daemon.
+    /// Stories already processed in this run are tracked and skipped on
+    /// subsequent re-polls to prevent double-processing if status updates
+    /// fail to persist.
+    ///
+    /// Processing stops when:
+    /// - No more eligible stories remain after re-poll
+    /// - A fatal error is encountered (e.g. auth failure)
+    /// - Re-poll itself fails (conservative — wait for next poll cycle)
+    ///
+    /// A run summary notification is sent after all processing completes.
     pub async fn process_eligible_stories(&self, stories: Vec<StoryInfo>) -> RunSummary {
-        let mut results: Vec<PipelineResult> = Vec::with_capacity(stories.len());
+        let mut results: Vec<PipelineResult> = Vec::new();
 
         let sprint_status_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
             .join("sprint-status.yaml");
+        let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
 
-        for story in &stories {
-            let result = self.process_story(story).await;
+        // Track processed stories to prevent re-processing if status updates
+        // fail and the same story reappears as eligible on re-poll.
+        let mut processed_keys: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        // Start with the first story from the initial eligible list.
+        // After each story, we re-poll sprint-status.yaml and recompute
+        // the eligible list so that dependency changes (e.g., 1-1 done →
+        // 1-2 now eligible) are reflected immediately instead of processing
+        // a stale batch (which would jump to 2-1 instead of 1-2).
+        let mut current_stories = stories;
+
+        loop {
+            // Find next unprocessed story from the current eligible list
+            let next_story = current_stories
+                .iter()
+                .find(|s| !processed_keys.contains(&s.story_key));
+
+            let story = match next_story {
+                Some(s) => s.clone(),
+                None => break, // No more eligible stories in this cycle
+            };
+
+            processed_keys.insert(story.story_key.clone());
+
+            let result = self.process_story(&story).await;
             let mut is_fatal = result.fatal;
             let story_key = &result.story_key;
 
@@ -716,6 +757,33 @@ impl StoryPipeline {
                 );
                 break;
             }
+
+            // Re-poll sprint-status.yaml and recompute eligible list.
+            // This ensures that dependency changes from the just-completed story
+            // are reflected: e.g., after 1-1 → done, 1-2 becomes eligible and
+            // takes priority over 2-1 which was in the original stale list.
+            match re_poll_eligible(&sprint_status_path, &story_dir) {
+                Ok(fresh_stories) => {
+                    tracing::info!(
+                        action = "re_poll_eligible",
+                        previous_story = %story.story_key,
+                        fresh_eligible = fresh_stories.len(),
+                        "Re-polled sprint-status after story completion"
+                    );
+                    current_stories = fresh_stories;
+                }
+                Err(e) => {
+                    // Re-poll failed — stop processing to avoid stale data decisions.
+                    // The next poll cycle (5 min) will retry with a fresh read.
+                    tracing::warn!(
+                        action = "re_poll_failed",
+                        previous_story = %story.story_key,
+                        error = %e,
+                        "Failed to re-poll sprint-status — stopping pipeline run, will retry next cycle"
+                    );
+                    break;
+                }
+            }
         }
 
         let summary = build_run_summary(&results);
@@ -731,8 +799,39 @@ impl StoryPipeline {
 
         summary
     }
+}
 
+/// Re-read sprint-status.yaml and recompute eligible stories with dependency filtering.
+///
+/// Called after each story completion to ensure the next story is chosen based on
+/// fresh dependency state, not a stale list from the initial poll.
+fn re_poll_eligible(sprint_status_path: &Path, story_dir: &Path) -> Result<Vec<StoryInfo>, String> {
+    let sprint_status = SprintStatusFile::load(sprint_status_path, story_dir)
+        .map_err(|e| format!("sprint-status load failed: {e}"))?;
+
+    let eligible = sprint_status.eligible_stories();
+    if eligible.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let entries = sprint_status.entries();
+    let (filtered, cascade_count) = watcher_deps::filter_eligible(eligible, entries)
+        .map_err(|e| format!("dependency filter failed: {e}"))?;
+
+    if cascade_count > 0 {
+        tracing::info!(
+            action = "re_poll_cascade",
+            cascade_blocked = cascade_count,
+            "Re-poll detected cascade-blocked stories"
+        );
+    }
+
+    Ok(filtered)
+}
+
+impl StoryPipeline {
     /// Send a notification for a single story result (non-blocking).
+    ///
     /// Push a local branch to the remote using git CLI.
     ///
     /// Uses `--force-with-lease` because story branches are single-developer
@@ -2090,5 +2189,182 @@ mod tests {
         }
         // This test always passes — it documents the behavior, not asserts it,
         // because git's handling of dirty files during checkout varies.
+    }
+
+    // -----------------------------------------------------------------------
+    // re_poll_eligible tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: write a sprint-status.yaml file with the given development_status entries.
+    fn write_sprint_status(dir: &std::path::Path, entries: &[(&str, &str)]) {
+        let mut yaml = String::from("development_status:\n");
+        for (key, status) in entries {
+            yaml.push_str(&format!("    {key}: {status}\n"));
+        }
+        std::fs::write(dir.join("sprint-status.yaml"), yaml).unwrap();
+    }
+
+    #[test]
+    fn test_re_poll_eligible_picks_up_status_changes() {
+        // Scenario: 1-1 was ready-for-dev, 1-2 was ready-for-dev (dep on 1-1).
+        // After 1-1 is marked done, re-poll should return 1-2 as eligible.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path();
+
+        // State AFTER 1-1 completed: 1-1 is done, 1-2 is ready-for-dev
+        write_sprint_status(
+            p,
+            &[
+                ("epic-1", "in-progress"),
+                ("1-1-scaffolding", "done"),
+                ("1-2-cli", "ready-for-dev"),
+            ],
+        );
+
+        let ss = p.join("sprint-status.yaml");
+        let result = re_poll_eligible(&ss, p).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].story_key, "1-2-cli");
+    }
+
+    #[test]
+    fn test_re_poll_eligible_cross_epic_first_stories_all_eligible() {
+        // Scenario: multiple epics, first story of each has no intra-epic dep.
+        // This is the CURRENT behavior (cross-epic deps not enforced by daemon).
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path();
+
+        write_sprint_status(
+            p,
+            &[
+                ("epic-1", "in-progress"),
+                ("1-1-scaffolding", "ready-for-dev"),
+                ("1-2-cli", "ready-for-dev"),
+                ("epic-2", "in-progress"),
+                ("2-1-rest-client", "ready-for-dev"),
+                ("2-2-websocket", "ready-for-dev"),
+            ],
+        );
+
+        let ss = p.join("sprint-status.yaml");
+        let result = re_poll_eligible(&ss, p).unwrap();
+
+        // 1-1 and 2-1 are eligible (first in their epic, no deps)
+        // 1-2 and 2-2 are NOT eligible (deps on 1-1 and 2-1 which are not done)
+        let keys: Vec<&str> = result.iter().map(|s| s.story_key.as_str()).collect();
+        assert_eq!(keys, vec!["1-1-scaffolding", "2-1-rest-client"]);
+    }
+
+    #[test]
+    fn test_re_poll_eligible_after_first_story_done_returns_second() {
+        // The core bug scenario: after 1-1 done, 1-2 becomes eligible and should
+        // appear BEFORE 2-1 in sprint order (document order tiebreaker).
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path();
+
+        write_sprint_status(
+            p,
+            &[
+                ("epic-1", "in-progress"),
+                ("1-1-scaffolding", "done"),
+                ("1-2-cli", "ready-for-dev"),
+                ("epic-2", "in-progress"),
+                ("2-1-rest-client", "ready-for-dev"),
+            ],
+        );
+
+        let ss = p.join("sprint-status.yaml");
+        let result = re_poll_eligible(&ss, p).unwrap();
+
+        // Both 1-2 (dep 1-1 is done) and 2-1 (no dep) are eligible.
+        // 1-2 appears first because it comes first in document order.
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].story_key, "1-2-cli");
+        assert_eq!(result[1].story_key, "2-1-rest-client");
+    }
+
+    #[test]
+    fn test_re_poll_eligible_returns_empty_when_all_done() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path();
+
+        write_sprint_status(
+            p,
+            &[
+                ("epic-1", "done"),
+                ("1-1-scaffolding", "done"),
+                ("1-2-cli", "done"),
+            ],
+        );
+
+        let ss = p.join("sprint-status.yaml");
+        let result = re_poll_eligible(&ss, p).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_re_poll_eligible_returns_error_on_missing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ss = dir.path().join("nonexistent.yaml");
+
+        let result = re_poll_eligible(&ss, dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("sprint-status load failed"));
+    }
+
+    #[test]
+    fn test_re_poll_eligible_cascade_blocked_excluded() {
+        // Story 1-2 depends on 1-1 which is blocked → 1-2 should be cascade-blocked
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path();
+
+        write_sprint_status(
+            p,
+            &[
+                ("epic-1", "in-progress"),
+                ("1-1-scaffolding", "blocked"),
+                ("1-2-cli", "ready-for-dev"),
+                ("epic-2", "in-progress"),
+                ("2-1-rest-client", "ready-for-dev"),
+            ],
+        );
+
+        let ss = p.join("sprint-status.yaml");
+        let result = re_poll_eligible(&ss, p).unwrap();
+
+        // 1-2 is cascade-blocked (dep 1-1 is blocked), only 2-1 is eligible
+        let keys: Vec<&str> = result.iter().map(|s| s.story_key.as_str()).collect();
+        assert_eq!(keys, vec!["2-1-rest-client"]);
+    }
+
+    #[test]
+    fn test_re_poll_eligible_processed_keys_prevent_reprocessing() {
+        // Verify the processed_keys HashSet logic in process_eligible_stories
+        // by testing the pattern directly: if a story already in processed_keys
+        // appears in the re-polled list, it should be skipped.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path();
+
+        write_sprint_status(
+            p,
+            &[
+                ("epic-1", "in-progress"),
+                ("1-1-scaffolding", "ready-for-dev"),
+                ("epic-2", "in-progress"),
+                ("2-1-rest-client", "ready-for-dev"),
+            ],
+        );
+
+        let ss = p.join("sprint-status.yaml");
+        let stories = re_poll_eligible(&ss, p).unwrap();
+
+        // Simulate: 1-1 already processed
+        let mut processed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        processed.insert("1-1-scaffolding".to_string());
+
+        let next = stories.iter().find(|s| !processed.contains(&s.story_key));
+        assert!(next.is_some());
+        assert_eq!(next.unwrap().story_key, "2-1-rest-client");
     }
 }
