@@ -32,7 +32,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Edition 2024** — All crates use `edition = "2024"` in Cargo.toml
 - **Error Handling:** `thiserror` for custom error types, `anyhow` for propagation in binary. No `unwrap()` or `expect()` in production code — only allowed in tests
 - **Async:** Full async tokio runtime. No `block_on()` inside async context, no `std::thread::spawn` unless explicitly justified
-- **Logging:** Use `tracing` exclusively — no `println!` or `eprintln!` in production. Use structured fields: `tracing::info!(story_id = %id, "Processing story")`
+- **Logging:** Use `tracing` for debug/operational logging to file — no `println!` or `eprintln!` in daemon runtime code. Use structured fields: `tracing::info!(story_id = %id, "Processing story")`. For user-facing terminal output, use `UiHandle` methods exclusively (see Terminal UI Rules below)
 - **Linting:** `#![deny(clippy::all)]` at crate root. Zero warnings policy
 - **No `unsafe`** unless explicitly justified and documented
 
@@ -155,6 +155,11 @@ _This file contains critical rules and patterns that AI agents must follow when 
   │   ├── list_directory.rs # List directory contents
   │   ├── git.rs
   │   └── terminal.rs
+  ├── ui/
+  │   ├── mod.rs           # UiHandle (Arc<dyn UiRenderer> wrapper), public API
+  │   ├── renderer.rs      # UiRenderer trait — backend-agnostic interface
+  │   ├── console.rs       # ConsoleRenderer (indicatif + console)
+  │   └── null.rs          # NullRenderer (no-op for tests/CI)
   └── notifier/
       └── mod.rs
   ```
@@ -183,6 +188,19 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **PR creation:** After code review passes (or directly after dev session if review disabled), the daemon opens a Pull Request automatically. GitHub supported in MVP. Provider configured in `bmad-bot.yaml`
 - **No auto-merge:** PRs are created for human review. Never merge automatically into `main`
 - **No CI for now:** No GitHub Actions or CI pipeline. May be added later
+
+### Terminal UI Rules
+- The `ui/` module is the **sole** user-facing terminal output point during daemon execution (`bmad-bot start`)
+- All other modules use `tracing` for debug logging only — debug logs go to the JSON log file, not stdout
+- Never use `println!`/`eprintln!` in daemon runtime code for user-facing output — use `UiHandle` methods
+- **Exception:** `cli/mod.rs` interactive commands (`init`, `status`, `copilot-login`, `logs`) may use `println!` directly as they run before the daemon loop
+- The `UiRenderer` trait must remain rendering-backend agnostic — no `indicatif` or `console` types in the trait signature
+- `UiHandle` wraps `Arc<dyn UiRenderer>` — must be `Send + Sync + Clone`, shared across async tasks
+- `UiHandle` is propagated like `ShutdownFlag`: `cli/run_start()` → `StoryPipeline` → `SessionRunner` / `ReviewRunner`
+- Tool call UI events are emitted at call sites (session/pipeline level), not inside tool implementations
+- All tests use `NullRenderer` via `UiHandle::null()` — zero test pollution from terminal output
+- `ConsoleRenderer` uses `indicatif` (spinners, `MultiProgress`) and `console` (colors, styles) — configured via `ui_mode` in `bmad-bot.yaml`: `"fancy"` (default), `"plain"` (no colors/spinners), `"silent"` (`NullRenderer`)
+- Non-TTY environments (pipes, CI) automatically use `NullRenderer` regardless of `ui_mode`
 
 ### Critical Don't-Miss Rules
 
@@ -214,4 +232,4 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Review quarterly for outdated rules
 - Remove rules that become obvious over time
 
-Last Updated: 2026-02-12 — LLM provider construction centralized in `llm/agent_factory.rs` (`AgentFactory` + `BuiltAgent` enum dispatch). Fixes Copilot gpt-5.2-codex Responses API bug. API format hardcoded per provider/model: Anthropic → Messages API, OpenAI → Responses API, GitHub Copilot → explicit match on OpenAI model families for Responses API, fallback to Completions API for all other models. ~610 lines of duplicated provider match arms eliminated. See architect-brief-llm-provider-abstraction.md for full rationale.
+Last Updated: 2026-03-05 — Added Terminal UI rules for new `ui/` module (Epic 10). The daemon displays structured user-facing terminal output in foreground mode via `UiRenderer` trait with `ConsoleRenderer` (indicatif + console) and `NullRenderer` (tests/CI). Stdout tracing layer removed when ConsoleRenderer is active — debug logs go to JSON file only. See sprint-change-proposal-2026-03-05.md for full rationale.
