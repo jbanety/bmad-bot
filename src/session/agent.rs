@@ -428,22 +428,26 @@ fn extract_tool_call_detail(tool_name: &str, args: &serde_json::Value) -> String
             path.to_string()
         }
         "git" => {
-            let sub = args
-                .get("sub_action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            // Pick the most descriptive argument for the sub-action
-            let key_arg = args
-                .get("message")
-                .or_else(|| args.get("branch"))
-                .or_else(|| args.get("args"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if key_arg.is_empty() {
-                sub.to_string()
-            } else {
-                format!("{sub} \"{key_arg}\"")
+            let sub = args.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+            // Build a readable command string from action + relevant args
+            let mut parts = vec![sub.to_string()];
+            if let Some(branch) = args.get("branch").and_then(|v| v.as_str()) {
+                parts.push(branch.to_string());
             }
+            if let Some(from) = args.get("from_branch").and_then(|v| v.as_str()) {
+                parts.push(format!("from {from}"));
+            }
+            if let Some(paths) = args.get("paths").and_then(|v| v.as_array()) {
+                let p: Vec<&str> = paths.iter().filter_map(|v| v.as_str()).collect();
+                parts.push(p.join(" "));
+            }
+            if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
+                parts.push(format!("\"{msg}\""));
+            }
+            if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
+                parts.push(url.to_string());
+            }
+            parts.join(" ")
         }
         "terminal" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("?");
