@@ -148,6 +148,11 @@ bmad-bot/
 │   │   ├── git.rs                     # GitTool — git operations via Git CLI subprocess
 │   │   ├── fs.rs
 │   │   └── terminal.rs
+│   ├── ui/
+│   │   ├── mod.rs                     # UiHandle wrapper, public API
+│   │   ├── renderer.rs                # UiRenderer trait definition
+│   │   ├── console.rs                 # ConsoleRenderer (indicatif + console)
+│   │   └── null.rs                    # NullRenderer (no-op for tests/CI)
 │   ├── git_provider/
 │   │   ├── mod.rs
 │   │   ├── github.rs
@@ -384,12 +389,18 @@ let response = streaming_chat(agent, "DS", rig_history, Some(&shutdown)).await?;
 This is a developer tool, not infrastructure software. Users can background it with standard OS tools (`tmux`, `screen`, `nohup`, `systemd`, `launchd`). Adding daemonization (fork, PID files, log rotation) is unnecessary complexity for the MVP.
 
 **Behavior:**
-- Logs to stdout/stderr via `tracing` (structured JSON or pretty-print based on config)
+- In foreground mode (tmux, screen, interactive terminal), the daemon displays structured user-facing terminal output via the `ui/` module — pipeline phases, tool calls, progress indicators. Debug logs are written exclusively to the JSON log file. The stdout `tracing` layer is removed when `ConsoleRenderer` is active.
+- Non-TTY environments (pipes, CI) and `ui_mode: "silent"` configuration automatically use `NullRenderer` (no stdout output)
 - SIGTERM/SIGINT triggers cooperative shutdown via ShutdownFlag
 - No PID file, no log file management, no auto-restart
-- Future (v2): could add `--daemon` flag or provide example systemd/launchd service files
+- Terminal output mode is configurable via `ui_mode` in `bmad-bot.yaml`: `"fancy"` (default — spinners, colors, hierarchy), `"plain"` (no colors/spinners), `"silent"` (no stdout)
+- Future (v2): could add `--daemon` flag or provide example systemd/launchd service files. The `UiRenderer` trait enables future migration to `iocraft` (React-like declarative TUI) or `ratatui` (full TUI framework) without modifying business code.
 
-**Affects:** cli module, main
+**Affects:** cli module, main, ui module
+
+> **Amendment (2026-03-05) — Terminal UI: raw tracing stdout → structured ConsoleRenderer**
+>
+> The original design logged to stdout via `tracing` (structured JSON or pretty-print). In practice, the primary usage mode is foreground via tmux/screen, and raw tracing output is unreadable for real-time monitoring. A new `ui/` module now provides structured terminal output via `indicatif` (spinners, progress) and `console` (colors, styles), completely replacing the stdout tracing layer during daemon execution. The `UiRenderer` trait decouples rendering from business logic, enabling backend swaps without code changes.
 
 ### Decision 7: Surgical Development Tooling — Focused Tools Modeled on Claude Code/Zed
 
@@ -715,11 +726,11 @@ tracing::warn!(action = "supervisor_fallback", question = %q, "Rule engine miss,
 tracing::error!(action = "git_push", error = %e, "Push failed");
 
 // NEVER log sensitive data (API keys, tokens, secrets)
-// NEVER use println! or eprintln! — tracing only
+// NEVER use println! or eprintln! in business logic — tracing for debug, UiHandle for user-facing output
 ```
 
 **LLM Payload Logging (`llm_logging` module):**
-All LLM requests and responses are logged via a dedicated `llm_logging` module (`src/llm_logging.rs`) using the `bmad_bot::llm` tracing target. This allows independent filtering:
+All LLM requests and responses are logged via a dedicated `llm_logging` module (`src/llm/logging.rs`) using the `bmad_bot::llm` tracing target. This allows independent filtering:
 
 ```
 # Enable LLM payload logging
@@ -731,12 +742,41 @@ RUST_LOG=bmad_bot::llm=trace cargo run -- start
 
 Functions: `log_llm_request()`, `log_llm_response()`, `log_llm_error()`, `log_llm_history()`, `log_llm_history_summary()`. Each has an early `tracing::enabled!` guard — zero cost when disabled (~1ns atomic load). Used across session runner, review, and supervisor architect modules.
 
+**Terminal UI Layer (`ui/` module):**
+In foreground mode, the stdout `tracing` layer is removed and replaced by a `ConsoleRenderer` that displays structured, user-facing output via `indicatif` (spinners, progress) and `console` (colors, styles). Debug logs are written exclusively to the JSON file layer. The `UiRenderer` trait abstracts the rendering backend:
+
+- **`ConsoleRenderer`** — rich terminal output with spinners (`indicatif::MultiProgress`), hierarchical indentation, and colors (`console::style()`). Visual vocabulary: `●` completed action, `◉` in-progress (spinner), `└` sub-detail, green/yellow/red/gray color scheme.
+- **`NullRenderer`** — no-op implementation for tests, CI, and `ui_mode: "silent"`.
+
+Modules emit UI events via `UiHandle` (an `Arc<dyn UiRenderer>` wrapper) passed through pipeline, session, and review structs. This is **separate from tracing** — tracing remains for debug/operational logging to file. Key events emitted:
+
+```
+// Pipeline level
+ui.story_start("epic-4/story-4.2", "Agent Session Setup & Chat Loop");
+ui.phase_start("Dev Session");       // starts spinner
+ui.phase_complete("Dev Session", duration);  // resolves spinner to ●
+
+// Session level — tool calls and chat turns
+ui.tool_call("read_file", "src/session/runner.rs");
+ui.tool_call("git", "commit \"feat(session): add recovery\"");
+ui.chat_turn(3, "I'll now implement the context limit...");
+ui.llm_request("dev-session", 3);    // thinking spinner
+ui.llm_response("dev-session", 3, 4200);  // resolves with size
+
+// Completion
+ui.story_complete("epic-4/story-4.2", Some("https://github.com/.../pull/42"));
+ui.story_error("epic-4/story-4.2", "Session failed: context limit exceeded");
+```
+
 **Mandatory rules:**
 - Every session wrapped in a `story_session` span with `story_id`
 - Every tool action logged with `action` field
 - Errors always include `error` field with the error value
 - Sensitive fields filtered — never log API keys, tokens, or credentials
 - All LLM interactions logged via `llm_logging` module, not ad-hoc tracing calls
+- The `ui/` module is the **sole** user-facing terminal output point during daemon execution — all other modules use `tracing` for debug logging only
+- `UiHandle` must be `Send + Sync + Clone` — it is shared across async tasks
+- Exception: `cli/mod.rs` interactive commands (`init`, `status`, `copilot-login`) may use `println!` directly as they run before the daemon loop
 
 ### Cooperative Shutdown Pattern — ShutdownFlag Propagation
 
@@ -916,12 +956,14 @@ mod tests {
 **All AI Agents MUST:**
 - Follow the error type pattern: thiserror per module, anyhow only in binary
 - Implement rig tools using the standard structure above
-- Use tracing with structured fields — never println/eprintln
+- Use tracing with structured fields for debug logging — never println/eprintln in business logic
+- Use `UiHandle` methods for user-facing terminal output — never tracing for UX
 - Log all LLM interactions via the `llm_logging` module
 - Pass config as `Arc<BotConfig>` — never clone, never mutate
 - Propagate `ShutdownFlag` to any function that runs LLM calls
+- Propagate `UiHandle` to any module that needs to emit user-facing events (pipeline, session, review)
 - Use dedicated structs for trait method params and returns
-- Write unit tests with mocked dependencies for every new module
+- Write unit tests with mocked dependencies for every new module — use `NullRenderer` for UI
 - Check the Project Context file for additional rules before implementing any code
 
 **Anti-Patterns (NEVER do these):**
@@ -932,6 +974,8 @@ mod tests {
 - Calling real LLM APIs in unit tests
 - Skipping doc comments on public items
 - Using `agent.chat()` (non-streaming) — always use `streaming_chat()` / `stream_chat()`
+- Using `println!`/`eprintln!` in daemon runtime code for user-facing output — use `UiHandle`
+- Leaking `indicatif` or `console` types into the `UiRenderer` trait signature — keep the trait backend-agnostic
 
 ## Project Structure & Boundaries
 
@@ -997,6 +1041,11 @@ bmad-bot/
 │   │   ├── agent_factory.rs          # AgentFactory + BuiltAgent enum dispatch — centralized LLM provider construction, Copilot API format detection
 │   │   ├── context.rs                # Zed-style XML ContextBuilder — adaptive backtick fencing, absolute path resolution, multi-file support
 │   │   └── logging.rs                # LLM request/response debug logging — dedicated bmad_bot::llm tracing target
+│   ├── ui/
+│   │   ├── mod.rs                    # UiHandle (Arc<dyn UiRenderer> wrapper), public API, module exports
+│   │   ├── renderer.rs               # UiRenderer trait — backend-agnostic interface for all user-facing terminal events
+│   │   ├── console.rs                # ConsoleRenderer — indicatif (MultiProgress, spinners) + console (colors, styles) for rich terminal output
+│   │   └── null.rs                   # NullRenderer — no-op implementation for tests, CI, and silent mode
 │   └── pipeline.rs                   # StoryPipeline — orchestrates watcher → session → review → PR → notify per story
 └── tests/
     └── e2e/
@@ -1018,7 +1067,8 @@ bmad-bot/
 | FR33-34 | Resilience & Shutdown | `cli/`, `session/`, `pipeline.rs` | ShutdownFlag created in `run_start()`, propagated through `pipeline.rs` → `session/runner.rs` → `streaming_chat()`. WAL save on interrupt |
 | FR35-36 | Error Alerts & Validation | *Cross-cutting* | reqwest-middleware + per-module error handling + notifier |
 | FR39 | Copilot Auth | `auth/` | `github_copilot.rs` (OAuth Device Flow, token exchange, CopilotTokenCache) |
-| FR40 | LLM Logging | `llm_logging.rs` | Request/response payload logging, `bmad_bot::llm` tracing target |
+| FR40 | LLM Logging | `llm/logging.rs` | Request/response payload logging, `bmad_bot::llm` tracing target |
+| FR43 | Terminal UI | `ui/` | `renderer.rs` (UiRenderer trait), `console.rs` (ConsoleRenderer — indicatif + console), `null.rs` (NullRenderer), `mod.rs` (UiHandle wrapper). UiHandle propagated through `pipeline.rs` → `session/runner.rs` → `review/mod.rs` |
 | — | Pipeline Orchestration | `pipeline.rs` | `StoryPipeline` — orchestrates full story pipeline (session → review → PR → notify) |
 | — | LLM Provider Abstraction | `llm/agent_factory.rs` | `AgentFactory` + `BuiltAgent` enum — centralized provider construction, Copilot API format detection, `stream_chat()` dispatch |
 | — | XML Context | `llm/context.rs` | `ContextBuilder` for agent activation (Zed-style XML formatting) |
@@ -1038,8 +1088,8 @@ bmad-bot/
 │        │    │ (orchestr.) │    │   deps.rs     │
 └────────┘    └──────┬──────┘    └───────────────┘
   │ creates          │
-  │ ShutdownFlag     │ propagates ShutdownFlag
-  │                  │
+  │ ShutdownFlag     │ propagates ShutdownFlag + UiHandle
+  │ + UiHandle       │
   │           ┌──────┴──────┐
   └──────────▶│  session/   │
               │  runner.rs  │◀─── llm/context.rs (XML context for activation)
@@ -1065,6 +1115,26 @@ bmad-bot/
                    │ git_provider/ │ │  notifier/   │
                    │ github/gitlab │ │  telegram    │
                    └──────────────┘ └──────────────┘
+
+        ┌──────────────┐
+        │     ui/      │◀─── consumed by cli/, pipeline.rs, session/runner.rs, review/mod.rs
+        │ console.rs   │     UiHandle (Arc<dyn UiRenderer>) — Send + Sync + Clone
+        │ null.rs      │     ConsoleRenderer (indicatif + console) | NullRenderer (tests/CI)
+        │ renderer.rs  │
+        └──────────────┘
+```
+
+**UiHandle propagation path:**
+```
+cli/run_start() ──creates──▶ UiHandle (Arc<dyn UiRenderer>)
+       │                     ConsoleRenderer if TTY + ui_mode=fancy
+       │                     NullRenderer if non-TTY or ui_mode=silent
+       │
+       └──▶ StoryPipeline::new(ui)
+                   │
+                   ├──▶ SessionRunner::new(ui)   ── emits tool calls, chat turns, LLM events
+                   │
+                   └──▶ ReviewRunner::new(ui)     ── emits review events
 ```
 
 **ShutdownFlag propagation path:**
@@ -1100,12 +1170,12 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 
 ### Data Flow
 
-1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>` + `Arc<BotSecrets>`. `cli/run_start()` validates git availability (`git --version` → require >= 2.30), creates the `ShutdownFlag`, and spawns the signal handler task.
-2. **Crash check:** `SessionRunner::check_and_recover_wal()` checks for existing WAL file → if found, `pipeline.recover_and_process()` resumes the interrupted session (skip to step 5 with loaded history)
-3. **Poll:** `watcher/` reads `sprint-status.yaml` from configured output path → `deps.rs` computes topological sort and pre-gate → eligible stories or sleep until next cycle. Uses `tokio::time::interval` which **ticks immediately on first call** — daemon polls at launch, not after `polling_interval_secs`.
-4. **Session init:** `session/runner.rs` builds the system preamble (operational instructions + tool usage rules + language override), then uses `AgentFactory::build()` to construct the rig agent with **9 tools** (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool). `GitTool` invokes the `git` CLI via `tokio::process::Command`, inheriting the user's full git configuration. `AgentFactory` centralizes all provider construction behind a `BuiltAgent` enum with `stream_chat()` dispatch. Provider resolution is hardcoded: Anthropic → Messages API, OpenAI → Responses API, GitHub Copilot → explicit match on known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) for Responses API, fallback to Completions API for all other models (safe default for non-OpenAI backends).
-5. **Agent activation:** `activate_agent()` sends the BMAD dev agent file (`dev.md`) as the first user message wrapped in Zed-style XML context tags (via `ContextBuilder`). The agent processes activation steps via tools (loads `config.yaml`, displays greeting/menu). Returns `(rig_history, chat_history)` for subsequent turns.
-6. **Chat loop:** Sends `"DS"` via `streaming_chat()` → agent works autonomously via tools → `state.rs` persists chat history (WAL) after each turn. **All LLM calls use streaming** — `streaming_chat()` consumes SSE stream, collects text, handles tool calls via rig's multi-turn stream. ShutdownFlag checked between every chunk. `llm_logging` records request/response payloads.
+1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>` + `Arc<BotSecrets>`. `cli/run_start()` validates git availability (`git --version` → require >= 2.30), creates the `ShutdownFlag`, spawns the signal handler task, and creates the `UiHandle` (ConsoleRenderer if TTY + `ui_mode=fancy`, NullRenderer otherwise). When `ConsoleRenderer` is active, the stdout `tracing` layer is removed — debug logs go to file only. UI: `ui.daemon_start()`.
+2. **Crash check:** `SessionRunner::check_and_recover_wal()` checks for existing WAL file → if found, `pipeline.recover_and_process()` resumes the interrupted session (skip to step 5 with loaded history). UI: `ui.crash_recovery_start()` / `ui.crash_recovery_complete()`.
+3. **Poll:** `watcher/` reads `sprint-status.yaml` from configured output path → `deps.rs` computes topological sort and pre-gate → eligible stories or sleep until next cycle. Uses `tokio::time::interval` which **ticks immediately on first call** — daemon polls at launch, not after `polling_interval_secs`. UI: quiet status line on idle cycles, `ui.stories_found(count)` when stories are eligible.
+4. **Session init:** `session/runner.rs` builds the system preamble (operational instructions + tool usage rules + language override), then uses `AgentFactory::build()` to construct the rig agent with **9 tools** (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, ThinkTool). `GitTool` invokes the `git` CLI via `tokio::process::Command`, inheriting the user's full git configuration. `AgentFactory` centralizes all provider construction behind a `BuiltAgent` enum with `stream_chat()` dispatch. Provider resolution is hardcoded: Anthropic → Messages API, OpenAI → Responses API, GitHub Copilot → explicit match on known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) for Responses API, fallback to Completions API for all other models (safe default for non-OpenAI backends). UI: `ui.story_start()`, `ui.phase_start("Dev Session")`.
+5. **Agent activation:** `activate_agent()` sends the BMAD dev agent file (`dev.md`) as the first user message wrapped in Zed-style XML context tags (via `ContextBuilder`). The agent processes activation steps via tools (loads `config.yaml`, displays greeting/menu). Returns `(rig_history, chat_history)` for subsequent turns. UI: `ui.phase_start("Agent Activation")` / `ui.phase_complete()`.
+6. **Chat loop:** Sends `"DS"` via `streaming_chat()` → agent works autonomously via tools → `state.rs` persists chat history (WAL) after each turn. **All LLM calls use streaming** — `streaming_chat()` consumes SSE stream, collects text, handles tool calls via rig's multi-turn stream. ShutdownFlag checked between every chunk. `llm_logging` records request/response payloads. UI: `ui.chat_turn()` after each turn, `ui.tool_call()` for each tool invocation, `ui.llm_request()` / `ui.llm_response()` for LLM interaction visibility.
 7. **During session:** Agent calls `ask_supervisor` tool as needed → rule engine → LLM fallback (architect session) → or escalation (stops session)
 8. **Post-completion — Impact analysis:** After the agent signals `<<BMAD_JOB_DONE>>`, the session runner executes a three-step post-completion sequence: **(a) Final commit** — commit any uncommitted changes (tool access: yes). **(b) Impact analysis** — a dedicated chat turn where the agent retains full tool access and evaluates downstream impact (tool access: yes). The agent reads `sprint-status.yaml`, identifies stories whose `depends-on` references the completed story, reads their Dev Notes ("Previous Story Intelligence" sections), compares actual implementation against assumptions, and updates stale sections with what was actually built. Optionally updates `architecture.md` if new modules or changed interfaces were introduced (checks existence first). Commits changes with `docs(stories): update downstream specs after {story_key}` prefix. **Design constraints:** best-effort and non-blocking — if this turn fails (LLM error, timeout, context exhaustion), the session proceeds to PR summary without error. Agent-driven — the daemon sends the prompt, the agent uses existing tools (`read_file`, `edit_file`, `git`). Scope-guarded — only "Previous Story Intelligence" in Dev Notes and architecture references are updated, never tasks, ACs, or other story sections. Updates are idempotent — sections are replaced, not appended. Dependency resolution uses `depends-on` as primary criterion, same-epic document order as secondary. **(c) PR summary** — agent generates `<pr-summary>` for PR description (tool access: no, text only). The PR summary prompt is aware that an impact analysis commit may have been added.
 9. **Push & PR creation:** `pipeline.rs` pushes the story branch to remote via `git push`, then `git_provider/` creates PR (GitHub or GitLab) with agent-written description + Supervisor Decisions section. The PR is immediately visible for human review even if automated code review is disabled.
