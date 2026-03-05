@@ -359,8 +359,7 @@ impl ReviewRunner {
                             story_key = %story.story_key,
                             "Transient error — retrying with fresh session"
                         );
-                        self.ui
-                            .llm_retry("code-review", 0, (attempt + 1) as u32, 0.0);
+                        self.ui.llm_retry("review", 0, (attempt + 1) as u32, 0.0);
                         continue;
                     }
 
@@ -518,11 +517,14 @@ impl ReviewRunner {
 
         // Activate agent: send dev.md as user message (same flow as dev session)
         self.ui.activation_start();
+        self.ui.llm_request("review", 0);
+        self.ui
+            .llm_request_content("review", 0, "[activate dev.md]");
         let (activation_rig_history, _activation_chat_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
                 "_bmad/bmm/agents/dev.md",
-                "code-review",
+                "review",
                 Some(&self.shutdown),
                 Some(&self.ui),
             )
@@ -535,6 +537,17 @@ impl ReviewRunner {
                     reason: format!("Agent activation failed: {e}"),
                 }
             })?;
+        // Show activation response (agent menu)
+        if let Some(last_assistant) = _activation_chat_history
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+        {
+            self.ui
+                .llm_response("review", 0, last_assistant.content.len());
+            self.ui
+                .llm_response_content("review", 0, &last_assistant.content);
+        }
         self.ui.activation_complete();
 
         // Send "CR" with English language override (same pattern as DS in dev session)
@@ -542,13 +555,9 @@ impl ReviewRunner {
             "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [CR] for story file: {}",
             story.specs_path.display()
         );
-        log_llm_request(
-            "code-review",
-            1,
-            &initial_message,
-            activation_rig_history.len(),
-        );
-        self.ui.llm_request("code-review", 1);
+        log_llm_request("review", 1, &initial_message, activation_rig_history.len());
+        self.ui.llm_request("review", 1);
+        self.ui.llm_request_content("review", 1, &initial_message);
         let (response, mut full_history) = agent
             .stream_chat(
                 &initial_message,
@@ -558,15 +567,16 @@ impl ReviewRunner {
             )
             .await
             .map_err(|e| {
-                log_llm_error("code-review", 1, &e);
-                self.ui.llm_error("code-review", 1, &e.to_string());
+                log_llm_error("review", 1, &e);
+                self.ui.llm_error("review", 1, &e.to_string());
                 ReviewError::ChatFailed {
                     turn: 1,
                     reason: e.to_string(),
                 }
             })?;
-        log_llm_response("code-review", 1, &response);
-        self.ui.llm_response("code-review", 1, response.len());
+        log_llm_response("review", 1, &response);
+        self.ui.llm_response("review", 1, response.len());
+        self.ui.llm_response_content("review", 1, &response);
         self.ui
             .chat_turn(1, &format!("[review] {}", truncate_summary(&response, 80)));
 
@@ -692,8 +702,9 @@ impl ReviewRunner {
                 ResponseAction::NoReply => "Continue.".to_string(),
             };
 
-            log_llm_request("code-review", turn, &reply, full_history.len());
-            self.ui.llm_request("code-review", turn as u32);
+            log_llm_request("review", turn, &reply, full_history.len());
+            self.ui.llm_request("review", turn as u32);
+            self.ui.llm_request_content("review", turn as u32, &reply);
             match agent
                 .stream_chat(
                     reply.as_str(),
@@ -704,16 +715,16 @@ impl ReviewRunner {
                 .await
             {
                 Ok((r, new_hist)) => {
-                    log_llm_response("code-review", turn, &r);
-                    self.ui.llm_response("code-review", turn as u32, r.len());
+                    log_llm_response("review", turn, &r);
+                    self.ui.llm_response("review", turn as u32, r.len());
+                    self.ui.llm_response_content("review", turn as u32, &r);
                     retries = 0;
                     full_history = new_hist;
                     current_response = r;
                 }
                 Err(e) => {
-                    log_llm_error("code-review", turn, &e);
-                    self.ui
-                        .llm_error("code-review", turn as u32, &e.to_string());
+                    log_llm_error("review", turn, &e);
+                    self.ui.llm_error("review", turn as u32, &e.to_string());
                     retries += 1;
                     tracing::warn!(
                         action = "review_chat_error",
@@ -723,7 +734,7 @@ impl ReviewRunner {
                         "Review chat error, will retry"
                     );
                     self.ui
-                        .llm_retry("code-review", turn as u32, retries as u32, 0.0);
+                        .llm_retry("review", turn as u32, retries as u32, 0.0);
                     if retries >= MAX_RETRIES {
                         if post_review_phase {
                             self.ui.phase_error(

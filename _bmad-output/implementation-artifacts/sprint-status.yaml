@@ -130,5 +130,5 @@ development_status:
     10-3-session-integration-tool-calls-chat-turns-visible: review # depends-on: 10-2
     10-4-review-integration-ui-events-in-code-review: review # depends-on: 10-3
     10-5-polish-visual-vocabulary-colors-final-formatting: review # depends-on: 10-4
-    10-6-llm-chat-content-visibility: ready-for-dev # depends-on: 10-5
+    10-6-llm-chat-content-visibility: review # depends-on: 10-5
     epic-10-retrospective: optional

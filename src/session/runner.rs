@@ -1053,11 +1053,14 @@ impl SessionRunner {
     ) -> Result<SessionOutcome, SessionOutcome> {
         // Step 4a — Activate agent: send dev.md as user message
         self.ui.activation_start();
+        self.ui.llm_request("recovery", 0);
+        self.ui
+            .llm_request_content("recovery", 0, "[activate dev.md]");
         let (mut activation_history, mut compressed_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
                 "_bmad/bmm/agents/dev.md",
-                "dev-recovery",
+                "recovery",
                 Some(&self.shutdown),
                 Some(&self.ui),
             )
@@ -1071,17 +1074,29 @@ impl SessionRunner {
                     decisions: decision_log.records(),
                 }
             })?;
+        // Show activation response (agent menu)
+        if let Some(last_assistant) = compressed_history
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+        {
+            self.ui
+                .llm_response("recovery", 0, last_assistant.content.len());
+            self.ui
+                .llm_response_content("recovery", 0, &last_assistant.content);
+        }
+        self.ui.activation_complete();
 
         // Step 4b — Enter chat mode with English language override.
         // The BMAD activation loads config.yaml which may set communication_language
         // to a non-English language. The response analyzer only matches English patterns.
         let ch_msg = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CH";
-        self.ui.activation_complete();
 
-        // Step 4b — Enter chat mode with English language override.
         let ch_turn = compressed_history.len() / 2;
-        log_llm_request("dev-recovery", ch_turn, ch_msg, activation_history.len());
-        self.ui.llm_request("dev-recovery", ch_turn as u32);
+        log_llm_request("recovery", ch_turn, ch_msg, activation_history.len());
+        self.ui.llm_request("recovery", ch_turn as u32);
+        self.ui
+            .llm_request_content("recovery", ch_turn as u32, ch_msg);
         let (ch_response, ch_full_history) = agent
             .stream_chat(
                 ch_msg,
@@ -1091,8 +1106,8 @@ impl SessionRunner {
             )
             .await
             .map_err(|e| {
-                log_llm_error("dev-recovery", 0, &e);
-                self.ui.llm_error("dev-recovery", 0, &e.to_string());
+                log_llm_error("recovery", 0, &e);
+                self.ui.llm_error("recovery", 0, &e.to_string());
                 tracing::error!(action = "context_limit_activation_ch_failed", error = %e);
                 SessionOutcome::Failed {
                     story_key: story.story_key.clone(),
@@ -1100,9 +1115,11 @@ impl SessionRunner {
                     decisions: decision_log.records(),
                 }
             })?;
-        log_llm_response("dev-recovery", ch_turn, &ch_response);
+        log_llm_response("recovery", ch_turn, &ch_response);
         self.ui
-            .llm_response("dev-recovery", ch_turn as u32, ch_response.len());
+            .llm_response("recovery", ch_turn as u32, ch_response.len());
+        self.ui
+            .llm_response_content("recovery", ch_turn as u32, &ch_response);
         // Use the full rig history returned by stream_chat — it includes tool calls
         // (think, read_file, etc.) that the agent made during this turn. Manually
         // pushing Message::user/assistant would lose those intermediate messages and
@@ -1120,12 +1137,14 @@ impl SessionRunner {
         // Step 4c — Load project context (existing flow unchanged)
         let ctx_turn = compressed_history.len() / 2;
         log_llm_request(
-            "dev-recovery",
+            "recovery",
             ctx_turn,
             "Load the project context",
             activation_history.len(),
         );
-        self.ui.llm_request("dev-recovery", ctx_turn as u32);
+        self.ui.llm_request("recovery", ctx_turn as u32);
+        self.ui
+            .llm_request_content("recovery", ctx_turn as u32, "Load the project context");
         let (ctx_response, ctx_full_history) = agent
             .stream_chat(
                 "Load the project context",
@@ -1135,9 +1154,9 @@ impl SessionRunner {
             )
             .await
             .map_err(|e| {
-                log_llm_error("dev-recovery", ctx_turn, &e);
+                log_llm_error("recovery", ctx_turn, &e);
                 self.ui
-                    .llm_error("dev-recovery", ctx_turn as u32, &e.to_string());
+                    .llm_error("recovery", ctx_turn as u32, &e.to_string());
                 tracing::error!(action = "context_limit_activation_ctx_failed", error = %e);
                 SessionOutcome::Failed {
                     story_key: story.story_key.clone(),
@@ -1145,9 +1164,11 @@ impl SessionRunner {
                     decisions: decision_log.records(),
                 }
             })?;
-        log_llm_response("dev-recovery", ctx_turn, &ctx_response);
+        log_llm_response("recovery", ctx_turn, &ctx_response);
         self.ui
-            .llm_response("dev-recovery", ctx_turn as u32, ctx_response.len());
+            .llm_response("recovery", ctx_turn as u32, ctx_response.len());
+        self.ui
+            .llm_response_content("recovery", ctx_turn as u32, &ctx_response);
         // Same as step 4b — use full rig history to preserve tool call context.
         // Not read after this point, but kept for symmetry / future use.
         let _ = ctx_full_history;
@@ -1264,12 +1285,14 @@ impl SessionRunner {
                 // Retries transient errors (503, 429, timeouts) with exponential backoff.
                 let mut activation_retries = 0usize;
                 self.ui.activation_start();
+                self.ui.llm_request("dev", 0);
+                self.ui.llm_request_content("dev", 0, "[activate dev.md]");
                 let (activation_rig_history, activation_chat_history) = loop {
                     match agent
                         .activate_agent(
                             &self.config.bmad_paths.project_root,
                             "_bmad/bmm/agents/dev.md",
-                            "dev-session",
+                            "dev",
                             Some(&self.shutdown),
                             Some(&self.ui),
                         )
@@ -1280,8 +1303,7 @@ impl SessionRunner {
                             // Token expired during activation — rebuild agent with fresh token
                             if is_token_expired_error(&e) && token_refreshes < MAX_TOKEN_REFRESHES {
                                 token_refreshes += 1;
-                                self.ui
-                                    .llm_retry("dev-session", 0, token_refreshes as u32, 0.0);
+                                self.ui.llm_retry("dev", 0, token_refreshes as u32, 0.0);
                                 tracing::warn!(
                                     action = "token_expired_rebuild",
                                     step = "activation",
@@ -1310,7 +1332,7 @@ impl SessionRunner {
                                 let delay =
                                     ACTIVATION_BACKOFF_BASE_SECS * (1 << (activation_retries - 1));
                                 self.ui.llm_retry(
-                                    "dev-session",
+                                    "dev",
                                     0,
                                     activation_retries as u32,
                                     delay as f64,
@@ -1338,6 +1360,16 @@ impl SessionRunner {
                     }
                 };
 
+                // Show activation response (agent menu)
+                if let Some(last_assistant) = activation_chat_history
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "assistant")
+                {
+                    self.ui.llm_response("dev", 0, last_assistant.content.len());
+                    self.ui
+                        .llm_response_content("dev", 0, &last_assistant.content);
+                }
                 self.ui.activation_complete();
 
                 // Persist activation history in WAL
@@ -1356,7 +1388,10 @@ impl SessionRunner {
                 // language, causing the agent to respond in that language. The response
                 // analyzer only matches English patterns, so we must enforce English here.
                 let initial_message = format!(
-                    "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [DS] for story file: {}",
+                    "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+                     BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
+                     Execute [DS] for story file: {}",
+                    story.branch_name,
                     story.specs_path.display()
                 );
                 state.add_user_message(&initial_message);
@@ -1367,12 +1402,14 @@ impl SessionRunner {
                 let mut ds_retries = 0usize;
                 let (response, ds_full_history) = loop {
                     log_llm_request(
-                        "dev-session",
+                        "dev",
                         activation_turn,
                         &initial_message,
                         activation_rig_history.len(),
                     );
-                    self.ui.llm_request("dev-session", activation_turn as u32);
+                    self.ui.llm_request("dev", activation_turn as u32);
+                    self.ui
+                        .llm_request_content("dev", activation_turn as u32, &initial_message);
                     match agent
                         .stream_chat(
                             &initial_message,
@@ -1383,13 +1420,14 @@ impl SessionRunner {
                         .await
                     {
                         Ok((r, hist)) => {
-                            log_llm_response("dev-session", 0, &r);
-                            self.ui.llm_response("dev-session", 0, r.len());
+                            log_llm_response("dev", 0, &r);
+                            self.ui.llm_response("dev", 0, r.len());
+                            self.ui.llm_response_content("dev", 0, &r);
                             break (r, hist);
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", 0, &e);
-                            self.ui.llm_error("dev-session", 0, &e.to_string());
+                            log_llm_error("dev", 0, &e);
+                            self.ui.llm_error("dev", 0, &e.to_string());
                             let error_str = e.to_string();
 
                             // Token expired during DS send — rebuild agent with fresh token
@@ -1397,8 +1435,7 @@ impl SessionRunner {
                                 && token_refreshes < MAX_TOKEN_REFRESHES
                             {
                                 token_refreshes += 1;
-                                self.ui
-                                    .llm_retry("dev-session", 0, token_refreshes as u32, 0.0);
+                                self.ui.llm_retry("dev", 0, token_refreshes as u32, 0.0);
                                 tracing::warn!(
                                     action = "token_expired_rebuild",
                                     step = "initial_ds",
@@ -1425,12 +1462,7 @@ impl SessionRunner {
                             {
                                 ds_retries += 1;
                                 let delay = ACTIVATION_BACKOFF_BASE_SECS * (1 << (ds_retries - 1));
-                                self.ui.llm_retry(
-                                    "dev-session",
-                                    0,
-                                    ds_retries as u32,
-                                    delay as f64,
-                                );
+                                self.ui.llm_retry("dev", 0, ds_retries as u32, delay as f64);
                                 tracing::warn!(
                                     action = "initial_chat_transient_retry",
                                     retry = %ds_retries,
@@ -1487,17 +1519,32 @@ impl SessionRunner {
 
                     // Activate agent: send dev.md as user message
                     self.ui.activation_start();
+                    self.ui.llm_request("recovery", 0);
+                    self.ui
+                        .llm_request_content("recovery", 0, "[activate dev.md]");
                     let (activation_rig_history, activation_chat_history) = match agent
                         .activate_agent(
                             &self.config.bmad_paths.project_root,
                             "_bmad/bmm/agents/dev.md",
-                            "dev-recovery",
+                            "recovery",
                             Some(&self.shutdown),
                             Some(&self.ui),
                         )
                         .await
                     {
                         Ok(pair) => {
+                            // Show activation response (agent menu)
+                            if let Some(last_assistant) =
+                                pair.1.iter().rev().find(|m| m.role == "assistant")
+                            {
+                                self.ui
+                                    .llm_response("recovery", 0, last_assistant.content.len());
+                                self.ui.llm_response_content(
+                                    "recovery",
+                                    0,
+                                    &last_assistant.content,
+                                );
+                            }
                             self.ui.activation_complete();
                             pair
                         }
@@ -1532,12 +1579,17 @@ impl SessionRunner {
 
                     let activation_turn = activation_chat_history.len() / 2;
                     log_llm_request(
-                        "dev-recovery",
+                        "recovery",
                         activation_turn,
                         &initial_message,
                         activation_rig_history.len(),
                     );
-                    self.ui.llm_request("dev-recovery", activation_turn as u32);
+                    self.ui.llm_request("recovery", activation_turn as u32);
+                    self.ui.llm_request_content(
+                        "recovery",
+                        activation_turn as u32,
+                        &initial_message,
+                    );
                     let (response, ds_full_history) = match agent
                         .stream_chat(
                             &initial_message,
@@ -1548,13 +1600,14 @@ impl SessionRunner {
                         .await
                     {
                         Ok((r, hist)) => {
-                            log_llm_response("dev-recovery", 0, &r);
-                            self.ui.llm_response("dev-recovery", 0, r.len());
+                            log_llm_response("recovery", 0, &r);
+                            self.ui.llm_response("recovery", 0, r.len());
+                            self.ui.llm_response_content("recovery", 0, &r);
                             (r, hist)
                         }
                         Err(e) => {
-                            log_llm_error("dev-recovery", 0, &e);
-                            self.ui.llm_error("dev-recovery", 0, &e.to_string());
+                            log_llm_error("recovery", 0, &e);
+                            self.ui.llm_error("recovery", 0, &e.to_string());
                             tracing::error!(action = "chat_failed", turn = 0, error = %e, "Initial chat failed during recovery");
                             let _ = self.handle_failure(story).await;
                             return SessionOutcome::Failed {
@@ -1603,10 +1656,12 @@ impl SessionRunner {
                             })
                             .collect();
 
-                        log_llm_request("dev-recovery", turn_offset, &last_user_msg, history.len());
-                        self.ui.llm_request("dev-recovery", turn_offset as u32);
+                        log_llm_request("recovery", turn_offset, &last_user_msg, history.len());
+                        self.ui.llm_request("recovery", turn_offset as u32);
+                        self.ui
+                            .llm_request_content("recovery", turn_offset as u32, &last_user_msg);
                         log_llm_history(
-                            "dev-recovery",
+                            "recovery",
                             turn_offset,
                             &state.chat_history[..state.chat_history.len() - 1],
                         );
@@ -1620,18 +1675,17 @@ impl SessionRunner {
                             .await
                         {
                             Ok((r, hist)) => {
-                                log_llm_response("dev-recovery", turn_offset, &r);
+                                log_llm_response("recovery", turn_offset, &r);
                                 self.ui
-                                    .llm_response("dev-recovery", turn_offset as u32, r.len());
+                                    .llm_response("recovery", turn_offset as u32, r.len());
+                                self.ui
+                                    .llm_response_content("recovery", turn_offset as u32, &r);
                                 (r, hist)
                             }
                             Err(e) => {
-                                log_llm_error("dev-recovery", turn_offset, &e);
-                                self.ui.llm_error(
-                                    "dev-recovery",
-                                    turn_offset as u32,
-                                    &e.to_string(),
-                                );
+                                log_llm_error("recovery", turn_offset, &e);
+                                self.ui
+                                    .llm_error("recovery", turn_offset as u32, &e.to_string());
                                 tracing::error!(
                                     action = "chat_failed",
                                     error = %e,
@@ -1712,8 +1766,9 @@ impl SessionRunner {
 
                     self.ui.phase_start("Final Commit");
                     let final_commit_start = std::time::Instant::now();
-                    log_llm_request("dev-session", turn, commit_msg, full_history.len());
-                    self.ui.llm_request("dev-session", turn as u32);
+                    log_llm_request("dev", turn, commit_msg, full_history.len());
+                    self.ui.llm_request("dev", turn as u32);
+                    self.ui.llm_request_content("dev", turn as u32, commit_msg);
                     match agent
                         .stream_chat(
                             commit_msg,
@@ -1724,8 +1779,9 @@ impl SessionRunner {
                         .await
                     {
                         Ok((r, new_hist)) => {
-                            log_llm_response("dev-session", turn, &r);
-                            self.ui.llm_response("dev-session", turn as u32, r.len());
+                            log_llm_response("dev", turn, &r);
+                            self.ui.llm_response("dev", turn as u32, r.len());
+                            self.ui.llm_response_content("dev", turn as u32, &r);
                             full_history = new_hist;
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
@@ -1739,9 +1795,8 @@ impl SessionRunner {
                             );
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", turn, &e);
-                            self.ui
-                                .llm_error("dev-session", turn as u32, &e.to_string());
+                            log_llm_error("dev", turn, &e);
+                            self.ui.llm_error("dev", turn as u32, &e.to_string());
                             let error_str = e.to_string();
 
                             // Token expired on final commit — rebuild and retry once
@@ -1749,12 +1804,8 @@ impl SessionRunner {
                                 && token_refreshes < MAX_TOKEN_REFRESHES
                             {
                                 token_refreshes += 1;
-                                self.ui.llm_retry(
-                                    "dev-session",
-                                    turn as u32,
-                                    token_refreshes as u32,
-                                    0.0,
-                                );
+                                self.ui
+                                    .llm_retry("dev", turn as u32, token_refreshes as u32, 0.0);
                                 tracing::warn!(
                                     action = "token_expired_rebuild",
                                     turn = %turn,
@@ -1780,8 +1831,9 @@ impl SessionRunner {
                                         )
                                         .await
                                     {
-                                        log_llm_response("dev-session", turn, &r);
-                                        self.ui.llm_response("dev-session", turn as u32, r.len());
+                                        log_llm_response("dev", turn, &r);
+                                        self.ui.llm_response("dev", turn as u32, r.len());
+                                        self.ui.llm_response_content("dev", turn as u32, &r);
                                         full_history = new_hist;
                                         state.add_assistant_message(&r);
                                         let _ = state.save(&self.state_file_path).await;
@@ -1822,13 +1874,10 @@ impl SessionRunner {
 
                     self.ui.phase_start("Impact Analysis");
                     let impact_start = std::time::Instant::now();
-                    log_llm_request(
-                        "dev-session",
-                        turn + 1,
-                        "[impact-analysis]",
-                        full_history.len(),
-                    );
-                    self.ui.llm_request("dev-session", (turn + 1) as u32);
+                    log_llm_request("dev", turn + 1, "[impact-analysis]", full_history.len());
+                    self.ui.llm_request("dev", (turn + 1) as u32);
+                    self.ui
+                        .llm_request_content("dev", (turn + 1) as u32, &impact_prompt);
                     match agent
                         .stream_chat(
                             &impact_prompt,
@@ -1839,9 +1888,9 @@ impl SessionRunner {
                         .await
                     {
                         Ok((r, new_hist)) => {
-                            log_llm_response("dev-session", turn + 1, &r);
-                            self.ui
-                                .llm_response("dev-session", (turn + 1) as u32, r.len());
+                            log_llm_response("dev", turn + 1, &r);
+                            self.ui.llm_response("dev", (turn + 1) as u32, r.len());
+                            self.ui.llm_response_content("dev", (turn + 1) as u32, &r);
                             full_history = new_hist;
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
@@ -1855,9 +1904,8 @@ impl SessionRunner {
                             );
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", turn + 1, &e);
-                            self.ui
-                                .llm_error("dev-session", (turn + 1) as u32, &e.to_string());
+                            log_llm_error("dev", turn + 1, &e);
+                            self.ui.llm_error("dev", (turn + 1) as u32, &e.to_string());
                             let error_str = e.to_string();
 
                             // Token expired on impact analysis — rebuild and retry once
@@ -1866,7 +1914,7 @@ impl SessionRunner {
                             {
                                 token_refreshes += 1;
                                 self.ui.llm_retry(
-                                    "dev-session",
+                                    "dev",
                                     (turn + 1) as u32,
                                     token_refreshes as u32,
                                     0.0,
@@ -1896,12 +1944,9 @@ impl SessionRunner {
                                         )
                                         .await
                                     {
-                                        log_llm_response("dev-session", turn + 1, &r);
-                                        self.ui.llm_response(
-                                            "dev-session",
-                                            (turn + 1) as u32,
-                                            r.len(),
-                                        );
+                                        log_llm_response("dev", turn + 1, &r);
+                                        self.ui.llm_response("dev", (turn + 1) as u32, r.len());
+                                        self.ui.llm_response_content("dev", (turn + 1) as u32, &r);
                                         full_history = new_hist;
                                         state.add_assistant_message(&r);
                                         let _ = state.save(&self.state_file_path).await;
@@ -1975,8 +2020,10 @@ impl SessionRunner {
 
                     self.ui.phase_start("PR Summary");
                     let pr_start = std::time::Instant::now();
-                    log_llm_request("dev-session", turn + 2, "[pr-summary]", full_history.len());
-                    self.ui.llm_request("dev-session", (turn + 2) as u32);
+                    log_llm_request("dev", turn + 2, "[pr-summary]", full_history.len());
+                    self.ui.llm_request("dev", (turn + 2) as u32);
+                    self.ui
+                        .llm_request_content("dev", (turn + 2) as u32, &pr_summary_prompt);
                     let (pr_context, pr_how_to_test, pr_additional_info) = match agent
                         .stream_chat(
                             &pr_summary_prompt,
@@ -1987,9 +2034,9 @@ impl SessionRunner {
                         .await
                     {
                         Ok((r, _)) => {
-                            log_llm_response("dev-session", turn + 2, &r);
-                            self.ui
-                                .llm_response("dev-session", (turn + 2) as u32, r.len());
+                            log_llm_response("dev", turn + 2, &r);
+                            self.ui.llm_response("dev", (turn + 2) as u32, r.len());
+                            self.ui.llm_response_content("dev", (turn + 2) as u32, &r);
                             state.add_assistant_message(&r);
                             let _ = state.save(&self.state_file_path).await;
                             self.ui.phase_complete("PR Summary", pr_start.elapsed());
@@ -2013,9 +2060,8 @@ impl SessionRunner {
                             }
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", turn + 2, &e);
-                            self.ui
-                                .llm_error("dev-session", (turn + 2) as u32, &e.to_string());
+                            log_llm_error("dev", turn + 2, &e);
+                            self.ui.llm_error("dev", (turn + 2) as u32, &e.to_string());
                             let error_str = e.to_string();
 
                             // Token expired on PR summary — rebuild and retry once
@@ -2024,7 +2070,7 @@ impl SessionRunner {
                             {
                                 token_refreshes += 1;
                                 self.ui.llm_retry(
-                                    "dev-session",
+                                    "dev",
                                     (turn + 2) as u32,
                                     token_refreshes as u32,
                                     0.0,
@@ -2055,11 +2101,12 @@ impl SessionRunner {
                                         .await
                                     {
                                         Ok((r, _)) => {
-                                            log_llm_response("dev-session", turn + 2, &r);
-                                            self.ui.llm_response(
-                                                "dev-session",
+                                            log_llm_response("dev", turn + 2, &r);
+                                            self.ui.llm_response("dev", (turn + 2) as u32, r.len());
+                                            self.ui.llm_response_content(
+                                                "dev",
                                                 (turn + 2) as u32,
-                                                r.len(),
+                                                &r,
                                             );
                                             state.add_assistant_message(&r);
                                             let _ = state.save(&self.state_file_path).await;
@@ -2175,9 +2222,10 @@ impl SessionRunner {
                     };
                     state.add_user_message(&reply);
 
-                    log_llm_request("dev-session", turn, &reply, full_history.len());
-                    self.ui.llm_request("dev-session", turn as u32);
-                    log_llm_history_summary("dev-session", turn, &state.chat_history);
+                    log_llm_request("dev", turn, &reply, full_history.len());
+                    self.ui.llm_request("dev", turn as u32);
+                    self.ui.llm_request_content("dev", turn as u32, &reply);
+                    log_llm_history_summary("dev", turn, &state.chat_history);
                     match agent
                         .stream_chat(
                             reply.as_str(),
@@ -2188,8 +2236,9 @@ impl SessionRunner {
                         .await
                     {
                         Ok((r, new_hist)) => {
-                            log_llm_response("dev-session", turn, &r);
-                            self.ui.llm_response("dev-session", turn as u32, r.len());
+                            log_llm_response("dev", turn, &r);
+                            self.ui.llm_response("dev", turn as u32, r.len());
+                            self.ui.llm_response_content("dev", turn as u32, &r);
                             retries = 0;
                             full_history = new_hist;
                             state.add_assistant_message(&r);
@@ -2197,9 +2246,8 @@ impl SessionRunner {
                             current_response = r;
                         }
                         Err(e) => {
-                            log_llm_error("dev-session", turn, &e);
-                            self.ui
-                                .llm_error("dev-session", turn as u32, &e.to_string());
+                            log_llm_error("dev", turn, &e);
+                            self.ui.llm_error("dev", turn as u32, &e.to_string());
                             let error_str = e.to_string();
 
                             // Check for context limit error BEFORE retry logic —
@@ -2263,7 +2311,7 @@ impl SessionRunner {
                                     Ok(new_agent) => {
                                         *agent = new_agent;
                                         self.ui.llm_retry(
-                                            "dev-session",
+                                            "dev",
                                             turn as u32,
                                             token_refreshes as u32,
                                             0.0,
@@ -2295,7 +2343,7 @@ impl SessionRunner {
                             let backoff_secs =
                                 CHAT_LOOP_BACKOFF_BASE_SECS * (1 << (retries - 1).min(5));
                             self.ui.llm_retry(
-                                "dev-session",
+                                "dev",
                                 turn as u32,
                                 retries as u32,
                                 backoff_secs as f64,
@@ -2416,6 +2464,7 @@ mod tests {
             log_level: "info".to_string(),
             log_file: "test.log".to_string(),
             ui_mode: "fancy".to_string(),
+            ui_verbosity: "normal".to_string(),
             code_review_enabled: true,
             mcp_servers: vec![],
         }

@@ -39,10 +39,10 @@ impl UiHandle {
     /// Creates a `UiHandle` backed by [`console::ConsoleRenderer`].
     ///
     /// Outputs styled text and spinners to stderr via `indicatif` and
-    /// `console`. Config-based initialization (TTY detection, `ui_mode`)
-    /// is deferred to Story 10.2.
-    pub(crate) fn console() -> Self {
-        Self(Arc::new(console::ConsoleRenderer::new()))
+    /// `console`. When `plain` is `true`, Unicode glyphs are replaced
+    /// with ASCII equivalents and spinner animation is disabled.
+    pub(crate) fn console(plain: bool, verbose: bool) -> Self {
+        Self(Arc::new(console::ConsoleRenderer::new(plain, verbose)))
     }
 
     // ── Pipeline events ─────────────────────────────────────────────
@@ -150,6 +150,16 @@ impl UiHandle {
         self.0.llm_retry(label, turn, retry_count, delay_secs);
     }
 
+    /// Preview of the prompt/message being sent to the LLM (verbose mode only).
+    pub(crate) fn llm_request_content(&self, label: &str, turn: u32, preview: &str) {
+        self.0.llm_request_content(label, turn, preview);
+    }
+
+    /// Preview of the LLM response content (verbose mode only).
+    pub(crate) fn llm_response_content(&self, label: &str, turn: u32, preview: &str) {
+        self.0.llm_response_content(label, turn, preview);
+    }
+
     // ── System events ───────────────────────────────────────────────
 
     /// The daemon has started.
@@ -202,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_ui_handle_console_creation_does_not_panic() {
-        let _ui = UiHandle::console();
+        let _ui = UiHandle::console(false, false);
     }
 
     #[test]
@@ -238,6 +248,8 @@ mod tests {
         ui.llm_response("dev", 1, 4096);
         ui.llm_error("dev", 2, "rate limited");
         ui.llm_retry("dev", 2, 1, 2.0);
+        ui.llm_request_content("dev", 1, "preview of request");
+        ui.llm_response_content("dev", 1, "preview of response");
 
         // System events
         ui.daemon_start("poll=5m, provider=copilot");
@@ -257,7 +269,7 @@ mod tests {
     #[test]
     fn test_console_renderer_implements_ui_renderer_trait_object() {
         // Object safety: can be wrapped in Arc<dyn UiRenderer>
-        let _obj: Arc<dyn UiRenderer> = Arc::new(console::ConsoleRenderer::new());
+        let _obj: Arc<dyn UiRenderer> = Arc::new(console::ConsoleRenderer::new(false, false));
     }
 
     #[test]

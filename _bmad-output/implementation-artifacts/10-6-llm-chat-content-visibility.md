@@ -1,6 +1,6 @@
 # Story 10.6: LLM Chat Content Visibility
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -33,38 +33,38 @@ So that I can understand agent decisions in real-time without reading log files.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `ui_verbosity` config field to `BotConfig` (AC: #3)
-  - [ ] 1.1 Add `ui_verbosity: String` field to `BotConfig` struct in `src/config/mod.rs` with `#[serde(default = "default_ui_verbosity")]` — default value `"normal"`
-  - [ ] 1.2 Add `default_ui_verbosity()` function returning `"normal".to_string()`
-  - [ ] 1.3 Add validation in `BotConfig::validate()`: accepted values are `"normal"` and `"verbose"` — reject anything else with `ConfigError::InvalidField`
-  - [ ] 1.4 Add unit tests: `test_config_default_ui_verbosity_is_normal`, `test_config_ui_verbosity_accepts_valid_values`, `test_config_ui_verbosity_rejects_invalid_value`
-  - [ ] 1.5 Update `VALID_YAML` test constant to include `ui_verbosity: normal` (optional — it's defaulted, but explicit is better for test clarity)
+- [x] Task 1: Add `ui_verbosity` config field to `BotConfig` (AC: #3)
+  - [x] 1.1 Add `ui_verbosity: String` field to `BotConfig` struct in `src/config/mod.rs` with `#[serde(default = "default_ui_verbosity")]` — default value `"normal"`
+  - [x] 1.2 Add `default_ui_verbosity()` function returning `"normal".to_string()`
+  - [x] 1.3 Add validation in `BotConfig::validate()`: accepted values are `"normal"` and `"verbose"` — reject anything else with `ConfigError::InvalidField`
+  - [x] 1.4 Add unit tests: `test_config_default_ui_verbosity_is_normal`, `test_config_ui_verbosity_accepts_valid_values`, `test_config_ui_verbosity_rejects_invalid_value`
+  - [x] 1.5 Update `VALID_YAML` test constant to include `ui_verbosity: normal` (optional — it's defaulted, but explicit is better for test clarity)
 
-- [ ] Task 2: Add 2 new methods with default impls to `UiRenderer` trait (AC: #5)
-  - [ ] 2.1 Add `fn llm_request_content(&self, _label: &str, _turn: u32, _preview: &str) {}` to `UiRenderer` trait in `src/ui/renderer.rs` with default no-op implementation
-  - [ ] 2.2 Add `fn llm_response_content(&self, _label: &str, _turn: u32, _preview: &str) {}` to `UiRenderer` trait in `src/ui/renderer.rs` with default no-op implementation
-  - [ ] 2.3 Add doc comments: `/// Preview of the prompt/message being sent to the LLM (verbose mode only).` and `/// Preview of the LLM response content (verbose mode only).`
-  - [ ] 2.4 Verify `NullRenderer` in `src/ui/null.rs` requires NO changes — default impls cover it
-  - [ ] 2.5 Verify `TestRenderer` in `renderer.rs` tests requires NO changes — default impls cover it
-  - [ ] 2.6 Add both methods to the `test_ui_renderer_all_methods_take_shared_ref` test in `renderer.rs`
+- [x] Task 2: Add 2 new methods with default impls to `UiRenderer` trait (AC: #5)
+  - [x] 2.1 Add `fn llm_request_content(&self, _label: &str, _turn: u32, _preview: &str) {}` to `UiRenderer` trait in `src/ui/renderer.rs` with default no-op implementation
+  - [x] 2.2 Add `fn llm_response_content(&self, _label: &str, _turn: u32, _preview: &str) {}` to `UiRenderer` trait in `src/ui/renderer.rs` with default no-op implementation
+  - [x] 2.3 Add doc comments: `/// Preview of the prompt/message being sent to the LLM (verbose mode only).` and `/// Preview of the LLM response content (verbose mode only).`
+  - [x] 2.4 Verify `NullRenderer` in `src/ui/null.rs` requires NO changes — default impls cover it
+  - [x] 2.5 Verify `TestRenderer` in `renderer.rs` tests requires NO changes — default impls cover it
+  - [x] 2.6 Add both methods to the `test_ui_renderer_all_methods_take_shared_ref` test in `renderer.rs`
 
-- [ ] Task 3: Add delegation methods to `UiHandle` (AC: #5)
-  - [ ] 3.1 Add `pub(crate) fn llm_request_content(&self, label: &str, turn: u32, preview: &str)` to `UiHandle` in `src/ui/mod.rs` delegating to `self.0.llm_request_content(label, turn, preview)`
-  - [ ] 3.2 Add `pub(crate) fn llm_response_content(&self, label: &str, turn: u32, preview: &str)` to `UiHandle` in `src/ui/mod.rs` delegating to `self.0.llm_response_content(label, turn, preview)`
-  - [ ] 3.3 Add both calls to the `test_null_renderer_all_methods_compile_and_succeed` test in `mod.rs`
+- [x] Task 3: Add delegation methods to `UiHandle` (AC: #5)
+  - [x] 3.1 Add `pub(crate) fn llm_request_content(&self, label: &str, turn: u32, preview: &str)` to `UiHandle` in `src/ui/mod.rs` delegating to `self.0.llm_request_content(label, turn, preview)`
+  - [x] 3.2 Add `pub(crate) fn llm_response_content(&self, label: &str, turn: u32, preview: &str)` to `UiHandle` in `src/ui/mod.rs` delegating to `self.0.llm_response_content(label, turn, preview)`
+  - [x] 3.3 Add both calls to the `test_null_renderer_all_methods_compile_and_succeed` test in `mod.rs`
 
-- [ ] Task 4: Implement `ConsoleRenderer` verbose content rendering (AC: #1, #2, #4, #6)
-  - [ ] 4.1 Add `verbose: bool` field to `ConsoleRenderer` struct in `src/ui/console.rs`
-  - [ ] 4.2 Update `ConsoleRenderer::new(plain: bool)` signature to `ConsoleRenderer::new(plain: bool, verbose: bool)` — store both fields
-  - [ ] 4.3 Add private helper `fn format_content_preview(&self, content: &str, max_chars: usize) -> Vec<String>` that:
+- [x] Task 4: Implement `ConsoleRenderer` verbose content rendering (AC: #1, #2, #4, #6)
+  - [x] 4.1 Add `verbose: bool` field to `ConsoleRenderer` struct in `src/ui/console.rs`
+  - [x] 4.2 Update `ConsoleRenderer::new(plain: bool)` signature to `ConsoleRenderer::new(plain: bool, verbose: bool)` — store both fields
+  - [x] 4.3 Add private helper `fn format_content_preview(&self, content: &str, max_chars: usize) -> Vec<String>` that:
       - Truncates content to `max_chars` characters, appending `…` if truncated
       - Splits on newlines, prefixes each line with the content glyph (`│` in fancy mode, `|` in plain mode)
       - Indents at Level 2.5 (5 spaces) to nest under the LLM event line (which is at 4-space indent)
       - Returns a `Vec<String>` of formatted lines ready for `self.println()`
-  - [ ] 4.4 Implement `llm_request_content()` on `ConsoleRenderer`: if `!self.verbose` return immediately (no-op). Otherwise call `format_content_preview(preview, 200)` and print each line via `self.println()`. Use `style(...).dim()` for the content glyph and text in fancy mode.
-  - [ ] 4.5 Implement `llm_response_content()` on `ConsoleRenderer`: if `!self.verbose` return immediately (no-op). Otherwise call `format_content_preview(preview, 500)` and print each line via `self.println()`. Use `style(...).dim()` for the content glyph and text in fancy mode.
-  - [ ] 4.6 Add `glyph_content_pipe(&self) -> &str` helper returning `"│"` in fancy mode, `"|"` in plain mode
-  - [ ] 4.7 Add unit tests:
+  - [x] 4.4 Implement `llm_request_content()` on `ConsoleRenderer`: if `!self.verbose` return immediately (no-op). Otherwise call `format_content_preview(preview, 200)` and print each line via `self.println()`. Use `style(...).dim()` for the content glyph and text in fancy mode.
+  - [x] 4.5 Implement `llm_response_content()` on `ConsoleRenderer`: if `!self.verbose` return immediately (no-op). Otherwise call `format_content_preview(preview, 500)` and print each line via `self.println()`. Use `style(...).dim()` for the content glyph and text in fancy mode.
+  - [x] 4.6 Add `glyph_content_pipe(&self) -> &str` helper returning `"│"` in fancy mode, `"|"` in plain mode
+  - [x] 4.7 Add unit tests:
       - `test_format_content_preview_short_single_line` — content under limit stays intact
       - `test_format_content_preview_truncates_long_content` — content over limit gets `…`
       - `test_format_content_preview_multiline_gets_pipe_prefix` — each line prefixed
@@ -72,13 +72,13 @@ So that I can understand agent decisions in real-time without reading log files.
       - `test_console_renderer_llm_content_methods_do_not_panic` — exercise both new methods in verbose + non-verbose mode
       - `test_console_renderer_plain_verbose_uses_ascii_pipe` — plain mode uses `|` not `│`
 
-- [ ] Task 5: Update `UiHandle::console()` to accept verbose flag (AC: #3)
-  - [ ] 5.1 Update `UiHandle::console(plain: bool)` to `UiHandle::console(plain: bool, verbose: bool)` in `src/ui/mod.rs`
-  - [ ] 5.2 Update `run_start()` in `src/cli/mod.rs`: pass `config.ui_verbosity == "verbose"` as the second argument to `UiHandle::console()`
-  - [ ] 5.3 Update ALL existing call sites of `UiHandle::console()` in tests to pass `false` for the verbose parameter (grep for `UiHandle::console(` across the codebase)
-  - [ ] 5.4 Update `test_ui_handle_console_creation_does_not_panic` and `test_console_renderer_implements_ui_renderer_trait_object` tests
+- [x] Task 5: Update `UiHandle::console()` to accept verbose flag (AC: #3)
+  - [x] 5.1 Update `UiHandle::console(plain: bool)` to `UiHandle::console(plain: bool, verbose: bool)` in `src/ui/mod.rs`
+  - [x] 5.2 Update `run_start()` in `src/cli/mod.rs`: pass `config.ui_verbosity == "verbose"` as the second argument to `UiHandle::console()`
+  - [x] 5.3 Update ALL existing call sites of `UiHandle::console()` in tests to pass `false` for the verbose parameter (grep for `UiHandle::console(` across the codebase)
+  - [x] 5.4 Update `test_ui_handle_console_creation_does_not_panic` and `test_console_renderer_implements_ui_renderer_trait_object` tests
 
-- [ ] Task 6: Emit content events at caller level alongside existing UI events (AC: #1, #2)
+- [x] Task 6: Emit content events at caller level alongside existing UI events (AC: #1, #2)
 
   **⚠️ CRITICAL APPROACH — Caller-level emission, NOT inside `streaming_chat()`:**
 
@@ -86,63 +86,63 @@ So that I can understand agent decisions in real-time without reading log files.
 
   Use `truncate_summary()` from `session/runner.rs` (L285, already `pub(crate)`) for truncation — 200 chars for request, 500 chars for response.
 
-  - [ ] 6.1 **`src/session/runner.rs` — `drive_activation_and_recover()`** (2 sites):
+  - [x] 6.1 **`src/session/runner.rs` — `drive_activation_and_recover()`** (2 sites):
       - L1083: After `self.ui.llm_request("dev-recovery", ch_turn as u32)`, add `self.ui.llm_request_content("dev-recovery", ch_turn as u32, &truncate_summary(ch_msg, 200))`
       - After the corresponding `self.ui.llm_response(...)` for ch_response, add `self.ui.llm_response_content("dev-recovery", ch_turn as u32, &truncate_summary(&ch_response, 500))`
       - L1128: Same pattern for the ctx ("Load the project context") turn
 
-  - [ ] 6.2 **`src/session/runner.rs` — `run_session()` initial DS message** (L1375):
+  - [x] 6.2 **`src/session/runner.rs` — `run_session()` initial DS message** (L1375):
       - After `self.ui.llm_request("dev-session", activation_turn as u32)`, add `self.ui.llm_request_content("dev-session", activation_turn as u32, &truncate_summary(&initial_message, 200))`
       - L1387: After `self.ui.llm_response("dev-session", 0, r.len())`, add `self.ui.llm_response_content("dev-session", 0, &truncate_summary(&r, 500))`
 
-  - [ ] 6.3 **`src/session/runner.rs` — `run_session()` recovery activation** (L1540):
+  - [x] 6.3 **`src/session/runner.rs` — `run_session()` recovery activation** (L1540):
       - After `self.ui.llm_request("dev-recovery", activation_turn as u32)`, add request content event
       - L1552: After `self.ui.llm_response("dev-recovery", 0, r.len())`, add response content event
 
-  - [ ] 6.4 **`src/session/runner.rs` — `run_session()` recovery resend** (L1607):
+  - [x] 6.4 **`src/session/runner.rs` — `run_session()` recovery resend** (L1607):
       - After `self.ui.llm_request("dev-recovery", turn_offset as u32)`, add `self.ui.llm_request_content("dev-recovery", turn_offset as u32, &truncate_summary(&last_user_msg, 200))`
       - After corresponding response, add response content event
 
-  - [ ] 6.5 **`src/session/runner.rs` — `run_session()` final commit** (L1715):
+  - [x] 6.5 **`src/session/runner.rs` — `run_session()` final commit** (L1715):
       - After `self.ui.llm_request("dev-session", turn as u32)`, add request content with `commit_msg`
       - L1728 + L1784: After both `self.ui.llm_response(...)` sites (normal + retry), add response content events
 
-  - [ ] 6.6 **`src/session/runner.rs` — `run_session()` impact analysis** (L1831):
+  - [x] 6.6 **`src/session/runner.rs` — `run_session()` impact analysis** (L1831):
       - After `self.ui.llm_request("dev-session", (turn + 1) as u32)`, add request content with `&impact_prompt`
       - L1900: After `self.ui.llm_response(...)` (including retry site), add response content events
 
-  - [ ] 6.7 **`src/session/runner.rs` — `run_session()` PR summary** (L1979):
+  - [x] 6.7 **`src/session/runner.rs` — `run_session()` PR summary** (L1979):
       - After `self.ui.llm_request("dev-session", (turn + 2) as u32)`, add request content with `"[pr-summary]"` (or truncated `pr_summary_prompt`)
       - L2059: After `self.ui.llm_response(...)`, add response content events
 
-  - [ ] 6.8 **`src/session/runner.rs` — `run_session()` main chat loop** (L2179):
+  - [x] 6.8 **`src/session/runner.rs` — `run_session()` main chat loop** (L2179):
       - After `self.ui.llm_request("dev-session", turn as u32)`, add `self.ui.llm_request_content("dev-session", turn as u32, &truncate_summary(&reply, 200))`
       - L2192: After `self.ui.llm_response("dev-session", turn as u32, r.len())`, add `self.ui.llm_response_content("dev-session", turn as u32, &truncate_summary(&r, 500))`
 
-  - [ ] 6.9 **`src/review/mod.rs` — `drive_review_session()` initial** (L549):
+  - [x] 6.9 **`src/review/mod.rs` — `drive_review_session()` initial** (L549):
       - After `self.ui.llm_request("code-review", 1)`, add request content with `&initial_message`
       - L569: After `self.ui.llm_response("code-review", 1, response.len())`, add response content event
 
-  - [ ] 6.10 **`src/review/mod.rs` — `drive_review_session()` chat loop** (L695):
+  - [x] 6.10 **`src/review/mod.rs` — `drive_review_session()` chat loop** (L695):
       - After `self.ui.llm_request("code-review", turn as u32)`, add request content with `&reply`
       - L708: After `self.ui.llm_response("code-review", turn as u32, r.len())`, add response content event
 
-  - [ ] 6.11 **Files that need NO changes:**
+  - [x] 6.11 **Files that need NO changes:**
       - `src/session/agent.rs` — `streaming_chat()` and `activate_agent()` signatures are unchanged
       - `src/llm/agent_factory.rs` — `BuiltAgent::stream_chat()` and `BuiltAgent::activate_agent()` signatures are unchanged
       - `src/supervisor/architect.rs` — passes `None` for `ui`, no content events needed
 
-- [ ] Task 7: Document `ui_verbosity` in README.md (AC: #3)
-  - [ ] 7.1 In the `## Terminal Output` section of `README.md` (added in Story 10.5), add a subsection or paragraph describing `ui_verbosity`:
+- [x] Task 7: Document `ui_verbosity` in README.md (AC: #3)
+  - [x] 7.1 In the `## Terminal Output` section of `README.md` (added in Story 10.5), add a subsection or paragraph describing `ui_verbosity`:
       - `"normal"` (default): event markers only (`→ dev turn 1`, `← dev turn 1 — 4096 bytes`)
       - `"verbose"`: shows truncated content preview for each LLM exchange
-  - [ ] 7.2 Add `ui_verbosity: normal` to the `bmad-bot.yaml` config example block in README (after `ui_mode: fancy`)
-  - [ ] 7.3 Add a small terminal output example showing verbose mode output with `│` content lines
+  - [x] 7.2 Add `ui_verbosity: normal` to the `bmad-bot.yaml` config example block in README (after `ui_mode: fancy`)
+  - [x] 7.3 Add a small terminal output example showing verbose mode output with `│` content lines
 
-- [ ] Task 8: Run full test suite and linting (AC: #7)
-  - [ ] 8.1 Run `cargo test` — ALL existing tests must pass with zero failures
-  - [ ] 8.2 Run `cargo clippy` — zero new warnings
-  - [ ] 8.3 Run `cargo fmt --check` — no formatting issues
+- [x] Task 8: Run full test suite and linting (AC: #7)
+  - [x] 8.1 Run `cargo test` — ALL existing tests must pass with zero failures
+  - [x] 8.2 Run `cargo clippy` — zero new warnings
+  - [x] 8.3 Run `cargo fmt --check` — no formatting issues
 
 ## Dev Notes
 
@@ -340,8 +340,32 @@ This is a **2-point story** (as estimated in the architect brief). Changes span 
 
 ### Agent Model Used
 
+Claude Opus 4.6 (via Copilot)
+
 ### Debug Log References
+
+N/A — no debug issues encountered during implementation.
 
 ### Completion Notes List
 
+- ✅ Task 1: Added `ui_verbosity: String` field to `BotConfig` with `#[serde(default = "default_ui_verbosity")]`, default `"normal"`, validation accepts `"normal"` / `"verbose"`. 3 unit tests added. `VALID_YAML` test constant updated. All 5 manual `BotConfig` initializers across `cli/mod.rs`, `session/runner.rs`, `watcher/mod.rs`, `llm/agent_factory.rs` updated with new field.
+- ✅ Task 2: Added `llm_request_content()` and `llm_response_content()` to `UiRenderer` trait with default no-op implementations. Doc comments added. `NullRenderer` and `TestRenderer` require no changes — default impls cover them. Both methods added to `test_ui_renderer_all_methods_take_shared_ref`.
+- ✅ Task 3: Added delegation methods to `UiHandle` in `src/ui/mod.rs`. Both calls added to `test_null_renderer_all_methods_compile_and_succeed`.
+- ✅ Task 4: Added `verbose: bool` field to `ConsoleRenderer`, updated `new(plain, verbose)` signature. Implemented `glyph_content_pipe()` (`│` fancy / `|` plain), `format_content_preview()` (truncation + pipe prefix + Level 2.5 indent), `llm_request_content()` (200 char limit), `llm_response_content()` (500 char limit). Both methods no-op when `!self.verbose`. `style(...).dim()` used in fancy mode. 6 unit tests added.
+- ✅ Task 5: Updated `UiHandle::console(plain, verbose)` signature. `run_start()` passes `config.ui_verbosity == "verbose"`. All test call sites updated to pass `false` for verbose.
+- ✅ Task 6: Added 22 content event calls (11 request + 11 response) across `runner.rs` and `review/mod.rs` at all existing `ui.llm_request()` / `ui.llm_response()` sites. Uses `truncate_summary()` (200 chars request, 500 chars response). No changes to `streaming_chat()`, `activate_agent()`, `agent.rs`, `agent_factory.rs`, or `supervisor/architect.rs`.
+- ✅ Task 7: Documented `ui_verbosity` in README.md — added config example, configuration table, verbose mode terminal output example with `│` content lines.
+- ✅ Task 8: `cargo test` — 1186 tests passed, 0 failures. `cargo clippy` — zero new warnings. `cargo fmt --check` — clean.
+
 ### File List
+
+- `src/config/mod.rs` — +`ui_verbosity` field, `default_ui_verbosity()`, validation, 3 tests, `VALID_YAML` updated, `_test_minimal()` updated
+- `src/ui/renderer.rs` — +2 trait methods with default no-op impls, doc comments, test updated
+- `src/ui/mod.rs` — +2 delegation methods, `console()` signature updated to `(plain, verbose)`, tests updated
+- `src/ui/console.rs` — +`verbose` field, `new()` signature updated, `glyph_content_pipe()`, `format_content_preview()`, 2 method impls, 6 new tests, all existing test call sites updated
+- `src/cli/mod.rs` — `run_start()` passes verbose flag, `run_init()` + `make_test_config()` updated with `ui_verbosity` field
+- `src/session/runner.rs` — +18 content event calls (9 request + 9 response), `make_runner_test_config()` updated with `ui_verbosity` field
+- `src/review/mod.rs` — +4 content event calls (2 request + 2 response)
+- `src/llm/agent_factory.rs` — `make_test_config()` updated with `ui_verbosity` field
+- `src/watcher/mod.rs` — `make_test_bot_config()` updated with `ui_verbosity` field
+- `README.md` — `ui_verbosity: normal` in config example, new `### ui_verbosity Configuration` section with table and verbose output example

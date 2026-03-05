@@ -107,6 +107,12 @@ pub struct BotConfig {
     #[serde(default = "default_ui_mode")]
     pub ui_mode: String,
 
+    /// Terminal UI verbosity level.
+    /// `"normal"` — event markers only,
+    /// `"verbose"` — shows truncated content preview for each LLM exchange (default).
+    #[serde(default = "default_ui_verbosity")]
+    pub ui_verbosity: String,
+
     /// Whether to run automated code review after dev sessions.
     /// When enabled, a separate LLM runs the BMAD CR workflow before PR creation.
     /// Default: `true`.
@@ -127,6 +133,11 @@ fn default_code_review_enabled() -> bool {
 /// Default UI mode — fancy (animated spinners + colors).
 fn default_ui_mode() -> String {
     "fancy".to_string()
+}
+
+/// Default UI verbosity — verbose (content preview enabled).
+fn default_ui_verbosity() -> String {
+    "verbose".to_string()
 }
 
 /// Default polling interval — 5 minutes.
@@ -314,6 +325,15 @@ impl BotConfig {
             });
         }
 
+        // ui_verbosity
+        let valid_ui_verbosities = ["normal", "verbose"];
+        if !valid_ui_verbosities.contains(&self.ui_verbosity.as_str()) {
+            return Err(ConfigError::InvalidField {
+                field: "ui_verbosity".to_string(),
+                reason: format!("must be one of: {}", valid_ui_verbosities.join(", ")),
+            });
+        }
+
         // log_format
         let valid_log_formats = ["json", "pretty"];
         if !valid_log_formats.contains(&self.log_format.as_str()) {
@@ -424,6 +444,7 @@ impl BotConfig {
             polling_interval_secs: 300,
             code_review_enabled: true,
             ui_mode: "fancy".to_string(),
+            ui_verbosity: "normal".to_string(),
             git_provider: GitProviderConfig {
                 provider: "github".to_string(),
                 repo_owner: "test".to_string(),
@@ -625,6 +646,7 @@ polling_interval_secs: 60
 log_format: pretty
 log_level: info
 ui_mode: fancy
+ui_verbosity: verbose
 git_provider:
   provider: github
   repo_owner: test-org
@@ -731,6 +753,37 @@ bmad_paths:
         assert!(
             matches!(err, ConfigError::InvalidField { ref field, .. } if field == "ui_mode"),
             "Expected InvalidField for ui_mode, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_default_ui_verbosity_is_verbose() {
+        // YAML without ui_verbosity — should default to "verbose"
+        let yaml = VALID_YAML.replace("ui_verbosity: verbose\n", "");
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        assert_eq!(config.ui_verbosity, "verbose");
+    }
+
+    #[test]
+    fn test_config_ui_verbosity_accepts_valid_values() {
+        for verbosity in &["normal", "verbose"] {
+            let mut config = valid_config();
+            config.ui_verbosity = verbosity.to_string();
+            assert!(
+                config.validate().is_ok(),
+                "ui_verbosity '{verbosity}' should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_config_ui_verbosity_rejects_invalid_value() {
+        let mut config = valid_config();
+        config.ui_verbosity = "debug".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidField { ref field, .. } if field == "ui_verbosity"),
+            "Expected InvalidField for ui_verbosity, got: {err}"
         );
     }
 

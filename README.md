@@ -243,6 +243,8 @@ polling_interval_secs: 300
 log_format: pretty            # "pretty" or "json"
 log_level: info               # "trace", "debug", "info", "warn", "error"
 log_file: bmad-bot.log
+ui_mode: fancy                # "fancy" (default), "plain", or "silent"
+ui_verbosity: verbose         # "verbose" (default) or "normal"
 
 # Git provider for PR creation
 git_provider:
@@ -300,6 +302,115 @@ GITHUB_TOKEN=ghp_...
 ```
 
 The `init` command generates both files with the correct variables for your chosen providers.
+
+---
+
+## Terminal Output
+
+BMAD Bot provides real-time terminal feedback during story processing using a consistent visual vocabulary.
+
+### `ui_mode` Configuration
+
+| Mode | Description |
+|------|-------------|
+| `"fancy"` (default) | Animated spinners, Unicode glyphs, full ANSI colors |
+| `"plain"` | ASCII-only glyphs, no colors, no spinner animation |
+| `"silent"` | No stdout output at all (`NullRenderer`) |
+
+Set `ui_mode` in your `bmad-bot.yaml`:
+
+```yaml
+ui_mode: fancy    # "fancy", "plain", or "silent"
+```
+
+### `ui_verbosity` Configuration
+
+| Level | Description |
+|-------|-------------|
+| `"verbose"` (default) | Shows a truncated content preview for each LLM exchange |
+| `"normal"` | Event markers only (`→ dev turn 1`, `← dev turn 1 — 4096 bytes`) |
+
+Set `ui_verbosity` in your `bmad-bot.yaml`:
+
+```yaml
+ui_verbosity: normal    # "verbose" (default) or "normal"
+```
+
+In verbose mode, a dim content preview appears below each `→` / `←` event line, prefixed with `│` (or `|` in plain mode):
+
+```text
+    → dev turn 1
+      │ "Read the story file and begin implementing Task 1. Start with failing tests…"
+    ← dev turn 1 — 4096 bytes
+      │ "I'll start by implementing the `format_duration()` helper. Let me first write
+      │  the failing tests:\n\n```rust\n#[test]\nfn test_format_duration_zero…"
+```
+
+Request previews are truncated at 200 characters, response previews at 500 characters. Content exceeding the limit is truncated with `…`.
+
+### TTY Auto-Detection
+
+When stdout is **not** a TTY (piped output, CI environment), `NullRenderer` is automatically selected regardless of `ui_mode`. The structured `tracing` log layer is always preserved for file-based logging.
+
+### Visual Vocabulary
+
+| Glyph | Color | Meaning |
+|-------|-------|---------|
+| `●` | green | Completed action |
+| `◉` | cyan (animated) | In-progress action (spinner) |
+| `└` | dim/gray | Sub-detail / child event |
+| `→` | dim | LLM request sent |
+| `←` | dim | LLM response received |
+| `►` | dim | Tool call initiated |
+| `✗` | red | Error |
+| `⚠` | yellow | Warning / escalation / retry |
+
+Indentation indicates nesting depth: 2 spaces per level.
+
+### Plain Mode ASCII Equivalents
+
+| Fancy | Plain |
+|-------|-------|
+| `●` | `[ok]` |
+| `◉` | `...` |
+| `✗` | `[ERR]` |
+| `⚠` | `[WARN]` |
+| `→` | `->` |
+| `←` | `<-` |
+| `└` | (extra indent) |
+| `►` | `>>` |
+
+### Example Output
+
+```text
+● BMAD Bot started — polling every 30s
+● Found 2 eligible stories
+
+◉ Story 4-2 — Agent Session Setup & Chat Loop
+  ◉ Dev Session
+    → dev turn 1
+    ← dev turn 1 — 4096 bytes
+      ► read_file src/session/runner.rs
+        └ 3567 lines (outline mode)
+      ► edit_file src/session/runner.rs (edit)
+      ► git commit "feat(session): add context limit recovery"
+      ► terminal cargo test session::tests
+        └ 42 tests passed
+  ● Dev Session [47s]
+  ● Push Branch [2s]
+  ● Create PR [1s]
+    └ https://github.com/jbanety/bmad-bot/pull/42
+  ◉ Code Review
+    → code-review turn 1
+    ← code-review turn 1 — 2048 bytes
+      ► edit_file src/session/runner.rs (edit)
+      ► git commit "fix(session): handle edge case in recovery"
+  ● Code Review [23s]
+  ● Notification [0s]
+● Story 4-2 complete → https://github.com/jbanety/bmad-bot/pull/42
+```
+
+Elapsed time is displayed on completed phases in human-readable format: `[47s]`, `[3m 12s]`, or `[1h 23m]`.
 
 ---
 
@@ -445,6 +556,7 @@ bmad-bot/
 │   ├── pipeline.rs                   # Story pipeline orchestrator
 │   ├── cli/                          # CLI commands: init, start, status, logs
 │   │   ├── mod.rs
+│   │   ├── git_detect.rs            # Git remote auto-detection
 │   │   └── state.rs                  # Daemon state file management
 │   ├── config/                       # Configuration loading & validation
 │   │   ├── mod.rs                    # BotConfig, BotSecrets, HTTP client
@@ -455,12 +567,18 @@ bmad-bot/
 │   ├── session/                      # LLM agent session management
 │   │   ├── mod.rs
 │   │   ├── runner.rs                # SessionRunner — agent build + chat loop
+│   │   ├── agent.rs                 # Agent configuration & preamble
 │   │   ├── state.rs                 # WAL state persistence
 │   │   ├── analyzer.rs             # Response analysis (completion detection)
 │   │   ├── branch.rs               # Git branch management
 │   │   ├── cleanup.rs              # Partial work preservation
 │   │   ├── escalation.rs           # Human escalation types
 │   │   └── provider.rs             # LLM provider factory
+│   ├── llm/                          # LLM abstraction layer
+│   │   ├── mod.rs
+│   │   ├── agent_factory.rs        # Agent builder with provider/model selection
+│   │   ├── context.rs              # Context window management
+│   │   └── logging.rs              # LLM request/response logging
 │   ├── supervisor/                   # Agent question handling
 │   │   ├── mod.rs                    # AskSupervisor rig tool
 │   │   ├── rules.rs                 # Deterministic rule engine
@@ -475,10 +593,22 @@ bmad-bot/
 │   │   └── gitlab.rs               # GitLab implementation (REST API)
 │   ├── notifier/                     # Notification abstraction
 │   │   └── mod.rs                    # Notifier trait + Telegram + Noop
+│   ├── ui/                           # Terminal output (decoupled renderer)
+│   │   ├── mod.rs                    # UiHandle — cloneable renderer wrapper
+│   │   ├── renderer.rs             # UiRenderer trait (27 fire-and-forget methods)
+│   │   ├── console.rs              # ConsoleRenderer — indicatif + console styling
+│   │   └── null.rs                  # NullRenderer — zero I/O (tests, CI, silent)
+│   ├── mcp/                          # Model Context Protocol server management
+│   │   ├── mod.rs
+│   │   └── manager.rs              # MCP server lifecycle & tool registration
 │   └── tools/                        # Rig tools for the agent
 │       ├── mod.rs
-│       ├── git.rs                   # Git operations (via git2)
-│       ├── fs.rs                    # Filesystem read/write
+│       ├── read_file.rs             # File reading (partial, outline mode)
+│       ├── edit_file.rs             # Surgical search-and-replace editing
+│       ├── grep.rs                  # Codebase search (regex)
+│       ├── find_path.rs            # File/directory path discovery (glob)
+│       ├── list_directory.rs       # Directory listing
+│       ├── git.rs                   # Git operations (via CLI)
 │       └── terminal.rs             # Shell command execution
 ├── tests/
 │   └── e2e/                          # E2E tests (gated behind BMAD_E2E=1)

@@ -78,6 +78,12 @@ pub(crate) trait UiRenderer: Send + Sync {
     /// An LLM request is being retried.
     fn llm_retry(&self, label: &str, turn: u32, retry_count: u32, delay_secs: f64);
 
+    /// Preview of the prompt/message being sent to the LLM (verbose mode only).
+    fn llm_request_content(&self, _label: &str, _turn: u32, _preview: &str) {}
+
+    /// Preview of the LLM response content (verbose mode only).
+    fn llm_response_content(&self, _label: &str, _turn: u32, _preview: &str) {}
+
     // ── System events ───────────────────────────────────────────────
 
     /// The daemon has started.
@@ -174,6 +180,8 @@ mod tests {
         r.llm_response("l", 1, 100);
         r.llm_error("l", 1, "e");
         r.llm_retry("l", 1, 1, 1.0);
+        r.llm_request_content("l", 1, "preview");
+        r.llm_response_content("l", 1, "preview");
         r.daemon_start("c");
         r.poll_cycle(1);
         r.stories_found(1);

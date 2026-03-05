@@ -735,6 +735,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
         log_level: LOG_LEVELS[log_level_idx].to_string(),
         log_file: "bmad-bot.log".to_string(),
         ui_mode: "fancy".to_string(),
+        ui_verbosity: "normal".to_string(),
         mcp_servers: vec![],
     })
 }
@@ -1275,7 +1276,7 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
         if config.ui_mode == "plain" {
             console::set_colors_enabled(false);
         }
-        crate::ui::UiHandle::console()
+        crate::ui::UiHandle::console(config.ui_mode == "plain", config.ui_verbosity == "verbose")
     } else {
         crate::ui::UiHandle::null()
     };
@@ -1318,9 +1319,11 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     let shutdown: crate::session::runner::ShutdownFlag =
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Spawn signal handler task that sets the shutdown flag
+    // Spawn signal handler task that sets the shutdown flag and emits
+    // an immediate UI event so the user sees feedback right away.
     {
         let flag = std::sync::Arc::clone(&shutdown);
+        let signal_ui = ui.clone();
         tokio::spawn(async move {
             let mut sigterm =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -1335,6 +1338,7 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
                 }
             }
 
+            signal_ui.shutdown_requested();
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         });
     }
@@ -1425,8 +1429,8 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     )
     .await?;
 
-    // Emit shutdown event before cleanup
-    ui.shutdown_requested();
+    // Note: shutdown_requested() UI event is emitted immediately by the
+    // signal handler task — no duplicate call needed here.
 
     // Shutdown MCP servers before marking daemon stopped (Story 9.1)
     mcp_manager.shutdown().await;
@@ -1563,6 +1567,7 @@ mod tests {
             polling_interval_secs: 300,
             code_review_enabled: true,
             ui_mode: "fancy".to_string(),
+            ui_verbosity: "normal".to_string(),
             git_provider: GitProviderConfig {
                 provider: "github".to_string(),
                 repo_owner: "test-org".to_string(),

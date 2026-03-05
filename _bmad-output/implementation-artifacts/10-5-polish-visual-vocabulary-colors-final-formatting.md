@@ -1,6 +1,6 @@
 # Story 10.5: Polish — Visual Vocabulary, Colors & Final Formatting
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -40,52 +40,52 @@ So that the daemon feels like a production-quality tool.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Implement `format_duration()` helper in `ConsoleRenderer` (AC: #4)
-  - [ ] 1.1 Add a private method `fn format_duration(d: Duration) -> String` to `ConsoleRenderer` (or as a module-level function in `console.rs`)
-  - [ ] 1.2 Logic: if `d.as_secs() < 60` → `"{secs}s"`, if `d.as_secs() < 3600` → `"{mins}m {secs}s"`, else → `"{hours}h {mins}m"`
-  - [ ] 1.3 Update `phase_complete()` to use `format_duration()` instead of the current `duration.as_secs()` raw seconds display
-  - [ ] 1.4 Add unit tests for `format_duration()` covering: 0s, 47s, 60s, 90s, 3599s, 3600s, 5000s edge cases
+- [x] Task 1: Implement `format_duration()` helper in `ConsoleRenderer` (AC: #4)
+  - [x] 1.1 Add a private method `fn format_duration(d: Duration) -> String` to `ConsoleRenderer` (or as a module-level function in `console.rs`)
+  - [x] 1.2 Logic: if `d.as_secs() < 60` → `"{secs}s"`, if `d.as_secs() < 3600` → `"{mins}m {secs}s"`, else → `"{hours}h {mins}m"`
+  - [x] 1.3 Update `phase_complete()` to use `format_duration()` instead of the current `duration.as_secs()` raw seconds display
+  - [x] 1.4 Add unit tests for `format_duration()` covering: 0s, 47s, 60s, 90s, 3599s, 3600s, 5000s edge cases
 
-- [ ] Task 2: Fix LLM event glyphs — `→` for request, `←` for response (AC: #1)
-  - [ ] 2.1 In `llm_request()`: change glyph from `►` (dim) to `→` (dim) — the `→` arrow is the specified visual vocabulary for "LLM request sent"
-  - [ ] 2.2 In `llm_response()`: change glyph from `●` (green dim) to `←` (dim) — the `←` arrow is the specified visual vocabulary for "LLM response received"
-  - [ ] 2.3 In `tool_call()`: keep `►` (dim) as-is — `►` is appropriate for tool calls (outgoing call) and is distinct from LLM arrows
-  - [ ] 2.4 Verify all other glyphs match the visual vocabulary: `●` (green) completed, `◉` (cyan) in-progress, `└` (dim) sub-detail, `✗` (red) error, `⚠` (yellow) warning — these are already correct from Story 10.1
+- [x] Task 2: Fix LLM event glyphs — `→` for request, `←` for response (AC: #1)
+  - [x] 2.1 In `llm_request()`: change glyph from `►` (dim) to `→` (dim) — the `→` arrow is the specified visual vocabulary for "LLM request sent"
+  - [x] 2.2 In `llm_response()`: change glyph from `●` (green dim) to `←` (dim) — the `←` arrow is the specified visual vocabulary for "LLM response received"
+  - [x] 2.3 In `tool_call()`: keep `►` (dim) as-is — `►` is appropriate for tool calls (outgoing call) and is distinct from LLM arrows
+  - [x] 2.4 Verify all other glyphs match the visual vocabulary: `●` (green) completed, `◉` (cyan) in-progress, `└` (dim) sub-detail, `✗` (red) error, `⚠` (yellow) warning — these are already correct from Story 10.1
 
-- [ ] Task 3: Add `"plain"` mode support to `ConsoleRenderer` (AC: #2)
-  - [ ] 3.1 Add a `plain_mode: bool` field to `ConsoleRenderer` struct
-  - [ ] 3.2 Update `ConsoleRenderer::new()` to accept a `plain: bool` parameter: `ConsoleRenderer::new(plain: bool)`
-  - [ ] 3.3 When `plain_mode` is true: disable spinner ticking in `create_spinner()` — use `ProgressDrawTarget::hidden()` or skip `enable_steady_tick()` and use a static message prefix like `... ` instead of animated `◉`
-  - [ ] 3.4 When `plain_mode` is true: replace Unicode glyphs with ASCII equivalents in all output: `●` → `[ok]`, `◉` → `...`, `✗` → `[ERR]`, `⚠` → `[WARN]`, `→` → `->`, `←` → `<-`, `└` → `  `, `►` → `>>`. **Also replace the `→` in `story_complete()`** (L122: `format!(" → {url}")`) with `" -> {url}"` in plain mode — this inline Unicode arrow is easy to miss but breaks ASCII consistency.
-  - [ ] 3.5 Update `UiHandle::console()` to `UiHandle::console(plain: bool)` — pass the `plain` flag through
-  - [ ] 3.6 Update `run_start()` in `cli/mod.rs`: pass `config.ui_mode == "plain"` to `UiHandle::console()`. Note: the `console::set_colors_enabled(false)` call already exists from Story 10.2 — keep it
-  - [ ] 3.7 Add unit tests: construct `ConsoleRenderer::new(true)` and exercise all methods without panic
+- [x] Task 3: Add `"plain"` mode support to `ConsoleRenderer` (AC: #2)
+  - [x] 3.1 Add a `plain_mode: bool` field to `ConsoleRenderer` struct
+  - [x] 3.2 Update `ConsoleRenderer::new()` to accept a `plain: bool` parameter: `ConsoleRenderer::new(plain: bool)`
+  - [x] 3.3 When `plain_mode` is true: disable spinner ticking in `create_spinner()` — use `ProgressDrawTarget::hidden()` or skip `enable_steady_tick()` and use a static message prefix like `... ` instead of animated `◉`
+  - [x] 3.4 When `plain_mode` is true: replace Unicode glyphs with ASCII equivalents in all output: `●` → `[ok]`, `◉` → `...`, `✗` → `[ERR]`, `⚠` → `[WARN]`, `→` → `->`, `←` → `<-`, `└` → `  `, `►` → `>>`. **Also replace the `→` in `story_complete()`** (L122: `format!(" → {url}")`) with `" -> {url}"` in plain mode — this inline Unicode arrow is easy to miss but breaks ASCII consistency.
+  - [x] 3.5 Update `UiHandle::console()` to `UiHandle::console(plain: bool)` — pass the `plain` flag through
+  - [x] 3.6 Update `run_start()` in `cli/mod.rs`: pass `config.ui_mode == "plain"` to `UiHandle::console()`. Note: the `console::set_colors_enabled(false)` call already exists from Story 10.2 — keep it
+  - [x] 3.7 Add unit tests: construct `ConsoleRenderer::new(true)` and exercise all methods without panic
 
-- [ ] Task 4: Refine nesting and indentation consistency (AC: #1, #5)
-  - [ ] 4.1 Audit all `ConsoleRenderer` methods for consistent indentation levels:
+- [x] Task 4: Refine nesting and indentation consistency (AC: #1, #5)
+  - [x] 4.1 Audit all `ConsoleRenderer` methods for consistent indentation levels:
     - **Level 0** (no indent): system events — `daemon_start`, `stories_found`, `crash_recovery_*`, `shutdown_requested`, `poll_cycle`, `batch_start`, `batch_complete`
     - **Level 0** (no indent): story-level — `story_start`, `story_complete`, `story_error`, `story_escalated`
     - **Level 1** (2 spaces): phase events — `phase_start`, `phase_complete`, `phase_error`
     - **Level 2** (4 spaces): session events — `chat_turn`, `activation_start`, `activation_complete`, `completion_detected`, `llm_request`, `llm_response`, `llm_error`, `llm_retry`
     - **Level 3** (6 spaces): tool events — `tool_call`, `tool_result`
-  - [ ] 4.2 Fix any inconsistencies found. Current code review shows: `story_start` uses no indent (correct), `phase_start`/`phase_complete` use 2-space indent (correct), `chat_turn` uses 4-space indent with `└` (correct), `tool_call`/`tool_result` use 6-space indent (correct), `llm_request`/`llm_response` use 4-space indent (correct), `poll_cycle` uses no indent with `└` (correct). `activation_start`/`activation_complete` use 4-space indent (correct). `batch_start` uses no indent with `◉` (correct). Most are already consistent — verify and fix any drift.
-  - [ ] 4.3 Add story key context to phase spinners where possible: the `phase_start` spinner message should include the current story context if available. **Note:** This is a nice-to-have — the current `phase_start` takes only `phase_name: &str`, so the story context is not available inside the renderer. Skip if it would require trait changes.
+  - [x] 4.2 Fix any inconsistencies found. Current code review shows: `story_start` uses no indent (correct), `phase_start`/`phase_complete` use 2-space indent (correct), `chat_turn` uses 4-space indent with `└` (correct), `tool_call`/`tool_result` use 6-space indent (correct), `llm_request`/`llm_response` use 4-space indent (correct), `poll_cycle` uses no indent with `└` (correct). `activation_start`/`activation_complete` use 4-space indent (correct). `batch_start` uses no indent with `◉` (correct). Most are already consistent — verify and fix any drift.
+  - [x] 4.3 Add story key context to phase spinners where possible: the `phase_start` spinner message should include the current story context if available. **Note:** This is a nice-to-have — the current `phase_start` takes only `phase_name: &str`, so the story context is not available inside the renderer. Skip if it would require trait changes.
 
-- [ ] Task 5: Update README.md with Terminal Output documentation (AC: #6)
-  - [ ] 5.1 Add a new `## Terminal Output` section after the `## Configuration` section (before `## Sprint Status Format`)
-  - [ ] 5.2 Document the `ui_mode` config option: `"fancy"` (default, animated spinners + colors), `"plain"` (ASCII, no colors, no spinners), `"silent"` (no output)
-  - [ ] 5.3 Document TTY auto-detection: non-TTY → `NullRenderer` regardless of `ui_mode`, stdout tracing layer preserved
-  - [ ] 5.4 Show the `ui_mode` field in the existing `bmad-bot.yaml` example block (it's currently missing) — add `ui_mode: fancy` after `log_file: bmad-bot.log`
-  - [ ] 5.5 Add an aspirational terminal output example showing the visual vocabulary in action (use the example from the epics)
-  - [ ] 5.6 Document the visual vocabulary table: glyph → meaning → color
+- [x] Task 5: Update README.md with Terminal Output documentation (AC: #6)
+  - [x] 5.1 Add a new `## Terminal Output` section after the `## Configuration` section (before `## Sprint Status Format`)
+  - [x] 5.2 Document the `ui_mode` config option: `"fancy"` (default, animated spinners + colors), `"plain"` (ASCII, no colors, no spinners), `"silent"` (no output)
+  - [x] 5.3 Document TTY auto-detection: non-TTY → `NullRenderer` regardless of `ui_mode`, stdout tracing layer preserved
+  - [x] 5.4 Show the `ui_mode` field in the existing `bmad-bot.yaml` example block (it's currently missing) — add `ui_mode: fancy` after `log_file: bmad-bot.log`
+  - [x] 5.5 Add an aspirational terminal output example showing the visual vocabulary in action (use the example from the epics)
+  - [x] 5.6 Document the visual vocabulary table: glyph → meaning → color
 
-- [ ] Task 6: Update Project Structure in README.md (AC: #6)
-  - [ ] 6.1 The `Project Structure` section in README.md is outdated — it lists `tools/git.rs`, `tools/fs.rs`, `tools/terminal.rs` but the actual codebase has `tools/edit_file.rs`, `tools/read_file.rs`, `tools/grep.rs`, `tools/find_path.rs`, `tools/list_directory.rs`, `tools/git.rs`, `tools/terminal.rs` (Epic 8 changes). Add the `ui/` module to the project structure tree with: `ui/mod.rs`, `ui/renderer.rs`, `ui/console.rs`, `ui/null.rs`. Also add `session/agent.rs` and `mcp/` module if missing. Fix the tools listing to reflect the actual codebase.
+- [x] Task 6: Update Project Structure in README.md (AC: #6)
+  - [x] 6.1 The `Project Structure` section in README.md is outdated — it lists `tools/git.rs`, `tools/fs.rs`, `tools/terminal.rs` but the actual codebase has `tools/edit_file.rs`, `tools/read_file.rs`, `tools/grep.rs`, `tools/find_path.rs`, `tools/list_directory.rs`, `tools/git.rs`, `tools/terminal.rs` (Epic 8 changes). Add the `ui/` module to the project structure tree with: `ui/mod.rs`, `ui/renderer.rs`, `ui/console.rs`, `ui/null.rs`. Also add `session/agent.rs` and `mcp/` module if missing. Fix the tools listing to reflect the actual codebase.
 
-- [ ] Task 7: Run full test suite and linting (AC: #7)
-  - [ ] 7.1 Run `cargo test` — ALL existing tests must pass with zero failures
-  - [ ] 7.2 Run `cargo clippy` — zero new warnings
-  - [ ] 7.3 Run `cargo fmt --check` — no formatting issues
+- [x] Task 7: Run full test suite and linting (AC: #7)
+  - [x] 7.1 Run `cargo test` — ALL existing tests must pass with zero failures
+  - [x] 7.2 Run `cargo clippy` — zero new warnings
+  - [x] 7.3 Run `cargo fmt --check` — no formatting issues
 
 ## Dev Notes
 
@@ -331,8 +331,30 @@ This is a **3-point story** (as planned in the epics). The changes are:
 
 ### Agent Model Used
 
+Claude Opus 4.6 (via Copilot)
+
 ### Debug Log References
+
+- `cargo test` — 1174 tests passed (77 lib + 1097 bin), 0 failures, 5 ignored (MCP e2e gated)
+- `cargo clippy` — 3 pre-existing errors in `session/cleanup.rs` and `watcher/deps.rs` (not related to this story), 0 new warnings from modified files
+- `cargo fmt --check` — clean, no formatting issues
 
 ### Completion Notes List
 
+- ✅ Task 1: Added `format_duration()` as module-level fn in `console.rs`. Covers <60s, 1-60min, >60min. 8 unit tests including edge cases (0s, 47s, 60s, 90s, 3599s, 3600s, 5000s, sub-second truncation). `phase_complete()` now uses humanized format `[47s]` / `[3m 12s]` / `[1h 23m]`.
+- ✅ Task 2: Changed `llm_request()` glyph `►` → `→` (dim), `llm_response()` glyph `●` (green dim) → `←` (dim). `tool_call()` kept `►` as-is. All other glyphs verified correct.
+- ✅ Task 3: Added `plain_mode: bool` field to `ConsoleRenderer`. `new(plain: bool)` signature. 9 glyph helper methods (`glyph_ok`, `glyph_err`, `glyph_warn`, `glyph_progress`, `glyph_sub`, `glyph_arrow_out`, `glyph_arrow_in`, `glyph_tool`, `glyph_url_arrow`). Plain mode: `ProgressDrawTarget::hidden()` for spinners, ASCII glyphs throughout including `story_complete` URL arrow. `UiHandle::console(plain: bool)` updated. `run_start()` passes `config.ui_mode == "plain"`. All 8 call sites updated (1 production + 7 tests). Added `test_console_renderer_plain_mode_all_methods_do_not_panic` and `test_console_renderer_plain_mode_field_stored`.
+- ✅ Task 4: Full indentation audit — all 27 methods verified: L0 (system/story), L1 (phase), L2 (session/LLM), L3 (tool). All consistent. Task 4.3 skipped (trait change required, story specifies skip).
+- ✅ Task 5: Added `## Terminal Output` section to README.md with: `ui_mode` config table, TTY auto-detection docs, visual vocabulary table, plain mode ASCII equivalents table, aspirational terminal output example, elapsed time format description. Added `ui_mode: fancy` to the `bmad-bot.yaml` config example block.
+- ✅ Task 6: Updated `## Project Structure` in README.md — added `cli/git_detect.rs`, `session/agent.rs`, `llm/` module (4 files), `ui/` module (4 files), `mcp/` module (2 files). Replaced outdated `tools/fs.rs` with actual files: `read_file.rs`, `edit_file.rs`, `grep.rs`, `find_path.rs`, `list_directory.rs`, `git.rs`, `terminal.rs`.
+- ✅ Task 7: `cargo test` 1174 passed / 0 failed. `cargo clippy` 0 new warnings. `cargo fmt --check` clean.
+
 ### File List
+
+
+- `src/ui/console.rs` — added `format_duration()`, glyph helpers, `plain_mode` field, `new(bool)` signature, LLM glyph fixes, plain mode ASCII rendering, 10 new tests
+- `src/ui/mod.rs` — `UiHandle::console(plain: bool)` signature, 2 test call sites updated
+- `src/cli/mod.rs` — `UiHandle::console(config.ui_mode == "plain")` call site updated
+- `README.md` — added `## Terminal Output` section (84 lines), `ui_mode` in config example, updated `## Project Structure` with `ui/`, `llm/`, `mcp/`, corrected `tools/` listing
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — story status `ready-for-dev` → `in-progress`
+- `_bmad-output/implementation-artifacts/10-5-polish-visual-vocabulary-colors-final-formatting.md` — task checkboxes, Dev Agent Record, status updates

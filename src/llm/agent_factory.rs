@@ -127,7 +127,7 @@ impl BuiltAgent {
     /// - `project_root` — path to the project root
     /// - `agent_relative_path` — relative path from project root to the agent file
     ///   (e.g. `"_bmad/bmm/agents/dev.md"` or `"_bmad/bmm/agents/architect.md"`)
-    /// - `label` — logging label (e.g. `"dev-session"`, `"code-review"`, `"supervisor"`)
+    /// - `label` — logging label (e.g. `"dev"`, `"review"`, `"supervisor"`)
     /// - `shutdown` — optional cooperative shutdown flag
     pub async fn activate_agent(
         &self,
@@ -923,6 +923,7 @@ mod tests {
             log_format: "pretty".to_string(),
             log_file: "test.log".to_string(),
             ui_mode: "fancy".to_string(),
+            ui_verbosity: "normal".to_string(),
             mcp_servers: vec![],
         }
     }

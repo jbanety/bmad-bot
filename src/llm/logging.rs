@@ -26,7 +26,7 @@ const LLM_TARGET: &str = "bmad_bot::llm";
 /// Call this **before** `agent.chat()`.
 ///
 /// # Arguments
-/// - `label` — context identifier (e.g. `"dev-session"`, `"supervisor"`, `"code-review"`)
+/// - `label` — context identifier (e.g. `"dev"`, `"supervisor"`, `"review"`)
 /// - `turn` — current conversation turn number
 /// - `message` — the user message being sent
 /// - `history_len` — number of messages in the chat history
@@ -281,13 +281,7 @@ mod tests {
     /// Verify various label values work.
     #[test]
     fn test_log_functions_with_all_labels() {
-        let labels = [
-            "dev-session",
-            "dev-recovery",
-            "dev-summarize",
-            "supervisor",
-            "code-review",
-        ];
+        let labels = ["dev", "recovery", "dev-summarize", "supervisor", "review"];
         for label in labels {
             log_llm_request(label, 0, "test", 0);
             log_llm_response(label, 0, "ok");

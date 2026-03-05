@@ -232,6 +232,13 @@ You have access to these tools: edit_file, read_file, grep, find_path, list_dire
 - When making multiple related changes in one file, batch them in a single `edit_file` call with multiple edit operations.
 {sequential_tool_rule}
 
+## Branch Management — CRITICAL
+- **The story branch is ALREADY created and checked out by the daemon before your session starts.** You are on the correct branch.
+- **NEVER use `git checkout -b`, `git branch`, `git switch -c`, or any command that creates a new branch.** The daemon manages branch lifecycle.
+- **NEVER use `git checkout <branch>` or `git switch <branch>` to switch to a different branch.** Stay on the current branch for the entire session.
+- You MAY use `git add`, `git commit`, `git status`, `git diff`, `git log`, and other non-branch-switching git operations.
+- If you need to know the current branch name, use `git branch --show-current`.
+
 ## Session Completion Protocol
 When you have fully completed your workflow (all tasks done, all tests passing, story file updated, all changes committed), your **final message** MUST end with exactly:
 
@@ -348,7 +355,7 @@ where
                     .get(&internal_call_id)
                     .map(|s| s.as_str())
                     .unwrap_or("unknown");
-                let brief = extract_tool_result_brief(&tool_result.content);
+                let brief = extract_tool_result_brief(tool_name, &tool_result.content);
                 if let Some(ui) = ui {
                     ui.tool_result(tool_name, &brief);
                 }
@@ -457,9 +464,20 @@ fn extract_tool_call_detail(tool_name: &str, args: &serde_json::Value) -> String
 
 /// Extract a brief summary string from a tool result's content.
 ///
-/// Returns a short string suitable for `ui.tool_result()`: file size, line
-/// count, match count, exit code, or a truncated text snippet.
+/// Returns a short string suitable for `ui.tool_result()`: a concise one-liner
+/// such as `"69 lines read"`, `"created"`, `"3 edits applied"`, `"1 file"`,
+/// `"5 matches"`, `"12 entries"`, or a truncated text snippet.
+///
+/// Tool-specific formatting:
+/// - `think` — full content (no truncation) for reasoning visibility
+/// - `read_file` — `"{N} lines read"` (line count only, no bytes)
+/// - `edit_file` — `"created"` / `"overwritten"` / `"{N} edits applied"`
+/// - `find_path` — `"{N} files"` (parsed from `"Found N total matches"`)
+/// - `grep` — `"{N} matches"` (parsed from `"Found N total matches"`)
+/// - `list_directory` — `"{N} entries"` (count of `[dir]` + `[file]` lines)
+/// - Others — heuristic: line count for long output, truncated text for short
 fn extract_tool_result_brief(
+    tool_name: &str,
     content: &rig::one_or_many::OneOrMany<rig::message::ToolResultContent>,
 ) -> String {
     // Get the first text content item
@@ -475,20 +493,141 @@ fn extract_tool_result_brief(
         return "(no text)".to_string();
     };
 
-    // Heuristic: detect common result patterns and produce brief summaries
+    // ── think ───────────────────────────────────────────────────────
+    // Full content for reasoning visibility. Unescape literal \n
+    // sequences and strip wrapping quotes so the renderer can split on
+    // real newlines for multi-line display.
+    if tool_name == "think" {
+        let mut s = text.to_string();
+        if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+            s = s[1..s.len() - 1].to_string();
+        }
+        s = s.replace("\\n", "\n");
+        return s;
+    }
+
+    // Early return for errors — applies to all tools.
     if text.starts_with("Error") || text.starts_with("error") {
         return truncate_str(text, 80);
     }
 
-    // Line-count heuristic: count newlines for multi-line output
-    let line_count = text.chars().filter(|&c| c == '\n').count();
-    if line_count > 3 {
-        let byte_len = text.len();
-        return format!("{line_count} lines, {byte_len} bytes");
+    // ── read_file ───────────────────────────────────────────────────
+    if tool_name == "read_file" {
+        let line_count = count_lines(text);
+        return format!("{line_count} lines read");
     }
 
-    // Short result — return truncated
-    truncate_str(text, 120)
+    // ── edit_file ───────────────────────────────────────────────────
+    // Formats: "Created path (N bytes)" | "Overwritten path (N bytes)"
+    //        | "Applied N edit(s) to path:\n..."
+    if tool_name == "edit_file" {
+        if text.starts_with("Created") {
+            return "created".to_string();
+        }
+        if text.starts_with("Overwritten") {
+            return "overwritten".to_string();
+        }
+        // "Applied N edit(s) to path" — extract count
+        if text.starts_with("Applied") {
+            if let Some(n) = text
+                .strip_prefix("Applied ")
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                return if n == 1 {
+                    "1 edit applied".to_string()
+                } else {
+                    format!("{n} edits applied")
+                };
+            }
+        }
+        // Fallback for edit_file
+        let line_count = count_lines(text);
+        return format!("{line_count} lines edited");
+    }
+
+    // ── find_path ───────────────────────────────────────────────────
+    // "Found N total matches. Showing results ..."
+    if tool_name == "find_path" {
+        if let Some(n) = parse_found_total_matches(text) {
+            return if n == 1 {
+                "1 file".to_string()
+            } else {
+                format!("{n} files")
+            };
+        }
+        return truncate_str(text, 80);
+    }
+
+    // ── grep ────────────────────────────────────────────────────────
+    // "Found N total matches. Showing matches ..."
+    if tool_name == "grep" {
+        if let Some(n) = parse_found_total_matches(text) {
+            return if n == 1 {
+                "1 match".to_string()
+            } else {
+                format!("{n} matches")
+            };
+        }
+        return truncate_str(text, 80);
+    }
+
+    // ── list_directory ──────────────────────────────────────────────
+    // Lines of "[dir]  name/" and "[file] name (N bytes)"
+    if tool_name == "list_directory" {
+        let normalized = normalize_tool_text(text);
+        let count = normalized
+            .lines()
+            .filter(|l| l.starts_with("[dir]") || l.starts_with("[file]"))
+            .count();
+        return if count == 1 {
+            "1 entry".to_string()
+        } else {
+            format!("{count} entries")
+        };
+    }
+
+    // ── Fallback heuristic ──────────────────────────────────────────
+    let normalized = normalize_tool_text(text);
+    let line_count = normalized.lines().count();
+    if line_count > 3 {
+        return format!("{line_count} lines");
+    }
+
+    // Short result — return truncated (first real line only)
+    let first = normalized.lines().next().unwrap_or(&normalized);
+    truncate_str(first, 120)
+}
+
+/// Count content lines in tool output text.
+///
+/// Handles both real newlines and literal `\n` escape sequences (rig may
+/// JSON-escape newlines in tool result content).
+fn count_lines(text: &str) -> usize {
+    let real = text.chars().filter(|&c| c == '\n').count();
+    if real > 0 {
+        return real;
+    }
+    text.matches("\\n").count()
+}
+
+/// Parse `"Found N total matches"` from find_path / grep output header.
+fn parse_found_total_matches(text: &str) -> Option<usize> {
+    let normalized = normalize_tool_text(text);
+    normalized
+        .strip_prefix("Found ")
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse::<usize>().ok())
+}
+
+/// Normalize tool result text: strip wrapping quotes and unescape literal
+/// `\n` sequences to real newlines.
+fn normalize_tool_text(text: &str) -> String {
+    let mut s = text.to_string();
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        s = s[1..s.len() - 1].to_string();
+    }
+    s.replace("\\n", "\n")
 }
 
 /// Truncate a string to `max` characters, appending `…` if truncated.
@@ -521,7 +660,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 /// - `project_root` — path to the project root
 /// - `agent_relative_path` — relative path from project root to the agent file
 ///   (e.g. `"_bmad/bmm/agents/dev.md"` or `"_bmad/bmm/agents/architect.md"`)
-/// - `label` — logging label (e.g. `"dev-session"`, `"code-review"`, `"supervisor"`)
+/// - `label` — logging label (e.g. `"dev"`, `"review"`, `"supervisor"`)
 /// - `shutdown` — optional shutdown flag for cooperative cancellation
 /// - `ui` — optional UI handle for emitting tool call events during activation
 pub async fn activate_agent<A, M>(

@@ -7,6 +7,26 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use super::renderer::UiRenderer;
 
+/// Formats a `Duration` into a human-readable elapsed-time string.
+///
+/// - Under 60 s: `"47s"`
+/// - 1–60 min:   `"3m 12s"`
+/// - Over 60 min: `"1h 23m"`
+fn format_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    if total_secs < 60 {
+        format!("{total_secs}s")
+    } else if total_secs < 3600 {
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        format!("{mins}m {secs}s")
+    } else {
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        format!("{hours}h {mins}m")
+    }
+}
+
 /// Console-based renderer using `indicatif` spinners and `console` colors.
 ///
 /// Uses `MultiProgress` for managing concurrent spinners and `console::style()`
@@ -32,32 +52,162 @@ pub(crate) struct ConsoleRenderer {
     multi: MultiProgress,
     /// Active phase spinners indexed by phase name.
     spinners: Mutex<HashMap<String, ProgressBar>>,
+    /// When `true`, use ASCII fallback glyphs and disable spinner animation.
+    plain_mode: bool,
+    /// When `true`, display truncated content previews for LLM exchanges.
+    verbose: bool,
 }
 
 impl ConsoleRenderer {
     /// Creates a new `ConsoleRenderer`.
     ///
-    /// Config-based initialization (`ui_mode`, TTY detection) is deferred
-    /// to Story 10.2 — this constructor takes no parameters.
-    pub(crate) fn new() -> Self {
+    /// When `plain` is `true`, animated spinners are disabled and Unicode
+    /// glyphs are replaced with ASCII equivalents. Color disabling is
+    /// handled externally via `console::set_colors_enabled(false)`.
+    pub(crate) fn new(plain: bool, verbose: bool) -> Self {
         let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
         Self {
             multi,
             spinners: Mutex::new(HashMap::new()),
+            plain_mode: plain,
+            verbose,
         }
     }
 
     /// Creates a new spinner `ProgressBar`, adds it to `MultiProgress`, and
-    /// returns it. Uses the standard cyan `◉` animated style.
+    /// returns it. In fancy mode uses the animated cyan `◉`; in plain mode
+    /// uses a static `...` prefix with no tick animation.
     fn create_spinner(&self, message: String) -> ProgressBar {
         let pb = ProgressBar::new_spinner();
         let pb = self.multi.add(pb);
         let spinner_style = ProgressStyle::with_template("  {spinner} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_spinner());
         pb.set_style(spinner_style);
-        pb.enable_steady_tick(Duration::from_millis(100));
-        pb.set_message(format!("{} {}", style("◉").cyan(), message));
+        if self.plain_mode {
+            pb.set_draw_target(ProgressDrawTarget::hidden());
+            pb.set_message(format!("... {message}"));
+        } else {
+            pb.enable_steady_tick(Duration::from_millis(100));
+            pb.set_message(format!("{} {message}", style("◉").cyan()));
+        }
         pb
+    }
+
+    /// Returns the appropriate glyph for the current mode.
+    ///
+    /// In fancy mode, applies `console::style()` formatting. In plain mode,
+    /// returns the ASCII equivalent without styling.
+    fn glyph_ok(&self) -> String {
+        if self.plain_mode {
+            "[ok]".to_string()
+        } else {
+            style("●").green().to_string()
+        }
+    }
+
+    fn glyph_err(&self) -> String {
+        if self.plain_mode {
+            "[ERR]".to_string()
+        } else {
+            style("✗").red().to_string()
+        }
+    }
+
+    fn glyph_warn(&self) -> String {
+        if self.plain_mode {
+            "[WARN]".to_string()
+        } else {
+            style("⚠").yellow().to_string()
+        }
+    }
+
+    fn glyph_progress(&self) -> String {
+        if self.plain_mode {
+            "...".to_string()
+        } else {
+            style("◉").cyan().to_string()
+        }
+    }
+
+    fn glyph_sub(&self) -> String {
+        if self.plain_mode {
+            "  ".to_string()
+        } else {
+            style("└").dim().to_string()
+        }
+    }
+
+    /// Returns `└` (dim) in fancy mode, `\-` in plain mode — used for
+    /// tool result sub-lines beneath the tool call line.
+    fn glyph_sub_tree(&self) -> String {
+        if self.plain_mode {
+            "\\-".to_string()
+        } else {
+            style("└").dim().to_string()
+        }
+    }
+
+    fn glyph_arrow_out(&self) -> String {
+        if self.plain_mode {
+            "->".to_string()
+        } else {
+            style("→").dim().to_string()
+        }
+    }
+
+    fn glyph_arrow_in(&self) -> String {
+        if self.plain_mode {
+            "<-".to_string()
+        } else {
+            style("←").dim().to_string()
+        }
+    }
+
+    /// Returns a human-friendly capitalized name for a tool.
+    ///
+    /// Used by `tool_call` to render e.g. `● Read path` instead of
+    /// `► read_file path`. Unknown/MCP tools are returned as-is.
+    fn humanize_tool_name<'a>(&self, tool_name: &'a str) -> &'a str {
+        match tool_name {
+            "read_file" => "Read",
+            "edit_file" => "Edit",
+            "grep" => "Grep",
+            "find_path" => "Find",
+            "list_directory" => "List",
+            "git" => "Git",
+            "terminal" => "Terminal",
+            "ask_supervisor" => "Ask supervisor",
+            "think" => "Think",
+            _ => tool_name,
+        }
+    }
+
+    fn glyph_url_arrow(&self) -> &'static str {
+        if self.plain_mode { "->" } else { "→" }
+    }
+
+    /// Returns the content pipe glyph: `│` in fancy mode, `|` in plain mode.
+    fn glyph_content_pipe(&self) -> &'static str {
+        if self.plain_mode { "|" } else { "│" }
+    }
+
+    /// Formats a content string as multi-line output with pipe prefixes.
+    ///
+    /// Splits on newlines and prefixes each line with the content pipe glyph at
+    /// Level 2.5 indentation (5 spaces) to nest under the LLM event line.
+    /// No truncation is applied — the full content is displayed.
+    fn format_content_preview(&self, content: &str) -> Vec<String> {
+        let pipe = self.glyph_content_pipe();
+        content
+            .lines()
+            .map(|line| {
+                if self.plain_mode {
+                    format!("     {pipe} {line}")
+                } else {
+                    format!("     {} {}", style(pipe).dim(), style(line).dim())
+                }
+            })
+            .collect()
     }
 
     /// Prints a styled line to the `MultiProgress` context so it does not
@@ -76,6 +226,23 @@ impl ConsoleRenderer {
             Err(poisoned) => {
                 tracing::debug!("ConsoleRenderer: spinner lock poisoned: {poisoned}");
                 None
+            }
+        }
+    }
+
+    /// Finishes and clears **all** active spinners.
+    ///
+    /// Called before shutdown to prevent `indicatif` animation frames from
+    /// being "baked" into the terminal when the process exits mid-tick.
+    fn clear_all_spinners(&self) {
+        match self.spinners.lock() {
+            Ok(mut map) => {
+                for (_, pb) in map.drain() {
+                    pb.finish_and_clear();
+                }
+            }
+            Err(poisoned) => {
+                tracing::debug!("ConsoleRenderer: spinner lock poisoned: {poisoned}");
             }
         }
     }
@@ -111,20 +278,21 @@ impl UiRenderer for ConsoleRenderer {
     fn story_start(&self, key: &str, title: &str) {
         self.println(&format!(
             "{} Story {} — {}",
-            style("◉").cyan(),
+            self.glyph_progress(),
             style(key).bold(),
             title,
         ));
     }
 
     fn story_complete(&self, key: &str, pr_url: Option<&str>) {
+        let arrow = self.glyph_url_arrow();
         let suffix = match pr_url {
-            Some(url) => format!(" → {url}"),
+            Some(url) => format!(" {arrow} {url}"),
             None => String::new(),
         };
         self.println(&format!(
             "{} Story {} complete{}",
-            style("●").green(),
+            self.glyph_ok(),
             style(key).bold(),
             suffix,
         ));
@@ -133,7 +301,7 @@ impl UiRenderer for ConsoleRenderer {
     fn story_error(&self, key: &str, error: &str) {
         self.println(&format!(
             "{} Story {} — {}",
-            style("✗").red(),
+            self.glyph_err(),
             style(key).bold(),
             error,
         ));
@@ -142,7 +310,7 @@ impl UiRenderer for ConsoleRenderer {
     fn story_escalated(&self, key: &str, reason: &str) {
         self.println(&format!(
             "{} Story {} escalated — {}",
-            style("⚠").yellow(),
+            self.glyph_warn(),
             style(key).bold(),
             reason,
         ));
@@ -151,17 +319,13 @@ impl UiRenderer for ConsoleRenderer {
     fn batch_start(&self, count: usize) {
         self.println(&format!(
             "{} Batch started — {} stories",
-            style("◉").cyan(),
+            self.glyph_progress(),
             count,
         ));
     }
 
     fn batch_complete(&self, summary: &str) {
-        self.println(&format!(
-            "{} Batch complete — {}",
-            style("●").green(),
-            summary,
-        ));
+        self.println(&format!("{} Batch complete — {}", self.glyph_ok(), summary,));
     }
 
     // ── Phase events ────────────────────────────────────────────────
@@ -176,10 +340,10 @@ impl UiRenderer for ConsoleRenderer {
             pb.finish_and_clear();
         }
         self.println(&format!(
-            "  {} {} [{}s]",
-            style("●").green(),
+            "  {} {} [{}]",
+            self.glyph_ok(),
             phase_name,
-            duration.as_secs(),
+            format_duration(duration),
         ));
     }
 
@@ -189,7 +353,7 @@ impl UiRenderer for ConsoleRenderer {
         }
         self.println(&format!(
             "  {} {} — {}",
-            style("✗").red(),
+            self.glyph_err(),
             phase_name,
             error,
         ));
@@ -200,62 +364,95 @@ impl UiRenderer for ConsoleRenderer {
     fn chat_turn(&self, turn: u32, summary: &str) {
         self.println(&format!(
             "    {} turn {} — {}",
-            style("└").dim(),
+            self.glyph_sub(),
             turn,
             summary,
         ));
     }
 
     fn activation_start(&self) {
-        self.println(&format!("    {} Agent activation…", style("◉").cyan()));
+        self.println(&format!("    {} Agent activation…", self.glyph_progress()));
     }
 
     fn activation_complete(&self) {
-        self.println(&format!("    {} Agent activated", style("●").green()));
+        self.println(&format!("    {} Agent activated", self.glyph_ok()));
     }
 
     fn completion_detected(&self, story_key: &str) {
         self.println(&format!(
             "    {} Completion detected for {}",
-            style("●").green(),
+            self.glyph_ok(),
             style(story_key).bold(),
         ));
     }
 
     // ── Tool events ─────────────────────────────────────────────────
 
-    /// A tool call was initiated — uses `►` (outgoing call) to distinguish
-    /// from the returning result.
+    /// A tool call was initiated — displayed as `● {HumanName} {detail}`.
+    ///
+    /// Uses a green `●` glyph and a humanized tool name (e.g. `Read` instead
+    /// of `read_file`) for a cleaner Copilot-style output.
     fn tool_call(&self, tool_name: &str, detail: &str) {
-        self.println(&format!(
-            "      {} {} {}",
-            style("►").dim(),
-            style(tool_name).dim().bold(),
-            style(detail).dim(),
-        ));
+        let human = self.humanize_tool_name(tool_name);
+        if self.plain_mode {
+            self.println(&format!("      [ok] {human} {detail}"));
+        } else {
+            self.println(&format!(
+                "      {} {} {}",
+                style("●").green().dim(),
+                style(human).bold(),
+                style(detail).dim(),
+            ));
+        }
     }
 
-    /// A tool call returned a result — uses `●` (green, dim) to signal success
-    /// and distinguish from the originating `tool_call`.
-    fn tool_result(&self, tool_name: &str, detail: &str) {
-        self.println(&format!(
-            "      {} {} {}",
-            style("●").green().dim(),
-            style(tool_name).dim().bold(),
-            style(detail).dim(),
-        ));
+    /// A tool call returned a result — displayed as a sub-line `└ {detail}`.
+    ///
+    /// When `detail` contains newlines (e.g. `think` tool output), the first
+    /// line is shown next to the `└` glyph and subsequent lines are rendered
+    /// with the content pipe prefix for readability.
+    fn tool_result(&self, _tool_name: &str, detail: &str) {
+        let mut lines = detail.lines();
+        let first_line = lines.next().unwrap_or("");
+
+        // Sub-line: └ detail
+        let tree = self.glyph_sub_tree();
+        if self.plain_mode {
+            self.println(&format!("        {tree} {first_line}"));
+        } else {
+            self.println(&format!("        {} {}", tree, style(first_line).dim(),));
+        }
+
+        // Remaining lines: pipe-prefixed continuation
+        let pipe = self.glyph_content_pipe();
+        for line in lines {
+            if self.plain_mode {
+                self.println(&format!("        {pipe} {line}"));
+            } else {
+                self.println(&format!(
+                    "        {} {}",
+                    style(pipe).dim(),
+                    style(line).dim()
+                ));
+            }
+        }
     }
 
     // ── LLM events ──────────────────────────────────────────────────
 
     fn llm_request(&self, label: &str, turn: u32) {
-        self.println(&format!("    {} {} turn {}", style("►").dim(), label, turn,));
+        self.println(&format!(
+            "    {} [{}] turn {}",
+            self.glyph_arrow_out(),
+            label,
+            turn,
+        ));
     }
 
     fn llm_response(&self, label: &str, turn: u32, response_len: usize) {
         self.println(&format!(
-            "    {} {} turn {} — {} bytes",
-            style("●").green().dim(),
+            "    {} [{}] turn {} — {} bytes",
+            self.glyph_arrow_in(),
             label,
             turn,
             response_len,
@@ -264,8 +461,8 @@ impl UiRenderer for ConsoleRenderer {
 
     fn llm_error(&self, label: &str, turn: u32, error: &str) {
         self.println(&format!(
-            "    {} {} turn {} — {}",
-            style("✗").red(),
+            "    {} [{}] turn {} — {}",
+            self.glyph_err(),
             label,
             turn,
             error,
@@ -274,8 +471,8 @@ impl UiRenderer for ConsoleRenderer {
 
     fn llm_retry(&self, label: &str, turn: u32, retry_count: u32, delay_secs: f64) {
         self.println(&format!(
-            "    {} {} turn {} — retry {} in {:.1}s",
-            style("⚠").yellow(),
+            "    {} [{}] turn {} — retry {} in {:.1}s",
+            self.glyph_warn(),
             label,
             turn,
             retry_count,
@@ -283,12 +480,30 @@ impl UiRenderer for ConsoleRenderer {
         ));
     }
 
+    fn llm_request_content(&self, _label: &str, _turn: u32, preview: &str) {
+        if !self.verbose {
+            return;
+        }
+        for line in self.format_content_preview(preview) {
+            self.println(&line);
+        }
+    }
+
+    fn llm_response_content(&self, _label: &str, _turn: u32, preview: &str) {
+        if !self.verbose {
+            return;
+        }
+        for line in self.format_content_preview(preview) {
+            self.println(&line);
+        }
+    }
+
     // ── System events ───────────────────────────────────────────────
 
     fn daemon_start(&self, config_summary: &str) {
         self.println(&format!(
             "{} Daemon started — {}",
-            style("●").green(),
+            self.glyph_ok(),
             config_summary,
         ));
     }
@@ -297,36 +512,36 @@ impl UiRenderer for ConsoleRenderer {
     /// lightweight heartbeat marker (sub-detail of the running daemon), not
     /// `●` which signals a completed discrete action.
     fn poll_cycle(&self, cycle_num: u32) {
-        self.println(&format!("{} Poll #{cycle_num}", style("└").dim(),));
+        self.println(&format!("{} Poll #{cycle_num}", self.glyph_sub()));
     }
 
     fn stories_found(&self, count: usize) {
         self.println(&format!(
             "{} Found {} eligible stories",
-            style("●").green(),
+            self.glyph_ok(),
             count,
         ));
     }
 
     fn crash_recovery_start(&self) {
-        self.println(&format!(
-            "{} Crash recovery initiated…",
-            style("⚠").yellow(),
-        ));
+        self.println(&format!("{} Crash recovery initiated…", self.glyph_warn(),));
     }
 
     fn crash_recovery_complete(&self, story_key: &str) {
         self.println(&format!(
             "{} Crash recovery complete for {}",
-            style("●").green(),
+            self.glyph_ok(),
             style(story_key).bold(),
         ));
     }
 
     fn shutdown_requested(&self) {
+        // Drain active spinners BEFORE printing so that indicatif
+        // animation frames don't linger on screen after Ctrl+C.
+        self.clear_all_spinners();
         self.println(&format!(
             "{} Shutdown requested — finishing current work…",
-            style("⚠").yellow(),
+            self.glyph_warn(),
         ));
     }
 }
@@ -334,6 +549,51 @@ impl UiRenderer for ConsoleRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── format_duration tests (Task 1.4) ────────────────────────────
+
+    #[test]
+    fn test_format_duration_zero_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
+    }
+
+    #[test]
+    fn test_format_duration_under_60s() {
+        assert_eq!(format_duration(Duration::from_secs(47)), "47s");
+    }
+
+    #[test]
+    fn test_format_duration_exactly_60s() {
+        assert_eq!(format_duration(Duration::from_secs(60)), "1m 0s");
+    }
+
+    #[test]
+    fn test_format_duration_90s() {
+        assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
+    }
+
+    #[test]
+    fn test_format_duration_just_under_1h() {
+        assert_eq!(format_duration(Duration::from_secs(3599)), "59m 59s");
+    }
+
+    #[test]
+    fn test_format_duration_exactly_1h() {
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1h 0m");
+    }
+
+    #[test]
+    fn test_format_duration_over_1h() {
+        assert_eq!(format_duration(Duration::from_secs(5000)), "1h 23m");
+    }
+
+    #[test]
+    fn test_format_duration_ignores_sub_second() {
+        // 47.999s should display as 47s (truncated, not rounded)
+        assert_eq!(format_duration(Duration::from_millis(47_999)), "47s");
+    }
+
+    // ── ConsoleRenderer (fancy mode) tests ──────────────────────────
 
     /// Compile-time proof that `ConsoleRenderer` is `Send + Sync` (M2).
     fn assert_send_sync<T: Send + Sync>() {}
@@ -345,14 +605,14 @@ mod tests {
 
     #[test]
     fn test_console_renderer_new_does_not_panic() {
-        let _r = ConsoleRenderer::new();
+        let _r = ConsoleRenderer::new(false, false);
     }
 
     /// H2: exercise every `UiRenderer` method on a real `ConsoleRenderer`
     /// to catch any internal panic (poisoned lock, bad ProgressStyle template, etc.).
     #[test]
     fn test_console_renderer_all_methods_do_not_panic() {
-        let r = ConsoleRenderer::new();
+        let r = ConsoleRenderer::new(false, false);
 
         // Pipeline
         r.story_start("10-1", "Foundation");
@@ -399,7 +659,7 @@ mod tests {
     /// first spinner — the previous one must be finished and removed.
     #[test]
     fn test_phase_start_duplicate_clears_previous_spinner() {
-        let r = ConsoleRenderer::new();
+        let r = ConsoleRenderer::new(false, false);
 
         r.phase_start("Dev Session");
         // Verify one spinner is tracked
@@ -430,14 +690,143 @@ mod tests {
     /// H3: `phase_complete` on a phase that was never started must not panic.
     #[test]
     fn test_phase_complete_without_start_does_not_panic() {
-        let r = ConsoleRenderer::new();
+        let r = ConsoleRenderer::new(false, false);
         r.phase_complete("Ghost Phase", Duration::from_secs(0));
     }
 
     /// H3: `phase_error` on a phase that was never started must not panic.
     #[test]
     fn test_phase_error_without_start_does_not_panic() {
-        let r = ConsoleRenderer::new();
+        let r = ConsoleRenderer::new(false, false);
         r.phase_error("Ghost Phase", "never started");
+    }
+
+    // ── ConsoleRenderer (plain mode) tests (Task 3.7) ───────────────
+
+    /// Plain mode: construct with `plain=true` and exercise all methods
+    /// without panic. Verifies ASCII glyph code paths are reachable.
+    #[test]
+    fn test_console_renderer_plain_mode_all_methods_do_not_panic() {
+        let r = ConsoleRenderer::new(true, false);
+
+        // Pipeline
+        r.story_start("10-5", "Polish");
+        r.story_complete("10-5", Some("https://example.com/pr/5"));
+        r.story_complete("10-5", None);
+        r.story_error("10-5", "compile error");
+        r.story_escalated("10-5", "needs clarification");
+        r.batch_start(2);
+        r.batch_complete("2/2 done");
+
+        // Phase
+        r.phase_start("Dev Session");
+        r.phase_complete("Dev Session", Duration::from_secs(120));
+        r.phase_start("Code Review");
+        r.phase_error("Code Review", "timeout");
+
+        // Session
+        r.chat_turn(1, "task done");
+        r.activation_start();
+        r.activation_complete();
+        r.completion_detected("10-5");
+
+        // Tool
+        r.tool_call("git", "commit msg");
+        r.tool_result("git", "ok");
+
+        // LLM
+        r.llm_request("dev", 1);
+        r.llm_response("dev", 1, 2048);
+        r.llm_error("dev", 2, "rate limited");
+        r.llm_retry("dev", 2, 1, 3.0);
+
+        // System
+        r.daemon_start("poll=30s");
+        r.poll_cycle(1);
+        r.stories_found(1);
+        r.crash_recovery_start();
+        r.crash_recovery_complete("10-5");
+        r.shutdown_requested();
+    }
+
+    #[test]
+    fn test_console_renderer_plain_mode_field_stored() {
+        let fancy = ConsoleRenderer::new(false, false);
+        assert!(!fancy.plain_mode);
+
+        let plain = ConsoleRenderer::new(true, false);
+        assert!(plain.plain_mode);
+    }
+
+    // ── Verbose content preview tests (Task 4.7) ────────────────────
+
+    #[test]
+    fn test_format_content_preview_short_single_line() {
+        let r = ConsoleRenderer::new(true, true);
+        let lines = r.format_content_preview("hello world");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("hello world"));
+        assert!(!lines[0].contains('…'));
+    }
+
+    #[test]
+    fn test_format_content_preview_no_truncation() {
+        let r = ConsoleRenderer::new(true, true);
+        let long = "a".repeat(1000);
+        let lines = r.format_content_preview(&long);
+        // Full content preserved — no ellipsis
+        let joined = lines.join("\n");
+        assert!(!joined.contains('…'), "content must NOT be truncated");
+        assert!(joined.contains(&"a".repeat(1000)));
+    }
+
+    #[test]
+    fn test_format_content_preview_multiline_gets_pipe_prefix() {
+        let r = ConsoleRenderer::new(true, true);
+        let lines = r.format_content_preview("line1\nline2\nline3");
+        assert_eq!(lines.len(), 3);
+        for line in &lines {
+            assert!(
+                line.contains('|'),
+                "each line should have pipe prefix, got: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_console_renderer_verbose_mode_field_stored() {
+        let non_verbose = ConsoleRenderer::new(false, false);
+        assert!(!non_verbose.verbose);
+
+        let verbose = ConsoleRenderer::new(false, true);
+        assert!(verbose.verbose);
+    }
+
+    #[test]
+    fn test_console_renderer_llm_content_methods_do_not_panic() {
+        // Verbose mode — should render content
+        let r = ConsoleRenderer::new(false, true);
+        r.llm_request_content("dev", 1, "test request preview");
+        r.llm_response_content("dev", 1, "test response preview");
+
+        // Non-verbose mode — should no-op
+        let r2 = ConsoleRenderer::new(false, false);
+        r2.llm_request_content("dev", 1, "should not render");
+        r2.llm_response_content("dev", 1, "should not render");
+    }
+
+    #[test]
+    fn test_console_renderer_plain_verbose_uses_ascii_pipe() {
+        let r = ConsoleRenderer::new(true, true);
+        let lines = r.format_content_preview("hello\nworld");
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("| hello"));
+        assert!(lines[1].contains("| world"));
+        // Must NOT contain the Unicode pipe
+        assert!(
+            !lines[0].contains('│'),
+            "plain mode should NOT use Unicode pipe, got: {}",
+            lines[0]
+        );
     }
 }
