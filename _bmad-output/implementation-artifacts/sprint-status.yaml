@@ -129,5 +129,5 @@ development_status:
     10-2-pipeline-integration-ui-events-in-story-lifecycle: ready-for-dev # depends-on: 10-1
     10-3-session-integration-tool-calls-chat-turns-visible: review # depends-on: 10-2
     10-4-review-integration-ui-events-in-code-review: review # depends-on: 10-3
-    10-5-polish-visual-vocabulary-colors-final-formatting: backlog # depends-on: 10-4
+    10-5-polish-visual-vocabulary-colors-final-formatting: ready-for-dev # depends-on: 10-4
     epic-10-retrospective: optional
