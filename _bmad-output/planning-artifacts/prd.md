@@ -39,6 +39,7 @@ classification:
 - Developer wakes up to notifications summarizing completed work: stories developed, PRs ready for review
 - Human code review is smooth — generated code is clean, understandable, tests pass, merges without friction
 - Zero babysitting: the daemon runs autonomously overnight without intervention
+- Developer can follow daemon progress in real-time via structured terminal output — pipeline phases, agent tool calls, and LLM interaction status are immediately visible without reading raw debug logs
 - Story specs are always current — the agent updates specs based on previous implementations before starting development (pre-dev), and propagates implementation reality forward to downstream dependent stories after completing each story (post-impl)
 
 ### Business Success
@@ -156,7 +157,7 @@ classification:
 
 **Persona:** JB — daemon running for 3 days, checking on things.
 
-**Rising Action:** `bmad-bot status` — stories processed, in progress, blocked, last activity. `bmad-bot logs` — structured tracing with story_id, timestamps, actions. He checks the LLM request/response logs to debug a strange agent behavior. He notices the supervisor LLM is called too often for a pattern the rule engine should handle.
+**Rising Action:** JB glances at his tmux pane — the daemon shows a clean hierarchical view: story epic-4/story-4.2 in progress, Dev Session phase active with a spinning indicator, recent tool calls listed beneath (read_file, edit_file, git commit). No need to parse log lines — the status is immediately clear. He also runs `bmad-bot status` — stories processed, in progress, blocked, last activity. `bmad-bot logs` — structured tracing with story_id, timestamps, actions. He checks the LLM request/response logs to debug a strange agent behavior. He notices the supervisor LLM is called too often for a pattern the rule engine should handle.
 
 **Resolution:** JB adds a rule to the rule engine for that pattern. Reviews decisions files to spot trends. Next run is more efficient and cheaper.
 
@@ -167,7 +168,7 @@ classification:
 | Happy Path | Watcher, rig session, supervisor with decision logging, optional code review with separate commits, PR with agent description + Supervisor Decisions section, review as PR comment, decisions file, Telegram notifications |
 | Pipeline Fail | Supervisor escalation, cascade dependency blocking, PR with partial code and failure description, decisions file traceability |
 | Setup | CLI `bmad-bot init` with prompts, YAML + `.env` generation, `bmad-bot start`, GitHub/GitLab selection |
-| Operations | `bmad-bot status`, `bmad-bot logs`, structured tracing, LLM request/response logging, decision file pattern analysis |
+| Operations | `bmad-bot status`, `bmad-bot logs`, structured tracing, LLM request/response logging, decision file pattern analysis, real-time terminal UI with pipeline phases and tool call visibility |
 
 ## Decision Tracking
 
@@ -205,7 +206,7 @@ BMAD Bot is a Rust binary distributed as a standalone daemon. Not a library, SDK
 | Command | Description |
 |---|---|
 | `bmad-bot init` | Interactive setup: repo path, LLM providers, notifications. Generates `bmad-bot.yaml` and `.env` |
-| `bmad-bot start` | Starts daemon. Polls `sprint-status.yaml`, processes stories until stopped |
+| `bmad-bot start` | Starts daemon. Polls `sprint-status.yaml`, processes stories until stopped. In foreground mode, displays structured terminal UI with pipeline phases, tool calls, and progress indicators |
 | `bmad-bot status` | Current state: stories processed, in progress, blocked, last activity |
 | `bmad-bot logs` | Structured `tracing` logs with story_id, timestamps, actions |
 
@@ -216,6 +217,7 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 - **Single binary:** No runtime dependencies beyond the OS. `git2` embeds libgit2, `rig-core` handles LLM connections. Self-contained.
 - **Graceful shutdown:** SIGTERM/SIGINT handled — finishes current step if possible, commits partial work, notifies, exits.
 - **Config validation:** `init` and `start` validate configuration before proceeding — missing keys, unreachable repos, invalid YAML all reported clearly.
+- **Terminal UI:** In foreground mode (tmux, screen, interactive terminal), the daemon displays structured user-facing output via `indicatif` (spinners, progress) and `console` (colors, styles). Debug logs are written exclusively to the log file. Output mode is configurable via `ui_mode` in `bmad-bot.yaml`: `"fancy"` (default), `"plain"` (no colors/spinners), `"silent"` (no stdout). Non-TTY environments (pipes, CI) automatically use silent mode.
 
 ### Documentation
 
@@ -306,6 +308,7 @@ No CLI flags for config override in MVP — all configuration via YAML file.
 - **FR39:** The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime. The Copilot provider is a proxy to multiple backends — API format is hardcoded per model: known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) use the Responses API, all other models fallback to the Completions API (safe default for non-OpenAI backends). Required IDE-specific headers are included in all Copilot requests
 - **FR40:** The daemon logs all LLM requests and responses via a dedicated `llm_logging` module for debugging and operational visibility
 - **FR42:** The daemon centralizes all LLM provider construction via an `AgentFactory` that returns a `BuiltAgent` with unified `stream_chat()` dispatch. API format selection is hardcoded per provider and model — not configurable. GitHub Copilot API format is determined by model name heuristic with Completions API as the safe fallback
+- **FR43:** The daemon displays structured, user-facing terminal output in foreground mode — progress indicators (spinners), pipeline phase transitions, agent tool calls (read_file, edit_file, git, terminal), and LLM interaction status — separate from debug logs which are written to the log file only. The UI is powered by a `UiRenderer` trait with `ConsoleRenderer` (rich terminal with spinners and colors via `indicatif` + `console`) and `NullRenderer` (silent/test mode) implementations. Terminal output mode is configurable via `ui_mode` in `bmad-bot.yaml`
 
 ### Error Handling & Resilience
 
