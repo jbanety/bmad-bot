@@ -54,7 +54,8 @@ impl GitLabProvider {
         }
 
         let client = build_http_client();
-        let project_path = format!("{}%2F{}", config.repo_owner, config.repo_name);
+        let full_path = format!("{}/{}", config.repo_owner, config.repo_name);
+        let project_path = full_path.replace('/', "%2F");
 
         Ok(Self {
             client,
@@ -285,6 +286,21 @@ mod tests {
     }
 
     #[test]
+    fn test_gitlab_provider_nested_group_encoding() {
+        let config = GitProviderConfig {
+            provider: "gitlab".to_string(),
+            repo_owner: "etdsolutions/clients".to_string(),
+            repo_name: "section2035".to_string(),
+            target_branch: "development".to_string(),
+        };
+        let provider = GitLabProvider::new(&config, "glpat-token").expect("should build");
+        assert_eq!(
+            provider.project_path, "etdsolutions%2Fclients%2Fsection2035",
+            "All slashes in nested group paths must be encoded as %2F"
+        );
+    }
+
+    #[test]
     fn test_gitlab_provider_project_path_encoding() {
         let config = GitProviderConfig {
             provider: "gitlab".to_string(),
@@ -295,7 +311,7 @@ mod tests {
         let provider = GitLabProvider::new(&config, "glpat-token").expect("should build");
         assert_eq!(
             provider.project_path, "acme-corp%2Fawesome-project",
-            "Project path should be URL-encoded with %2F"
+            "Single-level owner should have one %2F separator"
         );
     }
 
