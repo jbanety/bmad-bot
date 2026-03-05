@@ -1653,6 +1653,142 @@ development_status:
         assert!(cascade >= 2); // 1-2 cascade + 2-1 cascade
     }
 
+    #[test]
+    fn test_filter_eligible_multi_epic_comma_deps_autoscalp_scenario() {
+        // Exact autoscalp3000 scenario:
+        //   8-1 depends-on: epic-3, epic-5
+        //   9-1 depends-on: epic-7, epic-8
+        // When epics 3 and 5 are NOT done, 8-1 should be blocked.
+        // When epics 3 and 5 ARE done but epic-7 isn't, 9-1 still blocked.
+        let all_statuses = vec![
+            ("epic-3".into(), "in-progress".into()),
+            ("3-1-candles".into(), "done".into()),
+            ("3-2-indicators".into(), "done".into()),
+            ("3-3-regime".into(), "ready-for-dev".into()), // not done!
+            ("epic-5".into(), "in-progress".into()),
+            ("5-1-backtest".into(), "done".into()),
+            ("5-2-paper".into(), "done".into()),
+            ("5-3-live".into(), "ready-for-dev".into()), // not done!
+            ("epic-7".into(), "in-progress".into()),
+            ("7-1-grid".into(), "ready-for-dev".into()),
+            ("epic-8".into(), "backlog".into()),
+            ("8-1-walkforward".into(), "ready-for-dev".into()),
+            ("8-2-scorer".into(), "ready-for-dev".into()),
+            ("epic-9".into(), "backlog".into()),
+            ("9-1-logging".into(), "ready-for-dev".into()),
+            ("9-2-telegram".into(), "ready-for-dev".into()),
+        ];
+
+        let stories = vec![
+            make_story("3-3-regime", "ready-for-dev"),
+            make_story("5-3-live", "ready-for-dev"),
+            make_story("7-1-grid", "ready-for-dev"),
+            make_story("8-1-walkforward", "ready-for-dev"),
+            make_story("8-2-scorer", "ready-for-dev"),
+            make_story("9-1-logging", "ready-for-dev"),
+            make_story("9-2-telegram", "ready-for-dev"),
+        ];
+
+        let mut comment = HashMap::new();
+        comment.insert(
+            "8-1-walkforward".to_string(),
+            vec!["epic-3".to_string(), "epic-5".to_string()],
+        );
+        comment.insert(
+            "9-1-logging".to_string(),
+            vec!["epic-7".to_string(), "epic-8".to_string()],
+        );
+
+        let (eligible, _) = filter_eligible(stories, &all_statuses, &comment).unwrap();
+        let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
+
+        // 8-1 blocked: epic-3 last story (3-3) not done, epic-5 last story (5-3) not done
+        // 8-2 blocked: intra-epic dep on 8-1
+        // 9-1 blocked: epic-7 last story (7-1) not done, epic-8 last story (8-2) not done
+        // 9-2 blocked: intra-epic dep on 9-1
+        // Only 3-3, 5-3, 7-1 should be eligible (first unfinished in their epics)
+        assert!(
+            !keys.contains(&"8-1-walkforward"),
+            "8-1 should be blocked (epic-3 + epic-5 not done)"
+        );
+        assert!(
+            !keys.contains(&"9-1-logging"),
+            "9-1 should be blocked (epic-7 + epic-8 not done)"
+        );
+        assert!(
+            keys.contains(&"3-3-regime"),
+            "3-3 should be eligible (intra-epic dep 3-2 done)"
+        );
+        assert!(
+            keys.contains(&"5-3-live"),
+            "5-3 should be eligible (intra-epic dep 5-2 done)"
+        );
+        assert!(
+            keys.contains(&"7-1-grid"),
+            "7-1 should be eligible (no deps)"
+        );
+    }
+
+    #[test]
+    fn test_filter_eligible_multi_epic_deps_all_satisfied() {
+        // Same scenario but epics 3 and 5 are fully done → 8-1 becomes eligible.
+        let all_statuses = vec![
+            ("epic-3".into(), "done".into()),
+            ("3-1-candles".into(), "done".into()),
+            ("3-2-indicators".into(), "done".into()),
+            ("3-3-regime".into(), "done".into()),
+            ("epic-5".into(), "done".into()),
+            ("5-1-backtest".into(), "done".into()),
+            ("5-2-paper".into(), "done".into()),
+            ("5-3-live".into(), "done".into()),
+            ("epic-7".into(), "in-progress".into()),
+            ("7-1-grid".into(), "ready-for-dev".into()),
+            ("epic-8".into(), "in-progress".into()),
+            ("8-1-walkforward".into(), "ready-for-dev".into()),
+            ("8-2-scorer".into(), "ready-for-dev".into()),
+            ("epic-9".into(), "backlog".into()),
+            ("9-1-logging".into(), "ready-for-dev".into()),
+        ];
+
+        let stories = vec![
+            make_story("7-1-grid", "ready-for-dev"),
+            make_story("8-1-walkforward", "ready-for-dev"),
+            make_story("8-2-scorer", "ready-for-dev"),
+            make_story("9-1-logging", "ready-for-dev"),
+        ];
+
+        let mut comment = HashMap::new();
+        comment.insert(
+            "8-1-walkforward".to_string(),
+            vec!["epic-3".to_string(), "epic-5".to_string()],
+        );
+        comment.insert(
+            "9-1-logging".to_string(),
+            vec!["epic-7".to_string(), "epic-8".to_string()],
+        );
+
+        let (eligible, _) = filter_eligible(stories, &all_statuses, &comment).unwrap();
+        let keys: Vec<&str> = eligible.iter().map(|s| s.story_key.as_str()).collect();
+
+        // epic-3 done, epic-5 done → 8-1 eligible
+        assert!(
+            keys.contains(&"8-1-walkforward"),
+            "8-1 should be eligible (epic-3 + epic-5 both done)"
+        );
+        // 8-2 blocked: intra-epic dep on 8-1 (not done yet, just ready-for-dev)
+        assert!(
+            !keys.contains(&"8-2-scorer"),
+            "8-2 should be blocked (dep 8-1 not done)"
+        );
+        // 9-1 blocked: epic-7 (7-1 not done), epic-8 (8-2 not done)
+        assert!(
+            !keys.contains(&"9-1-logging"),
+            "9-1 should be blocked (epic-7 + epic-8 not done)"
+        );
+        // 7-1 eligible (no deps)
+        assert!(keys.contains(&"7-1-grid"), "7-1 should be eligible");
+    }
+
     fn test_find_cascade_stops_at_absorbed() {
         let stories = vec![
             make_story("1-1-broken", "blocked"),
