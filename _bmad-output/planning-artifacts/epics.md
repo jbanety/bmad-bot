@@ -193,6 +193,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR46: Epic 9 — MCP connection failures are non-blocking
 - FR47: Epic 9 — Graceful MCP shutdown during cooperative shutdown
 - FR48: Epic 9 — Agent uses MCP-discovered tools identically to native tools via rig's `McpTool`
+- FR49: Epic 10 — Display structured, user-facing terminal output in foreground mode (spinners, pipeline phases, tool calls, LLM status) via UiRenderer trait with ConsoleRenderer (indicatif + console) and NullRenderer (tests/CI). Configurable via ui_mode in bmad-bot.yaml
 
 ## Epic List
 
@@ -235,6 +236,11 @@ Replace the monolithic FsTool with focused, Claude Code-style tools to dramatica
 Connect to external MCP servers at daemon startup, discover their tools, and expose them to the rig agent alongside native tools — leveraging rig's built-in `McpTool` and `.rmcp_tools()` support. The autonomous agent gains browser automation (Playwright) and any future MCP-compatible tooling without custom tool implementations. Zero code changes to add a new MCP server — just a config entry.
 **FRs covered:** FR44, FR45, FR46, FR47, FR48
 **Depends on:** Epic 4 (AgentFactory + tool registration infrastructure)
+
+### Epic 10: Terminal UI & Developer Experience
+The daemon displays structured, user-facing terminal output in foreground mode (tmux, screen, interactive terminal) — replacing raw tracing logs on stdout with hierarchical progress indicators, pipeline phase tracking, agent tool call visibility, and LLM interaction status. Powered by `indicatif` (spinners, progress) and `console` (colors, styles) behind a `UiRenderer` trait that enables future migration to `iocraft` or `ratatui` without modifying business code. Debug logs remain in the JSON log file only. After this epic, the user can follow daemon progress in real-time without reading raw debug logs.
+**FRs covered:** FR49
+**Depends on:** Epics 1-6 (all implemented — retroactive UI event insertion)
 
 ---
 
@@ -2269,3 +2275,437 @@ mcp_servers:
 - `AgentConfigurator` trait is unchanged — only `ToolConfigurator` struct and its impls are modified
 - MCP failures are always non-blocking — the daemon never crashes due to an MCP server issue
 - **Epic 7** (Integration Tests) — not yet implemented. Tool integration test stories (especially 7.8) should be written against the new surgical tools, not the old FsTool.
+
+---
+
+## Epic 10: Terminal UI & Developer Experience
+
+Replace raw `tracing` stdout output with structured, user-facing terminal rendering in foreground mode (tmux, screen, interactive terminal). The daemon displays hierarchical progress indicators, pipeline phase tracking, agent tool call visibility, and LLM interaction status — similar to GitHub Copilot CLI and Claude Code. Powered by `indicatif` (spinners, progress) and `console` (colors, styles) behind a `UiRenderer` trait that enables future migration to `iocraft` (React-like declarative TUI) or `ratatui` (full TUI framework) without modifying business code.
+
+**Why this epic exists:** The daemon runs as a foreground process (Architecture Decision 6), and the primary usage mode is tmux/screen. The current stdout output is raw `tracing_subscriber::fmt` logs — structured debug lines with timestamps, log levels, targets, and key-value fields. This makes it impossible to follow in real-time what the daemon is doing. ~100+ `tracing::info!/warn!/error!` calls across the codebase are oriented toward debugging, not user experience. Zero TUI dependencies exist in the project today.
+
+**Dependency order:** Sequential — each story builds on the previous.
+
+```
+10.1 Foundation (trait + renderers) ──► 10.2 Pipeline Integration ──► 10.3 Session Integration ──► 10.4 Review Integration ──► 10.5 Polish
+```
+
+**Reference documents:**
+- `_bmad-output/planning-artifacts/sprint-change-proposal-2026-03-05.md` — Full analysis and rationale
+- `src/cli/mod.rs` — `init_tracing()` (current stdout layer to be replaced)
+- `src/pipeline.rs` — `StoryPipeline`, `process_story()`, `process_eligible_stories()`
+- `src/session/runner.rs` — `SessionRunner`, `run_session()`, `drive_activation_and_recover()`
+- `src/review/mod.rs` — `ReviewRunner`, `drive_review_session()`
+- `src/tools/*.rs` — Tool implementations with existing `tracing::info!(action = ...)` calls
+
+---
+
+### Story 10.1: Module `ui/` — Foundation, Trait & Console Renderer
+
+As a daemon developer,
+I want a `ui/` module with a `UiRenderer` trait, a `ConsoleRenderer` implementation, and a `NullRenderer`,
+So that user-facing terminal output is decoupled from business logic and rendering backends can be swapped without code changes.
+
+**Acceptance Criteria:**
+
+**Given** `Cargo.toml` is updated
+**When** the project is compiled
+**Then** `indicatif` (latest stable) and `console` (latest stable) are added as dependencies
+**And** the project compiles without warnings
+
+**Given** the new `src/ui/` module
+**When** I inspect the project structure
+**Then** the following files exist:
+- `src/ui/mod.rs` — `UiHandle` struct (wraps `Arc<dyn UiRenderer>`), convenience methods that delegate to the inner trait, `pub mod renderer; pub mod console; pub mod null;`
+- `src/ui/renderer.rs` — `UiRenderer` trait with all method signatures
+- `src/ui/console.rs` — `ConsoleRenderer` struct implementing `UiRenderer` using `indicatif::MultiProgress` and `console::style()`
+- `src/ui/null.rs` — `NullRenderer` struct implementing `UiRenderer` as no-op
+- `src/main.rs` — `mod ui;` added
+
+**Given** the `UiRenderer` trait
+**When** I inspect the method signatures
+**Then** the following event categories are covered:
+- **Pipeline events:** `story_start(key, title)`, `story_complete(key, pr_url)`, `story_error(key, error)`, `story_escalated(key, reason)`, `batch_start(count)`, `batch_complete(summary)`
+- **Phase events:** `phase_start(phase_name)`, `phase_complete(phase_name, duration)`, `phase_error(phase_name, error)`
+- **Session events:** `chat_turn(turn, summary)`, `activation_start()`, `activation_complete()`, `completion_detected(story_key)`
+- **Tool events:** `tool_call(tool_name, detail)`, `tool_result(tool_name, detail)`
+- **LLM events:** `llm_request(label, turn)`, `llm_response(label, turn, response_len)`, `llm_error(label, turn, error)`, `llm_retry(label, turn, retry_count, delay_secs)`
+- **System events:** `daemon_start(config_summary)`, `poll_cycle(cycle_num)`, `stories_found(count)`, `crash_recovery_start()`, `crash_recovery_complete(story_key)`, `shutdown_requested()`
+**And** the trait is `Send + Sync` (object safe)
+**And** no `indicatif` or `console` types appear in the trait signature (backend-agnostic)
+
+**Given** the `UiHandle` struct
+**When** I inspect its implementation
+**Then** it wraps `Arc<dyn UiRenderer>` and implements `Clone`, `Send`, `Sync`
+**And** it exposes convenience methods that delegate to the inner trait (e.g., `ui.story_start(key, title)` calls `self.0.story_start(key, title)`)
+
+**Given** the `ConsoleRenderer`
+**When** I inspect its implementation
+**Then** it uses `indicatif::MultiProgress` for managing concurrent spinners
+**And** it uses `console::style()` for colored and styled text output
+**And** the visual vocabulary is:
+- `●` (green) — completed action
+- `◉` (cyan, animated) — in-progress action (spinner)
+- `└` — sub-detail / child event
+- `✗` (red) — error
+- `⚠` (yellow) — warning / escalation
+- Indentation: 2 spaces per nesting level (pipeline → phase → tool)
+
+**Given** the `NullRenderer`
+**When** any method is called
+**Then** it performs no I/O and returns immediately
+**And** it can be used in unit tests and CI environments
+
+**Given** `UiHandle` is used in tests
+**When** I create a `UiHandle` with `NullRenderer`
+**Then** all method calls compile and succeed without side effects
+
+**Dev Notes:**
+
+- The trait must be object-safe (no generics, no `Self: Sized` constraints, no associated types) so it can be wrapped in `Arc<dyn UiRenderer>`
+- Consider adding a `PhaseGuard` pattern where `phase_start()` returns an opaque guard that auto-completes the phase on `Drop` — but this is optional for the first iteration
+- `ConsoleRenderer` should use `MultiProgress::with_draw_target(ProgressDrawTarget::stderr())` to keep stdout clean if needed, or `stdout()` — test both and pick what works best with the file tracing layer
+- The `indicatif` crate's `MultiProgress` is thread-safe and can be shared across async tasks without additional synchronization
+
+---
+
+### Story 10.2: Pipeline Integration — UI Events in Story Lifecycle
+
+As a developer monitoring the daemon in tmux,
+I want to see the full lifecycle of each story as it progresses through the pipeline,
+So that I know at a glance which story is being processed, which phase is active, and whether things are succeeding or failing.
+
+**Acceptance Criteria:**
+
+**Given** `StoryPipeline` struct in `src/pipeline.rs`
+**When** I inspect the struct definition
+**Then** it contains a `ui: UiHandle` field
+**And** `StoryPipeline::new()` accepts a `UiHandle` parameter
+
+**Given** a story is processed via `process_story()`
+**When** the pipeline progresses through each phase
+**Then** the following UI events are emitted in order:
+1. `ui.story_start(story_key, story_title)` — at the start of `process_story()`
+2. `ui.phase_start("Dev Session")` — before `session_runner.run()`
+3. `ui.phase_complete("Dev Session", duration)` — after session returns (success) OR `ui.phase_error("Dev Session", error)` — on failure
+4. `ui.phase_start("Push Branch")` — before `push_branch()`
+5. `ui.phase_complete("Push Branch", duration)` — after push
+6. `ui.phase_start("Create PR")` — before `git_provider.create_pr()`
+7. `ui.phase_complete("Create PR", duration)` — after PR created
+8. `ui.phase_start("Code Review")` — before `review_runner.run()` (if enabled)
+9. `ui.phase_complete("Code Review", duration)` — after review
+10. `ui.phase_start("Notification")` — before `notify_story_result()`
+11. `ui.phase_complete("Notification", duration)` — after notification sent
+12. `ui.story_complete(story_key, pr_url)` — on success OR `ui.story_error(story_key, error)` — on failure OR `ui.story_escalated(story_key, reason)` — on escalation
+
+**Given** multiple stories are processed via `process_eligible_stories()`
+**When** the batch starts and ends
+**Then** `ui.batch_start(count)` is emitted at the start with the number of eligible stories
+**And** `ui.batch_complete(summary)` is emitted at the end with a human-readable run summary
+
+**Given** a crash recovery is triggered via `recover_and_process()`
+**When** a WAL file is detected at startup
+**Then** `ui.crash_recovery_start()` is emitted before recovery begins
+**And** `ui.crash_recovery_complete(story_key)` is emitted after recovery finishes
+
+**Given** `cli/mod.rs` `run_start()` function
+**When** the daemon starts
+**Then** a `UiHandle` is created:
+- `ConsoleRenderer` if stdout is a TTY and `ui_mode` is `"fancy"` (default) or `"plain"`
+- `NullRenderer` if stdout is not a TTY, or `ui_mode` is `"silent"`
+**And** the `UiHandle` is passed to `StoryPipeline::new()`
+**And** `ui.daemon_start(config_summary)` is emitted after tracing is initialized
+
+**Given** `init_tracing()` in `cli/mod.rs`
+**When** `ConsoleRenderer` is active (TTY + fancy/plain mode)
+**Then** the stdout `tracing` layer is **removed** — debug logs go to the JSON file layer only
+**And** `ConsoleRenderer` takes over all user-facing terminal output
+**When** `NullRenderer` is active (non-TTY or silent mode)
+**Then** the stdout `tracing` layer is **preserved** for backward compatibility
+
+**Given** the polling loop in `run_polling_loop()`
+**When** a poll cycle finds no eligible stories
+**Then** `ui.poll_cycle(cycle_num)` is emitted (quiet — no spinner, just a timestamp or nothing)
+**When** a poll cycle finds eligible stories
+**Then** `ui.stories_found(count)` is emitted before processing
+
+**Given** all existing tests
+**When** they run
+**Then** they pass without modification (using `NullRenderer`)
+**And** `StoryPipeline::new()` in tests receives a `UiHandle::null()` or equivalent
+
+**Dev Notes:**
+
+- Add `UiHandle::null() -> UiHandle` convenience constructor that wraps `NullRenderer`
+- The `ui_mode` config field should be added to `BotConfig` with default `"fancy"`. Acceptable values: `"fancy"`, `"plain"`, `"silent"`
+- For `"plain"` mode, `ConsoleRenderer` should disable colors and spinners (use `console::set_colors_enabled(false)` and static indicators instead of animated spinners)
+- Duration tracking: use `std::time::Instant` around each phase to measure elapsed time
+- The `SessionRunner` and `ReviewRunner` also need the `UiHandle` — pass it from pipeline. This wiring is done in this story, but the actual session/review events are emitted in Stories 10.3 and 10.4
+
+---
+
+### Story 10.3: Session Integration — Tool Calls & Chat Turns Visible
+
+As a developer monitoring the daemon in tmux,
+I want to see each agent tool call, chat turn, and LLM interaction in real-time,
+So that I understand what the agent is doing without reading debug logs.
+
+**Acceptance Criteria:**
+
+**Given** `SessionRunner` struct in `src/session/runner.rs`
+**When** I inspect the struct definition
+**Then** it contains a `ui: UiHandle` field
+**And** `SessionRunner::new()` accepts a `UiHandle` parameter (passed from pipeline)
+
+**Given** the agent activation sequence in `drive_activation_and_recover()` / `run_session()`
+**When** activation begins
+**Then** `ui.activation_start()` is emitted
+**When** activation completes successfully
+**Then** `ui.activation_complete()` is emitted
+**When** activation fails
+**Then** `ui.phase_error("Agent Activation", error)` is emitted
+
+**Given** the chat loop in `run_session()`
+**When** a chat turn completes (response received from LLM)
+**Then** `ui.chat_turn(turn_number, truncated_summary)` is emitted
+**And** the summary is the first 80 characters of the response, truncated with `…` if longer
+**When** `ResponseAction::Completed` is detected
+**Then** `ui.completion_detected(story_key)` is emitted
+
+**Given** the post-completion sequence in `run_session()`
+**When** the final commit phase starts
+**Then** `ui.phase_start("Final Commit")` is emitted
+**When** the impact analysis phase starts
+**Then** `ui.phase_start("Impact Analysis")` is emitted
+**When** the PR summary phase starts
+**Then** `ui.phase_start("PR Summary")` is emitted
+**And** each phase emits `phase_complete` or `phase_error` on completion
+
+**Given** an LLM request is sent via `stream_chat()`
+**When** `log_llm_request()` is called in `run_session()`
+**Then** `ui.llm_request(label, turn)` is also emitted (starts a thinking spinner)
+**When** `log_llm_response()` is called
+**Then** `ui.llm_response(label, turn, response_len)` is also emitted (resolves spinner)
+**When** `log_llm_error()` is called
+**Then** `ui.llm_error(label, turn, error)` is also emitted
+
+**Given** a transient LLM error triggers a retry
+**When** the retry loop in `run_session()` backs off
+**Then** `ui.llm_retry(label, turn, retry_count, delay_secs)` is emitted
+**And** the terminal shows the retry count and backoff duration
+
+**Given** a Copilot token refresh is triggered
+**When** `is_token_expired_error()` returns true and agent is rebuilt
+**Then** `ui.llm_retry(label, turn, refresh_count, 0)` is emitted with a note about token refresh
+
+**Given** the agent calls tools during the chat loop
+**When** a tool is invoked (detected via existing `tracing::info!(action = "edit_file", ...)` etc.)
+**Then** `ui.tool_call(tool_name, detail)` is emitted for each tool call
+**And** the detail includes the key argument:
+- `edit_file` → file path + mode (edit/create/overwrite)
+- `read_file` → file path + line range if specified
+- `grep` → regex pattern
+- `find_path` → glob pattern
+- `list_directory` → directory path
+- `git` → sub-action (commit, checkout, add, etc.) + key arg (message, branch, etc.)
+- `terminal` → command (first 80 chars)
+- `ask_supervisor` → question (first 80 chars)
+
+**Given** the existing `tracing::info!` calls in tool implementations (`src/tools/*.rs`)
+**When** tool events need to be emitted to the UI
+**Then** the `UiHandle` is passed to the tool call sites in `run_session()` — NOT injected into the tool structs themselves
+**And** tool `tracing::info!` calls remain unchanged (they continue to log to the file)
+**And** UI events are emitted at the session runner level by inspecting the tool action from the tracing context or by wrapping tool call sites
+
+**Implementation Note:** The cleanest approach is to emit `ui.tool_call()` from the session runner level. Since rig handles tool dispatch internally during `stream_chat()`, and we don't control the tool call loop directly, consider one of these approaches:
+1. **Hook into the tracing layer** — create a thin subscriber that captures tool action events and forwards to UiHandle (complex but non-invasive)
+2. **Emit from tool implementations** — add an optional `UiHandle` to tool constructors (invasive but explicit)
+3. **Parse tool calls from the rig stream** — inspect `MultiTurnStreamItem` variants in `streaming_chat()` for tool call deltas (cleanest for rig integration)
+
+Choose the approach that best fits the rig streaming architecture. The AC requires tool calls to be visible — the implementation path is flexible.
+
+**Dev Notes:**
+
+- `streaming_chat()` in `session/agent.rs` receives `MultiTurnStreamItem` variants including tool call deltas. This is the most natural interception point for tool call visibility. Consider adding an optional `UiHandle` parameter to `streaming_chat()`.
+- The `ChatHistoryHook` already captures full history including tool calls — this could be extended to emit UI events.
+- Keep the existing `tracing::info!` calls in tools unchanged — they serve the debug log file. UI events are a separate concern.
+- For the `ConsoleRenderer`, tool calls should appear indented under the current phase spinner, using the `└` prefix.
+
+---
+
+### Story 10.4: Review Integration — UI Events in Code Review
+
+As a developer monitoring the daemon in tmux,
+I want to see the code review cycle as it happens,
+So that I know when the review starts, what fixes are applied, and whether it succeeds.
+
+**Acceptance Criteria:**
+
+**Given** `ReviewRunner` struct in `src/review/mod.rs`
+**When** I inspect the struct definition
+**Then** it contains a `ui: UiHandle` field
+**And** `ReviewRunner::new()` accepts a `UiHandle` parameter (passed from pipeline)
+
+**Given** a code review session starts via `drive_review_session()`
+**When** the review agent is activated
+**Then** `ui.activation_start()` is emitted (review context)
+**When** activation completes
+**Then** `ui.activation_complete()` is emitted
+
+**Given** the review chat loop
+**When** a review chat turn completes
+**Then** `ui.chat_turn(turn, summary)` is emitted with `[review]` prefix in the summary
+**When** the review agent applies fixes
+**Then** `ui.tool_call("edit_file", path)` events are emitted (same pattern as Story 10.3)
+**When** the review agent commits fixes
+**Then** `ui.tool_call("git", "commit \"fix: ...\"")` is emitted
+
+**Given** the review outcome
+**When** review completes successfully
+**Then** `ui.phase_complete("Code Review", duration)` is emitted by the pipeline (Story 10.2)
+**When** review fails
+**Then** `ui.phase_error("Code Review", error)` is emitted
+**When** review is skipped (disabled or not applicable)
+**Then** `ui.phase_complete("Code Review", Duration::ZERO)` is emitted with a skip note
+
+**Given** the review report is posted as a PR comment
+**When** the comment is posted successfully
+**Then** `ui.tool_result("pr_comment", "Review posted")` is emitted
+**When** the comment fails
+**Then** `ui.tool_result("pr_comment", "Failed: {error}")` is emitted
+
+**Dev Notes:**
+
+- Reuse all patterns from Story 10.3 — the review session has the same streaming_chat / tool call structure
+- The review uses the same BMAD dev persona (`dev.md`) with a different initial command (`"CR"` instead of `"DS"`)
+- Review tool calls go through the same rig streaming pipeline — the same interception approach from Story 10.3 applies
+- Review events should be visually distinguishable from dev session events (e.g., different color or prefix)
+
+---
+
+### Story 10.5: Polish — Visual Vocabulary, Colors & Final Formatting
+
+As a developer using BMAD Bot daily,
+I want a polished, professional terminal output that is consistent across terminals and configurable,
+So that the daemon feels like a production-quality tool.
+
+**Acceptance Criteria:**
+
+**Given** the `ConsoleRenderer` implementation
+**When** I review the visual output on different terminals
+**Then** the following visual vocabulary is consistently applied:
+- `●` (green) — completed action
+- `◉` (cyan, animated spinner) — in-progress action
+- `└` (gray) — sub-detail / child event
+- `✗` (red) — error
+- `⚠` (yellow) — warning / escalation / retry
+- `→` (dim) — LLM request sent
+- `←` (dim) — LLM response received
+- Indentation: 2 spaces per nesting level
+- Elapsed time displayed on completed phases: `● Dev Session [47s]`
+
+**Given** the `ui_mode` configuration in `bmad-bot.yaml`
+**When** `ui_mode` is set to `"fancy"` (default)
+**Then** `ConsoleRenderer` uses animated spinners and full ANSI colors
+**When** `ui_mode` is set to `"plain"`
+**Then** `ConsoleRenderer` disables colors (`console::set_colors_enabled(false)`) and uses static indicators instead of animated spinners (e.g., `...` instead of `◉`)
+**When** `ui_mode` is set to `"silent"`
+**Then** `NullRenderer` is used — no stdout output at all
+
+**Given** stdout is not a TTY (piped output, CI environment)
+**When** the daemon starts
+**Then** `NullRenderer` is automatically selected regardless of `ui_mode` setting
+**And** the stdout `tracing` layer is preserved for backward compatibility
+
+**Given** the `ConsoleRenderer` is active
+**When** a long-running phase completes
+**Then** the elapsed time is displayed in human-readable format:
+- Under 60s: `[47s]`
+- 1-60 minutes: `[3m 12s]`
+- Over 60 minutes: `[1h 23m]`
+
+**Given** the daemon processes a full story pipeline
+**When** I observe the terminal output
+**Then** the output resembles:
+
+```
+● BMAD Bot started — polling every 30s
+● Found 2 eligible stories
+
+● Pipeline: epic-4/story-4.2 — "Agent Session Setup & Chat Loop"
+  ◉ Dev Session [turn 5/50]
+    ● read_file src/session/runner.rs
+      └ 3567 lines (outline mode)
+    ● edit_file src/session/runner.rs (edit)
+    ● git commit "feat(session): add context limit recovery"
+    ● Terminal: cargo test session::tests
+      └ 42 tests passed
+  ● Dev Session [47s]
+  ● Push Branch [2s]
+  ● Create PR [1s]
+    └ https://github.com/jbanety/bmad-bot/pull/42
+  ◉ Code Review
+    ● edit_file src/session/runner.rs (edit)
+    ● git commit "fix(session): handle edge case in recovery"
+  ● Code Review [23s]
+  ● Notification [0s]
+● epic-4/story-4.2 ✓ completed — PR #42
+
+● Pipeline: epic-4/story-4.3 — "Pre-Development Preparation"
+  ◉ Dev Session [turn 2/50]
+    → LLM request (turn 2)
+```
+
+**Given** the README.md
+**When** I inspect the documentation
+**Then** there is a section describing the terminal output format
+**And** it explains the `ui_mode` configuration option with examples
+**And** it mentions TTY auto-detection behavior
+
+**Given** all existing tests
+**When** they run
+**Then** they all pass without modification
+**And** no test output is polluted by `ConsoleRenderer` output (all tests use `NullRenderer`)
+
+**Dev Notes:**
+
+- Use `console::Term::stdout().is_term()` for TTY detection
+- For `"plain"` mode, `indicatif` supports `ProgressDrawTarget::hidden()` to disable animations while still tracking progress
+- Consider adding a `--ui-mode` CLI flag as an override (optional, not required for this story)
+- Test on: tmux, iTerm2, Terminal.app, VS Code integrated terminal, GitHub Actions (CI)
+- The example output above is aspirational — the exact format may vary based on implementation, but the general structure and visual vocabulary must be followed
+
+---
+
+### Epic 10 Summary
+
+| Story | Title | Points | Dependencies |
+|-------|-------|--------|--------------|
+| 10.1 | Module `ui/` — Foundation, Trait & Console Renderer | 5 | — |
+| 10.2 | Pipeline Integration — UI Events in Story Lifecycle | 5 | 10.1 |
+| 10.3 | Session Integration — Tool Calls & Chat Turns Visible | 8 | 10.2 |
+| 10.4 | Review Integration — UI Events in Code Review | 3 | 10.3 |
+| 10.5 | Polish — Visual Vocabulary, Colors & Final Formatting | 3 | 10.4 |
+
+**Total Story Points:** 24
+
+**Execution Strategy:**
+- Stories must be executed sequentially: 10.1 → 10.2 → 10.3 → 10.4 → 10.5
+- Story 10.1 is the foundation — defines the trait contract that all subsequent stories depend on
+- Story 10.2 is the integration point — wires `UiHandle` through the daemon startup and pipeline, removes stdout tracing layer
+- Story 10.3 is the heaviest — requires intercepting tool calls from the rig streaming pipeline and emitting granular session events
+- Story 10.4 reuses all patterns from 10.3 — small incremental work
+- Story 10.5 is polish — visual consistency, TTY detection, config option, documentation
+
+**Existing Epics Impacted:**
+- **Epics 1-6** (all implemented) — retroactive `UiHandle` insertion in `StoryPipeline`, `SessionRunner`, `ReviewRunner`, and `cli/run_start()`
+- **Epic 7** (Integration Tests) — tests should use `NullRenderer` via `UiHandle::null()`
+- **`Cargo.toml`** — new dependencies: `indicatif`, `console`
+- **`bmad-bot.yaml`** — new optional config field: `ui_mode` (default: `"fancy"`)
+
+**Key architecture decisions:**
+- `UiRenderer` trait is backend-agnostic — no `indicatif` or `console` types in the trait signature. This enables future migration to `iocraft` (React-like declarative TUI) or `ratatui` (full TUI framework) by swapping the `ConsoleRenderer` implementation without touching business code.
+- `UiHandle` wraps `Arc<dyn UiRenderer>` — `Send + Sync + Clone`, safe to share across async tasks. Propagated like `ShutdownFlag`: `cli/run_start()` → `StoryPipeline` → `SessionRunner` / `ReviewRunner`.
+- Stdout `tracing` layer is removed when `ConsoleRenderer` is active — debug logs go to JSON file only. This eliminates the dual-output problem (tracing + UI fighting for stdout).
+- Tool call visibility requires intercepting rig's streaming pipeline — the implementation approach (tracing hook, tool constructor injection, or stream item parsing) is left to the implementer based on what fits best with rig's architecture.
+- `NullRenderer` ensures zero test pollution — all existing tests continue to pass without modification.
