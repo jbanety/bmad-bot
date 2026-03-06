@@ -619,7 +619,7 @@ pub fn compute_retrospective_gates(statuses: &[(String, String)]) -> HashMap<u32
     gates
 }
 
-/// Check if the retrospective gate for a previous epic allows stories in the next epic.
+/// Check if all retrospective gates for previous epics are clear.
 ///
 /// Gate statuses:
 /// - `"optional"`: gate clear (default/initial state — not yet reviewed)
@@ -627,16 +627,17 @@ pub fn compute_retrospective_gates(statuses: &[(String, String)]) -> HashMap<u32
 /// - `"review"`: gate **BLOCKED** (daemon activated gate, awaiting human)
 /// - absent: gate clear (no retro entry, backward compat)
 ///
-/// The gate blocks stories from epic X+1 when `epic-X-retrospective` is `"review"`.
+/// Blocks if ANY epic X < story_epic has `epic-X-retrospective: review`.
 /// Epic 1 stories are never blocked (no predecessor gate).
 pub fn is_retrospective_gate_clear(story_epic: u32, retro_gates: &HashMap<u32, String>) -> bool {
     if story_epic <= 1 {
         return true; // Epic 1 has no predecessor gate
     }
-    match retro_gates.get(&(story_epic - 1)) {
-        None => true,                       // No retro entry → no gate
-        Some(status) => status != "review", // ONLY "review" blocks
-    }
+    // Block if ANY previous epic has an active review gate
+    retro_gates
+        .iter()
+        .filter(|(epic_num, _)| **epic_num < story_epic)
+        .all(|(_, status)| status != "review")
 }
 
 /// Pre-gate filter: resolve dependencies, detect cascade blocks, return eligible stories.
@@ -717,14 +718,21 @@ pub fn filter_eligible(
         let (satisfied, unmet) = graph.deps_satisfied(key);
         if satisfied {
             if let Some(story) = story_map.get(key) {
-                // Check retrospective gate: epic X+1 blocked if epic-X-retro is "review"
+                // Check retrospective gate: blocked if ANY previous epic-X-retro is "review"
                 if !is_retrospective_gate_clear(story.epic_num, &retro_gates) {
+                    let blocking_epics: Vec<u32> = retro_gates
+                        .iter()
+                        .filter(|(epic_num, status)| {
+                            **epic_num < story.epic_num && *status == "review"
+                        })
+                        .map(|(n, _)| *n)
+                        .collect();
                     tracing::info!(
                         story_key = %key,
                         epic_num = story.epic_num,
-                        gate_epic = story.epic_num - 1,
-                        "Story skipped — retrospective gate for epic {} is active (status: review)",
-                        story.epic_num - 1
+                        blocking_gates = ?blocking_epics,
+                        "Story skipped — retrospective gate active (status: review) for epics {:?}",
+                        blocking_epics
                     );
                     continue;
                 }
@@ -1900,6 +1908,10 @@ development_status:
 
         // Epic 3 stories blocked by epic-2-retrospective: review
         assert!(!is_retrospective_gate_clear(3, &gates));
+        // Epic 4 stories also blocked — any previous epic in review blocks all later epics
+        assert!(!is_retrospective_gate_clear(4, &gates));
+        // Epic 5 stories also blocked
+        assert!(!is_retrospective_gate_clear(5, &gates));
     }
 
     #[test]
@@ -1936,6 +1948,29 @@ development_status:
         assert!(is_retrospective_gate_clear(3, &gates));
         // Epic 4 stories ARE blocked
         assert!(!is_retrospective_gate_clear(4, &gates));
+        // Epic 5 stories are also blocked (any previous epic in review)
+        assert!(!is_retrospective_gate_clear(5, &gates));
+    }
+
+    #[test]
+    fn test_is_retrospective_gate_clear_skips_two_epics() {
+        // epic-2-retrospective: review should block epic 4 stories even though
+        // epic-3-retrospective is optional (the old N-1 logic would miss this)
+        let mut gates = HashMap::new();
+        gates.insert(2, "review".to_string());
+        gates.insert(3, "optional".to_string());
+
+        assert!(!is_retrospective_gate_clear(4, &gates));
+    }
+
+    #[test]
+    fn test_is_retrospective_gate_clear_all_done_allows() {
+        let mut gates = HashMap::new();
+        gates.insert(1, "done".to_string());
+        gates.insert(2, "done".to_string());
+        gates.insert(3, "done".to_string());
+
+        assert!(is_retrospective_gate_clear(4, &gates));
     }
 
     #[test]
@@ -2003,6 +2038,29 @@ development_status:
         let (eligible, _) = filter_eligible(stories, &statuses, &comment_deps).unwrap();
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].story_key, "3-2-story-b");
+    }
+
+    #[test]
+    fn test_filter_eligible_epic4_blocked_by_epic2_gate_skipping_epic3() {
+        // Regression test: epic-2-retrospective: review must block epic 4 stories
+        // even when epic-3-retrospective is optional (old N-1 logic missed this)
+        let stories = vec![make_story("4-1-story-a", "ready-for-dev")];
+        let statuses: Vec<(String, String)> = vec![
+            ("epic-2".to_string(), "done".to_string()),
+            ("2-1-last".to_string(), "done".to_string()),
+            ("epic-2-retrospective".to_string(), "review".to_string()),
+            ("epic-3".to_string(), "in-progress".to_string()),
+            ("3-1-story-b".to_string(), "done".to_string()),
+            ("epic-3-retrospective".to_string(), "optional".to_string()),
+            ("epic-4".to_string(), "in-progress".to_string()),
+            ("4-1-story-a".to_string(), "ready-for-dev".to_string()),
+        ];
+        let comment_deps = HashMap::new();
+        let (eligible, _) = filter_eligible(stories, &statuses, &comment_deps).unwrap();
+        assert!(
+            eligible.is_empty(),
+            "Epic 4 story should be blocked by epic-2-retrospective: review"
+        );
     }
 
     #[test]

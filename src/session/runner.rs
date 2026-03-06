@@ -952,8 +952,9 @@ impl SessionRunner {
              \n\
              === SESSION RECOVERY — Context Window Limit Reached ===\n\
              Your previous session hit the context window limit and was restarted with a fresh context.\n\
-             Below are the most recent exchanges from just before the limit was hit.\n\
+             Below are the most recent exchanges from the previous session.\n\
              \n\
+             === Recent Exchanges (verbatim) ===\n\
              {formatted_exchanges}\n\
              \n\
              === Current Story ===\n\
@@ -3389,6 +3390,7 @@ mod tests {
             msg.contains("Context Window Limit Reached"),
             "Should contain the reason in the header"
         );
+        assert!(msg.contains("summary text"), "Should contain the summary");
         assert!(
             msg.contains("exchange text"),
             "Should contain the formatted exchanges"
