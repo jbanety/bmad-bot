@@ -936,14 +936,11 @@ impl SessionRunner {
         )
     }
 
-    /// Build recovery message for context window limit recovery — uses LLM-generated summary.
-    ///
     /// Build recovery message for context window limit recovery.
     ///
-    /// Same approach as crash recovery: pass the last N exchanges from the WAL
-    /// directly and let the dev agent (with tools) read the story file to
-    /// determine actual progress. No LLM summarize — the story file checkboxes
-    /// are the source of truth.
+    /// Passes the last N verbatim exchanges so the new dev agent has immediate
+    /// conversational context from just before the limit was hit. The agent is
+    /// instructed to read the story file checkboxes to determine overall progress.
     fn build_context_limit_recovery_message(
         &self,
         story: &StoryInfo,
@@ -951,17 +948,19 @@ impl SessionRunner {
     ) -> String {
         format!(
             "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+             BRANCH REMINDER: You are already on branch `{branch}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
              \n\
              === SESSION RECOVERY — Context Window Limit Reached ===\n\
-             Your previous session hit the context window limit. Below are the most recent \
-             exchanges from before the limit was reached.\n\
+             Your previous session hit the context window limit and was restarted with a fresh context.\n\
+             Below are the most recent exchanges from just before the limit was hit.\n\
              \n\
              {formatted_exchanges}\n\
              \n\
              === Current Story ===\n\
              The story file is at: {path}\n\
-             Read this file NOW to see current task checkboxes and progress.\n\
-             Then continue working directly on the current task. Do NOT restart the workflow from the beginning.",
+             Read this file NOW to verify task checkboxes and actual progress.\n\
+             Then continue working directly on the next incomplete task. Do NOT restart from the beginning.",
+            branch = story.branch_name,
             path = story.specs_path.display(),
         )
     }
@@ -1009,18 +1008,17 @@ impl SessionRunner {
             };
         }
 
-        // Step 1 — Extract last N exchanges from the WAL.
-        // No LLM summarize — the dev agent has tools (read_file, grep) to verify
-        // actual progress by reading the story file checkboxes and codebase.
+        // Step 1 — Extract last N exchanges verbatim (immediate context for the new agent).
+        // The dev agent reads the story file checkboxes to determine overall progress.
         let last_exchanges =
             Self::extract_last_exchanges(&state.chat_history, RECOVERY_KEEP_LAST_EXCHANGES);
         let formatted_exchanges = Self::format_exchanges_for_message(&last_exchanges);
 
         tracing::info!(
-            action = "context_limit_raw_history",
+            action = "context_limit_recovery_start",
             original_len = %state.chat_history.len(),
             kept_exchanges = %last_exchanges.len() / 2,
-            "Using raw last exchanges for context limit recovery (no LLM summarize)"
+            "Context limit recovery: last exchanges ready"
         );
 
         // Step 2 — Build fresh agent via AgentFactory (single call, no provider match)
@@ -1493,6 +1491,34 @@ impl SessionRunner {
                                     continue;
                                 }
                                 // Fall through to normal error handling if rebuild fails
+                            }
+
+                            // Context limit during initial DS send — the activation history
+                            // is already too large. Trigger recovery immediately; retrying
+                            // with the same history would produce the same 400 error.
+                            if is_context_limit_error(&error_str) {
+                                tracing::warn!(
+                                    action = "context_limit_detected",
+                                    turn = "initial_ds",
+                                    error = %error_str,
+                                    "Context window limit hit on initial DS send — initiating recovery"
+                                );
+                                // Pop the DS user message we added to state before sending
+                                state.chat_history.pop();
+                                let outcome = self
+                                    .context_limit_recovery(
+                                        &state,
+                                        story,
+                                        provider,
+                                        model,
+                                        base_branch,
+                                        escalation_slot.clone(),
+                                        decision_log.clone(),
+                                        0,
+                                    )
+                                    .await;
+                                self.write_decisions(story, &decision_log).await;
+                                return outcome;
                             }
 
                             if is_transient_llm_error(&error_str)
