@@ -108,6 +108,26 @@ pub struct RunSummary {
     pub fatal: bool,
 }
 
+/// Notification data for an epic gate activation.
+///
+/// Sent when the daemon completes an epic and activates the retrospective
+/// review gate, blocking the next epic until a human validates the report.
+#[derive(Debug, Clone)]
+pub struct EpicGateNotification {
+    /// The epic number that was just completed and reviewed.
+    pub epic_num: u32,
+    /// Human-readable epic title (e.g., "LLM Agent Session" or "Epic 4").
+    pub epic_title: String,
+    /// Number of stories in the completed epic.
+    pub story_count: usize,
+    /// URL of the merge request containing the review report (if PR creation succeeded).
+    pub mr_url: Option<String>,
+    /// Whether the autonomous review session completed successfully.
+    pub review_succeeded: bool,
+    /// Error summary if the review session failed.
+    pub error_summary: Option<String>,
+}
+
 /// Internal representation of the Telegram `sendMessage` API response.
 #[derive(serde::Deserialize)]
 struct TelegramResponse {
@@ -131,6 +151,17 @@ pub trait Notifier: Send + Sync {
 
     /// Send a summary notification for a complete daemon run.
     async fn notify_run_summary(&self, summary: &RunSummary) -> Result<(), NotifierError>;
+
+    /// Send a notification for an epic gate activation.
+    ///
+    /// Default implementation is a no-op (so `NoopNotifier` and any future
+    /// notifiers that don't override this method are unaffected).
+    async fn notify_epic_gate(
+        &self,
+        _notification: &EpicGateNotification,
+    ) -> Result<(), NotifierError> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +218,60 @@ fn format_story_message(notification: &StoryNotification) -> String {
 }
 
 /// Format a run summary notification as an HTML message for Telegram.
+/// Format an epic gate notification as an HTML message for Telegram.
+fn format_epic_gate_message(notification: &EpicGateNotification) -> String {
+    let epic_title = escape_html(&notification.epic_title);
+
+    if notification.review_succeeded {
+        let mut msg = format!(
+            "🔍 Epic {} Review Gate Activated\n\n\
+             <b>Epic:</b> {}\n\
+             <b>Stories reviewed:</b> {}",
+            notification.epic_num, epic_title, notification.story_count
+        );
+
+        if let Some(ref url) = notification.mr_url {
+            msg.push_str(&format!("\n\n📄 <a href=\"{}\">Review Report</a>", url));
+        }
+
+        msg.push_str(&format!(
+            "\n\n➡️ Review the report and set <code>epic-{}-retrospective: done</code> in sprint-status.yaml to continue.",
+            notification.epic_num
+        ));
+
+        msg
+    } else {
+        let error_summary = notification
+            .error_summary
+            .as_deref()
+            .unwrap_or("Unknown error");
+
+        let mut msg = format!(
+            "🔍 Epic {} Review Gate Activated (⚠️ Review Failed)\n\n\
+             <b>Epic:</b> {}\n\
+             <b>Stories completed:</b> {}\n\
+             <b>Review error:</b> {}",
+            notification.epic_num,
+            epic_title,
+            notification.story_count,
+            escape_html(error_summary)
+        );
+
+        msg.push_str("\n\nA minimal failure report has been committed.");
+
+        if let Some(ref url) = notification.mr_url {
+            msg.push_str(&format!("\n📄 <a href=\"{}\">Review Report</a>", url));
+        }
+
+        msg.push_str(&format!(
+            "\n\n➡️ Manual review strongly recommended. Set <code>epic-{}-retrospective: done</code> in sprint-status.yaml to continue.",
+            notification.epic_num
+        ));
+
+        msg
+    }
+}
+
 fn format_run_summary(summary: &RunSummary) -> String {
     let mut msg = String::from("🏁 BMAD Bot Run Complete\n");
     msg.push_str(&format!(
@@ -356,6 +441,14 @@ impl Notifier for TelegramNotifier {
         let message = format_run_summary(summary);
         self.send_message(&message).await
     }
+
+    async fn notify_epic_gate(
+        &self,
+        notification: &EpicGateNotification,
+    ) -> Result<(), NotifierError> {
+        let message = format_epic_gate_message(notification);
+        self.send_message(&message).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +525,7 @@ pub fn create_notifier(config: &NotificationConfig, secrets: &BotSecrets) -> Box
 
 #[cfg(test)]
 mod tests {
+    use super::EpicGateNotification;
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -608,6 +702,78 @@ mod tests {
     }
 
     #[test]
+    // -----------------------------------------------------------------------
+    // Epic gate message formatting tests (Story 4.8)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_format_epic_gate_message_success() {
+        let notification = EpicGateNotification {
+            epic_num: 4,
+            epic_title: "LLM Agent Session".to_string(),
+            story_count: 8,
+            mr_url: Some("https://github.com/org/repo/pull/42".to_string()),
+            review_succeeded: true,
+            error_summary: None,
+        };
+        let msg = format_epic_gate_message(&notification);
+        assert!(msg.contains("Epic 4 Review Gate Activated"));
+        assert!(msg.contains("LLM Agent Session"));
+        assert!(msg.contains("Stories reviewed:</b> 8"));
+        assert!(msg.contains("Review Report"));
+        assert!(msg.contains("epic-4-retrospective: done"));
+        assert!(!msg.contains("Failed"));
+    }
+
+    #[test]
+    fn test_format_epic_gate_message_failure() {
+        let notification = EpicGateNotification {
+            epic_num: 3,
+            epic_title: "Epic 3".to_string(),
+            story_count: 5,
+            mr_url: Some("https://github.com/org/repo/pull/99".to_string()),
+            review_succeeded: false,
+            error_summary: Some("connection timeout".to_string()),
+        };
+        let msg = format_epic_gate_message(&notification);
+        assert!(msg.contains("Review Failed"));
+        assert!(msg.contains("Epic 3"));
+        assert!(msg.contains("connection timeout"));
+        assert!(msg.contains("Manual review strongly recommended"));
+        assert!(msg.contains("epic-3-retrospective: done"));
+    }
+
+    #[test]
+    fn test_format_epic_gate_message_no_mr_url() {
+        let notification = EpicGateNotification {
+            epic_num: 2,
+            epic_title: "Epic 2".to_string(),
+            story_count: 3,
+            mr_url: None,
+            review_succeeded: true,
+            error_summary: None,
+        };
+        let msg = format_epic_gate_message(&notification);
+        assert!(msg.contains("Epic 2 Review Gate Activated"));
+        assert!(!msg.contains("Review Report"));
+        assert!(msg.contains("epic-2-retrospective: done"));
+    }
+
+    #[test]
+    fn test_format_epic_gate_message_escapes_html() {
+        let notification = EpicGateNotification {
+            epic_num: 1,
+            epic_title: "Test <script>alert(1)</script>".to_string(),
+            story_count: 1,
+            mr_url: None,
+            review_succeeded: false,
+            error_summary: Some("error with <html> & chars".to_string()),
+        };
+        let msg = format_epic_gate_message(&notification);
+        assert!(msg.contains("&lt;script&gt;"));
+        assert!(msg.contains("&lt;html&gt;"));
+        assert!(msg.contains("&amp; chars"));
+    }
+
     fn test_format_run_summary_truncation_long_message() {
         // Create a summary with enough stories to exceed 4096 chars
         let stories: Vec<StoryNotification> = (0..200)

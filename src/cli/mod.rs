@@ -718,6 +718,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
                 model: supervisor_model,
                 reasoning_effort: None,
             },
+            epic_review: LlmRoleConfig::default(),
         },
         notifications: NotificationConfig {
             telegram: TelegramConfig {
@@ -1590,6 +1591,7 @@ mod tests {
                     model: "gpt-4o".to_string(),
                     reasoning_effort: None,
                 },
+                epic_review: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

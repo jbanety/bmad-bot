@@ -651,7 +651,11 @@ impl SessionRunner {
     /// session lifecycle: build agent → create WAL → chat loop → cleanup.
     ///
     /// Returns a [`SessionOutcome`] indicating success, escalation, or failure.
-    pub async fn run(&self, story: &StoryInfo) -> SessionOutcome {
+    pub async fn run(
+        &self,
+        story: &StoryInfo,
+        base_branch_override: Option<&str>,
+    ) -> SessionOutcome {
         let span = tracing::info_span!(
             "story_session",
             story_id = %story.story_id,
@@ -670,8 +674,21 @@ impl SessionRunner {
         let default_branch = self.config.git_provider.target_branch.clone();
         let branch_name = story.branch_name.clone();
 
-        // Resolve base branch (CLI-based, no repo open needed)
-        let base_branch = determine_base_branch(story, &repo_path, &default_branch);
+        // Resolve base branch: use sequential override from pipeline when available
+        // (ensures sprint-status.yaml is never forked across parallel branch chains),
+        // fall back to dependency-based resolution for the first story in a run.
+        let base_branch = if let Some(override_branch) = base_branch_override {
+            tracing::info!(
+                action = "base_branch_override",
+                base = %override_branch,
+                story = %story.story_key,
+                reason = "sequential chaining from previous story in pipeline run",
+                "Using pipeline-provided base branch instead of dependency resolution"
+            );
+            override_branch.to_string()
+        } else {
+            determine_base_branch(story, &repo_path, &default_branch)
+        };
 
         // Create/checkout story branch — wrap blocking git CLI call in spawn_blocking
         let rp = repo_path.clone();
@@ -2533,6 +2550,7 @@ mod tests {
                     model: "test-model".to_string(),
                     reasoning_effort: None,
                 },
+                epic_review: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

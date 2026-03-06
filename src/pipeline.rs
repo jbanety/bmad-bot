@@ -19,9 +19,14 @@ use crate::git_provider::{
     build_pr_title, create_provider,
 };
 use crate::llm::AgentFactory;
-use crate::notifier::{Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier};
+use crate::notifier::{
+    EpicGateNotification, Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier,
+};
 use crate::review::ReviewOutcome;
 use crate::review::ReviewRunner;
+use crate::review::epic::{
+    EpicReviewOutcome, EpicReviewRunner, extract_epic_recap, generate_failure_report,
+};
 use crate::session::SessionOutcome;
 use crate::session::analyzer::strip_agent_artifacts;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
@@ -136,6 +141,8 @@ pub struct StoryPipeline {
     session_runner: SessionRunner,
     /// Code review session runner.
     review_runner: ReviewRunner,
+    /// Epic review session runner (autonomous post-epic retrospective).
+    epic_review_runner: EpicReviewRunner,
     /// UI handle for rendering terminal output (fire-and-forget).
     ui: UiHandle,
 }
@@ -188,6 +195,14 @@ impl StoryPipeline {
             Arc::clone(&config),
             Arc::clone(&secrets),
             Arc::clone(&agent_factory),
+            Arc::clone(&shutdown),
+            Arc::clone(&mcp_manager),
+            ui.clone(),
+        );
+        let epic_review_runner = EpicReviewRunner::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+            Arc::clone(&agent_factory),
             shutdown,
             mcp_manager,
             ui.clone(),
@@ -199,6 +214,7 @@ impl StoryPipeline {
             notifier,
             session_runner,
             review_runner,
+            epic_review_runner,
             ui,
         })
     }
@@ -207,7 +223,11 @@ impl StoryPipeline {
     ///
     /// Runs dev session → optional code review → PR creation → notification.
     /// Never panics — all errors are caught and returned as [`PipelineResult`].
-    pub async fn process_story(&self, story: &StoryInfo) -> PipelineResult {
+    pub async fn process_story(
+        &self,
+        story: &StoryInfo,
+        base_branch_override: Option<&str>,
+    ) -> PipelineResult {
         let story_title = story_title_from_label(&story.label);
         self.ui.story_start(&story.story_key, &story_title);
 
@@ -221,7 +241,7 @@ impl StoryPipeline {
         // Phase 1 — Dev Session
         self.ui.phase_start("Dev Session");
         let session_start = std::time::Instant::now();
-        let session_outcome = self.session_runner.run(story).await;
+        let session_outcome = self.session_runner.run(story, base_branch_override).await;
         let session_elapsed = session_start.elapsed();
 
         match session_outcome {
@@ -792,6 +812,12 @@ impl StoryPipeline {
         let mut processed_keys: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        // Track the branch of the last successfully completed story so that the
+        // next story chains from it instead of forking from its declared dependency.
+        // This prevents sprint-status.yaml from diverging across parallel branch
+        // chains (e.g., story/2-x vs story/3-x both forking from story/1-5).
+        let mut last_completed_branch: Option<String> = None;
+
         // Start with the first story from the initial eligible list.
         // After each story, we re-poll sprint-status.yaml and recompute
         // the eligible list so that dependency changes (e.g., 1-1 done →
@@ -812,9 +838,17 @@ impl StoryPipeline {
 
             processed_keys.insert(story.story_key.clone());
 
-            let result = self.process_story(&story).await;
+            let result = self
+                .process_story(&story, last_completed_branch.as_deref())
+                .await;
             let mut is_fatal = result.fatal;
             let story_key = &result.story_key;
+
+            // Update sequential chaining branch on successful completion.
+            // Only Completed stories guarantee the branch exists with committed work.
+            if result.status == StoryStatus::Completed {
+                last_completed_branch = Some(story.branch_name.clone());
+            }
 
             // Safety net: if sprint-status.yaml has uncommitted changes after
             // processing a story, commit them NOW before the next story's
@@ -844,6 +878,29 @@ impl StoryPipeline {
                             is_fatal = true;
                         }
                     }
+                }
+            }
+
+            // ── Epic completion detection & gate activation ─────────────
+            // After a successful story AND after the safety net commit,
+            // check if the completed story was the last in its epic.
+            // If so, run the autonomous epic review and activate the gate.
+            if result.status == StoryStatus::Completed && !is_fatal {
+                let gate_activated = self
+                    .try_epic_gate(
+                        &story,
+                        &sprint_status_path,
+                        &story_dir,
+                        last_completed_branch.as_deref(),
+                    )
+                    .await;
+
+                if !gate_activated {
+                    tracing::debug!(
+                        action = "epic_gate_not_activated",
+                        story_key = %story.story_key,
+                        "Epic gate not activated after story completion (epic incomplete, no retro entry, or gate flow failed)"
+                    );
                 }
             }
 
@@ -909,6 +966,356 @@ impl StoryPipeline {
 ///
 /// Called after each story completion to ensure the next story is chosen based on
 /// fresh dependency state, not a stale list from the initial poll.
+impl StoryPipeline {
+    /// Attempt the epic gate flow after a story completes.
+    ///
+    /// Checks if the epic is fully done, whether a retrospective entry exists,
+    /// then runs the autonomous review, updates sprint-status, creates a retro
+    /// branch + MR, and sends a notification. All failures are non-fatal —
+    /// the pipeline continues even if the gate flow fails.
+    ///
+    /// Returns `true` if the gate was successfully activated (sprint-status updated
+    /// and pushed), `false` if the gate was skipped or failed to activate.
+    async fn try_epic_gate(
+        &self,
+        story: &StoryInfo,
+        sprint_status_path: &Path,
+        story_dir: &Path,
+        last_completed_branch: Option<&str>,
+    ) -> bool {
+        // Step 1: Fresh-read epic completion detection
+        let epic_num = match detect_epic_completion(sprint_status_path, story_dir, story) {
+            Some(n) => n,
+            None => return false, // Epic not fully done yet
+        };
+
+        // Step 2: Check for retrospective entry (backward compat)
+        let ssf = match SprintStatusFile::load(sprint_status_path, story_dir) {
+            Ok(ssf) => ssf,
+            Err(e) => {
+                tracing::warn!(
+                    action = "epic_gate_ssf_load_failed",
+                    error = %e,
+                    epic_num = epic_num,
+                    "Failed to load sprint-status for retro entry check — skipping epic gate"
+                );
+                return false;
+            }
+        };
+
+        if !has_retrospective_entry(&ssf, epic_num) {
+            tracing::info!(
+                action = "epic_gate_skip_no_retro",
+                epic_num = epic_num,
+                "Epic {epic_num} complete but no retrospective entry — skipping gate (backward compat)"
+            );
+            return false;
+        }
+
+        tracing::info!(
+            action = "epic_gate_triggered",
+            epic_num = epic_num,
+            story_key = %story.story_key,
+            "Epic {epic_num} complete — launching autonomous review"
+        );
+
+        // Step 3: Count stories in the epic
+        let story_count = ssf
+            .stories()
+            .iter()
+            .filter(|s| s.epic_num == epic_num)
+            .count();
+
+        // Step 4: Run the autonomous epic review
+        let outcome = self.epic_review_runner.run(epic_num).await;
+        let (report, review_succeeded, error_summary) = match &outcome {
+            EpicReviewOutcome::Completed { report, .. } => (report.clone(), true, None),
+            EpicReviewOutcome::Failed { reason, .. } => {
+                let failure_report = generate_failure_report(epic_num, reason);
+                (failure_report, false, Some(reason.clone()))
+            }
+        };
+
+        // Step 5: Save report to disk
+        let report_filename = format!("epic-{epic_num}-retrospective-report.md");
+        let report_path =
+            PathBuf::from(&self.config.bmad_paths.implementation_artifacts).join(&report_filename);
+        if let Err(e) = tokio::fs::write(&report_path, &report).await {
+            tracing::error!(
+                action = "epic_gate_report_save_failed",
+                error = %e,
+                epic_num = epic_num,
+                "Failed to save epic review report — continuing with gate activation"
+            );
+        }
+
+        // Step 6: Update sprint-status on CURRENT branch (optional → review)
+        let retro_key = format!("epic-{epic_num}-retrospective");
+        let repo_path = &self.config.bmad_paths.project_root;
+        if let Err(e) = update_story_status(sprint_status_path, &retro_key, "review").await {
+            tracing::error!(
+                action = "epic_gate_status_update_failed",
+                error = %e,
+                epic_num = epic_num,
+                "Failed to update retrospective status — gate may not activate"
+            );
+            return false;
+        }
+
+        let gate_commit_msg =
+            format!("chore(sprint-status): epic {epic_num} gate activated — awaiting human review");
+        if let Err(e) = commit_sprint_status(repo_path, sprint_status_path, &gate_commit_msg).await
+        {
+            tracing::error!(
+                action = "epic_gate_commit_failed",
+                error = %e,
+                epic_num = epic_num,
+                "Failed to commit sprint-status gate update"
+            );
+            return false;
+        }
+
+        // Push current branch so watcher sees the gate
+        if let Err(e) = push_current_branch(repo_path).await {
+            tracing::error!(
+                action = "epic_gate_push_failed",
+                error = %e,
+                epic_num = epic_num,
+                "Failed to push sprint-status gate — watcher may not see gate until next push"
+            );
+            // Non-fatal — continue with branch/MR creation
+        }
+
+        // Step 7: Create retro branch, commit report, push, create MR
+        let base_branch = last_completed_branch.unwrap_or(&self.config.git_provider.target_branch);
+        let retro_branch = format!("epic-{epic_num}-retrospective");
+        let mr_url = self
+            .create_retro_branch_and_mr(epic_num, &retro_branch, base_branch, &report_path, &report)
+            .await;
+
+        // Step 8: Checkout back to the working branch (best effort)
+        let _ = checkout_branch(repo_path, base_branch).await;
+
+        // Step 9: Resolve epic title for notification
+        let epic_title = resolve_epic_title(
+            Path::new(&self.config.bmad_paths.planning_artifacts),
+            epic_num,
+        );
+
+        // Step 10: Notify
+        let notification = EpicGateNotification {
+            epic_num,
+            epic_title,
+            story_count,
+            mr_url,
+            review_succeeded,
+            error_summary,
+        };
+        if let Err(e) = self.notifier.notify_epic_gate(&notification).await {
+            tracing::error!(
+                action = "epic_gate_notification_failed",
+                error = %e,
+                epic_num = epic_num,
+                "Failed to send epic gate notification — non-blocking"
+            );
+        }
+
+        tracing::info!(
+            action = "epic_gate_complete",
+            epic_num = epic_num,
+            review_succeeded = review_succeeded,
+            "Epic {epic_num} gate flow complete"
+        );
+
+        true
+    }
+
+    /// Create the retrospective branch, commit the report, push, and create an MR.
+    ///
+    /// Returns the MR URL if PR creation succeeded, `None` otherwise.
+    async fn create_retro_branch_and_mr(
+        &self,
+        epic_num: u32,
+        retro_branch: &str,
+        base_branch: &str,
+        report_path: &Path,
+        report: &str,
+    ) -> Option<String> {
+        let repo_path = &self.config.bmad_paths.project_root;
+
+        // Compute a path relative to repo_path for `git add` — an absolute path
+        // passed to `git -C <repo> add -- <abs>` can silently fail on some git versions.
+        let report_path_relative = report_path
+            .strip_prefix(repo_path)
+            .unwrap_or(report_path)
+            .to_str()
+            .unwrap_or("epic-retrospective-report.md");
+
+        // Create branch from base
+        let create_output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["checkout", "-b", retro_branch, base_branch])
+            .output()
+            .await;
+
+        match create_output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!(
+                    action = "retro_branch_create_failed",
+                    error = %stderr,
+                    "Failed to create retrospective branch"
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(
+                    action = "retro_branch_create_exec_failed",
+                    error = %e,
+                    "Failed to execute git checkout for retrospective branch"
+                );
+                return None;
+            }
+        }
+
+        // Write report file on retro branch (it may have been written before on a different branch)
+        if let Err(e) = tokio::fs::write(report_path, report).await {
+            tracing::error!(
+                action = "retro_report_write_failed",
+                error = %e,
+                "Failed to write report on retro branch"
+            );
+            let _ = checkout_branch(repo_path, base_branch).await;
+            return None;
+        }
+
+        // Stage and commit the report (use relative path for portability across git versions)
+        let _ = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["add", "--", report_path_relative])
+            .output()
+            .await;
+
+        let commit_msg = format!("docs(retrospective): epic {epic_num} autonomous review report");
+        let commit_output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["commit", "-m", &commit_msg])
+            .output()
+            .await;
+
+        if let Ok(output) = &commit_output
+            && !output.status.success()
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                action = "retro_commit_warn",
+                error = %stderr,
+                "Retrospective commit may have failed"
+            );
+        }
+
+        // Push retro branch — checkout back to base on failure to avoid leaving
+        // HEAD stranded on the retro branch for the remainder of the pipeline run.
+        if let Err(e) = self.push_branch(retro_branch).await {
+            tracing::error!(
+                action = "retro_push_failed",
+                error = %e,
+                "Failed to push retrospective branch"
+            );
+            let _ = checkout_branch(repo_path, base_branch).await;
+            return None;
+        }
+
+        // Create MR/PR
+        let mr_title = format!("Epic {epic_num} Retrospective — Review Gate");
+        let mr_description = extract_epic_recap(report);
+
+        let pr_params = CreatePrParams {
+            title: mr_title,
+            body: mr_description,
+            source_branch: retro_branch.to_string(),
+            target_branch: self.config.git_provider.target_branch.clone(),
+        };
+
+        match self.git_provider.create_pr(pr_params).await {
+            Ok(pr_info) => {
+                tracing::info!(
+                    action = "retro_mr_created",
+                    url = %pr_info.url,
+                    epic_num = epic_num,
+                    "Retrospective MR created"
+                );
+                Some(pr_info.url)
+            }
+            Err(e) => {
+                tracing::error!(
+                    action = "retro_mr_failed",
+                    error = %e,
+                    epic_num = epic_num,
+                    "Failed to create retrospective MR"
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Push the current branch (HEAD) to origin.
+async fn push_current_branch(repo_path: &str) -> Result<(), String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["push", "origin", "HEAD"])
+        .output()
+        .await
+        .map_err(|e| format!("git push exec failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git push HEAD failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Checkout an existing branch.
+async fn checkout_branch(repo_path: &str, branch: &str) -> Result<(), String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["checkout", branch])
+        .output()
+        .await
+        .map_err(|e| format!("git checkout exec failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git checkout {branch} failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Resolve the epic title from epics.md.
+///
+/// Looks for a heading like `## Epic {X}: {title}` in the epics file.
+/// Falls back to `"Epic {X}"` if parsing fails.
+fn resolve_epic_title(planning_artifacts: &Path, epic_num: u32) -> String {
+    let epics_path = planning_artifacts.join("epics.md");
+    let pattern = format!("## Epic {epic_num}:");
+    match std::fs::read_to_string(&epics_path) {
+        Ok(content) => content
+            .lines()
+            .find(|line| line.contains(&pattern))
+            .and_then(|line| line.split(':').nth(1))
+            .map(|title| title.trim().to_string())
+            .unwrap_or_else(|| format!("Epic {epic_num}")),
+        Err(_) => format!("Epic {epic_num}"),
+    }
+}
+
 fn re_poll_eligible(sprint_status_path: &Path, story_dir: &Path) -> Result<Vec<StoryInfo>, String> {
     let sprint_status = SprintStatusFile::load(sprint_status_path, story_dir)
         .map_err(|e| format!("sprint-status load failed: {e}"))?;
@@ -1687,6 +2094,60 @@ fn build_run_summary(results: &[PipelineResult]) -> RunSummary {
         errored,
         fatal,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Epic Completion Detection
+// ---------------------------------------------------------------------------
+
+/// Detect whether the completed story was the last one in its epic.
+///
+/// Re-reads sprint-status.yaml from disk (NOT the cached poll version)
+/// to ensure the just-completed story's status update is visible.
+/// Returns `Some(epic_num)` if all stories in the epic are done.
+fn detect_epic_completion(
+    sprint_status_path: &Path,
+    story_dir: &Path,
+    completed_story: &StoryInfo,
+) -> Option<u32> {
+    let ssf = match SprintStatusFile::load(sprint_status_path, story_dir) {
+        Ok(ssf) => ssf,
+        Err(e) => {
+            tracing::warn!(
+                action = "epic_completion_check_failed",
+                error = %e,
+                "Failed to re-read sprint-status for epic completion detection"
+            );
+            return None;
+        }
+    };
+
+    let epic_num = completed_story.epic_num;
+
+    // Check all stories in this epic — ALL must be done.
+    // stories() already filters out epic entries and retrospective entries.
+    let epic_stories: Vec<_> = ssf
+        .stories()
+        .into_iter()
+        .filter(|s| s.epic_num == epic_num)
+        .collect();
+
+    // Guard: Iterator::all() on an empty iterator returns true — we must
+    // explicitly reject epics with no story entries to avoid false gate triggers
+    // (e.g., misconfigured sprint-status or a race condition on first load).
+    if epic_stories.is_empty() {
+        return None;
+    }
+
+    let all_done = epic_stories.iter().all(|s| s.status == "done");
+
+    if all_done { Some(epic_num) } else { None }
+}
+
+/// Check if sprint-status has a retrospective entry for this epic.
+fn has_retrospective_entry(ssf: &SprintStatusFile, epic_num: u32) -> bool {
+    let key = format!("epic-{epic_num}-retrospective");
+    ssf.entries().iter().any(|(k, _)| k == &key)
 }
 
 // ===========================================================================
@@ -2512,6 +2973,187 @@ mod tests {
         assert_eq!(keys, vec!["2-1-rest-client"]);
     }
 
+    // -----------------------------------------------------------------------
+    // Epic completion detection tests (Task 2)
+    // -----------------------------------------------------------------------
+
+    fn write_sprint_status_for_epic(dir: &std::path::Path, content: &str) {
+        let artifacts = dir.join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("sprint-status.yaml"), content).unwrap();
+    }
+
+    #[test]
+    fn test_detect_epic_completion_all_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let ss_path = artifacts.join("sprint-status.yaml");
+        std::fs::write(
+            &ss_path,
+            r#"
+development_status:
+    epic-1: in-progress
+    1-1-scaffolding: done
+    1-2-cli: done
+    1-3-init: done
+    epic-1-retrospective: optional
+"#,
+        )
+        .unwrap();
+
+        let story = StoryInfo::from_key_and_status("1-3-init", "done", &artifacts).unwrap();
+        let result = detect_epic_completion(&ss_path, &artifacts, &story);
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn test_detect_epic_completion_partial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let ss_path = artifacts.join("sprint-status.yaml");
+        std::fs::write(
+            &ss_path,
+            r#"
+development_status:
+    epic-1: in-progress
+    1-1-scaffolding: done
+    1-2-cli: in-progress
+    1-3-init: done
+    epic-1-retrospective: optional
+"#,
+        )
+        .unwrap();
+
+        let story = StoryInfo::from_key_and_status("1-3-init", "done", &artifacts).unwrap();
+        let result = detect_epic_completion(&ss_path, &artifacts, &story);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_detect_epic_completion_single_story_epic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let ss_path = artifacts.join("sprint-status.yaml");
+        std::fs::write(
+            &ss_path,
+            r#"
+development_status:
+    epic-5: in-progress
+    5-1-only-story: done
+    epic-5-retrospective: optional
+"#,
+        )
+        .unwrap();
+
+        let story = StoryInfo::from_key_and_status("5-1-only-story", "done", &artifacts).unwrap();
+        let result = detect_epic_completion(&ss_path, &artifacts, &story);
+        assert_eq!(result, Some(5));
+    }
+
+    #[test]
+    fn test_detect_epic_completion_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let ss_path = artifacts.join("sprint-status.yaml"); // does not exist
+
+        let story = StoryInfo::from_key_and_status("1-1-test", "done", &artifacts).unwrap();
+        let result = detect_epic_completion(&ss_path, &artifacts, &story);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_detect_epic_completion_excludes_retro_and_epic_entries() {
+        // Retrospective and epic entries must NOT be counted as stories.
+        // Even if epic-2-retrospective is "optional" (not "done"), the epic
+        // should still be detected as complete if all actual stories are done.
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let ss_path = artifacts.join("sprint-status.yaml");
+        std::fs::write(
+            &ss_path,
+            r#"
+development_status:
+    epic-2: in-progress
+    2-1-polling: done
+    2-2-deps: done
+    epic-2-retrospective: optional
+"#,
+        )
+        .unwrap();
+
+        let story = StoryInfo::from_key_and_status("2-2-deps", "done", &artifacts).unwrap();
+        let result = detect_epic_completion(&ss_path, &artifacts, &story);
+        assert_eq!(result, Some(2));
+    }
+
+    #[test]
+    fn test_has_retrospective_entry_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let ss_path = artifacts.join("sprint-status.yaml");
+        std::fs::write(
+            &ss_path,
+            r#"
+development_status:
+    epic-3: done
+    3-1-story: done
+    epic-3-retrospective: optional
+"#,
+        )
+        .unwrap();
+
+        let ssf = SprintStatusFile::load(&ss_path, &artifacts).unwrap();
+        assert!(has_retrospective_entry(&ssf, 3));
+    }
+
+    #[test]
+    fn test_has_retrospective_entry_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let ss_path = artifacts.join("sprint-status.yaml");
+        std::fs::write(
+            &ss_path,
+            r#"
+development_status:
+    epic-3: done
+    3-1-story: done
+"#,
+        )
+        .unwrap();
+
+        let ssf = SprintStatusFile::load(&ss_path, &artifacts).unwrap();
+        assert!(!has_retrospective_entry(&ssf, 3));
+    }
+
+    #[test]
+    fn test_has_retrospective_entry_wrong_epic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let ss_path = artifacts.join("sprint-status.yaml");
+        std::fs::write(
+            &ss_path,
+            r#"
+development_status:
+    epic-1: done
+    1-1-story: done
+    epic-1-retrospective: done
+"#,
+        )
+        .unwrap();
+
+        let ssf = SprintStatusFile::load(&ss_path, &artifacts).unwrap();
+        assert!(has_retrospective_entry(&ssf, 1));
+        assert!(!has_retrospective_entry(&ssf, 2));
+    }
+
     #[test]
     fn test_re_poll_eligible_processed_keys_prevent_reprocessing() {
         // Verify the processed_keys HashSet logic in process_eligible_stories
@@ -2540,5 +3182,62 @@ mod tests {
         let next = stories.iter().find(|s| !processed.contains(&s.story_key));
         assert!(next.is_some());
         assert_eq!(next.unwrap().story_key, "2-1-rest-client");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_epic_title tests (Task 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_epic_title_parses_heading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let planning = tmp.path();
+        std::fs::write(
+            planning.join("epics.md"),
+            "# Epics\n\n## Epic 1: Project Scaffolding\nDetails...\n\n## Epic 2: Sprint Polling\nMore details...\n",
+        )
+        .unwrap();
+
+        assert_eq!(resolve_epic_title(planning, 1), "Project Scaffolding");
+        assert_eq!(resolve_epic_title(planning, 2), "Sprint Polling");
+    }
+
+    #[test]
+    fn test_resolve_epic_title_fallback_when_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let planning = tmp.path();
+        std::fs::write(
+            planning.join("epics.md"),
+            "# Epics\n\n## Epic 1: Scaffolding\n",
+        )
+        .unwrap();
+
+        // Epic 99 doesn't exist in the file
+        assert_eq!(resolve_epic_title(planning, 99), "Epic 99");
+    }
+
+    #[test]
+    fn test_resolve_epic_title_fallback_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let planning = tmp.path();
+        // No epics.md file created
+
+        assert_eq!(resolve_epic_title(planning, 3), "Epic 3");
+    }
+
+    #[test]
+    fn test_resolve_epic_title_handles_complex_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let planning = tmp.path();
+        std::fs::write(
+            planning.join("epics.md"),
+            "## Epic 4: LLM Agent Session & Tool Calling\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_epic_title(planning, 4),
+            "LLM Agent Session & Tool Calling"
+        );
     }
 }

@@ -81,6 +81,7 @@ development_status:
     4-5-llm-provider-abstraction-agent-factory: done # depends-on: 4-2
     4-6-post-implementation-impact-analysis: review # depends-on: 4-5
     4-7-agent-module-centralization: review
+    4-8-epic-gate-autonomous-review: done
     epic-4-retrospective: optional
 
     epic-5: in-progress

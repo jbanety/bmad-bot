@@ -532,18 +532,17 @@ fn extract_tool_result_brief(
             return "overwritten".to_string();
         }
         // "Applied N edit(s) to path" — extract count
-        if text.starts_with("Applied") {
-            if let Some(n) = text
+        if text.starts_with("Applied")
+            && let Some(n) = text
                 .strip_prefix("Applied ")
                 .and_then(|s| s.split_whitespace().next())
                 .and_then(|s| s.parse::<usize>().ok())
-            {
-                return if n == 1 {
-                    "1 edit applied".to_string()
-                } else {
-                    format!("{n} edits applied")
-                };
-            }
+        {
+            return if n == 1 {
+                "1 edit applied".to_string()
+            } else {
+                format!("{n} edits applied")
+            };
         }
         // Fallback for edit_file
         let line_count = count_lines(text);

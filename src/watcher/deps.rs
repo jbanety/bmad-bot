@@ -488,10 +488,10 @@ pub fn resolve_comment_deps(
                     )
                 {
                     for epic_n in start..=end {
-                        if let Some(last_key) = last_story_per_epic.get(&epic_n) {
-                            if !deps_for_key.contains(last_key) {
-                                deps_for_key.push(last_key.clone());
-                            }
+                        if let Some(last_key) = last_story_per_epic.get(&epic_n)
+                            && !deps_for_key.contains(last_key)
+                        {
+                            deps_for_key.push(last_key.clone());
                         }
                     }
                 } else {
@@ -504,10 +504,10 @@ pub fn resolve_comment_deps(
             } else if let Some(rest) = spec_trimmed.strip_prefix("epic-") {
                 // Single epic: "epic-8"
                 if let Ok(epic_n) = rest.trim().parse::<u32>() {
-                    if let Some(last_key) = last_story_per_epic.get(&epic_n) {
-                        if !deps_for_key.contains(last_key) {
-                            deps_for_key.push(last_key.clone());
-                        }
+                    if let Some(last_key) = last_story_per_epic.get(&epic_n)
+                        && !deps_for_key.contains(last_key)
+                    {
+                        deps_for_key.push(last_key.clone());
                     }
                 } else {
                     tracing::debug!(
@@ -598,12 +598,56 @@ pub fn derive_dependencies(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Retrospective Gate
+// ---------------------------------------------------------------------------
+
+/// Build a map of epic_num → retrospective status for all `epic-X-retrospective` entries.
+///
+/// Scans the full status list for keys matching `epic-{N}-retrospective` and returns
+/// a map from the epic number to its retrospective status string.
+pub fn compute_retrospective_gates(statuses: &[(String, String)]) -> HashMap<u32, String> {
+    let mut gates = HashMap::new();
+    for (key, status) in statuses {
+        if let Some(rest) = key.strip_prefix("epic-")
+            && let Some(num_str) = rest.strip_suffix("-retrospective")
+            && let Ok(epic_num) = num_str.parse::<u32>()
+        {
+            gates.insert(epic_num, status.clone());
+        }
+    }
+    gates
+}
+
+/// Check if the retrospective gate for a previous epic allows stories in the next epic.
+///
+/// Gate statuses:
+/// - `"optional"`: gate clear (default/initial state — not yet reviewed)
+/// - `"done"`: gate clear (human has validated)
+/// - `"review"`: gate **BLOCKED** (daemon activated gate, awaiting human)
+/// - absent: gate clear (no retro entry, backward compat)
+///
+/// The gate blocks stories from epic X+1 when `epic-X-retrospective` is `"review"`.
+/// Epic 1 stories are never blocked (no predecessor gate).
+pub fn is_retrospective_gate_clear(story_epic: u32, retro_gates: &HashMap<u32, String>) -> bool {
+    if story_epic <= 1 {
+        return true; // Epic 1 has no predecessor gate
+    }
+    match retro_gates.get(&(story_epic - 1)) {
+        None => true,                       // No retro entry → no gate
+        Some(status) => status != "review", // ONLY "review" blocks
+    }
+}
+
 /// Pre-gate filter: resolve dependencies, detect cascade blocks, return eligible stories.
 ///
 /// This is the main entry point for the dependency pre-gate (updated for cascade blocking
 /// and cross-epic comment deps). It derives dependencies (intra-epic sequential + explicit
 /// comment deps), builds the graph, checks for cycles, detects cascade blocks, and filters
 /// out stories with unmet or blocked dependencies.
+///
+/// Stories are also filtered by the retrospective gate: if `epic-X-retrospective` is
+/// `"review"`, all stories from epic X+1 and beyond are excluded.
 ///
 /// # Arguments
 /// * `stories` — Eligible stories from the watcher (status == `ready-for-dev`)
@@ -660,6 +704,9 @@ pub fn filter_eligible(
         .map(|s| (s.story_key.clone(), s))
         .collect();
 
+    // Step 6b: Compute retrospective gates
+    let retro_gates = compute_retrospective_gates(all_statuses);
+
     let mut eligible: Vec<StoryInfo> = Vec::new();
     for key in &sorted_keys {
         // Skip cascade-blocked stories (already logged at warn)
@@ -670,6 +717,17 @@ pub fn filter_eligible(
         let (satisfied, unmet) = graph.deps_satisfied(key);
         if satisfied {
             if let Some(story) = story_map.get(key) {
+                // Check retrospective gate: epic X+1 blocked if epic-X-retro is "review"
+                if !is_retrospective_gate_clear(story.epic_num, &retro_gates) {
+                    tracing::info!(
+                        story_key = %key,
+                        epic_num = story.epic_num,
+                        gate_epic = story.epic_num - 1,
+                        "Story skipped — retrospective gate for epic {} is active (status: review)",
+                        story.epic_num - 1
+                    );
+                    continue;
+                }
                 eligible.push(story.clone());
             }
         } else if let Some((dep_key, dep_status)) = unmet {
@@ -687,6 +745,7 @@ pub fn filter_eligible(
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_pass_by_value)]
 mod tests {
     use std::collections::HashMap;
 
@@ -1789,6 +1848,182 @@ development_status:
         assert!(keys.contains(&"7-1-grid"), "7-1 should be eligible");
     }
 
+    // -----------------------------------------------------------------------
+    // Retrospective gate tests (Task 3 — Story 4.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_retrospective_gates_extracts_entries() {
+        let statuses = vec![
+            ("epic-1".to_string(), "done".to_string()),
+            ("1-1-scaffolding".to_string(), "done".to_string()),
+            ("epic-1-retrospective".to_string(), "optional".to_string()),
+            ("epic-2".to_string(), "done".to_string()),
+            ("2-1-polling".to_string(), "done".to_string()),
+            ("epic-2-retrospective".to_string(), "review".to_string()),
+            ("epic-3".to_string(), "in-progress".to_string()),
+            ("3-1-story".to_string(), "done".to_string()),
+            ("epic-3-retrospective".to_string(), "done".to_string()),
+        ];
+        let gates = compute_retrospective_gates(&statuses);
+        assert_eq!(gates.len(), 3);
+        assert_eq!(gates.get(&1).unwrap(), "optional");
+        assert_eq!(gates.get(&2).unwrap(), "review");
+        assert_eq!(gates.get(&3).unwrap(), "done");
+    }
+
+    #[test]
+    fn test_compute_retrospective_gates_empty_when_no_entries() {
+        let statuses = vec![
+            ("epic-1".to_string(), "done".to_string()),
+            ("1-1-scaffolding".to_string(), "done".to_string()),
+        ];
+        let gates = compute_retrospective_gates(&statuses);
+        assert!(gates.is_empty());
+    }
+
+    #[test]
+    fn test_is_retrospective_gate_clear_epic_1_always_clear() {
+        let gates = HashMap::new();
+        assert!(is_retrospective_gate_clear(1, &gates));
+
+        // Even if there were a hypothetical gate at epic 0, epic 1 is always clear
+        let mut gates_with_zero = HashMap::new();
+        gates_with_zero.insert(0, "review".to_string());
+        assert!(is_retrospective_gate_clear(1, &gates_with_zero));
+    }
+
+    #[test]
+    fn test_is_retrospective_gate_clear_review_blocks() {
+        let mut gates = HashMap::new();
+        gates.insert(2, "review".to_string());
+
+        // Epic 3 stories blocked by epic-2-retrospective: review
+        assert!(!is_retrospective_gate_clear(3, &gates));
+    }
+
+    #[test]
+    fn test_is_retrospective_gate_clear_done_allows() {
+        let mut gates = HashMap::new();
+        gates.insert(2, "done".to_string());
+
+        assert!(is_retrospective_gate_clear(3, &gates));
+    }
+
+    #[test]
+    fn test_is_retrospective_gate_clear_optional_allows() {
+        let mut gates = HashMap::new();
+        gates.insert(2, "optional".to_string());
+
+        // CRITICAL: optional must NOT block — backward compatibility
+        assert!(is_retrospective_gate_clear(3, &gates));
+    }
+
+    #[test]
+    fn test_is_retrospective_gate_clear_absent_allows() {
+        let gates = HashMap::new();
+
+        // No retro entry at all → no gate → clear
+        assert!(is_retrospective_gate_clear(3, &gates));
+    }
+
+    #[test]
+    fn test_is_retrospective_gate_blocks_current_epic_not_own() {
+        let mut gates = HashMap::new();
+        gates.insert(3, "review".to_string());
+
+        // Epic 3 stories are NOT blocked by their own retro gate
+        assert!(is_retrospective_gate_clear(3, &gates));
+        // Epic 4 stories ARE blocked
+        assert!(!is_retrospective_gate_clear(4, &gates));
+    }
+
+    #[test]
+    fn test_filter_eligible_respects_retrospective_gate_review_blocks() {
+        let stories = vec![make_story("3-1-story-a", "ready-for-dev")];
+        let statuses: Vec<(String, String)> = vec![
+            ("epic-2".to_string(), "done".to_string()),
+            ("2-1-last".to_string(), "done".to_string()),
+            ("epic-2-retrospective".to_string(), "review".to_string()),
+            ("epic-3".to_string(), "in-progress".to_string()),
+            ("3-1-story-a".to_string(), "ready-for-dev".to_string()),
+        ];
+        let comment_deps = HashMap::new();
+        let (eligible, _) = filter_eligible(stories, &statuses, &comment_deps).unwrap();
+        // Epic 3 story should be blocked by epic-2-retrospective: review
+        assert!(
+            eligible.is_empty(),
+            "Expected no eligible stories when retro gate is active"
+        );
+    }
+
+    #[test]
+    fn test_filter_eligible_respects_retrospective_gate_optional_allows() {
+        let stories = vec![make_story("3-1-story-a", "ready-for-dev")];
+        let statuses: Vec<(String, String)> = vec![
+            ("epic-2".to_string(), "done".to_string()),
+            ("2-1-last".to_string(), "done".to_string()),
+            ("epic-2-retrospective".to_string(), "optional".to_string()),
+            ("epic-3".to_string(), "in-progress".to_string()),
+            ("3-1-story-a".to_string(), "ready-for-dev".to_string()),
+        ];
+        let comment_deps = HashMap::new();
+        let (eligible, _) = filter_eligible(stories, &statuses, &comment_deps).unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].story_key, "3-1-story-a");
+    }
+
+    #[test]
+    fn test_filter_eligible_respects_retrospective_gate_done_allows() {
+        let stories = vec![make_story("3-1-story-a", "ready-for-dev")];
+        let statuses: Vec<(String, String)> = vec![
+            ("epic-2".to_string(), "done".to_string()),
+            ("2-1-last".to_string(), "done".to_string()),
+            ("epic-2-retrospective".to_string(), "done".to_string()),
+            ("epic-3".to_string(), "in-progress".to_string()),
+            ("3-1-story-a".to_string(), "ready-for-dev".to_string()),
+        ];
+        let comment_deps = HashMap::new();
+        let (eligible, _) = filter_eligible(stories, &statuses, &comment_deps).unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].story_key, "3-1-story-a");
+    }
+
+    #[test]
+    fn test_filter_eligible_retro_gate_does_not_block_current_epic() {
+        // epic-3-retrospective: review should NOT block epic 3 stories
+        let stories = vec![make_story("3-2-story-b", "ready-for-dev")];
+        let statuses: Vec<(String, String)> = vec![
+            ("epic-3".to_string(), "in-progress".to_string()),
+            ("3-1-story-a".to_string(), "done".to_string()),
+            ("3-2-story-b".to_string(), "ready-for-dev".to_string()),
+            ("epic-3-retrospective".to_string(), "review".to_string()),
+        ];
+        let comment_deps = HashMap::new();
+        let (eligible, _) = filter_eligible(stories, &statuses, &comment_deps).unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].story_key, "3-2-story-b");
+    }
+
+    #[test]
+    fn test_filter_eligible_incomplete_epic_optional_retro_allows_next_epic() {
+        // Even if epic 2 retro is optional and epic 2 is not fully done yet,
+        // epic 3 stories should be eligible if their deps are satisfied
+        let stories = vec![make_story("3-1-story-a", "ready-for-dev")];
+        let statuses: Vec<(String, String)> = vec![
+            ("epic-2".to_string(), "in-progress".to_string()),
+            ("2-1-polling".to_string(), "done".to_string()),
+            ("2-2-deps".to_string(), "in-progress".to_string()),
+            ("epic-2-retrospective".to_string(), "optional".to_string()),
+            ("epic-3".to_string(), "in-progress".to_string()),
+            ("3-1-story-a".to_string(), "ready-for-dev".to_string()),
+        ];
+        let comment_deps = HashMap::new();
+        let (eligible, _) = filter_eligible(stories, &statuses, &comment_deps).unwrap();
+        assert_eq!(eligible.len(), 1);
+    }
+
+    #[test]
     fn test_find_cascade_stops_at_absorbed() {
         let stories = vec![
             make_story("1-1-broken", "blocked"),

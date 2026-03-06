@@ -169,10 +169,16 @@ pub struct LlmConfig {
     pub review: LlmRoleConfig,
     /// Provider + model for the supervisor fallback.
     pub supervisor: LlmRoleConfig,
+    /// Provider + model for the epic review agent (autonomous post-epic retrospective).
+    ///
+    /// Defaults to empty strings — at runtime, [`AgentFactory::config_for_role`]
+    /// falls back to the `review` config when the provider is empty.
+    #[serde(default)]
+    pub epic_review: LlmRoleConfig,
 }
 
 /// Provider + model pair for a single LLM role.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct LlmRoleConfig {
     /// One of: `"anthropic"`, `"openai"`, `"github-copilot"`.
     pub provider: String,
@@ -369,6 +375,11 @@ impl BotConfig {
         self.validate_llm_role("llm.review", &self.llm.review)?;
         self.validate_llm_role("llm.supervisor", &self.llm.supervisor)?;
 
+        // epic_review is optional — only validate if provider is explicitly set
+        if !self.llm.epic_review.provider.is_empty() {
+            self.validate_llm_role("llm.epic_review", &self.llm.epic_review)?;
+        }
+
         // Required paths must be non-empty
         self.validate_non_empty("bmad_paths.project_root", &self.bmad_paths.project_root)?;
         self.validate_non_empty("bmad_paths.output_folder", &self.bmad_paths.output_folder)?;
@@ -467,6 +478,7 @@ impl BotConfig {
                     model: "test".to_string(),
                     reasoning_effort: None,
                 },
+                epic_review: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {
@@ -536,11 +548,17 @@ impl BotSecrets {
     /// Telegram bot token.
     pub fn validate_for_config(&self, config: &BotConfig) -> Result<(), ConfigError> {
         // Collect all unique LLM providers in use
-        let llm_roles: &[(&str, &LlmRoleConfig)] = &[
+        let mut llm_roles: Vec<(&str, &LlmRoleConfig)> = vec![
             ("dev", &config.llm.dev),
             ("review", &config.llm.review),
             ("supervisor", &config.llm.supervisor),
         ];
+
+        // Only validate epic_review secrets if provider is explicitly configured
+        // (empty provider inherits from review, which is already validated)
+        if !config.llm.epic_review.provider.is_empty() {
+            llm_roles.push(("epic_review", &config.llm.epic_review));
+        }
 
         for (role_name, role_config) in llm_roles {
             match role_config.provider.as_str() {

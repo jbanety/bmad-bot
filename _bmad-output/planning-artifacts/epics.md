@@ -210,7 +210,7 @@ The supervisor can intercept agent questions and answer them via a deterministic
 **FRs covered:** FR12, FR13, FR14, FR15, FR16, FR17
 
 ### Epic 4: Autonomous Development Session
-The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After story completion, the agent propagates implementation reality forward to downstream dependent stories via post-implementation impact analysis. After this epic, stories are developed end-to-end by the agent. *(Note: Story 4.1's monolithic FsTool is refactored into surgical tools in Epic 8. Story 4.4 migrates all git operations from git2 to Git CLI. Story 4.6 adds the post-impl impact analysis step.)*
+The daemon launches a streaming rig agent session with the BMAD dev agent persona (activated via Zed-style XML context, not system preamble) and registered tools (git, filesystem, terminal, ask_supervisor, think). The agent reviews prior stories, updates specs, creates a branch, and executes the full dev-story workflow autonomously with English language override via minimal system preamble. After story completion, the agent propagates implementation reality forward to downstream dependent stories via post-implementation impact analysis. The epic concludes with an autonomous review gate: upon epic completion, the daemon pauses, launches an Architect-persona LLM session to analyze the codebase, produces a structured report with functional testing guide, and blocks the next epic until the human validates. *(Note: Story 4.1's monolithic FsTool is refactored into surgical tools in Epic 8. Story 4.4 migrates all git operations from git2 to Git CLI. Story 4.6 adds the post-impl impact analysis step. Story 4.8 adds the epic gate with autonomous retrospective review.)*
 **FRs covered:** FR5, FR6, FR7, FR8, FR9, FR10, FR11, FR41, FR43
 
 ### Epic 5: Code Review & Pull Request Delivery [L201-205]
@@ -1020,6 +1020,57 @@ So that the next agent picking up a dependent story works from accurate assumpti
 - Symmetric counterpart to the pre-dev spec update (FR5-6): pre-dev reads prior stories' output, post-impl propagates forward to downstream stories
 - See `architect-brief-post-impl-impact-analysis.md` for the full architect brief with the proposed prompt design and sequence diagrams
 - Architecture Data Flow step 8 documents this feature
+
+---
+
+### Story 4.8: Epic Gate — Autonomous Retrospective Review
+
+> **Triggered by:** Production incident (2026-03-06) — daemon looped 4× re-processing 14 already-completed stories (42 wasted LLM sessions, 19 duplicate MRs) due to sprint-status.yaml divergence across parallel branch chains. Root cause fixed (sequential branch chaining), but exposed a deeper problem: no human checkpoint exists between epics, allowing architectural drift, pattern inconsistencies, and infrastructure bugs to compound unchecked. See `architect-brief-epic-gate-retrospective.md` for full rationale.
+
+As a daemon operator,
+I want the daemon to automatically pause between epics, run an autonomous LLM-driven codebase review, and block the next epic until a human validates the report,
+So that architectural drift, pattern inconsistencies, and technical debt are caught at epic boundaries instead of compounding silently across the entire project.
+
+**Acceptance Criteria:**
+
+**Given** the pipeline has just finished processing a story successfully
+**When** all stories in the completed story's epic are `done`
+**Then** the pipeline detects epic completion and launches the autonomous epic review process
+**And** if no `epic-X-retrospective` entry exists in sprint-status.yaml, the gate is skipped entirely (backward compatibility)
+
+**Given** epic completion is detected and the retrospective entry exists
+**When** the review session launches
+**Then** a `BuiltAgent` is constructed using `AgentFactory::build(LlmRole::EpicReview, ...)` with read-only tools (read_file, grep, find_path, list_directory, terminal, git, think — NO edit_file, NO ask_supervisor)
+**And** the preamble uses the Architect agent persona (`_bmad/bmm/agents/architect.md`) combined with project-context.md
+
+**Given** the review agent is analyzing the epic
+**When** it produces the report
+**Then** the report contains four sections: (1) Epic Recap — objectives, stories delivered, planned vs actual, (2) Functional Testing Guide — step-by-step scenarios with concrete CLI commands the human can follow to verify each capability, (3) Technical Analysis — pattern consistency, architecture adherence, tech debt inventory, codebase health via cargo check/test/clippy, (4) Recommendations — actionable items for the next epic
+
+**Given** the review report is generated (or the review session failed)
+**When** the pipeline creates retrospective artifacts
+**Then** the report is saved to `{implementation_artifacts}/epic-{X}-retrospective-report.md`
+**And** a branch `epic-{X}-retrospective` is created, the report committed, pushed, and an MR created via GitProvider
+**And** sprint-status.yaml is updated: `epic-X-retrospective: review`
+**And** the human is notified (if notifications enabled) with epic summary, MR link, and unlock instructions
+
+**Given** `epic-X-retrospective` is set to `review`
+**When** the watcher computes eligible stories
+**Then** ALL stories from epic X+1 and beyond are excluded from the eligible list
+**And** the gate is only cleared when the human sets `epic-X-retrospective: done`
+
+**Given** the `LlmRole` enum exists with Dev, Review, Supervisor
+**When** the `EpicReview` variant is added
+**Then** `LlmConfig` gains an `epic_review: LlmRoleConfig` field with `#[serde(default)]`
+**And** if absent from config, it falls back to the `review` role config at runtime (zero-config backward compatibility)
+
+**Technical Notes:**
+- New file: `src/review/epic.rs` — `EpicReviewRunner` struct mirroring `ReviewRunner` pattern
+- Extends: `LlmRole` enum, `LlmConfig`, `AgentFactory::config_for_role()`, `pipeline.rs` (epic completion detection + review trigger), `watcher/deps.rs` (retrospective gate check), `Notifier` trait
+- The review is pipeline-level (not session-level) — triggered in `process_eligible_stories()` after `process_story()` returns Completed
+- Review failure is non-blocking for the gate activation — a failed review is MORE reason to pause
+- Cross-cutting: touches `llm/agent_factory.rs`, `config/mod.rs`, `pipeline.rs`, `watcher/deps.rs`, `review/epic.rs` (new), `notifier/mod.rs`
+- See `architect-brief-epic-gate-retrospective.md` for full architect brief with incident details
 
 ---
 

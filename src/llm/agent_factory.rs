@@ -49,6 +49,8 @@ pub enum LlmRole {
     Review,
     /// Supervisor fallback — answers agent questions via Architect session.
     Supervisor,
+    /// Epic review agent — autonomous post-epic retrospective analysis.
+    EpicReview,
 }
 
 impl std::fmt::Display for LlmRole {
@@ -57,6 +59,7 @@ impl std::fmt::Display for LlmRole {
             Self::Dev => write!(f, "dev"),
             Self::Review => write!(f, "review"),
             Self::Supervisor => write!(f, "supervisor"),
+            Self::EpicReview => write!(f, "epic_review"),
         }
     }
 }
@@ -252,11 +255,21 @@ impl AgentFactory {
     }
 
     /// Resolve the [`LlmRoleConfig`] for a given role.
+    ///
+    /// For [`LlmRole::EpicReview`], falls back to the `review` config when the
+    /// `epic_review` provider is empty (zero-config backward compatibility).
     pub fn config_for_role(&self, role: LlmRole) -> &LlmRoleConfig {
         match role {
             LlmRole::Dev => &self.config.llm.dev,
             LlmRole::Review => &self.config.llm.review,
             LlmRole::Supervisor => &self.config.llm.supervisor,
+            LlmRole::EpicReview => {
+                if self.config.llm.epic_review.provider.is_empty() {
+                    &self.config.llm.review // fallback to review config
+                } else {
+                    &self.config.llm.epic_review
+                }
+            }
         }
     }
 
@@ -851,6 +864,7 @@ mod tests {
         assert_eq!(LlmRole::Dev.to_string(), "dev");
         assert_eq!(LlmRole::Review.to_string(), "review");
         assert_eq!(LlmRole::Supervisor.to_string(), "supervisor");
+        assert_eq!(LlmRole::EpicReview.to_string(), "epic_review");
     }
 
     #[test]
@@ -864,6 +878,8 @@ mod tests {
     fn test_llm_role_debug() {
         let debug = format!("{:?}", LlmRole::Dev);
         assert_eq!(debug, "Dev");
+        let debug_epic = format!("{:?}", LlmRole::EpicReview);
+        assert_eq!(debug_epic, "EpicReview");
     }
 
     #[test]
@@ -871,6 +887,8 @@ mod tests {
         assert_eq!(LlmRole::Dev, LlmRole::Dev);
         assert_ne!(LlmRole::Dev, LlmRole::Review);
         assert_ne!(LlmRole::Review, LlmRole::Supervisor);
+        assert_ne!(LlmRole::Supervisor, LlmRole::EpicReview);
+        assert_eq!(LlmRole::EpicReview, LlmRole::EpicReview);
     }
 
     // -- AgentFactory tests --
@@ -904,6 +922,7 @@ mod tests {
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
                 },
+                epic_review: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {
@@ -990,6 +1009,48 @@ mod tests {
         let role_config = factory.config_for_role(LlmRole::Supervisor);
         assert_eq!(role_config.provider, "github-copilot");
         assert_eq!(role_config.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_agent_factory_config_for_role_epic_review_fallback() {
+        // When epic_review has empty provider, falls back to review config
+        let config = Arc::new(make_test_config());
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        let role_config = factory.config_for_role(LlmRole::EpicReview);
+        // Should fall back to the review config (openai / gpt-4o)
+        assert_eq!(role_config.provider, "openai");
+        assert_eq!(role_config.model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_agent_factory_config_for_role_epic_review_explicit() {
+        // When epic_review has an explicit provider, uses its own config
+        use crate::config::LlmRoleConfig;
+        let mut cfg = make_test_config();
+        cfg.llm.epic_review = LlmRoleConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            reasoning_effort: Some("high".to_string()),
+        };
+        let config = Arc::new(cfg);
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        let role_config = factory.config_for_role(LlmRole::EpicReview);
+        assert_eq!(role_config.provider, "anthropic");
+        assert_eq!(role_config.model, "claude-sonnet-4-20250514");
+        assert_eq!(role_config.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn test_llm_role_config_default_has_empty_strings() {
+        use crate::config::LlmRoleConfig;
+        let default = LlmRoleConfig::default();
+        assert!(default.provider.is_empty());
+        assert!(default.model.is_empty());
+        assert!(default.reasoning_effort.is_none());
     }
 
     #[test]

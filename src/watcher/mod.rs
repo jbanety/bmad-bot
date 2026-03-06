@@ -914,6 +914,7 @@ development_status:
                     model: "test".to_string(),
                     reasoning_effort: None,
                 },
+                epic_review: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

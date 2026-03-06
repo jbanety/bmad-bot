@@ -13,6 +13,13 @@
 //! - [`ReviewError`] — typed errors for review-level failures
 //! - [`ReviewOutcome`] — the three possible results of a review run
 //! - [`ReviewRunner`] — the main review lifecycle manager
+//!
+//! ## Epic Review
+//!
+//! The [`epic`] submodule provides [`EpicReviewRunner`](epic::EpicReviewRunner)
+//! for autonomous post-epic retrospective analysis.
+
+pub mod epic;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,7 +54,9 @@ const MAX_TOKEN_REFRESHES: usize = 5;
 /// rig includes the broken tool call in conversation history, causing the API to reject
 /// all subsequent turns with 400 "invalid_tool_call_format". The only recovery is to
 /// retry with a fresh session (clean history). This constant limits how many times we retry.
-const MAX_SESSION_RETRIES: usize = 2;
+///
+/// Shared with [`epic::EpicReviewRunner`] to ensure both runners use the same retry budget.
+pub(super) const MAX_SESSION_RETRIES: usize = 2;
 
 /// Detect Copilot session token expiry errors.
 ///
@@ -409,7 +418,7 @@ impl ReviewRunner {
 ///    conversation history invalid (rig/API bug workaround)
 /// 2. **Network errors** — transient HTTP failures (connection reset, timeout,
 ///    incomplete message) that are likely to succeed on retry
-fn is_retryable_review_error(error: &str) -> bool {
+pub fn is_retryable_review_error(error: &str) -> bool {
     let lower = error.to_lowercase();
     // Poisoned history (rig sends malformed tool call args in conversation history)
     lower.contains("invalid_tool_call_format")
