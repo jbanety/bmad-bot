@@ -193,6 +193,57 @@ pub async fn preserve_partial_work(repo_path: &Path, story_key: &str, question: 
     summary
 }
 
+/// Check the git working tree for uncommitted changes and return their paths.
+///
+/// Runs `git status --porcelain` and parses the output into a list of file
+/// paths. Returns an empty `Vec` if the working tree is clean or if the git
+/// command fails (never blocks callers on git errors).
+///
+/// Used by [`SessionRunner`] and [`ReviewRunner`] after the agent signals
+/// completion — if files remain uncommitted, the runner sends one more LLM
+/// turn asking the agent to commit them with a descriptive message. This
+/// prevents dirty-worktree errors when the pipeline switches branches for
+/// the next story.
+pub async fn get_dirty_files(repo_path: &Path) -> Vec<String> {
+    let output = match tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["status", "--porcelain"])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            tracing::warn!(
+                action = "dirty_check_failed",
+                exit_code = ?o.status.code(),
+                "git status --porcelain returned non-zero — assuming clean"
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!(
+                action = "dirty_check_failed",
+                error = %e,
+                "Failed to execute git status — assuming clean"
+            );
+            return Vec::new();
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            // porcelain format: "XY filename" or "XY original -> renamed"
+            // Strip the 2-char status prefix + space
+            let path = if line.len() > 3 { &line[3..] } else { line };
+            path.to_string()
+        })
+        .collect()
+}
+
 /// Updates a story's status to `needs-clarification` in sprint-status.yaml.
 ///
 /// Uses string-based find-and-replace to preserve all comments and structure

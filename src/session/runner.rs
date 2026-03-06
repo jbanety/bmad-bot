@@ -23,7 +23,9 @@ use crate::session::agent;
 pub use crate::session::agent::ShutdownFlag;
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
 use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
-use crate::session::cleanup::{mark_story_needs_clarification, preserve_partial_work};
+use crate::session::cleanup::{
+    get_dirty_files, mark_story_needs_clarification, preserve_partial_work,
+};
 use crate::session::escalation::EscalationReport;
 use crate::session::provider::ProviderError;
 use crate::session::state::{ChatMessage, SessionState};
@@ -1875,6 +1877,75 @@ impl SessionRunner {
                                     error = %e,
                                     story_key = %story.story_key,
                                     "Final commit request failed — proceeding anyway"
+                                );
+                            }
+                        }
+                    }
+
+                    // ── Step 7b: Dirty worktree safety net ────────────────
+                    // The agent may have left uncommitted files despite the
+                    // final commit request (e.g., touched files outside story
+                    // scope, or tool calls that modified files after the commit).
+                    // If the worktree is still dirty, send one more turn so
+                    // the agent commits with a descriptive message — prevents
+                    // checkout failures when the pipeline switches branches.
+                    let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
+                    let dirty_files = get_dirty_files(&repo_path).await;
+                    if !dirty_files.is_empty() {
+                        let file_list = dirty_files.join("\n  - ");
+                        let dirty_msg = format!(
+                            "WARNING: There are still uncommitted files in the working tree:\n  \
+                             - {file_list}\n\n\
+                             You MUST commit ALL of these files NOW. Use `git add -A` then \
+                             `git commit` with a descriptive conventional commit message \
+                             that explains what these files contain. Then push with `git push`."
+                        );
+                        tracing::warn!(
+                            action = "dirty_worktree_detected",
+                            file_count = dirty_files.len(),
+                            story_key = %story.story_key,
+                            step = "post_final_commit",
+                            "Uncommitted files remain after final commit — sending cleanup turn"
+                        );
+                        state.add_user_message(&dirty_msg);
+                        let dirty_turn = turn + 1;
+                        log_llm_request(
+                            "dev",
+                            dirty_turn,
+                            "[dirty-worktree-cleanup]",
+                            full_history.len(),
+                        );
+                        self.ui.llm_request("dev", dirty_turn as u32);
+                        self.ui
+                            .llm_request_content("dev", dirty_turn as u32, &dirty_msg);
+                        match agent
+                            .stream_chat(
+                                &dirty_msg,
+                                full_history.clone(),
+                                Some(&self.shutdown),
+                                Some(&self.ui),
+                            )
+                            .await
+                        {
+                            Ok((r, new_hist)) => {
+                                log_llm_response("dev", dirty_turn, &r);
+                                self.ui.llm_response("dev", dirty_turn as u32, r.len());
+                                self.ui.llm_response_content("dev", dirty_turn as u32, &r);
+                                full_history = new_hist;
+                                state.add_assistant_message(&r);
+                                let _ = state.save(&self.state_file_path).await;
+                                tracing::info!(
+                                    action = "dirty_worktree_cleanup_done",
+                                    story_key = %story.story_key,
+                                    "Dirty worktree cleanup turn completed"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    action = "dirty_worktree_cleanup_failed",
+                                    error = %e,
+                                    story_key = %story.story_key,
+                                    "Dirty worktree cleanup turn failed — proceeding anyway"
                                 );
                             }
                         }

@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use rig::completion::Message;
+use crate::session::cleanup::get_dirty_files;
+
 use rig::tools::think::ThinkTool;
 
 use crate::config::{BotConfig, BotSecrets};
@@ -36,6 +37,10 @@ use crate::watcher::StoryInfo;
 /// Maximum chat turns for a review session (safety net).
 const MAX_REVIEW_TURNS: usize = 100;
 
+/// Maximum number of times we rebuild the agent due to Copilot token expiry
+/// within a single review session. Mirrors [`crate::session::runner::MAX_TOKEN_REFRESHES`].
+const MAX_TOKEN_REFRESHES: usize = 5;
+
 /// Maximum number of full session retries for transient errors (e.g. malformed tool calls).
 ///
 /// When the LLM sends malformed tool call arguments (e.g. two JSON objects concatenated),
@@ -43,6 +48,19 @@ const MAX_REVIEW_TURNS: usize = 100;
 /// all subsequent turns with 400 "invalid_tool_call_format". The only recovery is to
 /// retry with a fresh session (clean history). This constant limits how many times we retry.
 const MAX_SESSION_RETRIES: usize = 2;
+
+/// Detect Copilot session token expiry errors.
+///
+/// GitHub Copilot session tokens are short-lived (~30 min). When a review
+/// session runs longer than the token TTL, the LLM API returns a 401 with
+/// "token expired". Unlike other transient errors, retrying with the same
+/// agent is pointless — the token baked into the rig HTTP client is dead.
+/// The fix is to rebuild the agent (which exchanges a fresh session token
+/// via [`crate::auth::CopilotTokenCache`]) and retry with the existing chat history.
+fn is_token_expired_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("token expired")
+}
 
 /// Build the post-review message sent after the CR workflow completes.
 ///
@@ -414,47 +432,35 @@ fn is_retryable_review_error(error: &str) -> bool {
 }
 
 impl ReviewRunner {
-    /// Inner implementation that can fail with [`ReviewError`].
-    async fn run_inner(&self, story: &StoryInfo) -> Result<ReviewOutcome, ReviewError> {
-        let span = tracing::info_span!(
-            "review_session",
-            story_id = %story.story_id,
-            story_key = %story.story_key,
-        );
-        let _guard = span.enter();
-
-        tracing::info!(
-            action = "review_start",
-            story_key = %story.story_key,
-            "Starting code review session"
-        );
-
-        // 1. Build generic preamble (same as SessionRunner)
+    /// Build a fresh [`BuiltAgent`] for review, reusing existing shared resources.
+    ///
+    /// Used both for initial agent construction and for token refresh rebuilds.
+    /// The `escalation_slot` and `decision_log` are passed through so the new
+    /// agent's supervisor tool shares state with the existing session.
+    async fn build_review_agent(
+        &self,
+        escalation_slot: EscalationSlot,
+        decision_log: DecisionLog,
+    ) -> Result<BuiltAgent, ReviewError> {
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         let mcp_tool_names = crate::mcp::extract_mcp_tool_names(&mcp_data);
         let preamble = agent::build_preamble(&mcp_tool_names, &self.config.llm.review.model);
 
-        // 2. Create shared resources
-        let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
-        let decision_log = DecisionLog::new();
-
-        // 3. Build agent via AgentFactory — single call replaces 3-arm provider match
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
         let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
             agent::create_tools_with_supervisor(
                 &project_root,
                 &self.config,
                 &self.agent_factory,
-                escalation_slot.clone(),
-                decision_log.clone(),
+                escalation_slot,
+                decision_log,
                 &self.mcp_manager,
             )
             .map_err(|e| ReviewError::AgentBuildFailed {
                 reason: format!("Failed to create AskSupervisor: {e}"),
             })?;
 
-        let agent = self
-            .agent_factory
+        self.agent_factory
             .build(
                 LlmRole::Review,
                 &preamble,
@@ -473,11 +479,37 @@ impl ReviewRunner {
                 other => ReviewError::ProviderInit {
                     reason: other.to_string(),
                 },
-            })?;
+            })
+    }
 
-        // 4. Drive the review session
+    /// Inner implementation that can fail with [`ReviewError`].
+    async fn run_inner(&self, story: &StoryInfo) -> Result<ReviewOutcome, ReviewError> {
+        let span = tracing::info_span!(
+            "review_session",
+            story_id = %story.story_id,
+            story_key = %story.story_key,
+        );
+        let _guard = span.enter();
+
+        tracing::info!(
+            action = "review_start",
+            story_key = %story.story_key,
+            "Starting code review session"
+        );
+
+        // Create shared resources
+        let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
+        let decision_log = DecisionLog::new();
+
+        // Build agent via centralized helper
+        let agent = self
+            .build_review_agent(escalation_slot.clone(), decision_log.clone())
+            .await?;
+
+        // Drive the review session (agent is mutable for token refresh rebuilds)
+        let mut agent = agent;
         let outcome = self
-            .drive_review_session(&agent, story, escalation_slot, decision_log)
+            .drive_review_session(&mut agent, story, escalation_slot, decision_log)
             .await?;
 
         let outcome_type = match &outcome {
@@ -507,10 +539,10 @@ impl ReviewRunner {
     /// NOT the story key, because the CR workflow asks for the story file path.
     async fn drive_review_session(
         &self,
-        agent: &BuiltAgent,
+        agent: &mut BuiltAgent,
         story: &StoryInfo,
         escalation_slot: EscalationSlot,
-        _decision_log: DecisionLog,
+        decision_log: DecisionLog,
     ) -> Result<ReviewOutcome, ReviewError> {
         // The CR workflow asks "which story file to review" — reply with the file path
         let story_reply = story.specs_path.display().to_string();
@@ -601,6 +633,7 @@ impl ReviewRunner {
             });
         }
         const MAX_RETRIES: usize = 3;
+        let mut token_refreshes: usize = 0;
 
         loop {
             // Cooperative shutdown check — between chat turns
@@ -663,6 +696,73 @@ impl ReviewRunner {
                     report_len = %formatted_report.len(),
                     "Review report captured from agent"
                 );
+
+                // ── Dirty worktree safety net ─────────────────────────
+                // The review agent may have left uncommitted files (e.g.,
+                // touched downstream story files during analysis, or tool
+                // calls that modified files after the last commit). If the
+                // worktree is dirty, send one more turn so the agent commits
+                // and pushes — prevents checkout failures when the pipeline
+                // switches branches for the next story.
+                let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
+                let dirty_files = get_dirty_files(&repo_path).await;
+                if !dirty_files.is_empty() {
+                    let file_list = dirty_files.join("\n  - ");
+                    let dirty_msg = format!(
+                        "WARNING: There are still uncommitted files in the working tree:\n  \
+                         - {file_list}\n\n\
+                         You MUST commit ALL of these files NOW. Use `git add -A` then \
+                         `git commit` with a descriptive conventional commit message \
+                         that explains what these files contain. Then push with `git push`."
+                    );
+                    tracing::warn!(
+                        action = "dirty_worktree_detected",
+                        file_count = dirty_files.len(),
+                        story_key = %story.story_key,
+                        step = "post_review",
+                        "Uncommitted files remain after review — sending cleanup turn"
+                    );
+                    let dirty_turn = turn + 1;
+                    log_llm_request(
+                        "review",
+                        dirty_turn,
+                        "[dirty-worktree-cleanup]",
+                        full_history.len(),
+                    );
+                    self.ui.llm_request("review", dirty_turn as u32);
+                    self.ui
+                        .llm_request_content("review", dirty_turn as u32, &dirty_msg);
+                    match agent
+                        .stream_chat(
+                            &dirty_msg,
+                            full_history.clone(),
+                            Some(&self.shutdown),
+                            Some(&self.ui),
+                        )
+                        .await
+                    {
+                        Ok((r, _new_hist)) => {
+                            log_llm_response("review", dirty_turn, &r);
+                            self.ui.llm_response("review", dirty_turn as u32, r.len());
+                            self.ui
+                                .llm_response_content("review", dirty_turn as u32, &r);
+                            tracing::info!(
+                                action = "dirty_worktree_cleanup_done",
+                                story_key = %story.story_key,
+                                "Review dirty worktree cleanup turn completed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                action = "dirty_worktree_cleanup_failed",
+                                error = %e,
+                                story_key = %story.story_key,
+                                "Review dirty worktree cleanup turn failed — proceeding anyway"
+                            );
+                        }
+                    }
+                }
+
                 return Ok(ReviewOutcome::Completed {
                     story_key: story.story_key.clone(),
                     branch: story.branch_name.clone(),
@@ -725,12 +825,59 @@ impl ReviewRunner {
                 Err(e) => {
                     log_llm_error("review", turn, &e);
                     self.ui.llm_error("review", turn as u32, &e.to_string());
+                    let error_str = e.to_string();
+
+                    // Token expired — rebuild agent with fresh Copilot session token.
+                    // The existing full_history is reusable; only the HTTP client
+                    // (with the baked-in bearer token) needs replacing.
+                    if is_token_expired_error(&error_str) && token_refreshes < MAX_TOKEN_REFRESHES {
+                        token_refreshes += 1;
+                        tracing::warn!(
+                            action = "token_expired_rebuild",
+                            turn = %turn,
+                            refresh = %token_refreshes,
+                            max_refreshes = %MAX_TOKEN_REFRESHES,
+                            phase = if post_review_phase { "post_review" } else { "normal" },
+                            "Copilot token expired in review — rebuilding agent with fresh token"
+                        );
+
+                        match self
+                            .build_review_agent(escalation_slot.clone(), decision_log.clone())
+                            .await
+                        {
+                            Ok(new_agent) => {
+                                *agent = new_agent;
+                                self.ui.llm_retry(
+                                    "review",
+                                    turn as u32,
+                                    token_refreshes as u32,
+                                    0.0,
+                                );
+                                tracing::info!(
+                                    action = "token_refreshed",
+                                    refresh = %token_refreshes,
+                                    "Review agent rebuilt with fresh token — retrying turn"
+                                );
+                                // Do NOT increment retries — this is a token lifecycle event
+                                continue;
+                            }
+                            Err(rebuild_err) => {
+                                tracing::error!(
+                                    action = "token_refresh_failed",
+                                    error = %rebuild_err,
+                                    "Failed to rebuild review agent after token expiry"
+                                );
+                                // Fall through to normal retry/failure logic
+                            }
+                        }
+                    }
+
                     retries += 1;
                     tracing::warn!(
                         action = "review_chat_error",
                         turn = %turn,
                         retries = %retries,
-                        error = %e,
+                        error = %error_str,
                         "Review chat error, will retry"
                     );
                     self.ui
@@ -739,12 +886,14 @@ impl ReviewRunner {
                         if post_review_phase {
                             self.ui.phase_error(
                                 "Post-Review Report",
-                                &format!("Chat failed after {MAX_RETRIES} retries: {e}"),
+                                &format!("Chat failed after {MAX_RETRIES} retries: {error_str}"),
                             );
                         }
                         return Ok(ReviewOutcome::Failed {
                             story_key: story.story_key.clone(),
-                            error: format!("Review chat failed after {MAX_RETRIES} retries: {e}"),
+                            error: format!(
+                                "Review chat failed after {MAX_RETRIES} retries: {error_str}"
+                            ),
                         });
                     }
                     continue;
@@ -1140,5 +1289,48 @@ None.
     fn test_max_review_turns_is_reasonable() {
         assert!(MAX_REVIEW_TURNS >= 50, "Max turns should be at least 50");
         assert!(MAX_REVIEW_TURNS <= 200, "Max turns should be at most 200");
+    }
+
+    // -----------------------------------------------------------------------
+    // Token expiry detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_token_expired_error_exact_copilot_message() {
+        assert!(is_token_expired_error(
+            "CompletionError: ResponseError: CompletionError: ProviderError: Invalid status code 401 Unauthorized with message: unauthorized: token expired\n"
+        ));
+    }
+
+    #[test]
+    fn test_is_token_expired_error_simple() {
+        assert!(is_token_expired_error("token expired"));
+        assert!(is_token_expired_error("Token Expired"));
+    }
+
+    #[test]
+    fn test_is_token_expired_error_false_for_other_auth_errors() {
+        assert!(!is_token_expired_error("bad credentials"));
+        assert!(!is_token_expired_error("authentication failed"));
+        assert!(!is_token_expired_error("HTTP 403 forbidden"));
+    }
+
+    #[test]
+    fn test_is_token_expired_error_false_for_transient_errors() {
+        assert!(!is_token_expired_error("status code 503"));
+        assert!(!is_token_expired_error("connection timeout"));
+        assert!(!is_token_expired_error("rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_max_token_refreshes_is_reasonable() {
+        assert!(
+            MAX_TOKEN_REFRESHES >= 3,
+            "Should allow at least 3 token refreshes for long review sessions"
+        );
+        assert!(
+            MAX_TOKEN_REFRESHES <= 10,
+            "Should cap token refreshes to prevent infinite loops"
+        );
     }
 }
