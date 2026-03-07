@@ -36,7 +36,9 @@ use crate::tools::{
 };
 use crate::ui::UiHandle;
 
-use super::{MAX_SESSION_RETRIES, is_retryable_review_error};
+use super::{
+    MAX_SESSION_RETRIES, MAX_TOKEN_REFRESHES, is_retryable_review_error, is_token_expired_error,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -291,7 +293,7 @@ impl EpicReviewRunner {
     /// trigger a full-session retry via [`MAX_SESSION_RETRIES`].
     async fn drive_epic_review(
         &self,
-        agent: BuiltAgent,
+        mut agent: BuiltAgent,
         epic_num: u32,
         prompt: &str,
     ) -> Result<EpicReviewOutcome, EpicReviewError> {
@@ -299,6 +301,7 @@ impl EpicReviewRunner {
         let mut history: Vec<Message> = Vec::new();
         let mut all_agent_output: Vec<String> = Vec::new();
         let mut consecutive_no_tool_turns: usize = 0;
+        let mut token_refreshes: usize = 0;
 
         // Send initial prompt
         let mut current_prompt = prompt.to_string();
@@ -341,6 +344,54 @@ impl EpicReviewRunner {
                         }
                         Err(e) => {
                             let err_str = e.to_string();
+
+                            // ── Token expiry handling ──────────────────────
+                            // Copilot session tokens are short-lived (~30 min).
+                            // Epic reviews easily exceed that. Rebuild the agent
+                            // with a fresh token and retry the same turn — the
+                            // existing history is reusable, only the HTTP client
+                            // (with the baked-in bearer token) needs replacing.
+                            if is_token_expired_error(&err_str)
+                                && token_refreshes < MAX_TOKEN_REFRESHES
+                            {
+                                token_refreshes += 1;
+                                tracing::warn!(
+                                    action = "epic_review_token_expired_rebuild",
+                                    turn = turn,
+                                    refresh = token_refreshes,
+                                    max_refreshes = MAX_TOKEN_REFRESHES,
+                                    epic_num = epic_num,
+                                    "Copilot token expired in epic review — rebuilding agent with fresh token"
+                                );
+                                match self.build_epic_review_agent().await {
+                                    Ok(new_agent) => {
+                                        agent = new_agent;
+                                        self.ui.llm_retry(
+                                            "epic_review",
+                                            turn as u32,
+                                            token_refreshes as u32,
+                                            0.0,
+                                        );
+                                        tracing::info!(
+                                            action = "epic_review_token_refreshed",
+                                            refresh = token_refreshes,
+                                            "Epic review agent rebuilt with fresh token — retrying turn"
+                                        );
+                                        // Retry this attempt without consuming a turn-retry slot
+                                        continue;
+                                    }
+                                    Err(rebuild_err) => {
+                                        tracing::error!(
+                                            action = "epic_review_token_refresh_failed",
+                                            error = %rebuild_err,
+                                            epic_num = epic_num,
+                                            "Failed to rebuild epic review agent after token expiry"
+                                        );
+                                        // Fall through to normal transient retry logic
+                                    }
+                                }
+                            }
+
                             let transient = is_retryable_review_error(&err_str);
                             if transient && attempt < MAX_TURN_RETRIES {
                                 let delay_ms = TURN_RETRY_BASE_MS * (1u64 << attempt); // 1s, 2s, 4s
