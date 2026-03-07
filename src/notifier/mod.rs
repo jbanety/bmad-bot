@@ -183,7 +183,7 @@ fn escape_html(text: &str) -> String {
 }
 
 /// Format a single-story notification as an HTML message for Telegram.
-fn format_story_message(notification: &StoryNotification) -> String {
+fn format_story_message(notification: &StoryNotification, project_name: &str) -> String {
     let status_line = match notification.status {
         StoryStatus::Completed => {
             format!("✅ Story {} completed", escape_html(&notification.story_id))
@@ -193,7 +193,8 @@ fn format_story_message(notification: &StoryNotification) -> String {
     };
 
     let mut msg = format!(
-        "{status_line}\n<b>{}</b>",
+        "📦 <b>{}</b>\n{status_line}\n<b>{}</b>",
+        escape_html(project_name),
         escape_html(&notification.story_key)
     );
 
@@ -219,12 +220,13 @@ fn format_story_message(notification: &StoryNotification) -> String {
 
 /// Format a run summary notification as an HTML message for Telegram.
 /// Format an epic gate notification as an HTML message for Telegram.
-fn format_epic_gate_message(notification: &EpicGateNotification) -> String {
+fn format_epic_gate_message(notification: &EpicGateNotification, project_name: &str) -> String {
     let epic_title = escape_html(&notification.epic_title);
+    let project_header = format!("📦 <b>{}</b>\n", escape_html(project_name));
 
     if notification.review_succeeded {
         let mut msg = format!(
-            "🔍 Epic {} Review Gate Activated\n\n\
+            "{project_header}🔍 Epic {} Review Gate Activated\n\n\
              <b>Epic:</b> {}\n\
              <b>Stories reviewed:</b> {}",
             notification.epic_num, epic_title, notification.story_count
@@ -247,7 +249,7 @@ fn format_epic_gate_message(notification: &EpicGateNotification) -> String {
             .unwrap_or("Unknown error");
 
         let mut msg = format!(
-            "🔍 Epic {} Review Gate Activated (⚠️ Review Failed)\n\n\
+            "{project_header}🔍 Epic {} Review Gate Activated (⚠️ Review Failed)\n\n\
              <b>Epic:</b> {}\n\
              <b>Stories completed:</b> {}\n\
              <b>Review error:</b> {}",
@@ -272,8 +274,11 @@ fn format_epic_gate_message(notification: &EpicGateNotification) -> String {
     }
 }
 
-fn format_run_summary(summary: &RunSummary) -> String {
-    let mut msg = String::from("🏁 BMAD Bot Run Complete\n");
+fn format_run_summary(summary: &RunSummary, project_name: &str) -> String {
+    let mut msg = format!(
+        "📦 <b>{}</b>\n🏁 BMAD Bot Run Complete\n",
+        escape_html(project_name)
+    );
     msg.push_str(&format!(
         "📊 {} stories processed: ✅ {} | ⚠️ {} | ❌ {}\n",
         summary.total_processed, summary.completed, summary.blocked, summary.errored
@@ -350,6 +355,8 @@ pub struct TelegramNotifier {
     bot_token: String,
     /// Target chat ID from config.
     chat_id: String,
+    /// Project name included in all notifications for multi-project disambiguation.
+    project_name: String,
 }
 
 impl TelegramNotifier {
@@ -357,7 +364,11 @@ impl TelegramNotifier {
     ///
     /// # Errors
     /// Returns [`NotifierError::Disabled`] if `config.enabled` is `false`.
-    pub fn new(config: &TelegramConfig, bot_token: String) -> Result<Self, NotifierError> {
+    pub fn new(
+        config: &TelegramConfig,
+        bot_token: String,
+        project_name: String,
+    ) -> Result<Self, NotifierError> {
         if !config.enabled {
             return Err(NotifierError::Disabled);
         }
@@ -368,6 +379,7 @@ impl TelegramNotifier {
             http_client,
             bot_token,
             chat_id: config.chat_id.clone(),
+            project_name,
         })
     }
 
@@ -433,12 +445,12 @@ impl TelegramNotifier {
 #[async_trait]
 impl Notifier for TelegramNotifier {
     async fn notify_story(&self, notification: &StoryNotification) -> Result<(), NotifierError> {
-        let message = format_story_message(notification);
+        let message = format_story_message(notification, &self.project_name);
         self.send_message(&message).await
     }
 
     async fn notify_run_summary(&self, summary: &RunSummary) -> Result<(), NotifierError> {
-        let message = format_run_summary(summary);
+        let message = format_run_summary(summary, &self.project_name);
         self.send_message(&message).await
     }
 
@@ -446,7 +458,7 @@ impl Notifier for TelegramNotifier {
         &self,
         notification: &EpicGateNotification,
     ) -> Result<(), NotifierError> {
-        let message = format_epic_gate_message(notification);
+        let message = format_epic_gate_message(notification, &self.project_name);
         self.send_message(&message).await
     }
 }
@@ -490,14 +502,22 @@ impl Notifier for NoopNotifier {
 /// Returns a [`TelegramNotifier`] if Telegram is enabled and the bot token
 /// is available; otherwise returns a [`NoopNotifier`] with an info log.
 /// This function never fails — worst case it returns `NoopNotifier`.
-pub fn create_notifier(config: &NotificationConfig, secrets: &BotSecrets) -> Box<dyn Notifier> {
+pub fn create_notifier(
+    config: &NotificationConfig,
+    secrets: &BotSecrets,
+    project_name: &str,
+) -> Box<dyn Notifier> {
     if config.telegram.enabled {
         if let Some(ref token) = secrets
             .telegram_bot_token
             .as_ref()
             .filter(|t| !t.is_empty())
         {
-            match TelegramNotifier::new(&config.telegram, token.to_string()) {
+            match TelegramNotifier::new(
+                &config.telegram,
+                token.to_string(),
+                project_name.to_string(),
+            ) {
                 Ok(notifier) => return Box::new(notifier),
                 Err(e) => {
                     tracing::warn!(
@@ -587,7 +607,8 @@ mod tests {
             pr_url: Some("https://github.com/org/repo/pull/42".to_string()),
             reason: None,
         };
-        let msg = format_story_message(&notification);
+        let msg = format_story_message(&notification, "bmad-bot");
+        assert!(msg.contains("📦 <b>bmad-bot</b>"));
         assert!(msg.contains("✅"));
         assert!(msg.contains("6.1"));
         assert!(msg.contains("<b>6-1-telegram-notifications</b>"));
@@ -603,7 +624,8 @@ mod tests {
             pr_url: None,
             reason: Some("Dependency not available".to_string()),
         };
-        let msg = format_story_message(&notification);
+        let msg = format_story_message(&notification, "my-project");
+        assert!(msg.contains("📦 <b>my-project</b>"));
         assert!(msg.contains("⚠️"));
         assert!(msg.contains("Reason: Dependency not available"));
     }
@@ -617,7 +639,8 @@ mod tests {
             pr_url: None,
             reason: None,
         };
-        let msg = format_story_message(&notification);
+        let msg = format_story_message(&notification, "bmad-bot");
+        assert!(msg.contains("📦 <b>bmad-bot</b>"));
         assert!(msg.contains("❌"));
         assert!(msg.contains("6.3"));
         assert!(msg.contains("<b>6-3-crash-recovery</b>"));
@@ -634,7 +657,8 @@ mod tests {
             pr_url: None,
             reason: Some("Connection <timeout> after 30s & retry".to_string()),
         };
-        let msg = format_story_message(&notification);
+        let msg = format_story_message(&notification, "test<project>");
+        assert!(msg.contains("📦 <b>test&lt;project&gt;</b>"));
         assert!(msg.contains("Connection &lt;timeout&gt; after 30s &amp; retry"));
         // Verify the raw < > & are NOT present outside of HTML tags
         assert!(!msg.contains("Connection <timeout>"));
@@ -672,7 +696,8 @@ mod tests {
             errored: 1,
             fatal: false,
         };
-        let msg = format_run_summary(&summary);
+        let msg = format_run_summary(&summary, "bmad-bot");
+        assert!(msg.contains("📦 <b>bmad-bot</b>"));
         assert!(msg.contains("🏁 BMAD Bot Run Complete"));
         assert!(msg.contains("📊 3 stories processed: ✅ 2 | ⚠️ 0 | ❌ 1"));
         assert!(msg.contains("6-1-telegram-notifications"));
@@ -696,7 +721,8 @@ mod tests {
             errored: 0,
             fatal: false,
         };
-        let msg = format_run_summary(&summary);
+        let msg = format_run_summary(&summary, "my-app");
+        assert!(msg.contains("📦 <b>my-app</b>"));
         assert!(msg.contains("✅ 1 | ⚠️ 0 | ❌ 0"));
         assert!(msg.contains("1-1-scaffolding"));
     }
@@ -715,7 +741,8 @@ mod tests {
             review_succeeded: true,
             error_summary: None,
         };
-        let msg = format_epic_gate_message(&notification);
+        let msg = format_epic_gate_message(&notification, "bmad-bot");
+        assert!(msg.contains("📦 <b>bmad-bot</b>"));
         assert!(msg.contains("Epic 4 Review Gate Activated"));
         assert!(msg.contains("LLM Agent Session"));
         assert!(msg.contains("Stories reviewed:</b> 8"));
@@ -734,7 +761,8 @@ mod tests {
             review_succeeded: false,
             error_summary: Some("connection timeout".to_string()),
         };
-        let msg = format_epic_gate_message(&notification);
+        let msg = format_epic_gate_message(&notification, "bmad-bot");
+        assert!(msg.contains("📦 <b>bmad-bot</b>"));
         assert!(msg.contains("Review Failed"));
         assert!(msg.contains("Epic 3"));
         assert!(msg.contains("connection timeout"));
@@ -752,7 +780,8 @@ mod tests {
             review_succeeded: true,
             error_summary: None,
         };
-        let msg = format_epic_gate_message(&notification);
+        let msg = format_epic_gate_message(&notification, "bmad-bot");
+        assert!(msg.contains("📦 <b>bmad-bot</b>"));
         assert!(msg.contains("Epic 2 Review Gate Activated"));
         assert!(!msg.contains("Review Report"));
         assert!(msg.contains("epic-2-retrospective: done"));
@@ -768,7 +797,8 @@ mod tests {
             review_succeeded: false,
             error_summary: Some("error with <html> & chars".to_string()),
         };
-        let msg = format_epic_gate_message(&notification);
+        let msg = format_epic_gate_message(&notification, "test&proj");
+        assert!(msg.contains("📦 <b>test&amp;proj</b>"));
         assert!(msg.contains("&lt;script&gt;"));
         assert!(msg.contains("&lt;html&gt;"));
         assert!(msg.contains("&amp; chars"));
@@ -793,7 +823,7 @@ mod tests {
             errored: 0,
             fatal: false,
         };
-        let msg = format_run_summary(&summary);
+        let msg = format_run_summary(&summary, "bmad-bot");
         let truncated = truncate_message(&msg);
         assert!(truncated.len() <= TELEGRAM_MAX_MESSAGE_LEN);
         if msg.len() > TELEGRAM_MAX_MESSAGE_LEN {
@@ -844,7 +874,7 @@ mod tests {
             enabled: false,
             chat_id: "12345".to_string(),
         };
-        let result = TelegramNotifier::new(&config, "token".to_string());
+        let result = TelegramNotifier::new(&config, "token".to_string(), "bmad-bot".to_string());
         assert!(result.is_err());
         match result.unwrap_err() {
             NotifierError::Disabled => {} // expected
@@ -878,7 +908,7 @@ mod tests {
             gitlab_token: None,
             telegram_bot_token: None,
         };
-        let notifier = create_notifier(&config, &secrets);
+        let notifier = create_notifier(&config, &secrets, "bmad-bot");
         // NoopNotifier is returned — verify it doesn't panic on use
         // We can't downcast easily, but we can verify the trait object works
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -913,6 +943,6 @@ mod tests {
         // We verify indirectly: a NoopNotifier would return Ok for notify_story
         // without network, while TelegramNotifier would fail trying to reach the API.
         // Here we just verify the factory doesn't panic.
-        let _notifier = create_notifier(&config, &secrets);
+        let _notifier = create_notifier(&config, &secrets, "bmad-bot");
     }
 }
