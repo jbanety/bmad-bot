@@ -92,10 +92,16 @@ fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
 /// Determine which base branch to create the story branch from.
 ///
 /// Resolution logic:
-/// 1. If the story has dependencies, take the **last** dependency key (most recent predecessor)
-/// 2. Check if `story/{last_dep_key}` exists as a local branch
-/// 3. If it exists → return that branch (parent not yet merged, chain from it)
-/// 4. If not → return `default_branch` (parent already merged to main, or no deps)
+/// 1. If the story has no dependencies → `default_branch`
+/// 2. Take the **last** dependency key (most recent predecessor)
+/// 3. Parse the epic number from that dependency key
+/// 4. If the dependency belongs to a **different epic** (inter-epic dep) → `default_branch`
+///    always. An inter-epic dependency means the predecessor epic is fully merged into
+///    `default_branch` by the time the gate is cleared — forking from a story branch
+///    would inherit a stale sprint-status (e.g. `epic-N-retrospective: review`) and
+///    block all subsequent epics on the next poll cycle.
+/// 5. If the dependency belongs to the **same epic** (intra-epic dep) → check if
+///    `story/{last_dep_key}` exists locally and chain from it; otherwise `default_branch`.
 ///
 /// # Arguments
 /// * `story` — The story being developed (contains `dependencies` from watcher)
@@ -115,8 +121,26 @@ pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch
 
     // Take the last dependency — the most recent predecessor in the chain
     let last_dep = &story.dependencies[story.dependencies.len() - 1];
-    let candidate = format!("story/{last_dep}");
 
+    // Parse the epic number from the dependency key (format: "{epic_num}-{story_num}-{slug}")
+    let dep_epic_num: Option<u32> = last_dep.splitn(2, '-').next().and_then(|s| s.parse().ok());
+
+    // Inter-epic dependency: the predecessor epic is fully merged into default_branch.
+    // Always fork from default_branch — never from a story branch of another epic.
+    if dep_epic_num.map_or(false, |dep_epic| dep_epic != story.epic_num) {
+        tracing::info!(
+            action = "base_branch_resolved",
+            base = %default_branch,
+            story = %story.story_key,
+            dependency = %last_dep,
+            reason = "inter-epic dependency — predecessor epic merged into default branch",
+            "Using default branch as base (inter-epic dep)"
+        );
+        return default_branch.to_string();
+    }
+
+    // Intra-epic dependency: chain from the predecessor story branch if it exists locally.
+    let candidate = format!("story/{last_dep}");
     let exists = branch_exists(repo_path, &candidate);
 
     if exists {
@@ -125,7 +149,7 @@ pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch
             base = %candidate,
             story = %story.story_key,
             dependency = %last_dep,
-            reason = "dependency branch exists locally",
+            reason = "intra-epic dependency branch exists locally",
             "Chaining from dependency branch"
         );
         candidate
@@ -135,7 +159,7 @@ pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch
             base = %default_branch,
             story = %story.story_key,
             dependency = %last_dep,
-            reason = "dependency branch not found locally (likely merged)",
+            reason = "intra-epic dependency branch not found locally (likely merged)",
             "Falling back to default branch"
         );
         default_branch.to_string()
@@ -362,6 +386,72 @@ mod tests {
 
         let base = determine_base_branch(&story, &path, "main");
         assert_eq!(base, "main");
+    }
+
+    #[test]
+    fn test_determine_base_branch_inter_epic_dep_returns_default_even_if_branch_exists() {
+        let (_dir, path) = init_test_repo();
+
+        // Story 2-1 depends on 1-5 (different epic) — branch exists locally
+        create_branch_with_commit(&path, "story/1-5-structured-logging-bootstrap");
+
+        let story = make_story(
+            "2-1-bingx-rest-client",
+            vec!["1-5-structured-logging-bootstrap"],
+        );
+
+        let base = determine_base_branch(&story, &path, "main");
+        // Inter-epic dep → always default_branch, even though story/1-5-... exists
+        assert_eq!(base, "main");
+    }
+
+    #[test]
+    fn test_determine_base_branch_inter_epic_dep_returns_default_when_branch_missing() {
+        let (_dir, path) = init_test_repo();
+
+        // Story 2-1 depends on 1-5 (different epic) — branch does NOT exist locally
+        let story = make_story(
+            "2-1-bingx-rest-client",
+            vec!["1-5-structured-logging-bootstrap"],
+        );
+
+        let base = determine_base_branch(&story, &path, "main");
+        assert_eq!(base, "main");
+    }
+
+    #[test]
+    fn test_determine_base_branch_inter_epic_range_dep_returns_default() {
+        let (_dir, path) = init_test_repo();
+
+        // Story 5-1 depends on last story of epic 2 and epic 4 (both different epics)
+        create_branch_with_commit(&path, "story/2-5-live-tick-data-recorder");
+        create_branch_with_commit(&path, "story/4-5-state-reconciliation-on-restart");
+
+        let story = make_story(
+            "5-1-backtest-executor",
+            vec![
+                "2-5-live-tick-data-recorder",
+                "4-5-state-reconciliation-on-restart",
+            ],
+        );
+
+        let base = determine_base_branch(&story, &path, "main");
+        // Last dep is epic 4, story is epic 5 — inter-epic → default_branch
+        assert_eq!(base, "main");
+    }
+
+    #[test]
+    fn test_determine_base_branch_intra_epic_dep_still_chains_from_story_branch() {
+        let (_dir, path) = init_test_repo();
+
+        // Story 4-3 depends on 4-2 (same epic) — branch exists locally
+        create_branch_with_commit(&path, "story/4-2-session-setup");
+
+        let story = make_story("4-3-branch-mgmt", vec!["4-2-session-setup"]);
+
+        let base = determine_base_branch(&story, &path, "main");
+        // Intra-epic dep → chain from story branch as before
+        assert_eq!(base, "story/4-2-session-setup");
     }
 
     #[test]

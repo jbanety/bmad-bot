@@ -8,7 +8,7 @@ date: '2026-02-10'
 lastStep: 8
 status: 'complete'
 completedAt: '2026-02-07'
-revisedAt: '2026-02-15'
+revisedAt: '2026-03-07'
 revisionNote: 'Post-Implementation Impact Analysis step added to session runner post-completion sequence. New Step 8 between final commit and PR summary — agent evaluates downstream dependent stories and updates their Previous Story Intelligence sections with actual implementation details. Best-effort, non-blocking, agent-driven. Single file change in runner.rs (~50 lines). Triggered by story 7-1 completing without propagating implementation reality to dependent stories 7-2 through 7-10.'
 ---
 
@@ -380,6 +380,46 @@ let response = streaming_chat(agent, "DS", rig_history, Some(&shutdown)).await?;
 **Key principle:** The daemon has an explicit activation phase before sending commands. The system preamble provides persistent behavioral grounding, while the agent persona flows through user-message context — keeping the two concerns cleanly separated.
 
 **Affects:** session module, llm_context module
+
+### Decision 9: Branch Base Resolution — Inter-Epic vs Intra-Epic Chaining
+
+**Decision:** `determine_base_branch()` in `session/branch.rs` applies a two-tier rule when selecting the base branch for a new story branch:
+
+1. **Intra-epic dependency** (dependency belongs to the same epic as the story being developed) → chain from `story/{dep_key}` if it exists locally, otherwise fall back to `target_branch`. This preserves the incremental commit chain within an epic while it is being built.
+2. **Inter-epic dependency** (dependency belongs to a different epic) → **always** use `target_branch`, regardless of whether `story/{dep_key}` exists locally.
+
+**Rationale:**
+
+When a story has a cross-epic dependency (e.g. `2-1` depends on `epic-1`, resolved to the last story of epic 1 `1-5-structured-logging-bootstrap`), the predecessor epic is fully completed and its branches are merged into `target_branch` by the time the dependency gate clears. Forking from `story/1-5-...` instead of `target_branch` causes the new story branch to inherit a **stale sprint-status** from the story chain — one where `epic-1-retrospective` is still `review` (the gate activation commit). This makes the watcher see an active gate on every subsequent poll cycle for the duration of the new story session, even after the human has validated the epic and committed `done` on `target_branch`.
+
+The inter-epic case always signals "predecessor work is fully integrated" — the correct fork point is the integration branch (`target_branch`), not any story branch from the completed epic.
+
+**Root cause this fixes:** After the autonomous epic gate flow activates (`epic-N-retrospective: review` committed on `story/N-last-...`), the next epic's first story was being forked from `story/N-last-...`. The sprint-status on that fork contained `epic-N-retrospective: review`, blocking all subsequent epics indefinitely — even after the human merged everything and committed `done` on `target_branch`. The watcher reads the sprint-status from the **currently checked-out branch** (not from `target_branch`), so the stale gate was never resolved within that story session.
+
+**Implementation:**
+
+```rust
+// In session/branch.rs — determine_base_branch()
+let dep_epic_num: Option<u32> = last_dep.splitn(2, '-').next().and_then(|s| s.parse().ok());
+
+if dep_epic_num.map_or(false, |dep_epic| dep_epic != story.epic_num) {
+    // Inter-epic dep — predecessor epic is merged into target_branch
+    return default_branch.to_string();
+}
+
+// Intra-epic dep — chain from story branch if it exists locally
+let candidate = format!("story/{last_dep}");
+if branch_exists(repo_path, &candidate) {
+    return candidate;
+}
+default_branch.to_string()
+```
+
+**Consequence for sequential chaining (`base_branch_override`):** The `last_completed_branch` override in `process_eligible_stories` continues to apply for intra-epic sequential runs (story 2.2 chains from story 2.1 within the same pipeline run). When a story has an inter-epic dependency, `determine_base_branch` returns `target_branch` unconditionally — but in practice the pipeline override (`base_branch_override`) takes precedence when set. The override is only set when the previous completed story is in the **same run**, so the first story of a new epic after a gate clearance will always arrive with `base_branch_override = None`, letting `determine_base_branch` apply the inter-epic rule correctly.
+
+**Affected file:** `session/branch.rs` — `determine_base_branch()` function.
+
+---
 
 ### Decision 6: Deployment Model — Foreground Process
 
@@ -1169,6 +1209,8 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 - **config → all:** `Arc<BotConfig>` + `Arc<BotSecrets>` injected at startup — read-only, never mutated
 
 ### Data Flow
+
+> **Branch base resolution rule (Decision 9):** When `session/branch.rs` creates a new story branch, it checks whether the last dependency belongs to the same epic as the story being developed. If the dependency is **inter-epic** (different epic number), it always forks from `target_branch` — never from a story branch of another epic. If the dependency is **intra-epic** (same epic), it chains from `story/{dep_key}` if that branch exists locally. This prevents new story sessions from inheriting stale sprint-status files from completed-epic story branches where `epic-N-retrospective` is still `review`.
 
 1. **Startup:** `config/` loads and validates `bmad-bot.yaml` + `.env` → `Arc<BotConfig>` + `Arc<BotSecrets>`. `cli/run_start()` validates git availability (`git --version` → require >= 2.30), creates the `ShutdownFlag`, spawns the signal handler task, and creates the `UiHandle` (ConsoleRenderer if TTY + `ui_mode=fancy`, NullRenderer otherwise). When `ConsoleRenderer` is active, the stdout `tracing` layer is removed — debug logs go to file only. UI: `ui.daemon_start()`.
 2. **Crash check:** `SessionRunner::check_and_recover_wal()` checks for existing WAL file → if found, `pipeline.recover_and_process()` resumes the interrupted session (skip to step 5 with loaded history). UI: `ui.crash_recovery_start()` / `ui.crash_recovery_complete()`.
