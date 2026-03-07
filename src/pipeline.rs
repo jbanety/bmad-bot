@@ -1224,6 +1224,7 @@ impl StoryPipeline {
 
         let mut triggered = 0usize;
         let repo_path = &self.config.bmad_paths.project_root;
+        let target_branch = &self.config.git_provider.target_branch;
 
         for epic_num in pending {
             // Cleanup leftover retro branch from prior failed attempt (idempotent)
@@ -1241,12 +1242,6 @@ impl StoryPipeline {
                 .output()
                 .await;
 
-            tracing::info!(
-                action = "scan_retro_trigger",
-                epic_num = epic_num,
-                "Triggering epic review for completed epic with optional retrospective"
-            );
-
             // Re-load SSF since run_epic_gate_inner modifies sprint-status
             let ssf = match SprintStatusFile::load(&sprint_status_path, &story_dir) {
                 Ok(ssf) => ssf,
@@ -1261,9 +1256,102 @@ impl StoryPipeline {
                 }
             };
 
+            // Find the last story branch of the epic so the review agent sees
+            // the epic's code (not main, which may not have it merged yet).
+            let last_story_branch: Option<String> = ssf
+                .stories()
+                .into_iter()
+                .filter(|s| s.epic_num == epic_num && s.status == "done")
+                .max_by_key(|s| s.story_num)
+                .map(|s| s.branch_name.clone());
+
+            // Checkout the last story branch before running the review.
+            // The review agent reads files from the working directory — it must
+            // see the epic's code, not just what's on main/target_branch.
+            let checked_out_branch = if let Some(ref branch) = last_story_branch {
+                // Commit any dirty sprint-status.yaml first — checkout will fail
+                // if the worktree is dirty (as seen in linoasclaw logs).
+                if has_uncommitted_sprint_status(repo_path, &sprint_status_path).await {
+                    let msg = format!(
+                        "chore(sprint-status): persist status before epic {epic_num} review checkout"
+                    );
+                    let _ = commit_sprint_status(repo_path, &sprint_status_path, &msg).await;
+                }
+
+                // Try local checkout first, then fetch + checkout from origin
+                let checkout_result = checkout_branch(repo_path, branch).await;
+                if checkout_result.is_err() {
+                    // Branch may only exist on remote — fetch and retry
+                    let _ = tokio::process::Command::new("git")
+                        .arg("-C")
+                        .arg(repo_path)
+                        .args(["fetch", "origin", &format!("{branch}:{branch}")])
+                        .output()
+                        .await;
+                    let _ = checkout_branch(repo_path, branch).await;
+                }
+
+                // Verify we're on the right branch
+                let current = tokio::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo_path)
+                    .args(["branch", "--show-current"])
+                    .output()
+                    .await
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        } else {
+                            None
+                        }
+                    });
+
+                if current.as_deref() == Some(branch.as_str()) {
+                    tracing::info!(
+                        action = "scan_retro_checkout",
+                        epic_num = epic_num,
+                        branch = %branch,
+                        "Checked out last story branch for epic review"
+                    );
+                    Some(branch.clone())
+                } else {
+                    tracing::warn!(
+                        action = "scan_retro_checkout_failed",
+                        epic_num = epic_num,
+                        branch = %branch,
+                        current = ?current,
+                        "Failed to checkout last story branch — review will run on current branch"
+                    );
+                    None
+                }
+            } else {
+                tracing::warn!(
+                    action = "scan_retro_no_story_branch",
+                    epic_num = epic_num,
+                    "No done stories found for epic — review will run on current branch"
+                );
+                None
+            };
+
+            tracing::info!(
+                action = "scan_retro_trigger",
+                epic_num = epic_num,
+                branch = ?checked_out_branch,
+                "Triggering epic review for completed epic with optional retrospective"
+            );
+
             let activated = self
-                .run_epic_gate_inner(epic_num, &ssf, &sprint_status_path, None)
+                .run_epic_gate_inner(
+                    epic_num,
+                    &ssf,
+                    &sprint_status_path,
+                    checked_out_branch.as_deref(),
+                )
                 .await;
+
+            // Checkout back to target branch after gate flow (best effort)
+            let _ = checkout_branch(repo_path, target_branch).await;
 
             if activated {
                 triggered += 1;
