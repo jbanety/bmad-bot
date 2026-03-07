@@ -179,7 +179,11 @@ impl StoryPipeline {
             })?;
 
         // Factory never fails — returns NoopNotifier as fallback
-        let notifier = create_notifier(&config.notifications, &secrets);
+        let project_name = std::path::Path::new(&config.bmad_paths.project_root)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("bmad-bot");
+        let notifier = create_notifier(&config.notifications, &secrets, project_name);
 
         // Create the centralized AgentFactory — owns secrets + Copilot token cache.
         let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));

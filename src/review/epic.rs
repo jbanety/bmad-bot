@@ -21,14 +21,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rig::completion::Message;
 use rig::tools::think::ThinkTool;
 
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
-use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
+use crate::llm::logging::{log_llm_request, log_llm_response};
 use crate::session::agent::{self, ShutdownFlag};
 use crate::session::provider::ProviderError;
 use crate::tools::{
@@ -36,7 +36,7 @@ use crate::tools::{
 };
 use crate::ui::UiHandle;
 
-use super::is_retryable_review_error;
+use super::{MAX_SESSION_RETRIES, is_retryable_review_error};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -48,11 +48,18 @@ use super::is_retryable_review_error;
 /// runs cargo commands across the entire epic's codebase.
 const MAX_EPIC_REVIEW_TURNS: usize = 200;
 
-/// Maximum number of full session retries for transient errors.
+/// Maximum number of per-turn retries for transient SSE/network errors within
+/// a single epic review session (e.g. unexpected EOF, connection reset).
 ///
-/// Reuses the exact same constant as [`super::MAX_SESSION_RETRIES`] to ensure
-/// both runners have the same retry budget — changing one changes both.
-use super::MAX_SESSION_RETRIES;
+/// These are retried inline with exponential backoff *before* escalating to a
+/// full session retry via [`super::MAX_SESSION_RETRIES`].  Keeping them separate
+/// avoids burning a full-session retry budget on a one-second blip.
+const MAX_TURN_RETRIES: usize = 3;
+
+/// Base delay (ms) for exponential backoff on transient turn-level errors.
+const TURN_RETRY_BASE_MS: u64 = 1_000;
+
+/// Maximum number of full session retries for transient errors.
 
 /// Number of consecutive no-tool-call turns before treating the session as complete.
 const NO_TOOL_CALL_THRESHOLD: usize = 3;
@@ -247,7 +254,7 @@ impl EpicReviewRunner {
 
         let prompt = build_epic_review_prompt(epic_num, &self.config);
 
-        let outcome = self.drive_epic_review(agent, epic_num, &prompt).await;
+        let outcome = self.drive_epic_review(agent, epic_num, &prompt).await?;
 
         let outcome_type = match &outcome {
             EpicReviewOutcome::Completed { .. } => "completed",
@@ -276,12 +283,18 @@ impl EpicReviewRunner {
     /// 2. No-tool-call heuristic (fallback completion signal)
     /// 3. Turn limit safety net
     /// 4. Shutdown flag
+    ///
+    /// Transient per-turn errors (SSE EOF, connection reset, 429, 503) are
+    /// retried inline up to [`MAX_TURN_RETRIES`] times with exponential
+    /// backoff.  If all per-turn retries are exhausted the error is returned
+    /// as [`EpicReviewError::ChatFailed`] so the outer `run()` loop can
+    /// trigger a full-session retry via [`MAX_SESSION_RETRIES`].
     async fn drive_epic_review(
         &self,
-        mut agent: BuiltAgent,
+        agent: BuiltAgent,
         epic_num: u32,
         prompt: &str,
-    ) -> EpicReviewOutcome {
+    ) -> Result<EpicReviewOutcome, EpicReviewError> {
         let start = Instant::now();
         let mut history: Vec<Message> = Vec::new();
         let mut all_agent_output: Vec<String> = Vec::new();
@@ -306,14 +319,60 @@ impl EpicReviewRunner {
 
             self.ui.llm_request("epic_review", turn as u32);
 
-            let result = agent
-                .stream_chat(
-                    &current_prompt,
-                    history.clone(),
-                    Some(&self.shutdown),
-                    Some(&self.ui),
-                )
-                .await;
+            // ---------------------------------------------------------------
+            // Per-turn retry loop — handles transient network/SSE errors
+            // ---------------------------------------------------------------
+            let result = {
+                let mut last_err: Option<String> = None;
+                let mut outcome = None;
+                for attempt in 0..=MAX_TURN_RETRIES {
+                    match agent
+                        .stream_chat(
+                            &current_prompt,
+                            history.clone(),
+                            Some(&self.shutdown),
+                            Some(&self.ui),
+                        )
+                        .await
+                    {
+                        Ok(val) => {
+                            outcome = Some(Ok(val));
+                            break;
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            let transient = is_retryable_review_error(&err_str);
+                            if transient && attempt < MAX_TURN_RETRIES {
+                                let delay_ms = TURN_RETRY_BASE_MS * (1u64 << attempt); // 1s, 2s, 4s
+                                tracing::warn!(
+                                    action = "epic_review_turn_retry",
+                                    turn = turn,
+                                    attempt = attempt + 1,
+                                    max_retries = MAX_TURN_RETRIES,
+                                    delay_ms = delay_ms,
+                                    error = %err_str,
+                                    epic_num = epic_num,
+                                    "Transient turn error — retrying with backoff"
+                                );
+                                self.ui.llm_retry(
+                                    "epic_review",
+                                    turn as u32,
+                                    (attempt + 1) as u32,
+                                    delay_ms as f64 / 1_000.0,
+                                );
+                                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                            } else {
+                                last_err = Some(err_str);
+                                break;
+                            }
+                        }
+                    }
+                }
+                match outcome {
+                    Some(r) => r,
+                    None => Err(last_err.unwrap_or_else(|| "unknown error".to_string())),
+                }
+            };
 
             match result {
                 Ok((response_text, updated_history)) => {
@@ -340,7 +399,7 @@ impl EpicReviewRunner {
                             "Epic review completed — report delimiter found"
                         );
                         let report = extract_report(&all_agent_output, epic_num);
-                        return EpicReviewOutcome::Completed { report, epic_num };
+                        return Ok(EpicReviewOutcome::Completed { report, epic_num });
                     }
 
                     // No-tool-call heuristic (fallback completion signal)
@@ -356,35 +415,42 @@ impl EpicReviewRunner {
                                 "Epic review completed — no-tool-call heuristic triggered"
                             );
                             let report = extract_report(&all_agent_output, epic_num);
-                            return EpicReviewOutcome::Completed { report, epic_num };
+                            return Ok(EpicReviewOutcome::Completed { report, epic_num });
                         }
                     }
 
                     // Continue conversation — nudge toward completion
                     current_prompt = "Continue your analysis. When you have finished, output the complete report between the <<EPIC_REVIEW_REPORT_START>> and <<EPIC_REVIEW_REPORT_END>> delimiters.".to_string();
                 }
-                Err(e) => {
-                    let error_str = e.to_string();
-                    log_llm_error("epic_review", turn, &e);
-
+                Err(error_str) => {
                     tracing::error!(
                         action = "epic_review_chat_error",
                         turn = turn,
                         error = %error_str,
                         epic_num = epic_num,
-                        "Chat error during epic review"
+                        "Chat error during epic review — all per-turn retries exhausted"
                     );
 
-                    // If we have partial output, use it
+                    // If we already have meaningful partial output, salvage it
+                    // rather than discarding everything and retrying the session.
                     if !all_agent_output.is_empty() {
+                        tracing::warn!(
+                            action = "epic_review_partial_salvage",
+                            turn = turn,
+                            chunks = all_agent_output.len(),
+                            epic_num = epic_num,
+                            "Salvaging partial output after unrecoverable turn error"
+                        );
                         let report = extract_report(&all_agent_output, epic_num);
-                        return EpicReviewOutcome::Completed { report, epic_num };
+                        return Ok(EpicReviewOutcome::Completed { report, epic_num });
                     }
 
-                    return EpicReviewOutcome::Failed {
+                    // No output at all — propagate as Err so run() can retry
+                    // with a fresh session (full-session retry budget).
+                    return Err(EpicReviewError::ChatFailed {
+                        turn,
                         reason: error_str,
-                        epic_num,
-                    };
+                    });
                 }
             }
         }
@@ -398,15 +464,15 @@ impl EpicReviewRunner {
         );
 
         if all_agent_output.is_empty() {
-            EpicReviewOutcome::Failed {
+            Ok(EpicReviewOutcome::Failed {
                 reason: format!(
                     "Epic review hit turn limit ({MAX_EPIC_REVIEW_TURNS}) with no output"
                 ),
                 epic_num,
-            }
+            })
         } else {
             let report = extract_report(&all_agent_output, epic_num);
-            EpicReviewOutcome::Completed { report, epic_num }
+            Ok(EpicReviewOutcome::Completed { report, epic_num })
         }
     }
 }
@@ -425,8 +491,9 @@ enum EpicReviewError {
     #[error("API key missing for {provider} (env var: {env_var})")]
     ApiKeyMissing { provider: String, env_var: String },
 
-    #[error("Chat failed on turn {turn}: {reason}")]
-    #[allow(dead_code)]
+    /// Transient chat error that exhausted all per-turn retries.
+    /// Propagated to `run()` so the full-session retry loop can trigger.
+    #[error("Chat failed on turn {turn} after retries: {reason}")]
     ChatFailed { turn: usize, reason: String },
 }
 
