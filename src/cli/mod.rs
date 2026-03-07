@@ -1486,6 +1486,18 @@ async fn run_polling_loop(
 
                 cycle_num = cycle_num.saturating_add(1);
 
+                // Scan for completed epics whose retrospective is `optional`
+                // (never reviewed, or reset after failure). Runs the full epic
+                // gate flow inline — no story completion trigger needed.
+                let retro_triggered = pipeline.scan_pending_epic_reviews().await;
+                if retro_triggered > 0 {
+                    tracing::info!(
+                        action = "scan_retro_completed",
+                        triggered = retro_triggered,
+                        "Pending epic reviews processed — re-polling for newly eligible stories"
+                    );
+                }
+
                 // Poll for eligible stories (Story 2.1)
                 match watcher.poll() {
                     Ok(stories) => {

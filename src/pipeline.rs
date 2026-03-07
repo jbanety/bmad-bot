@@ -974,12 +974,11 @@ impl StoryPipeline {
     /// Attempt the epic gate flow after a story completes.
     ///
     /// Checks if the epic is fully done, whether a retrospective entry exists,
-    /// then runs the autonomous review, updates sprint-status, creates a retro
-    /// branch + MR, and sends a notification. All failures are non-fatal —
-    /// the pipeline continues even if the gate flow fails.
+    /// then delegates to [`run_epic_gate_inner`] for the actual review + gate
+    /// activation. All failures are non-fatal — the pipeline continues even if
+    /// the gate flow fails.
     ///
-    /// Returns `true` if the gate was successfully activated (sprint-status updated
-    /// and pushed), `false` if the gate was skipped or failed to activate.
+    /// Returns `true` if the gate was activated (regardless of review success).
     async fn try_epic_gate(
         &self,
         story: &StoryInfo,
@@ -1023,14 +1022,31 @@ impl StoryPipeline {
             "Epic {epic_num} complete — launching autonomous review"
         );
 
-        // Step 3: Count stories in the epic
+        self.run_epic_gate_inner(epic_num, &ssf, sprint_status_path, last_completed_branch)
+            .await
+    }
+
+    /// Core epic gate logic shared by [`try_epic_gate`] (post-story-completion)
+    /// and [`scan_pending_epic_reviews`] (poll-cycle re-trigger).
+    ///
+    /// Runs the autonomous review, saves the report, updates sprint-status to
+    /// `review`, creates a retro branch + MR, and sends a notification.
+    /// Returns `true` if the gate was activated (regardless of review success).
+    async fn run_epic_gate_inner(
+        &self,
+        epic_num: u32,
+        ssf: &SprintStatusFile,
+        sprint_status_path: &Path,
+        last_completed_branch: Option<&str>,
+    ) -> bool {
+        // Count stories in the epic
         let story_count = ssf
             .stories()
             .iter()
             .filter(|s| s.epic_num == epic_num)
             .count();
 
-        // Step 4: Run the autonomous epic review
+        // Run the autonomous epic review
         let outcome = self.epic_review_runner.run(epic_num).await;
         let (report, review_succeeded, error_summary) = match &outcome {
             EpicReviewOutcome::Completed { report, .. } => (report.clone(), true, None),
@@ -1040,7 +1056,7 @@ impl StoryPipeline {
             }
         };
 
-        // Step 5: Save report to disk
+        // Save report to disk
         let report_filename = format!("epic-{epic_num}-retrospective-report.md");
         let report_path =
             PathBuf::from(&self.config.bmad_paths.implementation_artifacts).join(&report_filename);
@@ -1053,7 +1069,7 @@ impl StoryPipeline {
             );
         }
 
-        // Step 6: Update sprint-status on CURRENT branch (optional → review)
+        // Update sprint-status on CURRENT branch (optional → review)
         let retro_key = format!("epic-{epic_num}-retrospective");
         let repo_path = &self.config.bmad_paths.project_root;
         if let Err(e) = update_story_status(sprint_status_path, &retro_key, "review").await {
@@ -1090,23 +1106,23 @@ impl StoryPipeline {
             // Non-fatal — continue with branch/MR creation
         }
 
-        // Step 7: Create retro branch, commit report, push, create MR
+        // Create retro branch, commit report, push, create MR
         let base_branch = last_completed_branch.unwrap_or(&self.config.git_provider.target_branch);
         let retro_branch = format!("epic-{epic_num}-retrospective");
         let mr_url = self
             .create_retro_branch_and_mr(epic_num, &retro_branch, base_branch, &report_path, &report)
             .await;
 
-        // Step 8: Checkout back to the working branch (best effort)
+        // Checkout back to the working branch (best effort)
         let _ = checkout_branch(repo_path, base_branch).await;
 
-        // Step 9: Resolve epic title for notification
+        // Resolve epic title for notification
         let epic_title = resolve_epic_title(
             Path::new(&self.config.bmad_paths.planning_artifacts),
             epic_num,
         );
 
-        // Step 10: Notify
+        // Notify
         let notification = EpicGateNotification {
             epic_num,
             epic_title,
@@ -1132,6 +1148,129 @@ impl StoryPipeline {
         );
 
         true
+    }
+
+    /// Scan sprint-status for completed epics whose retrospective is still
+    /// `optional` — i.e. the review was never run or was reset after a failure.
+    ///
+    /// For each match, cleans up any leftover retro branch (local + remote)
+    /// from a prior failed attempt, then runs the full epic gate flow via
+    /// [`run_epic_gate_inner`].
+    ///
+    /// Called at the start of each poll cycle so that manually resetting
+    /// `epic-X-retrospective: optional` in sprint-status.yaml is enough to
+    /// re-trigger the review — no need to re-run a story.
+    ///
+    /// Returns the number of epic reviews that were triggered.
+    pub async fn scan_pending_epic_reviews(&self) -> usize {
+        let sprint_status_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
+            .join("sprint-status.yaml");
+        let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
+
+        let ssf = match SprintStatusFile::load(&sprint_status_path, &story_dir) {
+            Ok(ssf) => ssf,
+            Err(e) => {
+                tracing::debug!(
+                    action = "scan_retro_load_failed",
+                    error = %e,
+                    "Failed to load sprint-status for pending epic review scan"
+                );
+                return 0;
+            }
+        };
+
+        // Find epics with `epic-X-retrospective: optional` where all stories are done
+        let mut pending: Vec<u32> = Vec::new();
+        for (key, status) in ssf.entries() {
+            if status != "optional" {
+                continue;
+            }
+            let Some(rest) = key.strip_prefix("epic-") else {
+                continue;
+            };
+            let Some(num_str) = rest.strip_suffix("-retrospective") else {
+                continue;
+            };
+            let Ok(epic_num) = num_str.parse::<u32>() else {
+                continue;
+            };
+
+            // Check all stories in this epic are done
+            let epic_stories: Vec<_> = ssf
+                .stories()
+                .into_iter()
+                .filter(|s| s.epic_num == epic_num)
+                .collect();
+
+            if epic_stories.is_empty() {
+                continue;
+            }
+
+            let all_done = epic_stories.iter().all(|s| s.status == "done");
+            if all_done {
+                pending.push(epic_num);
+            }
+        }
+
+        if pending.is_empty() {
+            return 0;
+        }
+
+        tracing::info!(
+            action = "scan_retro_pending",
+            epics = ?pending,
+            "Found completed epics with pending retrospective reviews"
+        );
+
+        let mut triggered = 0usize;
+        let repo_path = &self.config.bmad_paths.project_root;
+
+        for epic_num in pending {
+            // Cleanup leftover retro branch from prior failed attempt (idempotent)
+            let retro_branch = format!("epic-{epic_num}-retrospective");
+            let _ = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_path)
+                .args(["branch", "-D", &retro_branch])
+                .output()
+                .await;
+            let _ = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_path)
+                .args(["push", "origin", "--delete", &retro_branch])
+                .output()
+                .await;
+
+            tracing::info!(
+                action = "scan_retro_trigger",
+                epic_num = epic_num,
+                "Triggering epic review for completed epic with optional retrospective"
+            );
+
+            // Re-load SSF since run_epic_gate_inner modifies sprint-status
+            let ssf = match SprintStatusFile::load(&sprint_status_path, &story_dir) {
+                Ok(ssf) => ssf,
+                Err(e) => {
+                    tracing::error!(
+                        action = "scan_retro_reload_failed",
+                        error = %e,
+                        epic_num = epic_num,
+                        "Failed to reload sprint-status before epic gate — skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let activated = self
+                .run_epic_gate_inner(epic_num, &ssf, &sprint_status_path, None)
+                .await;
+
+            if activated {
+                triggered += 1;
+            }
+        }
+
+        triggered
     }
 
     /// Create the retrospective branch, commit the report, push, and create an MR.
