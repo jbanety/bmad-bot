@@ -1466,6 +1466,7 @@ async fn run_polling_loop(
 ) -> Result<(), CliError> {
     let mut interval_timer =
         tokio::time::interval(Duration::from_secs(config.polling_interval_secs));
+    interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut cycle_num: u32 = 0;
 
     loop {
