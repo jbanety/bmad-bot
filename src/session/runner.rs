@@ -289,9 +289,12 @@ fn is_context_limit_error(error_msg: &str) -> bool {
     lower.contains("context_length_exceeded")
         || lower.contains("prompt is too long")
         || lower.contains("maximum context length")
-        // OpenAI patterns
+        // OpenAI / Copilot patterns
         || lower.contains("max_tokens")
+        || lower.contains("prompt_tokens_exceeded")
         || lower.contains("token limit")
+        || lower.contains("exceeds the limit")
+        || lower.contains("prompt token count")
         || lower.contains("context window")
         // Generic patterns
         || lower.contains("too many tokens")
@@ -3124,6 +3127,30 @@ mod tests {
         assert!(is_context_limit_error(
             "This model's maximum context length is 128000 tokens"
         ));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_copilot_prompt_tokens_exceeded() {
+        assert!(is_context_limit_error(
+            r#"CompletionError: ResponseError: CompletionError: ProviderError: Invalid status code 400 Bad Request with message: {"error":{"message":"prompt token count of 128177 exceeds the limit of 128000","code":"model_max_prompt_tokens_exceeded"}}"#
+        ));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_exceeds_the_limit() {
+        assert!(is_context_limit_error(
+            "prompt token count of 128177 exceeds the limit of 128000"
+        ));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_prompt_token_count() {
+        assert!(is_context_limit_error("prompt token count exceeded"));
+    }
+
+    #[test]
+    fn test_is_context_limit_error_prompt_tokens_exceeded_code() {
+        assert!(is_context_limit_error("model_max_prompt_tokens_exceeded"));
     }
 
     #[test]
