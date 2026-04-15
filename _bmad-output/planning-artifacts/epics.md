@@ -1,6 +1,6 @@
 ---
 stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step-03-create-stories', 'step-04-final-validation']
-inputDocuments: ['_bmad-output/planning-artifacts/prd.md', '_bmad-output/planning-artifacts/architecture.md', '_bmad-output/planning-artifacts/architect-brief-mcp-client-integration.md']
+inputDocuments: ['_bmad-output/planning-artifacts/prd.md', '_bmad-output/planning-artifacts/architecture.md', '_bmad-output/planning-artifacts/architect-brief-mcp-client-integration.md', '_bmad-output/planning-artifacts/sprint-change-proposal-2026-04-15.md']
 ---
 
 # BMAD Bot - Epic Breakdown
@@ -14,7 +14,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 ### Functional Requirements
 
 **Story Management**
-- FR1: The daemon can detect stories with `ready-for-dev` status by polling `sprint-status.yaml` at a configurable interval
+- FR1: The daemon can detect stories with `backlog`, `ready-for-dev`, and `review` status by polling `sprint-status.yaml` at a configurable interval, routing each to the appropriate pipeline phase
 - FR2: The daemon can resolve story dependencies and determine correct execution order
 - FR3: The daemon can skip stories whose dependencies are not yet completed
 - FR4: The daemon can mark dependent stories as `blocked` when a prerequisite story fails
@@ -25,7 +25,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR7: The agent can create and checkout a git branch following the `story/{epic}-{story}` naming convention
 
 **Development Session**
-- FR8: The daemon can instantiate a streaming rig agent session with the BMAD dev agent persona, activated via Zed-style XML context (agent file sent as first user message, not as system preamble)
+- FR8: The daemon can instantiate a streaming rig agent session with a BMAD skill (`SKILL.md` loaded via Zed-style XML context as first user message), replacing the former persona-based activation
 - FR9: The daemon can expose surgical development tools to the agent via rig tool calling: `read_file` (partial reading & outline mode), `edit_file` (search-replace surgical editing), `grep` (regex codebase search), `find_path` (glob-based file discovery), `list_directory` (directory listing), `git` (version control operations), `terminal` (shell command execution), `ask_supervisor` (supervision escalation), and `think` (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern, for structured reasoning without consuming real tool calls). Tools follow the Claude Code / Zed agent-mode pattern for optimal token efficiency and code safety
 - FR10: The agent can execute the full BMAD `dev-story` workflow autonomously
 - FR11: The daemon can inject a session language override (English) via a minimal system preamble without modifying repo files
@@ -60,8 +60,9 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR30: The user can run `bmad-bot logs` to view structured daemon logs
 - FR31: The daemon can load configuration from a YAML file with secrets separated in a gitignored file
 - FR32: The daemon can auto-discover BMAD version and installed modules from the project repo
-- FR39: The user can authenticate with GitHub Copilot via OAuth Device Flow during `bmad-bot init` to automatically obtain an LLM access token, and the daemon can transparently exchange it for short-lived Copilot session tokens at runtime. The Copilot provider uses the Completions API (distinct from OpenAI's Responses API) with required IDE-specific headers
+- FR39: ~~REMOVED~~ — GitHub Copilot provider support removed in Sprint Change Proposal 2026-04-15
 - FR40: The daemon logs all LLM requests and responses via a dedicated `llm_logging` module for debugging and operational visibility
+- FR42: The daemon centralizes all LLM provider construction via an `AgentFactory` that returns a `BuiltAgent` with unified `stream_chat()` dispatch. Two providers supported: `anthropic` (Messages API) and `openai-compatible` (Responses API, with optional `base_url` for any compatible endpoint)
 
 **Error Handling & Resilience**
 - FR33: The daemon can handle LLM provider rate limits with retry and exponential backoff
@@ -77,6 +78,15 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR46: MCP server connection failures are non-blocking — the daemon logs a warning and continues with native tools only
 - FR47: The daemon gracefully shuts down MCP server connections during cooperative shutdown (sends MCP `close` notification before killing child processes)
 - FR48: The agent can use MCP-discovered tools (e.g., Playwright browser automation) identically to native tools during development sessions, via rig's built-in `McpTool` + `.rmcp_tools()` bridge
+
+**Story Creation & Validation (Sprint Change 2026-04-15)**
+- FR50: The daemon can invoke the `bmad-create-story` skill to create a story file from a `backlog` story, transitioning it to `ready-for-dev`
+- FR51: The daemon can invoke the `bmad-review-adversarial-general` skill for adversarial story critique, with findings fed back to the active create-story session for correction
+- FR52: The daemon can launch a Story Critic agent with persistent cross-story memory (`critic-memory.md`), project brief as vision anchor, and extended thinking for independent product/technical review
+- FR53: The pipeline executes a linear flow per story with daemon-orchestrated consultations: create-story session (with adversarial + critic consultations) → dev-story → code-review (with critic consultation for decision-needed findings)
+- FR54: The epic review agent (Winston) reads `deferred-work.md` and its own code analysis findings to propose pre-epic debt/improvement stories at epic boundaries
+- FR55: A `spawn_agent` tool is available to all agent sessions for LLM-initiated sub-agent delegation (Zed-style: label, message, session_id for follow-up)
+- FR56: The OpenAI-compatible provider supports an optional `base_url` configuration for any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, Groq, etc.)
 
 ### NonFunctional Requirements
 
@@ -145,14 +155,14 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 
 ### FR Coverage Map
 
-- FR1: Epic 2 — Detect ready-for-dev stories by polling sprint-status.yaml
+- FR1: Epic 2 + Epic 13 — Detect backlog/ready-for-dev/review stories by polling sprint-status.yaml
 - FR2: Epic 2 — Resolve story dependencies and execution order
 - FR3: Epic 2 — Skip stories with unmet dependencies
 - FR4: Epic 2 — Cascade blocked status to dependent stories
 - FR5: Epic 4 — Review previously completed stories before starting new one
 - FR6: Epic 4 — Update current story specs based on prior implementations
 - FR7: Epic 4 — Create and checkout git branch (story/{epic}-{story})
-- FR8: Epic 4 — Instantiate streaming rig agent session with BMAD dev agent persona, activated via Zed-style XML context
+- FR8: Epic 4 + Epic 12 — Instantiate streaming rig agent session with BMAD skill (SKILL.md via Zed-style XML context)
 - FR9: Epic 4 (baseline) + Epic 8 (refactoring) — Expose surgical development tools via rig tool calling (read_file, edit_file, grep, find_path, list_directory, git, terminal, ask_supervisor, think)
 - FR10: Epic 4 — Execute full BMAD dev-story workflow autonomously
 - FR11: Epic 4 — Inject session language override (English) via minimal system preamble
@@ -183,10 +193,10 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR36: Epic 1 — Validate configuration at startup and report issues
 - FR37: Epic 6 — Detect interrupted session at startup (WAL file) and resume
 - FR38: Epic 6 — Detect context window limit error and bootstrap fresh session with compressed context
-- FR39: Epic 1 — Authenticate with GitHub Copilot via OAuth Device Flow and exchange tokens at runtime. API format hardcoded per model: OpenAI model families use Responses API, all others fallback to Completions API. IDE-specific headers included
+- FR39: ~~Epic 1 — REMOVED~~ — Copilot OAuth removed
 - FR40: Epic 1/6 — Log all LLM requests and responses via dedicated llm_logging module for debugging and operations visibility
 - FR41: Epic 4 (Story 4.4) — Validate git CLI availability at startup and fail fast if missing
-- FR42: Epic 4 (Story 4.5) — Centralize LLM provider construction via AgentFactory with BuiltAgent enum dispatch. Hardcoded API format per provider/model. Fixes Copilot Responses API bug for OpenAI models
+- FR42: Epic 4 (Story 4.5) + Epic 11 — AgentFactory with BuiltAgent enum. Simplified to Anthropic + OpenAI-compatible with optional base_url
 - FR43: Epic 4 (Story 4.6) — Post-implementation impact analysis: agent analyzes downstream dependent stories after completion and updates their Previous Story Intelligence sections. Best-effort, non-blocking
 - FR44: Epic 9 — Connect to external MCP servers at startup, perform handshake, discover tools
 - FR45: Epic 9 — Parse optional `mcp_servers` config section
@@ -194,6 +204,13 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR47: Epic 9 — Graceful MCP shutdown during cooperative shutdown
 - FR48: Epic 9 — Agent uses MCP-discovered tools identically to native tools via rig's `McpTool`
 - FR49: Epic 10 — Display structured, user-facing terminal output in foreground mode (spinners, pipeline phases, tool calls, LLM status) via UiRenderer trait with ConsoleRenderer (indicatif + console) and NullRenderer (tests/CI). Configurable via ui_mode in bmad-bot.yaml
+- FR50: Epic 13 — Invoke bmad-create-story skill to create story files from backlog stories
+- FR51: Epic 13 — Adversarial review with findings fed back to active create-story session
+- FR52: Epic 13 — Story Critic with persistent memory and project brief as vision anchor
+- FR53: Epic 13 — Linear pipeline with daemon-orchestrated consultations (create→dev→review)
+- FR54: Epic 14 — Epic review reads deferred-work.md and proposes pre-epic debt stories
+- FR55: Epic 12 — spawn_agent tool for LLM-initiated sub-agent delegation in all sessions
+- FR56: Epic 11 — OpenAI-compatible provider with optional base_url for any compatible endpoint
 
 ## Epic List
 
@@ -241,6 +258,22 @@ Connect to external MCP servers at daemon startup, discover their tools, and exp
 The daemon displays structured, user-facing terminal output in foreground mode (tmux, screen, interactive terminal) — replacing raw tracing logs on stdout with hierarchical progress indicators, pipeline phase tracking, agent tool call visibility, and LLM interaction status. Powered by `indicatif` (spinners, progress) and `console` (colors, styles) behind a `UiRenderer` trait that enables future migration to `iocraft` or `ratatui` without modifying business code. Debug logs remain in the JSON log file only. After this epic, the user can follow daemon progress in real-time without reading raw debug logs.
 **FRs covered:** FR49
 **Depends on:** Epics 1-6 (all implemented — retroactive UI event insertion)
+
+### Epic 11: Copilot Removal & Provider Simplification
+The daemon supports only Anthropic and OpenAI-compatible providers (with optional `base_url` for any compatible endpoint). All GitHub Copilot code, authentication, and the rig fork are removed. The `AgentFactory` is simplified to two provider variants. After this epic, the codebase is leaner and uses the official `rig-core` crate.
+**FRs covered:** FR39 (removed), FR42 (modified), FR56
+
+### Epic 12: Skill-Based Sessions & SpawnAgent Tool
+The daemon activates agent sessions by loading BMAD skill files (`SKILL.md`) via the existing Zed-style XML context mechanism instead of persona files. The `ResponseAnalyzer` is simplified (no more menu/persona auto-response). A universal `spawn_agent` tool (Zed-inspired) is available in all sessions for LLM-initiated sub-agent delegation. After this epic, the bot speaks the BMAD v6.2+ skill language natively.
+**FRs covered:** FR8 (modified), FR55
+
+### Epic 13: Multi-Phase Pipeline & Story Critic
+The pipeline orchestrates the full story lifecycle from `backlog` to `done`. For each story: a create-story session runs (with daemon-orchestrated adversarial and critic consultations fed back into the active session), then a dev-story session, then a code-review session (with critic consultation for decision-needed findings). The Story Critic is an independent vision guardian with persistent memory across stories, anchored by a project brief provided at init. After this epic, the bot autonomously creates, validates, implements, and reviews stories end-to-end.
+**FRs covered:** FR1 (modified), FR50, FR51, FR52, FR53
+
+### Epic 14: Epic Review Enhancement & Deferred Work
+The epic review agent (Winston) reads `deferred-work.md` and combines it with findings from its own code analysis to propose pre-epic cleanup/improvement stories. These are injected at the head of the next epic in `sprint-status.yaml` as `backlog` stories with convention `X-0-pre-epic-X-{slug}`. Processed debt items are purged from `deferred-work.md`. After this epic, technical debt is managed rhythmically at epic boundaries.
+**FRs covered:** FR54
 
 ---
 
@@ -2760,3 +2793,847 @@ So that the daemon feels like a production-quality tool.
 - Stdout `tracing` layer is removed when `ConsoleRenderer` is active — debug logs go to JSON file only. This eliminates the dual-output problem (tracing + UI fighting for stdout).
 - Tool call visibility requires intercepting rig's streaming pipeline — the implementation approach (tracing hook, tool constructor injection, or stream item parsing) is left to the implementer based on what fits best with rig's architecture.
 - `NullRenderer` ensures zero test pollution — all existing tests continue to pass without modification.
+
+## Epic 11: Copilot Removal & Provider Simplification
+
+The daemon supports only Anthropic and OpenAI-compatible providers (with optional `base_url` for any compatible endpoint). All GitHub Copilot code, authentication, and the rig fork are removed. The `AgentFactory` is simplified to two provider variants. After this epic, the codebase is leaner and uses the official `rig-core` crate.
+
+### Story 11.1: Remove Copilot Auth Module
+
+As a maintainer,
+I want all GitHub Copilot authentication code removed from the codebase,
+So that the project no longer carries ~1350 lines of OAuth Device Flow, token exchange, and caching code that is no longer needed.
+
+**Acceptance Criteria:**
+
+**Given** the `src/auth/github_copilot.rs` module exists (~1350 lines)
+**When** this story is implemented
+**Then** the entire `src/auth/` directory is deleted (`mod.rs` and `github_copilot.rs`)
+**And** `mod auth;` is removed from `src/main.rs`
+**And** all references to `CopilotTokenCache`, `exchange_copilot_token()`, `derive_base_url_from_token()`, `run_device_flow()`, `request_device_code()`, `poll_for_access_token()` are removed from the codebase
+**And** the project compiles with zero warnings
+
+**Given** `src/cli/mod.rs` contains the `copilot-login` subcommand
+**When** this story is implemented
+**Then** the `copilot-login` subcommand is removed from the clap CLI definition
+**And** any interactive Copilot Device Flow trigger during `bmad-bot init` is removed
+
+### Story 11.2: Simplify AgentFactory — OpenAI-Compatible with base_url
+
+As a developer,
+I want the `AgentFactory` to support only Anthropic and OpenAI-compatible providers with an optional `base_url`,
+So that I can use any OpenAI-compatible endpoint (OpenAI direct, Ollama, LM Studio, vLLM, Groq) without Copilot complexity.
+
+**Acceptance Criteria:**
+
+**Given** the `BuiltAgent` enum in `src/llm/agent_factory.rs`
+**When** this story is implemented
+**Then** the `BuiltAgent::OpenAiCompletions` variant is removed (was Copilot-only)
+**And** the remaining variants are `Anthropic` and `OpenAiCompatible`
+**And** the `OpenAiCompatible` variant supports an optional `base_url` field — when provided, the OpenAI client is constructed with that base URL; when absent, defaults to `https://api.openai.com/v1`
+
+**Given** the `AgentFactory::build()` method
+**When** this story is implemented
+**Then** the `"github-copilot"` match arm is removed entirely
+**And** the `copilot_requires_responses_api()` function is deleted
+**And** the `resolve_copilot_session()` method is deleted
+**And** the `CopilotTokenCache` field is removed from `AgentFactory`
+**And** only two match arms remain: `"anthropic"` → `BuiltAgent::Anthropic`, `"openai-compatible"` → `BuiltAgent::OpenAiCompatible`
+**And** the `"openai-compatible"` arm reads `base_url` from the LLM role config and passes it to the OpenAI client builder
+
+**Given** the config struct `LlmRoleConfig` (or equivalent)
+**When** this story is implemented
+**Then** a new optional field `base_url: Option<String>` is added
+**And** validation ensures `base_url`, if provided, is a valid URL
+
+### Story 11.3: Clean Provider Routing, Config & Secrets
+
+As a developer configuring BMAD Bot,
+I want the provider list, secrets, and config to reflect only Anthropic and OpenAI-compatible,
+So that there is no residual Copilot configuration anywhere.
+
+**Acceptance Criteria:**
+
+**Given** `src/session/provider.rs`
+**When** this story is implemented
+**Then** the `"github-copilot"` match arm in `resolve_api_key()` is removed
+**And** `copilot_headers()` function is deleted
+**And** `create_completion_model()` no longer references Copilot
+
+**Given** `src/config/mod.rs`
+**When** this story is implemented
+**Then** `BotSecrets.github_copilot_oauth_token` field is removed
+**And** `VALID_LLM_PROVIDERS` is updated to `["anthropic", "openai-compatible"]`
+**And** config validation accepts `base_url` as an optional field per LLM role
+
+**Given** `src/cli/mod.rs`
+**When** this story is implemented
+**Then** `LLM_PROVIDERS` list is updated to `["anthropic", "openai-compatible"]`
+**And** `default_model_for_provider("openai-compatible")` returns `"gpt-4.1"`
+**And** `generate_env_file` no longer references `GITHUB_COPILOT_OAUTH_TOKEN`
+**And** the init flow prompts for `base_url` when `openai-compatible` is selected (optional, with default hint)
+
+**Given** all Copilot-related unit tests in the above modules
+**When** this story is implemented
+**Then** those tests are removed and replaced with tests for the `openai-compatible` provider with `base_url` (default and custom)
+
+### Story 11.4: Migrate rig Fork to Official Crate
+
+As a maintainer,
+I want to use the official `rig-core` crate from crates.io instead of the forked repository,
+So that I no longer maintain a fork and benefit from upstream updates.
+
+**Acceptance Criteria:**
+
+**Given** `Cargo.toml` references `rig-core` from `git = "https://github.com/jbanety/rig.git"` branch `fix/copilot-streaming-compat`
+**When** this story is implemented
+**Then** the dependency is changed to `rig-core = { version = "...", features = ["rmcp"] }` from crates.io
+**And** the version selected is the latest stable release that includes the `rmcp` feature
+
+**Given** the official `rig-core` crate is used
+**When** `cargo build` is run
+**Then** the project compiles without errors
+**And** `cargo test` passes all remaining tests (Copilot tests already removed in prior stories)
+**And** `cargo clippy -- -D warnings` reports zero warnings
+
+**Given** the fork is no longer needed
+**When** this story is complete
+**Then** the `Cargo.lock` reflects only crates.io dependencies for rig-core (no git sources)
+
+### Story 11.5: Update Documentation — Remove Copilot References
+
+As a developer reading the documentation,
+I want all references to GitHub Copilot removed and OpenAI-compatible with `base_url` documented,
+So that the docs accurately reflect the current provider capabilities.
+
+**Acceptance Criteria:**
+
+**Given** `_bmad-output/project-context.md`
+**When** this story is implemented
+**Then** the "Multi-Provider LLM Config" section is updated to list only `anthropic` and `openai-compatible`
+**And** the `base_url` option is documented with examples (Ollama, LM Studio)
+**And** all references to `github-copilot`, `CopilotTokenCache`, Copilot streaming compat, and IDE-specific headers are removed
+**And** the "External Integration Points" section no longer mentions GitHub Copilot token exchange
+
+**Given** `bmad-bot.yaml.example`
+**When** this story is implemented
+**Then** example config shows `openai-compatible` with `base_url` examples (commented)
+**And** no `github-copilot` provider appears anywhere
+
+**Given** `README.md`
+**When** this story is implemented
+**Then** all references to `github-copilot`, `github-models`, Copilot OAuth, and Device Flow are removed
+**And** the provider section documents `anthropic` and `openai-compatible` (with `base_url`)
+
+### Epic 11 Summary
+
+| Story | Title | Dependencies |
+|-------|-------|--------------|
+| 11.1 | Remove Copilot Auth Module | — |
+| 11.2 | Simplify AgentFactory — OpenAI-Compatible with base_url | 11.1 |
+| 11.3 | Clean Provider Routing, Config & Secrets | 11.2 |
+| 11.4 | Migrate rig Fork to Official Crate | 11.3 |
+| 11.5 | Update Documentation — Remove Copilot References | 11.4 |
+
+**Execution Strategy:**
+- Linear chain: 11.1 → 11.2 → 11.3 → 11.4 → 11.5
+- Story 11.1 is pure deletion (~1350 lines removed)
+- Story 11.2 restructures the AgentFactory enum and build method
+- Story 11.3 cleans up all downstream config/routing references
+- Story 11.4 switches the Cargo.toml dependency — must come after code changes to avoid compilation errors with the official crate
+- Story 11.5 is documentation-only polish
+
+**Dependencies:** None — Epic 11 can start immediately
+**Risk:** 🟢 Low — pure cleanup + base_url addition
+
+## Epic 12: Skill-Based Sessions & SpawnAgent Tool
+
+The daemon activates agent sessions by loading BMAD skill files (`SKILL.md`) via the existing Zed-style XML context mechanism instead of persona files. The `ResponseAnalyzer` is simplified (no more menu/persona auto-response). A universal `spawn_agent` tool (Zed-inspired) is available in all sessions for LLM-initiated sub-agent delegation. After this epic, the bot speaks the BMAD v6.2+ skill language natively.
+
+### Story 12.1: Parameterize Activation by Skill
+
+As a daemon operator,
+I want agent sessions to be activated by loading a BMAD skill (`SKILL.md`) instead of a persona file (`dev.md`),
+So that the bot aligns with BMAD v6.2+ skill-based workflows and no longer depends on persona/menu interaction.
+
+**Acceptance Criteria:**
+
+**Given** the `activate_agent()` function in `src/session/agent.rs` currently accepts an agent file path (e.g., `_bmad/bmm/agents/dev.md`)
+**When** this story is implemented
+**Then** the function accepts a skill path (e.g., `.github/skills/bmad-dev-story/SKILL.md`) instead
+**And** the `ContextBuilder` loads the `SKILL.md` content and wraps it in Zed-style XML context (`<context><files>...</files></context>`) exactly as it does today for persona files
+**And** the function sends this as the first user message — the mechanism is unchanged, only the file content differs
+**And** no post-activation command is sent — no `"DS"`, no `"CR"`, no hardcoded menu commands. The LLM reads the SKILL.md, discovers `./workflow.md` via the instructions, and loads it autonomously using `read_file`
+
+**Given** `src/session/runner.rs` currently hardcodes `"_bmad/bmm/agents/dev.md"` as the persona path and sends `"Execute [DS] for story file: {path}"` after activation
+**When** this story is implemented
+**Then** `run_session()` accepts a `skill_path: &str` parameter instead of hardcoding the persona
+**And** the post-activation message is either empty (the skill is self-starting) or a minimal contextual hint (e.g., the story file path as context), parameterized per caller
+**And** the `build_agent_for_role()` function signature is updated to accept skill path
+
+**Given** `src/review/mod.rs` currently loads `"_bmad/bmm/agents/dev.md"` and sends `"Execute [CR] for story file: {path}"`
+**When** this story is implemented
+**Then** the review runner loads `.github/skills/bmad-code-review/SKILL.md` instead
+**And** no `"CR"` command is sent — the skill is self-directing
+
+**Given** `build_preamble()` in `src/session/agent.rs` contains instructions about persona activation (processing agent file, executing activation steps, displaying menu)
+**When** this story is implemented
+**Then** those persona-specific instructions are removed
+**And** the preamble retains: tool usage rules, branch management rules, completion sentinel (`<<BMAD_JOB_DONE>>`), English language override, and general operational instructions
+**And** new instruction added: "When provided a SKILL.md file in context, follow its instructions completely. Use your tools to read any referenced workflow files."
+
+### Story 12.2: Simplify ResponseAnalyzer
+
+As a daemon operator,
+I want the `ResponseAnalyzer` to focus only on essential detection patterns,
+So that it no longer carries persona/menu-specific auto-response logic that is irrelevant with skill-based sessions.
+
+**Acceptance Criteria:**
+
+**Given** `src/session/analyzer.rs` contains patterns for auto-responding to persona-driven prompts
+**When** this story is implemented
+**Then** the following pattern categories are removed:
+  - Menu display detection and auto-selection (`"DS"`, `"CR"`, `"CH"` patterns)
+  - "Should I proceed?" / confirmation auto-response patterns
+  - Story selection prompt auto-response
+  - Step-by-step progress detection that triggers automatic responses
+**And** any `ResponseAction::Continue { reply }` variants that carried hardcoded menu responses are removed
+
+**Given** the simplified `ResponseAnalyzer`
+**When** an agent response is analyzed
+**Then** the following essential detections remain:
+  - `Completed` — detection of `<<BMAD_JOB_DONE>>` sentinel or equivalent skill completion signal
+  - `Escalated` — detection of supervisor escalation / needs-clarification signals
+  - `Failed` — detection of fatal error patterns
+  - `Continue` — with `NoReply` as default (the LLM continues working autonomously)
+**And** `Continue { reply }` is only used when the daemon needs to inject consultation results (adversarial/critic findings) — this is prepared as an extension point for Epic 13
+
+**Given** the supervisor `rules.rs` rule engine contains patterns that overlap with the removed analyzer patterns (confirmations, step-by-step, story selection)
+**When** this story is implemented
+**Then** those rules remain in the rule engine — they serve a different purpose (answering agent questions via `ask_supervisor` tool, not auto-responding to workflow prompts)
+
+### Story 12.3: SpawnAgent Tool
+
+As an LLM agent working in a BMAD session,
+I want to spawn independent sub-agents for well-scoped tasks,
+So that I can delegate research, parallel investigation, or specialized work without polluting my main context.
+
+**Acceptance Criteria:**
+
+**Given** a new tool file `src/tools/spawn_agent.rs`
+**When** this story is implemented
+**Then** a `SpawnAgentTool` struct implements the rig `Tool` trait with:
+  - `NAME: "spawn_agent"`
+  - `Args: SpawnAgentArgs { label: String, message: String, session_id: Option<String> }`
+  - `Output: String` (JSON containing `session_id` and `output` or `error`)
+  - `Error: SpawnAgentError` (thiserror enum)
+
+**Given** the `SpawnAgentTool` receives args with no `session_id` (new session)
+**When** `call()` is invoked
+**Then** a fresh agent is built via `AgentFactory::build()` using the same provider/model as the parent session's role
+**And** the `message` is sent as the first user prompt via `stream_chat()`
+**And** the agent runs to completion (up to a configurable max turns, default 100)
+**And** the final assistant message is captured as `output`
+**And** a unique `session_id` (UUID) is generated and the sub-agent state (agent + chat history) is stored in a shared `HashMap<String, SubAgentState>` behind an `Arc<Mutex<>>`
+**And** the tool returns JSON `{ "session_id": "...", "output": "..." }`
+
+**Given** the `SpawnAgentTool` receives args with an existing `session_id` (follow-up)
+**When** `call()` is invoked
+**Then** the existing sub-agent state is retrieved from the `HashMap`
+**And** the `message` is appended to the existing chat history
+**And** `stream_chat()` continues with the full history
+**And** the new final message is returned as `output`
+**And** if the `session_id` is not found, an error is returned: `"No sub-agent session found for id: {session_id}"`
+
+**Given** the `SpawnAgentTool` is constructed
+**When** the tool definition is generated
+**Then** the description includes comprehensive guidelines matching the Zed pattern:
+  - Sub-agents don't see parent conversation history — include all relevant context in message
+  - Subtasks must be concrete, well-defined, and self-contained
+  - Don't use for tasks accomplishable with one or two tool calls
+  - For follow-ups with session_id, send only a short direct message
+  - Parallel delegation patterns for independent tasks
+
+**Given** the sub-agent encounters an error during execution
+**When** the error is handled
+**Then** the tool returns JSON `{ "session_id": "...", "error": "..." }` (session_id included if a session was created before the error)
+**And** the error is logged via `tracing::warn!`
+
+### Story 12.4: Universal SpawnAgent Registration
+
+As a daemon operator,
+I want the `spawn_agent` tool registered in all agent sessions,
+So that any LLM agent (dev, review, supervisor, critic) can delegate work to sub-agents.
+
+**Acceptance Criteria:**
+
+**Given** `src/session/agent.rs` defines `create_base_tools()` which returns the standard tool set for all sessions
+**When** this story is implemented
+**Then** `SpawnAgentTool` is included in `create_base_tools()` alongside git, read_file, edit_file, grep, find_path, list_directory, terminal
+**And** the `SpawnAgentTool` is constructed with a shared `AgentFactory` reference and the shared sub-agent session map
+**And** the tool is available in dev sessions, review sessions, and any future session types
+
+**Given** the supervisor's `ArchitectSession` in `src/supervisor/architect.rs` currently implements a hardcoded 4-turn scripted conversation to answer questions
+**When** this story is implemented
+**Then** the `ArchitectSession` is evaluated for migration to the `spawn_agent` pattern
+**And** if migration is feasible (the Architect can be invoked via a single spawn_agent call with appropriate context), it replaces the hardcoded script
+**And** if migration introduces complexity or regressions, the existing implementation is kept with a TODO comment documenting the future migration path
+
+**Given** the `SpawnAgentTool` needs shared state (`AgentFactory`, session map)
+**When** the tool is constructed
+**Then** `AgentFactory` is passed as `Arc<AgentFactory>` (already the case in the codebase)
+**And** the sub-agent session map is `Arc<Mutex<HashMap<String, SubAgentState>>>` — created once per daemon run and shared across all tool instances
+**And** session cleanup: sub-agent sessions are dropped when the parent story pipeline completes (not when the parent session ends, to allow cross-phase follow-ups within the same story)
+
+### Story 12.5: Skill-Based Session & SpawnAgent Tests
+
+As a maintainer,
+I want comprehensive tests for skill-based activation and the SpawnAgent tool,
+So that I can verify the new activation model works correctly and sub-agent delegation is reliable.
+
+**Acceptance Criteria:**
+
+**Given** the skill-based activation changes in `session/agent.rs`
+**When** tests are run
+**Then** the following unit tests exist and pass:
+  - `test_build_preamble_contains_skill_instructions` — verifies preamble includes skill handling instructions and does NOT contain persona activation instructions
+  - `test_build_preamble_retains_operational_rules` — verifies tool rules, branch rules, completion sentinel, language override are preserved
+  - `test_activate_agent_loads_skill_file` — verifies `ContextBuilder` wraps SKILL.md content in Zed-style XML tags
+
+**Given** the `SpawnAgentTool` in `tools/spawn_agent.rs`
+**When** tests are run
+**Then** the following unit tests exist and pass:
+  - `test_spawn_agent_new_session_returns_session_id` — mock AgentFactory, verify UUID generated and output returned
+  - `test_spawn_agent_follow_up_reuses_session` — create session, then follow-up with session_id, verify history continuity
+  - `test_spawn_agent_invalid_session_id_returns_error` — verify descriptive error for unknown session_id
+  - `test_spawn_agent_definition_contains_guidelines` — verify tool description includes delegation best practices
+  - `test_spawn_agent_session_cleanup` — verify sessions are dropped on pipeline story completion
+
+**Given** the `ResponseAnalyzer` simplification
+**When** tests are run
+**Then** tests for removed patterns (menu detection, confirmation auto-response) are deleted
+**And** tests for retained patterns (completion sentinel, escalation, error detection) are preserved and pass
+**And** a new test `test_analyzer_default_is_continue_no_reply` verifies that unrecognized responses result in `Continue` with no auto-reply
+
+### Epic 12 Summary
+
+| Story | Title | Dependencies |
+|-------|-------|--------------|
+| 12.1 | Parameterize Activation by Skill | — |
+| 12.2 | Simplify ResponseAnalyzer | 12.1 |
+| 12.3 | SpawnAgent Tool | — (parallel with 12.1) |
+| 12.4 | Universal SpawnAgent Registration | 12.3 |
+| 12.5 | Skill-Based Session & SpawnAgent Tests | 12.4 |
+
+**Execution Strategy:**
+- Two parallel branches: skill activation (12.1 → 12.2) and spawn_agent (12.3 → 12.4), converging at 12.5
+- Story 12.1 is the key change — swaps the file loaded into ContextBuilder from persona to skill. The mechanism is identical.
+- Story 12.3 is a new rig tool following the established Tool pattern — the most significant new code in this epic
+- Story 12.4 evaluates whether the ArchitectSession can migrate to spawn_agent — pragmatic decision, not forced
+
+**Dependencies:** Epic 11 (rig official crate in place)
+**Risk:** 🟢 Low — the activation mechanism stays the same, only the loaded content changes
+
+## Epic 13: Multi-Phase Pipeline & Story Critic
+
+The pipeline orchestrates the full story lifecycle from `backlog` to `done`. For each story: a create-story session runs (with daemon-orchestrated adversarial and critic consultations fed back into the active session), then a dev-story session, then a code-review session (with critic consultation for decision-needed findings). The Story Critic is an independent vision guardian with persistent memory across stories, anchored by a project brief provided at init. After this epic, the bot autonomously creates, validates, implements, and reviews stories end-to-end.
+
+### Story 13.1: Watcher Extension — Backlog Stories Eligible
+
+As a daemon operator,
+I want the watcher to detect stories in `backlog` status in addition to `ready-for-dev` and `review`,
+So that the pipeline can pick up stories at the very beginning of their lifecycle and run the full create→dev→review flow.
+
+**Acceptance Criteria:**
+
+**Given** `src/watcher/mod.rs` currently filters stories to only `ready-for-dev` status
+**When** this story is implemented
+**Then** `eligible_stories()` returns stories with status `backlog`, `ready-for-dev`, or `review`
+**And** the returned `StoryInfo` includes the `status` field so the pipeline can route accordingly
+
+**Given** the dependency resolution in `src/watcher/deps.rs`
+**When** a `backlog` story's dependencies are evaluated
+**Then** the same dependency rules apply: a `backlog` story is only eligible if all its dependencies are `done`
+**And** cascade blocking applies identically — if a prerequisite fails, dependent `backlog` stories are excluded
+
+**Given** the watcher returns multiple eligible stories with mixed statuses
+**When** the pipeline selects the next story to process
+**Then** stories are prioritized: `review` first (resume interrupted work), then `ready-for-dev` (resume after create), then `backlog` (start fresh)
+**And** within each status group, document-order topo sort applies as before
+**And** only one story is processed at a time — the pipeline re-polls after each story completes
+
+### Story 13.2: Pipeline Orchestrator Refonte
+
+As a daemon operator,
+I want the pipeline to orchestrate three types of sessions per story (create-with-consultations, dev, code-review-with-consultations),
+So that each story flows through the full lifecycle autonomously.
+
+**Acceptance Criteria:**
+
+**Given** `src/pipeline.rs` currently has `process_story()` which runs dev session → push → PR → review → notify
+**When** this story is implemented
+**Then** `process_story()` implements a state machine that routes based on the story's current status:
+  - `backlog` → run create-story phase (Story 13.4) → on success, continue to dev phase
+  - `ready-for-dev` → run dev-story phase (Story 13.5) → on success, continue to review phase
+  - `review` → run code-review phase (Story 13.6) → on success, push + PR + notify
+
+**Given** a story enters `process_story()` at any status
+**When** the pipeline processes it
+**Then** it runs all remaining phases sequentially to `done` (e.g., a `backlog` story goes through create → dev → review → push)
+**And** between each phase, the pipeline verifies the outcome — if any phase fails or escalates, the pipeline stops and handles the error (partial PR, notification, etc.)
+**And** each phase creates a fresh agent session — no session state carries between phases
+
+**Given** the pipeline re-polls after each story
+**When** a story was interrupted mid-pipeline (e.g., crash during dev phase)
+**Then** the next poll picks up the story at its current status (e.g., `ready-for-dev` if create completed but dev didn't start, `review` if dev completed but review didn't)
+**And** the pipeline resumes from the correct phase
+
+### Story 13.3: Daemon-Orchestrated Consultation Mechanism
+
+As a daemon operator,
+I want the session runner to support pausing an active session, running a fresh consultation agent, and feeding results back to the paused session,
+So that sessions can be enriched with external perspectives (adversarial review, critic) without losing their BMAD context.
+
+**Acceptance Criteria:**
+
+**Given** the session runner manages a chat loop via `stream_chat(agent, prompt, history)`
+**When** a consultation is triggered (daemon detects a phase-completion pattern in the agent's response)
+**Then** the session is paused: the current `chat_history` and agent state are held in memory
+**And** a fresh consultation agent is built via `AgentFactory::build()` with its own preamble, tools, and context
+**And** the consultation agent is run to completion via `stream_chat()` — it receives the artifact to review as its prompt
+**And** the consultation agent's final output (findings, decisions) is captured as a `String`
+**And** the paused session is resumed: findings are sent as a new user message to the original agent, which applies them with its full BMAD context intact
+
+**Given** a `ConsultationConfig` struct defining a consultation
+**When** the daemon sets up a pipeline phase
+**Then** each consultation is configured with:
+  - `skill_path: Option<String>` — SKILL.md to load for the consultation agent (if skill-based, e.g., adversarial review)
+  - `preamble_override: Option<String>` — custom preamble (for non-skill agents like the critic)
+  - `context_files: Vec<String>` — additional files to load into the agent's context
+  - `trigger_pattern: String` — regex or keyword the daemon watches for in the main session's output to trigger the consultation
+  - `resume_message_template: String` — template for the message sent to the main session with `{findings}` placeholder
+
+**Given** a consultation agent encounters an error
+**When** the error is handled
+**Then** the paused session is resumed with an error message: "Consultation failed: {error}. Continue without external input."
+**And** the pipeline does not abort — the main session continues best-effort
+**And** the error is logged via `tracing::warn!`
+
+### Story 13.4: Create-Story Phase with Consultations
+
+As a daemon operator,
+I want the create-story pipeline phase to run a `bmad-create-story` session enriched with adversarial review and critic consultations,
+So that every story file is adversarially validated and vision-checked before development begins.
+
+**Acceptance Criteria:**
+
+**Given** a story with status `backlog` enters the create-story phase
+**When** the phase runs
+**Then** a fresh agent session is created, activated with `.github/skills/bmad-create-story/SKILL.md`
+**And** the agent runs autonomously — discovers the target story from `sprint-status.yaml`, creates the story file, transitions the story to `ready-for-dev`
+**And** the daemon monitors the session for the completion signal
+
+**Given** the create-story session signals completion (story file created)
+**When** the daemon detects the completion pattern
+**Then** **Consultation 1 — Adversarial Review** is triggered:
+  - A fresh agent is built and activated with `.github/skills/bmad-review-adversarial-general/SKILL.md`
+  - The newly created story file content is provided as input
+  - The adversarial agent produces findings
+  - Findings are sent back to the create-story session as a message: "An external adversarial reviewer has analyzed this story and found the following issues:\n\n{findings}\n\nPlease fix all these issues and update the story file."
+  - The create-story agent applies corrections with its BMAD context
+
+**Given** the adversarial corrections are applied
+**When** the create-story agent signals it has finished applying fixes
+**Then** **Consultation 2 — Story Critic** is triggered:
+  - A fresh Critic agent is built (see Story 13.9) with project brief + `critic-memory.md` + updated story file
+  - The Critic produces observations and proposed modifications
+  - The Critic updates `critic-memory.md` with its observations
+  - Findings are sent back to the create-story session: "An external product/technical vision reviewer has analyzed this story:\n\n{findings}\n\nPlease apply the relevant corrections to the story file."
+  - The create-story agent applies corrections
+
+**Given** both consultations are complete and corrections applied
+**When** the create-story agent finishes
+**Then** a final commit is made with all story file changes
+**And** the phase completes successfully with the story in `ready-for-dev` status
+
+### Story 13.5: Dev-Story Phase
+
+As a daemon operator,
+I want the dev-story pipeline phase to run a `bmad-dev-story` session,
+So that the validated story is implemented autonomously.
+
+**Acceptance Criteria:**
+
+**Given** a story with status `ready-for-dev` enters the dev-story phase
+**When** the phase runs
+**Then** a fresh agent session is created, activated with `.github/skills/bmad-dev-story/SKILL.md`
+**And** the session follows the existing session runner flow: branch creation/checkout, streaming chat loop, tool calls, completion detection
+**And** the `ask_supervisor` tool is registered and available (3-tier cascade: rules → architect → escalation)
+**And** the `spawn_agent` tool is registered and available
+
+**Given** the dev-story session completes successfully
+**When** the agent signals `<<BMAD_JOB_DONE>>`
+**Then** the story status transitions to `review`
+**And** the session outcome includes: branch name, decisions log, PR context, test results
+**And** any post-implementation impact analysis runs as before (Story 4.6 behavior preserved)
+
+**Given** the dev-story session escalates or fails
+**When** the session outcome is `Escalated` or `Failed`
+**Then** the pipeline handles it identically to the current behavior: partial PR for failures, `needs-clarification` status for escalations, notification sent
+
+### Story 13.6: Code-Review Phase with Critic Consultation
+
+As a daemon operator,
+I want the code-review pipeline phase to invoke the critic for `decision-needed` findings,
+So that ambiguous code review findings are resolved by the vision guardian instead of blocking on human input.
+
+**Acceptance Criteria:**
+
+**Given** a story with status `review` enters the code-review phase
+**When** the phase runs
+**Then** a fresh agent session is created, activated with `.github/skills/bmad-code-review/SKILL.md`
+**And** the session runs the code review workflow autonomously
+
+**Given** the code-review session produces findings classified as `decision-needed`
+**When** the daemon detects decision-needed findings in the session output
+**Then** **Consultation — Critic Decision Resolution** is triggered:
+  - A fresh Critic agent is built with project brief + `critic-memory.md` + the decision-needed findings + story file
+  - The Critic analyzes each finding against accumulated project knowledge and vision
+  - The Critic produces decisions for each finding (resolve as `patch`, `defer`, or `dismiss`) with rationale
+  - The Critic updates `critic-memory.md` with the decisions made
+  - Decisions are sent back to the code-review session: "An external vision reviewer has resolved the following decision-needed findings:\n\n{decisions}\n\nPlease apply accordingly."
+  - The code-review agent applies the decisions
+
+**Given** the code-review session has no `decision-needed` findings (only `patch`, `defer`, `dismiss`)
+**When** the review completes
+**Then** no Critic consultation is triggered — the review proceeds directly to completion
+
+**Given** the code-review session completes
+**When** all findings are resolved
+**Then** the story status transitions to `done`
+**And** review fixes are committed separately from dev commits
+**And** the phase outcome includes the review report for the PR comment
+
+### Story 13.7: Config Init — Project Brief
+
+As a developer setting up BMAD Bot,
+I want to provide a project brief file path during `bmad-bot init`,
+So that the Story Critic has a vision anchor independent from BMAD artifacts.
+
+**Acceptance Criteria:**
+
+**Given** the `bmad-bot init` interactive flow in `src/cli/mod.rs`
+**When** this story is implemented
+**Then** a new prompt is added after the existing configuration steps: "Do you have a project brief file? (path or skip)"
+**And** if a path is provided, the file existence is validated
+**And** the path is stored in `bmad-bot.yaml` as `project_brief: "{path}"` (relative to project root)
+**And** if skipped, no `project_brief` field is written (optional config)
+
+**Given** the `BotConfig` struct in `src/config/mod.rs`
+**When** this story is implemented
+**Then** a new optional field `project_brief: Option<String>` is added
+**And** if provided, the file existence is validated at startup (non-fatal warning if missing — the Critic can work without it but with degraded context)
+
+**Given** no project brief is configured
+**When** the Critic agent is constructed
+**Then** it falls back to loading the PRD or any available BMAD planning artifact as its vision anchor
+**And** a `tracing::info!` message notes the fallback: "No project brief configured, using PRD as Critic vision anchor"
+
+### Story 13.8: Critic Memory System
+
+As a daemon operator,
+I want a persistent memory file that accumulates the Story Critic's observations across all stories,
+So that the Critic can reference previous decisions and maintain vision continuity throughout the sprint.
+
+**Acceptance Criteria:**
+
+**Given** the implementation artifacts directory
+**When** the first Critic invocation occurs
+**Then** a `critic-memory.md` file is created at `{implementation_artifacts}/critic-memory.md` if it does not exist
+**And** the file is initialized with a header: `# Story Critic Memory` and the current date
+
+**Given** the Critic agent completes a review (story review or decision resolution)
+**When** the Critic produces its output
+**Then** the Critic agent appends a new section to `critic-memory.md` with:
+  - Timestamp and story key
+  - Type of review (story review or decision resolution)
+  - Key observations and rationale
+  - Decisions made and why
+  - Any concerns or patterns noticed across stories
+**And** the Critic manages the format of its own memory — no rigid structure is imposed by the daemon
+
+**Given** `critic-memory.md` grows over time
+**When** the file exceeds a configurable size threshold (default: 50KB)
+**Then** a `tracing::warn!` is emitted suggesting manual review or summarization
+**And** the pipeline does NOT auto-truncate — the Critic's memory is sacred and only the human should decide to prune it
+
+**Given** a new sprint starts or the user wants a fresh Critic
+**When** the user deletes or renames `critic-memory.md`
+**Then** the next Critic invocation creates a fresh memory file
+**And** no error occurs — absence of memory is a valid starting state
+
+### Story 13.9: Critic Agent — Prompt Engineering & Construction
+
+As a daemon operator,
+I want the Story Critic to be an independent vision guardian with extended thinking and its own review perspective,
+So that it provides non-BMAD, vision-anchored critique of stories and decisions.
+
+**Acceptance Criteria:**
+
+**Given** a Critic agent needs to be constructed for a consultation
+**When** the daemon builds the Critic agent
+**Then** the agent is built via `AgentFactory::build()` using a new `LlmRole::Critic` from config
+**And** the `LlmRole::Critic` allows configuring a different provider/model optimized for reasoning (e.g., a model with extended thinking capabilities)
+**And** the `BotConfig` and `LlmConfig` structs are extended with a `critic` role alongside `dev`, `review`, `supervisor`
+
+**Given** the Critic agent's preamble (system prompt)
+**When** the agent is constructed
+**Then** the preamble establishes the Critic's identity and role:
+  - "You are an independent product and technical vision guardian. You are NOT part of the BMAD methodology — you are an external advisor."
+  - "Your job is to ensure that what is being built aligns with the original project vision."
+  - "You have persistent memory across stories — read your memory file carefully to maintain continuity."
+  - "Be direct, specific, and constructive. Flag deviations from the vision. Propose concrete corrections."
+  - "When making decisions on ambiguous findings, reference your accumulated knowledge of prior stories and decisions."
+**And** tool usage instructions are included (read_file, edit_file for critic-memory, think for reasoning)
+
+**Given** the Critic is invoked for a story review
+**When** the agent's context is assembled
+**Then** the following are loaded via `ContextBuilder`:
+  - The project brief file (from config, or PRD as fallback)
+  - `critic-memory.md` (full content)
+  - The story file being reviewed
+**And** the prompt asks: "Review this story against the original project vision. Read your memory for context on previous stories. Identify any deviations, missing considerations, or improvements. Propose specific modifications. Then update your memory file with your observations."
+
+**Given** the Critic is invoked for decision resolution
+**When** the agent's context is assembled
+**Then** the following are loaded:
+  - The project brief
+  - `critic-memory.md`
+  - The story file
+  - The `decision-needed` findings with their full detail
+**And** the prompt asks: "These findings need a decision. Based on the project vision and your accumulated knowledge of prior stories and decisions, resolve each finding. Provide clear rationale referencing specific prior decisions when relevant. Then update your memory file."
+
+**Given** the Critic agent has tools available
+**When** the agent runs
+**Then** the following tools are registered: `read_file`, `edit_file` (for updating critic-memory.md), `grep`, `find_path`, `list_directory`, `think`
+**And** `git`, `terminal`, `ask_supervisor`, and `spawn_agent` are NOT registered — the Critic is read-only on the codebase except for its own memory file
+
+### Story 13.10: WAL with Pipeline Phase Tracking
+
+As a daemon operator,
+I want the WAL (Write-Ahead Log) to track which pipeline phase a story is in,
+So that crash recovery resumes at the correct phase instead of restarting from scratch.
+
+**Acceptance Criteria:**
+
+**Given** the WAL file at `{implementation_artifacts}/.bmad-bot-session.yaml`
+**When** this story is implemented
+**Then** a new field `pipeline_phase` is added to the WAL structure with values: `create`, `create-adversarial-consult`, `create-critic-consult`, `dev`, `review`, `review-critic-consult`
+**And** the `pipeline_phase` is updated at each phase transition before the phase starts
+
+**Given** the daemon starts and finds an existing WAL file
+**When** crash recovery is attempted
+**Then** the `pipeline_phase` field is read to determine where the story was in the pipeline
+**And** recovery routes to the correct phase:
+  - `create` / `create-*-consult` → restart create-story phase from scratch (consultations are lightweight, safe to redo)
+  - `dev` → attempt dev session recovery using existing WAL chat history (existing behavior)
+  - `review` / `review-critic-consult` → restart code-review phase from scratch
+**And** `tracing::info!` logs the recovery: "Recovering story {key} from pipeline phase: {phase}"
+
+**Given** a pipeline phase completes successfully
+**When** the next phase starts
+**Then** the WAL is updated with the new phase before the phase begins
+**And** when the entire story pipeline completes (push + PR + notify), the WAL is deleted as before
+
+### Story 13.11: UI Events for New Pipeline Phases
+
+As a developer monitoring the daemon,
+I want terminal UI events for all new pipeline phases and consultations,
+So that I can follow the full create→adversarial→critic→dev→review flow in real-time.
+
+**Acceptance Criteria:**
+
+**Given** the `UiRenderer` trait in `src/ui/mod.rs`
+**When** this story is implemented
+**Then** the following new event methods are added:
+  - `phase_start(&self, phase: &str)` — already exists, reused for new phases
+  - `consultation_start(&self, consultation_type: &str, story_key: &str)` — new, shows "Consulting {type}..."
+  - `consultation_complete(&self, consultation_type: &str, findings_count: usize)` — new, resolves with findings summary
+  - `critic_memory_update(&self, story_key: &str)` — new, shows Critic memory was updated
+
+**Given** the `ConsoleRenderer` implementation
+**When** new events are emitted
+**Then** the visual output follows the existing vocabulary:
+  - `◉ Creating story 4-2...` (spinner for create phase)
+  - `  └─ 🔍 Consulting adversarial reviewer...` (sub-spinner, indented)
+  - `  └─ ● Adversarial review: 7 findings` (resolved)
+  - `  └─ 🧠 Consulting story critic...` (sub-spinner)
+  - `  └─ ● Story critic: 3 observations, memory updated` (resolved)
+  - `◉ Developing story 4-2...` (spinner for dev phase)
+  - `◉ Reviewing story 4-2...` (spinner for review phase)
+  - `  └─ 🧠 Consulting critic for 2 decision-needed findings...`
+
+**Given** the `NullRenderer` implementation
+**When** new events are emitted
+**Then** all new methods are no-ops (consistent with existing pattern)
+
+### Epic 13 Summary
+
+| Story | Title | Dependencies |
+|-------|-------|--------------|
+| 13.1 | Watcher Extension — Backlog Stories Eligible | — |
+| 13.2 | Pipeline Orchestrator Refonte | 13.1 |
+| 13.3 | Daemon-Orchestrated Consultation Mechanism | 13.2 |
+| 13.4 | Create-Story Phase with Consultations | 13.3, 13.9 |
+| 13.5 | Dev-Story Phase | 13.3 |
+| 13.6 | Code-Review Phase with Critic Consultation | 13.3, 13.9 |
+| 13.7 | Config Init — Project Brief | — (parallel with 13.1) |
+| 13.8 | Critic Memory System | 13.7 |
+| 13.9 | Critic Agent — Prompt Engineering & Construction | 13.8 |
+| 13.10 | WAL with Pipeline Phase Tracking | 13.2 |
+| 13.11 | UI Events for New Pipeline Phases | 13.2 |
+
+**Execution Strategy:**
+- Two parallel branches converge: pipeline (13.1 → 13.2 → 13.3 → 13.4/5/6) and critic (13.7 → 13.8 → 13.9)
+- Stories 13.4 and 13.6 depend on BOTH branches (pipeline mechanism + critic agent)
+- Stories 13.10 and 13.11 can be developed in parallel with 13.3+ (they only depend on 13.2)
+- Story 13.9 is the prompt engineering challenge — the Critic's effectiveness depends on preamble quality
+
+**Dependencies:** Epic 12 (skill-based activation + spawn_agent)
+**Risk:** 🟡 Medium — the Critic is the most novel component, requiring iterative prompt engineering
+
+## Epic 14: Epic Review Enhancement & Deferred Work
+
+The epic review agent (Winston) reads `deferred-work.md` and combines it with findings from its own code analysis to propose pre-epic cleanup/improvement stories. These are injected at the head of the next epic in `sprint-status.yaml` as `backlog` stories with convention `X-0-pre-epic-X-{slug}`. Processed debt items are purged from `deferred-work.md`. After this epic, technical debt is managed rhythmically at epic boundaries.
+
+### Story 14.1: Winston Reads Deferred Work
+
+As a daemon operator,
+I want the epic review agent (Winston) to read `deferred-work.md` as part of its analysis,
+So that accumulated technical debt is evaluated alongside the epic's code quality.
+
+**Acceptance Criteria:**
+
+**Given** `src/review/epic.rs` builds an epic review prompt via `build_epic_review_prompt()`
+**When** this story is implemented
+**Then** the prompt includes an instruction to read `{implementation_artifacts}/deferred-work.md` via tools if the file exists
+**And** Winston is instructed to categorize deferred items by severity (critical/high/medium/low) and by effort (small/medium/large)
+**And** Winston integrates the deferred items into the "Technical Analysis" section of its report alongside his own code-level findings
+
+**Given** `deferred-work.md` does not exist or is empty
+**When** the epic review runs
+**Then** Winston notes "No deferred work items found" in his report and continues normally
+**And** no error is raised — the file is optional
+
+**Given** `deferred-work.md` contains items from multiple past reviews (different stories, different dates)
+**When** Winston reads the file
+**Then** Winston considers the age and origin of each item — older items that persist across multiple stories are flagged as higher priority
+**And** the report section explicitly calls out items that have been deferred for more than one epic
+
+### Story 14.2: Pre-Epic Story Generation
+
+As a daemon operator,
+I want Winston to propose pre-epic cleanup stories from both `deferred-work.md` and his own code analysis findings,
+So that technical debt and improvements are addressed before the next epic's feature work begins.
+
+**Acceptance Criteria:**
+
+**Given** Winston completes his epic review analysis (code analysis + deferred work review)
+**When** the report is generated
+**Then** a new section **"Pre-Epic Stories for Epic {N+1}"** is appended to the report
+**And** each proposed story follows this format:
+  - Story key: `{N+1}-0-pre-epic-{N+1}-{slug}` (e.g., `5-0-pre-epic-5-fix-error-handling`)
+  - Title: descriptive, action-oriented
+  - Source: `deferred-work` or `epic-review-finding` or `both`
+  - Severity: critical/high/medium/low
+  - Estimated effort: small/medium/large
+  - Justification: why this should be addressed before epic N+1 feature work
+  - Related deferred items: list of `deferred-work.md` item IDs this story would resolve (if applicable)
+
+**Given** Winston identifies findings from his own code analysis that are not in `deferred-work.md`
+**When** he generates pre-epic stories
+**Then** these findings are included alongside deferred items — the two sources are merged into a unified prioritized list
+**And** the report distinguishes the source of each proposed story (deferred vs epic-review vs both)
+
+**Given** Winston evaluates the combined list of proposed stories
+**When** the total exceeds a reasonable scope for pre-epic cleanup
+**Then** Winston recommends a prioritized subset (top items by severity × effort ratio) as "must-do before Epic {N+1}"
+**And** remaining items are listed as "can defer further" with rationale
+
+### Story 14.3: Inject Pre-Epic Stories into Sprint Status
+
+As a daemon operator,
+I want Winston's approved pre-epic stories to be automatically added to `sprint-status.yaml`,
+So that the linear pipeline processes them before the next epic's regular stories.
+
+**Acceptance Criteria:**
+
+**Given** Winston's epic review report contains proposed pre-epic stories
+**When** the epic review phase completes (the report is generated and saved)
+**Then** the daemon parses the "Pre-Epic Stories" section from Winston's report
+**And** each proposed story is added to `sprint-status.yaml` under the next epic with status `backlog`
+**And** pre-epic stories are inserted BEFORE the regular stories of the next epic (position `X-0` ensures document-order topo sort processes them first)
+
+**Given** the naming convention `{N+1}-0-pre-epic-{N+1}-{slug}`
+**When** multiple pre-epic stories are generated
+**Then** they are numbered with sub-indices to maintain order: `5-0a-pre-epic-5-fix-error-handling`, `5-0b-pre-epic-5-missing-tests`, etc.
+**And** dependencies between pre-epic stories are set sequentially (0b depends on 0a) to ensure ordered processing
+
+**Given** pre-epic stories are inserted into `sprint-status.yaml`
+**When** the daemon's next poll cycle runs
+**Then** the watcher picks up the `backlog` pre-epic stories as eligible
+**And** they are processed through the full pipeline (create → adversarial → critic → dev → review) like any regular story
+**And** the linear pipeline naturally processes all `X-0*` stories before `X-1`, `X-2`, etc. due to document order
+
+**Given** the `sprint-status.yaml` is updated with pre-epic stories
+**When** the update is complete
+**Then** the changes are committed with message `chore(sprint): add pre-epic-{N+1} debt stories from epic-{N} review`
+**And** `tracing::info!` logs the number of pre-epic stories injected
+
+### Story 14.4: Purge Processed Deferred Items
+
+As a daemon operator,
+I want resolved deferred items to be removed from `deferred-work.md` when their corresponding pre-epic stories are completed,
+So that the deferred work file remains current and doesn't accumulate stale resolved items.
+
+**Acceptance Criteria:**
+
+**Given** a pre-epic story reaches `done` status
+**When** the pipeline completes the story
+**Then** the daemon checks if the story key matches the pre-epic naming convention (`X-0*-pre-epic-*`)
+**And** if it matches, the daemon reads the story file to find the "Related deferred items" section (listing which `deferred-work.md` items this story resolved)
+**And** the corresponding items are removed from `deferred-work.md`
+**And** a `tracing::info!` logs: "Purged {count} resolved items from deferred-work.md"
+
+**Given** `deferred-work.md` contains items under section headings (e.g., `## Deferred from: code review of story-3.3 (2026-03-18)`)
+**When** all items under a section heading are removed
+**Then** the section heading is also removed to keep the file clean
+
+**Given** a pre-epic story resolves some but not all items from a deferred section
+**When** the purge runs
+**Then** only the resolved items (matched by description or ID) are removed
+**And** remaining items in the section are preserved
+
+**Given** `deferred-work.md` becomes empty after purging
+**When** all items have been resolved
+**Then** the file is NOT deleted — it is left with only the top-level heading as a placeholder for future deferred items
+**And** the daemon commits the cleanup with message `chore(deferred): purge resolved items from pre-epic-{N+1} stories`
+
+### Epic 14 Summary
+
+| Story | Title | Dependencies |
+|-------|-------|--------------|
+| 14.1 | Winston Reads Deferred Work | — |
+| 14.2 | Pre-Epic Story Generation | 14.1 |
+| 14.3 | Inject Pre-Epic Stories into Sprint Status | 14.2 |
+| 14.4 | Purge Processed Deferred Items | 14.3 |
+
+**Execution Strategy:**
+- Linear chain: 14.1 → 14.2 → 14.3 → 14.4
+- Story 14.1 is a prompt extension — minimal code, mainly Winston's instructions
+- Story 14.2 defines the output format Winston uses for story proposals
+- Story 14.3 is the daemon-side parsing and sprint-status injection
+- Story 14.4 closes the loop — purges resolved debt
+
+**Dependencies:** Epic 13 (linear pipeline in place to process pre-epic stories)
+**Risk:** 🟢 Low — extends existing epic review functionality
