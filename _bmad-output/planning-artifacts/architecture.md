@@ -8,8 +8,8 @@ date: '2026-02-10'
 lastStep: 8
 status: 'complete'
 completedAt: '2026-02-07'
-revisedAt: '2026-03-07'
-revisionNote: 'Post-Implementation Impact Analysis step added to session runner post-completion sequence. New Step 8 between final commit and PR summary — agent evaluates downstream dependent stories and updates their Previous Story Intelligence sections with actual implementation details. Best-effort, non-blocking, agent-driven. Single file change in runner.rs (~50 lines). Triggered by story 7-1 completing without propagating implementation reality to dependent stories 7-2 through 7-10.'
+revisedAt: '2026-04-15'
+revisionNote: 'Sprint Change Proposal 2026-04-15 — Skill-based activation (D5 amended), simplified chat loop (D1 amended), WAL pipeline_phase (D3 amended), Copilot removed + OpenAI-compatible with base_url (D8 amended), new Decision 10 (Daemon-Orchestrated Consultations), new Decision 11 (Story Critic with Persistent Memory). Updated tool patterns (spawn_agent), enforcement guidelines, project structure (critic/ module, auth/ removed), external integration points, configuration files.'
 ---
 
 # Architecture Decision Document
@@ -212,6 +212,10 @@ The hybrid approach uses both rig interaction patterns for their natural strengt
 - The supervisor tool is unit-testable in isolation
 - Minimal exposure to rig breaking changes (tool API is the most stable surface)
 
+> **Amendment (2026-04-15) — Skill-based sessions simplify chat loop role**
+>
+> With BMAD v6.2+ skill-based activation, the chat loop's auto-response burden is significantly reduced. Skills run autonomously without interactive prompts — no menu selection, no "should I proceed?" confirmations. The `ResponseAnalyzer` is simplified to three essential detections: completion, error/escalation, and consultation injection points. The chat loop gains a new responsibility: daemon-orchestrated consultations (see Decision 10). When the daemon detects a phase completion pattern, it pauses the loop, runs a fresh consultation agent, and injects findings as a new user message to the active session. The `ask_supervisor` tool and its 3-tier cascade remain unchanged.
+
 **Affects:** session module, supervisor module, tools module
 
 ### Decision 2: Sprint-Status Mutation — Daemon Reads, Agent Writes
@@ -286,6 +290,10 @@ Recovery flow:
 - The story file on disk already tracks task progress (`[x]`/`[ ]`), Dev Agent Record, File List — no duplication needed
 - The resumed session is lean: summary + last exchanges + project context fits well within budget
 - From the agent's perspective, it's like being briefed by a colleague and continuing the work
+
+> **Amendment (2026-04-15) — Multi-phase pipeline tracking in WAL**
+>
+> With the multi-phase pipeline (Epic 13), a single story passes through up to 5 phases: `create` → `create-adversarial-consult` → `create-critic-consult` → `dev` → `review` → `review-critic-consult`. **New WAL field:** `pipeline_phase: String` — records the active phase. Updated at each phase transition before the phase starts. The WAL tracks the current phase's session only — no multi-phase history needed (phases are sequential). **Recovery routing by phase:** `create` / `create-*-consult` → restart create-story phase from scratch (consultations are lightweight, safe to redo). `dev` → attempt session recovery using existing WAL chat history (existing Recovery Case A behavior, preserved). `review` / `review-*-consult` → restart code-review phase from scratch. The dev phase is the only phase where mid-session recovery is attempted — it is the longest-running and most expensive phase.
 
 **Affects:** session module, config module
 
@@ -378,6 +386,10 @@ let response = streaming_chat(agent, "DS", rig_history, Some(&shutdown)).await?;
 **First command:** `"DS"` (triggers the dev-story workflow as defined in the BMAD agent's menu system).
 
 **Key principle:** The daemon has an explicit activation phase before sending commands. The system preamble provides persistent behavioral grounding, while the agent persona flows through user-message context — keeping the two concerns cleanly separated.
+
+> **Amendment (2026-04-15) — Skill-based activation replaces persona activation**
+>
+> **What changed:** BMAD v6.2+ migrated from persona files (agents with menus) to skill files (self-contained workflows). The activation mechanism is identical — the content loaded into `ContextBuilder` changes. **Before:** Load `_bmad/bmm/agents/dev.md` (persona) → agent displays menu → daemon sends `"DS"` command → agent enters dev-story workflow. **After:** Load `.github/skills/bmad-dev-story/SKILL.md` (skill) → agent reads it, discovers `./workflow.md` via `read_file` tool → executes the workflow autonomously. No menu, no commands, no post-activation message. **Updated preamble:** removes persona activation instructions (menu, greeting, activation steps), adds skill execution instructions ("When provided a SKILL.md file in context, follow its instructions completely"), adds `spawn_agent` to the tool inventory. **Updated activation:** `activate_agent()` accepts `skill_path` parameter instead of hardcoded persona. No post-activation command needed — the skill is self-starting. **What this simplifies:** `ResponseAnalyzer` no longer needs menu/confirmation auto-response patterns. Session runner no longer hardcodes persona paths or command strings. Review runner uses the same mechanism with a different SKILL.md.
 
 **Affects:** session module, llm_context module
 
@@ -643,7 +655,65 @@ fn copilot_requires_responses_api(model: &str) -> bool {
 - `pipeline.rs` — passes `AgentFactory` to `StoryPipeline` instead of individual provider configs
 - `session/provider.rs` — absorbed into `AgentFactory` (resolve_api_key, copilot_headers)
 
+> **Amendment (2026-04-15) — Copilot removed, OpenAI-compatible with base_url, LlmRole::Critic added**
+>
+> GitHub Copilot provider removed entirely (auth module, token exchange, cache, streaming compat fixes). The rig fork (`jbanety/rig`, branch `fix/copilot-streaming-compat`) is replaced by official `rig-core` from crates.io. `BuiltAgent::OpenAiCompletions` variant removed (was Copilot-only). **Updated BuiltAgent enum (2 variants):** `Anthropic(Agent<anthropic::CompletionModel>)` and `OpenAiCompatible(Agent<openai::responses_api::ResponsesCompletionModel>)`. The `OpenAiCompatible` variant supports an optional `base_url` — when provided, the OpenAI client is constructed with that base URL; when absent, defaults to `https://api.openai.com/v1`. This enables any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, Groq). **Updated AgentFactory:** no more `CopilotTokenCache` field, no more `copilot_requires_responses_api()`. Two match arms only: `"anthropic"` and `"openai-compatible"`. **Updated LlmRole enum:** `Dev`, `Review`, `Supervisor`, `Critic` — the new `Critic` role allows configuring a different provider/model optimized for reasoning (extended thinking). **Removed:** `copilot_requires_responses_api()`, `resolve_copilot_session()`, `CopilotTokenCache`, `BuiltAgent::OpenAiCompletions`, entire `src/auth/` module.
+
 **Affects:** llm module (new agent_factory.rs), session module, review module, supervisor module, pipeline
+
+### Decision 10: Daemon-Orchestrated Consultations — Pause/Consult/Resume
+
+> **Added (2026-04-15) — Sprint Change Proposal: multi-phase pipeline**
+
+**Decision:** The daemon can pause an active session, launch a fresh consultation agent, and inject the results back into the paused session as a new user message. This is the same mechanics as the `spawn_agent` tool (fresh agent, result returned) but triggered by the daemon, not the LLM.
+
+**Rationale:**
+Certain pipeline phases benefit from external perspectives that must remain context-independent from the active BMAD session. Adversarial review of a story must be cynical and unbiased — the agent that just created the story cannot objectively critique it. Story Critic vision checks must be anchored in the project brief, not in BMAD methodology context. Decision resolution during code review must reference accumulated cross-story knowledge, not the review session's local context. Running these as separate agents ensures context isolation. Feeding results back to the active session ensures BMAD-aware application of corrections.
+
+**Pattern:**
+1. Active session (BMAD skill) runs → daemon detects phase completion
+2. Session paused: `chat_history` + agent held in memory
+3. Consultation agent built (`AgentFactory::build()`) — own preamble, tools, context files
+4. Consultation runs to completion via `stream_chat()` — final output captured as `String`
+5. Active session resumed: findings injected as new user message via template
+6. Active agent applies corrections with its full BMAD context intact
+7. Repeat for additional consultations if needed
+
+**ConsultationConfig:**
+- `skill_path: Option<String>` — SKILL.md for skill-based consultations (e.g., adversarial review)
+- `preamble_override: Option<String>` — custom preamble for non-skill agents (e.g., Critic)
+- `context_files: Vec<String>` — files loaded into agent context
+- `trigger_pattern: String` — pattern daemon watches for in the main session output
+- `resume_message_template: String` — template with `{findings}` placeholder
+
+**Error handling:** Consultation failures are non-fatal. If a consultation agent errors, the active session resumes with: "Consultation failed: {error}. Continue without external input." The pipeline does not abort.
+
+**Why not spawn_agent tool?** The `spawn_agent` tool is LLM-initiated — the agent decides when to delegate. Consultations are daemon-initiated — the pipeline orchestrator decides when external review is needed, based on deterministic phase transitions. Both use the same underlying mechanics (fresh agent via AgentFactory), but the control plane is different.
+
+**Affects:** pipeline module, session module (runner)
+
+### Decision 11: Story Critic — Independent Vision Guardian with Persistent Memory
+
+> **Added (2026-04-15) — Sprint Change Proposal: Story Critic agent**
+
+**Decision:** A Story Critic agent provides independent product and technical vision review, anchored by a project brief and persistent cross-story memory. It is NOT part of the BMAD methodology — it is an external advisor that replicates the human workflow of maintaining a project-knowledge ChatGPT thread.
+
+**Rationale:**
+During manual development, the developer maintains a separate ChatGPT thread where they started with the project idea/brief, and for each story critique or ambiguous decision, they send the artifact to that thread. ChatGPT has full accumulated context since project inception. The Story Critic automates this pattern.
+
+**Design:**
+- **Identity:** Independent vision guardian. Not BMAD. External advisor. Evaluates whether what is being built aligns with the original project vision.
+- **Founding context:** A project brief file provided at `bmad-bot init` (stored in config as `project_brief`). Falls back to PRD if no brief exists.
+- **Persistent memory:** `{implementation_artifacts}/critic-memory.md` — cumulative file enriched after every Critic invocation. Contains observations, decisions, rationale, cross-story patterns. The Critic manages its own memory format — no rigid structure imposed. Memory is never auto-truncated — only the human prunes it. Absence of memory is a valid starting state.
+- **Invocation points:** (1) Story review during create-story phase — reviews story against project vision, proposes modifications. (2) Decision resolution during code-review phase — resolves `decision-needed` findings using accumulated project knowledge.
+- **Agent construction:** Built via `AgentFactory::build(LlmRole::Critic, ...)`. Fresh agent each invocation — memory continuity via `critic-memory.md`. Context loaded via `ContextBuilder`: project brief + critic-memory.md + artifact under review.
+- **Tool set (restricted):** `read_file`, `edit_file` (for critic-memory.md only), `grep`, `find_path`, `list_directory`, `think`. NOT registered: `git`, `terminal`, `ask_supervisor`, `spawn_agent`. The Critic is read-only on the codebase, write-only on its memory.
+
+**Why a separate LlmRole?** The Critic benefits from models with strong reasoning capabilities (extended thinking). The dev agent benefits from fast tool-calling models. Separating the role in config allows using the right model for the right job.
+
+**Why not the existing supervisor?** The supervisor (`ask_supervisor`) is reactive (answers questions), ephemeral (no memory), and embedded inside the dev session as a tool. The Critic is proactive (reviews artifacts), persistent (cumulative memory), and external to all sessions (daemon-orchestrated via Decision 10).
+
+**Affects:** new critic module, config module, pipeline module
 
 ### Decision Impact Analysis
 
@@ -698,7 +768,7 @@ pub enum WatcherError {
 
 ### Rig Tool Implementation Pattern — Standard Structure
 
-Every rig tool (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor) follows the same structural pattern. Note: `GitTool` uses `tokio::process::Command` to invoke the `git` CLI — each action maps to a subprocess call with structured output parsing.
+Every rig tool (edit_file, read_file, grep, find_path, list_directory, git, terminal, ask_supervisor, spawn_agent) follows the same structural pattern. Note: `GitTool` uses `tokio::process::Command` to invoke the `git` CLI — each action maps to a subprocess call with structured output parsing.
 
 ```
 // 1. Serializable struct with shared state
@@ -745,6 +815,8 @@ impl Tool for MyTool {
 Each tool owns a single concern with a compact JSON schema. Do NOT add an `action: String` field that multiplexes multiple operations into one tool (this was the anti-pattern of the original `FsTool`). The LLM reasons better with many small, clearly-described tools than with one mega-tool that has a large branching schema.
 
 **Note on ThinkTool:** The 9th agent tool is rig's built-in `ThinkTool` (derived from Anthropic's Claude Think Tool pattern). It gives the agent a dedicated space for structured reasoning without consuming real tool calls. No custom implementation needed — it is imported from the `rig` crate and added via `.tool(ThinkTool)` on the agent builder. It does **not** live in the `tools/` directory.
+
+**Note on SpawnAgentTool:** The 11th agent tool is a daemon-provided `spawn_agent` (inspired by Zed's implementation). It allows the LLM to spawn fresh sub-agents for delegated tasks — research, parallel investigation, specialized work. Input: `label`, `message`, `session_id` (optional for follow-up). Output: `session_id` + final message. Sub-agent sessions are stored in a shared `Arc<Mutex<HashMap<String, SubAgentState>>>` for follow-up capability. Sessions are cleaned up when the parent story pipeline completes. Lives in `tools/spawn_agent.rs`.
 
 **Mandatory rules:**
 - Tool NAME is always snake_case and descriptive
@@ -1005,6 +1077,10 @@ mod tests {
 - Use dedicated structs for trait method params and returns
 - Write unit tests with mocked dependencies for every new module — use `NullRenderer` for UI
 - Check the Project Context file for additional rules before implementing any code
+- Construct Critic agents with restricted tool sets (no git, terminal, ask_supervisor, spawn_agent)
+- Use `LlmRole::Critic` for Story Critic sessions — never reuse Dev or Review roles
+- Emit UI events for consultation phases via `UiHandle` (consultation_start, consultation_complete, critic_memory_update)
+- Load SKILL.md (not persona files) for agent activation in all new sessions
 
 **Anti-Patterns (NEVER do these):**
 - `unwrap()` or `expect()` in production code
@@ -1106,13 +1182,18 @@ bmad-bot/
 | FR27-32 | CLI & Config | `cli/`, `config/` | `cli/mod.rs` (clap subcommands, run_start, run_polling_loop), `cli/git_detect.rs` (remote auto-detection), `cli/state.rs` (daemon state), `config/mod.rs` (BotConfig, BotSecrets), `config/discovery.rs` (BMAD discovery) |
 | FR33-34 | Resilience & Shutdown | `cli/`, `session/`, `pipeline.rs` | ShutdownFlag created in `run_start()`, propagated through `pipeline.rs` → `session/runner.rs` → `streaming_chat()`. WAL save on interrupt |
 | FR35-36 | Error Alerts & Validation | *Cross-cutting* | reqwest-middleware + per-module error handling + notifier |
-| FR39 | Copilot Auth | `auth/` | `github_copilot.rs` (OAuth Device Flow, token exchange, CopilotTokenCache) |
+| FR39 | ~~Copilot Auth~~ | ~~`auth/`~~ | REMOVED — Sprint Change Proposal 2026-04-15. Entire `src/auth/` module deleted. |
 | FR40 | LLM Logging | `llm/logging.rs` | Request/response payload logging, `bmad_bot::llm` tracing target |
 | FR43 | Terminal UI | `ui/` | `renderer.rs` (UiRenderer trait), `console.rs` (ConsoleRenderer — indicatif + console), `null.rs` (NullRenderer), `mod.rs` (UiHandle wrapper). UiHandle propagated through `pipeline.rs` → `session/runner.rs` → `review/mod.rs` |
 | — | Pipeline Orchestration | `pipeline.rs` | `StoryPipeline` — orchestrates full story pipeline (session → review → PR → notify) |
 | — | LLM Provider Abstraction | `llm/agent_factory.rs` | `AgentFactory` + `BuiltAgent` enum — centralized provider construction, Copilot API format detection, `stream_chat()` dispatch |
 | — | XML Context | `llm/context.rs` | `ContextBuilder` for agent activation (Zed-style XML formatting) |
 | — | Agent Dev Tools | `tools/` | `edit_file.rs`, `read_file.rs`, `grep.rs`, `find_path.rs`, `list_directory.rs`, `git.rs`, `terminal.rs` — 7 custom tools + ThinkTool (rig built-in) + ask_supervisor |
+| FR50-53 | Story Creation, Pipeline, Critic | `pipeline.rs`, `critic/` | Pipeline orchestration with consultation mechanism, critic agent construction |
+| FR54 | Deferred Work Processing | `review/epic.rs` | Winston reads deferred-work.md, proposes pre-epic stories |
+| FR55 | Sub-Agent Delegation | `tools/spawn_agent.rs` | SpawnAgentTool — fresh agent per call, session follow-up via HashMap |
+| FR56 | OpenAI-Compatible + base_url | `llm/agent_factory.rs` | AgentFactory constructs OpenAI client with optional custom base_url |
+| — | Story Critic | `critic/` | `mod.rs` (agent construction, prompt), `memory.rs` (critic-memory.md I/O) |
 
 ### Architectural Boundaries
 
@@ -1135,7 +1216,7 @@ bmad-bot/
               │  runner.rs  │◀─── llm/context.rs (XML context for activation)
               │  analyzer.rs│◀─── llm/logging.rs (request/response logging)
               │             │◀─── llm/agent_factory.rs (BuiltAgent + provider construction)
-              │             │◀─── auth/github_copilot.rs (Copilot token)
+
               │  branch.rs  │
               │  cleanup.rs │
               │  state.rs   │
@@ -1146,9 +1227,14 @@ bmad-bot/
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
 │   tools/     │  │  supervisor/ │  │   review/    │
 │ git/fs/term  │  │ rules/arch/  │  │ (optional)   │
-│ + ThinkTool  │  │ decisions    │  │              │
-│ (rig builtin)│  └──────────────┘  └──────┬───────┘
+│ spawn_agent  │  │ decisions    │  │              │
+│ + ThinkTool  │  └──────────────┘  └──────┬───────┘
 └──────────────┘                           │
+┌──────────────┐
+│   critic/    │◀─── daemon-orchestrated consultation (Decision 10)
+│ memory.rs    │     project brief + critic-memory.md context
+│ mod.rs       │
+└──────────────┘
                           ┌────────────────┤
                           ▼                ▼
                    ┌──────────────┐ ┌──────────────┐
@@ -1230,8 +1316,8 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 | Integration | Module | Protocol | Auth | Notes |
 |-------------|--------|----------|------|-------|
 | LLM Provider (Anthropic) | `llm/agent_factory.rs` | HTTPS via rig-core | API key from `.env` | Anthropic Messages API. Constructed via `AgentFactory::build()` → `BuiltAgent::Anthropic` |
-| LLM Provider (OpenAI) | `llm/agent_factory.rs` | HTTPS via rig-core | API key from `.env` | Uses **Responses API**. Constructed via `AgentFactory::build()` → `BuiltAgent::OpenAiResponses` |
-| LLM Provider (GitHub Copilot) | `llm/agent_factory.rs`, `auth/` | HTTPS via rig-core + reqwest | OAuth token from `.env` → exchanged at runtime for short-lived Copilot session token via `GET https://api.github.com/copilot_internal/v2/token` | Proxy to multiple backends — API format is **hardcoded per model**: known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) use **Responses API** (`BuiltAgent::OpenAiResponses`), all other models (Claude, Mistral, etc.) **fallback to Completions API** (`BuiltAgent::OpenAiCompletions`) — safe default for non-OpenAI backends. Requires IDE headers: `Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id` ("vscode-chat"). Base URL derived from token `proxy-ep` field; default: `https://api.individual.githubcopilot.com`. Headers injected via rig's `.http_headers()` builder. Provider construction centralized in `AgentFactory` with `copilot_requires_responses_api()` heuristic |
+| LLM Provider (OpenAI-compatible) | `llm/agent_factory.rs` | HTTPS via rig-core | API key from `.env` | Uses **Responses API** with optional `base_url` for any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, Groq). Default: `https://api.openai.com/v1`. Constructed via `AgentFactory::build()` → `BuiltAgent::OpenAiCompatible` |
+| LLM Provider (GitHub Copilot) | ~~REMOVED~~ | — | — | Removed in Sprint Change Proposal 2026-04-15. All Copilot code (OAuth Device Flow, token exchange, CopilotTokenCache, streaming compat) deleted. Fork `jbanety/rig` replaced by official `rig-core` from crates.io. |
 | GitHub API | `git_provider/github.rs` | HTTPS via octocrab | Token from `.env` | |
 | GitLab API | `git_provider/gitlab.rs` | HTTPS via reqwest | Token from `.env` | |
 | Telegram API | `notifier/mod.rs` | HTTPS via reqwest | Bot token from `.env` | |
@@ -1251,6 +1337,8 @@ cli/run_start() ──creates──▶ ShutdownFlag (Arc<AtomicBool>)
 | `.env.example` | ✅ Yes | Template listing required env vars (no values) |
 | `_bmad-output/implementation-artifacts/.bmad-bot-session.yaml` | ❌ No (transient) | Session WAL file — exists only during active session |
 | `.bmad-bot-state.json` | ❌ No (transient) | Daemon state file — exists only while daemon is running, used by `bmad-bot status` |
+| `_bmad-output/implementation-artifacts/critic-memory.md` | ❌ No (persistent) | Story Critic cumulative memory — observations, decisions, rationale across all stories. Created on first Critic invocation. Never auto-truncated. |
+| `_bmad-output/implementation-artifacts/deferred-work.md` | ❌ No (persistent) | Accumulated technical debt items from code reviews. Purged when pre-epic stories complete. |
 
 ## Architecture Validation Results
 
