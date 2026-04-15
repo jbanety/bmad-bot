@@ -184,13 +184,21 @@ pub struct LlmRoleConfig {
     pub provider: String,
     /// Model identifier, e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`.
     pub model: String,
-    /// Optional reasoning effort level for OpenAI-compatible models.
+    /// Optional reasoning effort level for OpenAI providers.
     ///
     /// Supported values: `"low"`, `"medium"`, `"high"`, `"xhigh"`.
-    /// Only effective for OpenAI and GitHub Copilot providers using the Responses API.
-    /// Ignored for Anthropic and Copilot models routed through Chat Completions API.
+    /// Only effective for OpenAI providers using the Responses API.
+    /// Ignored for Anthropic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Optional base URL override for any provider.
+    ///
+    /// When set, overrides the default endpoint for the configured provider.
+    /// Use for custom Anthropic-compatible or OpenAI-compatible endpoints
+    /// (Ollama: `http://localhost:11434/v1`, LM Studio, vLLM, Groq, etc.).
+    /// Must start with `http://` or `https://`. Trailing slashes are stripped automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 /// Valid values for `reasoning_effort`.
@@ -434,6 +442,23 @@ impl BotConfig {
             });
         }
 
+        // Validate base_url if provided
+        if let Some(ref url) = role.base_url {
+            let has_scheme = url.starts_with("http://") || url.starts_with("https://");
+            let scheme_len = if url.starts_with("https://") { 8 } else { 7 };
+            let after_scheme = if has_scheme { &url[scheme_len..] } else { "" };
+            let has_host = has_scheme && !after_scheme.is_empty() && !after_scheme.starts_with('/');
+            if !has_scheme || !has_host {
+                return Err(ConfigError::InvalidField {
+                    field: format!("{field_prefix}.base_url"),
+                    reason: format!(
+                        "invalid URL '{}'; must start with http:// or https:// and include a host",
+                        url
+                    ),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -467,16 +492,19 @@ impl BotConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 review: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
             },
@@ -1501,5 +1529,93 @@ enabled: false
 "#;
         let cfg: McpServerConfig = serde_yml::from_str(yaml).unwrap();
         assert!(!cfg.enabled);
+    }
+    // -----------------------------------------------------------------------
+    // base_url tests (Story 11.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_openai_with_base_url() {
+        let yaml = r#"
+polling_interval_secs: 300
+git_provider:
+  provider: github
+  repo_owner: test
+  repo_name: test
+llm:
+  dev:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+  review:
+    provider: openai
+    model: gpt-4o
+    base_url: "http://localhost:11434/v1"
+  supervisor:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+notifications:
+  telegram:
+    enabled: false
+    chat_id: ""
+bmad_paths:
+  project_root: /tmp/test
+  output_folder: /tmp/test/_out
+  planning_artifacts: /tmp/test/_out/planning
+  implementation_artifacts: /tmp/test/_out/impl
+"#;
+        let config = config_from_str(yaml).expect("should parse");
+        assert_eq!(
+            config.llm.review.base_url.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+    }
+
+    #[test]
+    fn test_config_openai_without_base_url() {
+        let mut config = valid_config();
+        config.llm.supervisor.provider = "openai".to_string();
+        // When base_url is absent from config, it should deserialize to None
+        assert!(config.llm.supervisor.base_url.is_none());
+    }
+
+    #[test]
+    fn test_validate_llm_role_base_url_valid() {
+        let mut config = valid_config();
+        config.llm.dev.base_url = Some("http://localhost:11434/v1".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_llm_role_base_url_invalid() {
+        let mut config = valid_config();
+        config.llm.dev.base_url = Some("not-a-url".to_string());
+        let result = config.validate();
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("base_url"));
+    }
+
+    #[test]
+    fn test_validate_llm_role_base_url_none_ok() {
+        let mut config = valid_config();
+        config.llm.dev.base_url = None;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_llm_role_base_url_https_valid() {
+        let mut config = valid_config();
+        config.llm.dev.base_url = Some("https://api.groq.com/openai/v1".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_llm_role_base_url_no_scheme_invalid() {
+        let mut config = valid_config();
+        config.llm.dev.base_url = Some("localhost:11434/v1".to_string());
+        let result = config.validate();
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("base_url"));
     }
 }

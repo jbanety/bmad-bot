@@ -203,6 +203,7 @@ mod tests {
             provider: "gemini".to_string(),
             model: "gemini-pro".to_string(),
             reasoning_effort: None,
+            base_url: None,
         };
 
         let result = create_completion_model(&config, &secrets);
@@ -292,6 +293,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: None,
+            base_url: None,
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "sk-ant-test-key");
@@ -304,6 +306,7 @@ mod tests {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
             reasoning_effort: None,
+            base_url: None,
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "sk-openai-test-key");
@@ -316,6 +319,7 @@ mod tests {
             provider: "github-copilot".to_string(),
             model: "gpt-4o".to_string(),
             reasoning_effort: None,
+            base_url: None,
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "gh-models-test-key");
@@ -328,6 +332,7 @@ mod tests {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
             reasoning_effort: None,
+            base_url: None,
         };
         let result = create_completion_model(&config, &secrets);
         assert!(result.is_err());

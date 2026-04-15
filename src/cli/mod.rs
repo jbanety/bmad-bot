@@ -601,16 +601,19 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
                 provider: dev_provider,
                 model: dev_model,
                 reasoning_effort: None,
+                base_url: None,
             },
             review: LlmRoleConfig {
                 provider: review_provider,
                 model: review_model,
                 reasoning_effort: None,
+                base_url: None,
             },
             supervisor: LlmRoleConfig {
                 provider: supervisor_provider,
                 model: supervisor_model,
                 reasoning_effort: None,
+                base_url: None,
             },
             epic_review: LlmRoleConfig::default(),
         },
@@ -1468,16 +1471,19 @@ mod tests {
                     provider: "anthropic".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 review: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "openai".to_string(),
                     model: "gpt-4o".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
             },
@@ -1794,6 +1800,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: None,
+            base_url: None,
         };
         let env = generate_env_file(&config).unwrap();
         let count = env.matches("ANTHROPIC_API_KEY=").count();

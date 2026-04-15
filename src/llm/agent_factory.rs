@@ -69,13 +69,13 @@ impl std::fmt::Display for LlmRole {
 /// ## Variants
 ///
 /// - **Anthropic** — Messages API (native Anthropic provider).
-/// - **OpenAiResponses** — Responses API (native OpenAI provider).
+/// - **OpenAiCompatible** — OpenAI-compatible Responses API agent (supports custom base_url).
 #[allow(missing_debug_implementations)]
 pub enum BuiltAgent {
     /// Anthropic Messages API agent.
     Anthropic(Agent<anthropic::completion::CompletionModel>),
-    /// OpenAI Responses API agent.
-    OpenAiResponses(Agent<openai::responses_api::ResponsesCompletionModel>),
+    /// OpenAI-compatible Responses API agent (supports custom base_url).
+    OpenAiCompatible(Agent<openai::responses_api::ResponsesCompletionModel>),
 }
 
 impl BuiltAgent {
@@ -99,7 +99,7 @@ impl BuiltAgent {
     ) -> Result<(String, Vec<Message>), rig::completion::PromptError> {
         match self {
             Self::Anthropic(agent) => streaming_chat(agent, prompt, history, shutdown, ui).await,
-            Self::OpenAiResponses(agent) => {
+            Self::OpenAiCompatible(agent) => {
                 streaming_chat(agent, prompt, history, shutdown, ui).await
             }
         }
@@ -136,7 +136,7 @@ impl BuiltAgent {
                 )
                 .await
             }
-            Self::OpenAiResponses(agent) => {
+            Self::OpenAiCompatible(agent) => {
                 crate::session::agent::activate_agent(
                     agent,
                     project_root,
@@ -155,7 +155,7 @@ impl std::fmt::Debug for BuiltAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Anthropic(_) => write!(f, "BuiltAgent::Anthropic(..)"),
-            Self::OpenAiResponses(_) => write!(f, "BuiltAgent::OpenAiResponses(..)"),
+            Self::OpenAiCompatible(_) => write!(f, "BuiltAgent::OpenAiCompatible(..)"),
         }
     }
 }
@@ -256,13 +256,19 @@ impl AgentFactory {
 
         match provider {
             "anthropic" => {
-                let client: anthropic::Client = anthropic::Client::builder()
-                    .api_key(&api_key)
-                    .build()
-                    .map_err(|e| ProviderError::ClientCreation {
-                        provider: "anthropic".to_string(),
-                        reason: e.to_string(),
-                    })?;
+                let mut client_builder = anthropic::Client::builder().api_key(&api_key);
+
+                if let Some(ref url) = role_config.base_url {
+                    client_builder = client_builder.base_url(url.trim_end_matches('/'));
+                }
+
+                let client: anthropic::Client =
+                    client_builder
+                        .build()
+                        .map_err(|e| ProviderError::ClientCreation {
+                            provider: "anthropic".to_string(),
+                            reason: e.to_string(),
+                        })?;
 
                 let builder = client.agent(model).preamble(preamble);
 
@@ -282,35 +288,43 @@ impl AgentFactory {
                     provider = "anthropic",
                     model = %model,
                     role = %role,
+                    base_url = role_config.base_url.as_deref().unwrap_or("(default)"),
                     "AgentFactory built agent"
                 );
 
                 Ok(BuiltAgent::Anthropic(agent))
             }
             "openai" => {
-                let client: openai::Client = openai::Client::builder()
-                    .api_key(&api_key)
-                    .build()
-                    .map_err(|e| ProviderError::ClientCreation {
-                        provider: "openai".to_string(),
-                        reason: e.to_string(),
-                    })?;
+                let mut client_builder = openai::Client::builder().api_key(&api_key);
 
-                let builder = client.agent(model).preamble(preamble);
-                let builder =
-                    apply_reasoning_effort(builder, reasoning_effort, "openai", model, role);
-                let agent = configure_tools.configure_openai_responses(builder);
+                if let Some(ref url) = role_config.base_url {
+                    client_builder = client_builder.base_url(url.trim_end_matches('/'));
+                }
+
+                let client: openai::Client =
+                    client_builder
+                        .build()
+                        .map_err(|e| ProviderError::ClientCreation {
+                            provider: "openai".to_string(),
+                            reason: e.to_string(),
+                        })?;
+
+                let agent_builder = client.agent(model).preamble(preamble);
+                let agent_builder =
+                    apply_reasoning_effort(agent_builder, reasoning_effort, "openai", model, role);
+                let agent = configure_tools.configure_openai_compatible(agent_builder);
 
                 tracing::info!(
                     action = "agent_built",
                     provider = "openai",
                     model = %model,
                     role = %role,
+                    base_url = role_config.base_url.as_deref().unwrap_or("(default)"),
                     reasoning_effort = reasoning_effort.unwrap_or("none"),
-                    "AgentFactory built agent (Responses API)"
+                    "AgentFactory built agent (OpenAI-compatible)"
                 );
 
-                Ok(BuiltAgent::OpenAiResponses(agent))
+                Ok(BuiltAgent::OpenAiCompatible(agent))
             }
             other => Err(ProviderError::UnsupportedProvider {
                 provider: other.to_string(),
@@ -356,7 +370,7 @@ impl AgentFactory {
 /// the trait methods receive a builder and return the final built `Agent<M>`.
 ///
 /// The most common implementation is [`ToolConfigurator`], which registers the
-/// same set of tools on all three builder types.
+/// same set of tools on both builder types.
 pub trait AgentConfigurator {
     /// Configure tools on an Anthropic agent builder and build the final agent.
     fn configure_anthropic(
@@ -364,17 +378,11 @@ pub trait AgentConfigurator {
         builder: AgentBuilder<anthropic::completion::CompletionModel>,
     ) -> Agent<anthropic::completion::CompletionModel>;
 
-    /// Configure tools on an OpenAI Responses API agent builder and build the final agent.
-    fn configure_openai_responses(
+    /// Configure tools on an OpenAI-compatible Responses API agent builder and build the final agent.
+    fn configure_openai_compatible(
         self,
         builder: AgentBuilder<openai::responses_api::ResponsesCompletionModel>,
     ) -> Agent<openai::responses_api::ResponsesCompletionModel>;
-
-    /// Configure tools on an OpenAI Completions API agent builder and build the final agent.
-    fn configure_openai_completions(
-        self,
-        builder: AgentBuilder<openai::completion::CompletionModel>,
-    ) -> Agent<openai::completion::CompletionModel>;
 }
 
 /// No-tools configurator — returns the builder unchanged.
@@ -391,17 +399,10 @@ impl AgentConfigurator for NoTools {
         builder.build()
     }
 
-    fn configure_openai_responses(
+    fn configure_openai_compatible(
         self,
         builder: AgentBuilder<openai::responses_api::ResponsesCompletionModel>,
     ) -> Agent<openai::responses_api::ResponsesCompletionModel> {
-        builder.build()
-    }
-
-    fn configure_openai_completions(
-        self,
-        builder: AgentBuilder<openai::completion::CompletionModel>,
-    ) -> Agent<openai::completion::CompletionModel> {
         builder.build()
     }
 }
@@ -459,8 +460,8 @@ impl<T> ToolConfigurator<T> {
 /// Generate [`AgentConfigurator`] implementations for any tuple arity.
 ///
 /// Each invocation produces an `impl AgentConfigurator for ToolConfigurator<(T1, T2, …)>`
-/// that registers the tools on all three provider builder types (Anthropic, OpenAI
-/// Responses, OpenAI Completions). Adding or removing tools from a call-site
+/// that registers the tools on both provider builder types (Anthropic, OpenAI-compatible
+/// Responses). Adding or removing tools from a call-site
 /// requires zero changes here — the macro already covers arities 1 through 12.
 macro_rules! impl_agent_configurator {
     ([$($T:ident),+], [$($t:ident),+]) => {
@@ -480,22 +481,10 @@ macro_rules! impl_agent_configurator {
                 simple.build()
             }
 
-            fn configure_openai_responses(
+            fn configure_openai_compatible(
                 self,
                 builder: AgentBuilder<openai::responses_api::ResponsesCompletionModel>,
             ) -> Agent<openai::responses_api::ResponsesCompletionModel> {
-                let ($($t,)+) = self.tools;
-                let mut simple = builder$(.tool($t))+;
-                for (tools, sink) in self.mcp_servers {
-                    simple = simple.rmcp_tools(tools, sink);
-                }
-                simple.build()
-            }
-
-            fn configure_openai_completions(
-                self,
-                builder: AgentBuilder<openai::completion::CompletionModel>,
-            ) -> Agent<openai::completion::CompletionModel> {
                 let ($($t,)+) = self.tools;
                 let mut simple = builder$(.tool($t))+;
                 for (tools, sink) in self.mcp_servers {
@@ -643,16 +632,19 @@ mod tests {
                     provider: "anthropic".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 review: LlmRoleConfig {
                     provider: "openai".to_string(),
                     model: "gpt-4o".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "github-copilot".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
+                    base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
             },
@@ -765,6 +757,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: Some("high".to_string()),
+            base_url: None,
         };
         let config = Arc::new(cfg);
         let secrets = Arc::new(make_test_secrets());
@@ -783,6 +776,7 @@ mod tests {
         assert!(default.provider.is_empty());
         assert!(default.model.is_empty());
         assert!(default.reasoning_effort.is_none());
+        assert!(default.base_url.is_none());
     }
 
     #[test]
@@ -846,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_agent_factory_build_openai_bare() {
+    async fn test_agent_factory_build_openai_compatible_bare() {
         let config = Arc::new(make_test_config());
         let secrets = Arc::new(make_test_secrets());
         let factory = AgentFactory::new(config, secrets);
@@ -855,7 +849,7 @@ mod tests {
         assert!(result.is_ok());
 
         let agent = result.unwrap();
-        assert!(matches!(agent, BuiltAgent::OpenAiResponses(_)));
+        assert!(matches!(agent, BuiltAgent::OpenAiCompatible(_)));
     }
 
     #[test]
@@ -933,7 +927,7 @@ mod tests {
             let builder = apply_reasoning_effort(
                 builder,
                 Some(level),
-                "github-copilot",
+                "openai",
                 "gpt-5.2-codex",
                 LlmRole::Dev,
             );
@@ -1053,5 +1047,36 @@ mod tests {
             crate::configure_agent_tools!(rig::tools::think::ThinkTool).with_mcp(vec![]);
         // Should build successfully — identical to no-MCP path
         let _agent = configurator.configure_anthropic(builder);
+    }
+    // -- Story 11.2: base_url and openai-compatible tests --
+
+    #[tokio::test]
+    async fn test_agent_factory_build_openai_compatible_with_base_url() {
+        let mut config = make_test_config();
+        config.llm.review.base_url = Some("http://localhost:11434/v1".to_string());
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        let result = factory.build_bare(LlmRole::Review, "test preamble").await;
+        assert!(result.is_ok(), "Build with base_url should succeed");
+        assert!(matches!(result.unwrap(), BuiltAgent::OpenAiCompatible(_)));
+    }
+
+    #[tokio::test]
+    async fn test_agent_factory_build_anthropic_with_base_url() {
+        // Anthropic build path should also honour base_url (e.g. Anthropic-compatible proxy).
+        let mut config = make_test_config();
+        config.llm.dev.base_url = Some("http://localhost:8080/v1".to_string());
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        let result = factory.build_bare(LlmRole::Dev, "test preamble").await;
+        assert!(
+            result.is_ok(),
+            "Anthropic build with base_url should succeed"
+        );
+        assert!(matches!(result.unwrap(), BuiltAgent::Anthropic(_)));
     }
 }
