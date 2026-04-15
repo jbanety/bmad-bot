@@ -4,23 +4,15 @@
 //! we cannot use `Box<dyn Chat>`. Instead, [`BuiltAgent`] wraps concrete agent types
 //! in an enum and dispatches `stream_chat()` via match arms.
 //!
-//! [`AgentFactory`] centralizes all provider construction: API key resolution,
-//! Copilot token exchange, and API format detection happen in one place. Callers
+//! [`AgentFactory`] centralizes all provider construction: API key resolution
+//! and provider configuration happen in one place. Callers
 //! (session runner, review runner, supervisor architect) simply call
 //! `factory.build(role, preamble, configure_tools)` and get a ready-to-use
 //! `BuiltAgent` back.
-//!
-//! ## Copilot API Format Detection
-//!
-//! GitHub Copilot is a proxy that routes to multiple backends (OpenAI, Anthropic,
-//! Mistral, etc.). Known OpenAI model families require the Responses API; all
-//! other models use Chat Completions API as a safe fallback. See
-//! [`copilot_requires_responses_api()`] for the hardcoded heuristic.
 
-use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};
 use crate::config::{BotConfig, BotSecrets, LlmRoleConfig};
 use crate::session::agent::streaming_chat;
-use crate::session::provider::{ProviderError, copilot_headers};
+use crate::session::provider::ProviderError;
 
 use rig::agent::{Agent, AgentBuilder};
 use rig::client::CompletionClient;
@@ -77,18 +69,13 @@ impl std::fmt::Display for LlmRole {
 /// ## Variants
 ///
 /// - **Anthropic** — Messages API (native Anthropic provider).
-/// - **OpenAiResponses** — Responses API (native OpenAI, or Copilot-proxied
-///   OpenAI models like `gpt-4o`, `o3-pro`, `gpt-5.2-codex`).
-/// - **OpenAiCompletions** — Chat Completions API (Copilot-proxied non-OpenAI
-///   models like Claude, Mistral — safe fallback).
+/// - **OpenAiResponses** — Responses API (native OpenAI provider).
 #[allow(missing_debug_implementations)]
 pub enum BuiltAgent {
     /// Anthropic Messages API agent.
     Anthropic(Agent<anthropic::completion::CompletionModel>),
-    /// OpenAI Responses API agent (also used for Copilot-proxied OpenAI models).
+    /// OpenAI Responses API agent.
     OpenAiResponses(Agent<openai::responses_api::ResponsesCompletionModel>),
-    /// OpenAI Chat Completions API agent (used for Copilot-proxied non-OpenAI models).
-    OpenAiCompletions(Agent<openai::completion::CompletionModel>),
 }
 
 impl BuiltAgent {
@@ -113,9 +100,6 @@ impl BuiltAgent {
         match self {
             Self::Anthropic(agent) => streaming_chat(agent, prompt, history, shutdown, ui).await,
             Self::OpenAiResponses(agent) => {
-                streaming_chat(agent, prompt, history, shutdown, ui).await
-            }
-            Self::OpenAiCompletions(agent) => {
                 streaming_chat(agent, prompt, history, shutdown, ui).await
             }
         }
@@ -163,17 +147,6 @@ impl BuiltAgent {
                 )
                 .await
             }
-            Self::OpenAiCompletions(agent) => {
-                crate::session::agent::activate_agent(
-                    agent,
-                    project_root,
-                    agent_relative_path,
-                    label,
-                    shutdown,
-                    ui,
-                )
-                .await
-            }
         }
     }
 }
@@ -183,7 +156,6 @@ impl std::fmt::Debug for BuiltAgent {
         match self {
             Self::Anthropic(_) => write!(f, "BuiltAgent::Anthropic(..)"),
             Self::OpenAiResponses(_) => write!(f, "BuiltAgent::OpenAiResponses(..)"),
-            Self::OpenAiCompletions(_) => write!(f, "BuiltAgent::OpenAiCompletions(..)"),
         }
     }
 }
@@ -203,32 +175,16 @@ const _: () = {
 // AgentFactory
 // ---------------------------------------------------------------------------
 
-/// Centralized agent construction — builds [`BuiltAgent`] instances for any role.
+/// Centralized factory for constructing provider-specific [`BuiltAgent`] instances.
 ///
-/// Owns the shared configuration, secrets, and Copilot token cache. Callers
-/// provide the role, preamble, and a closure to configure tools on the agent
-/// builder.
-///
-/// # Example (conceptual)
-///
-/// ```ignore
-/// let agent = factory.build(LlmRole::Dev, &preamble, |builder| {
-///     builder.tool(git).tool(read_file).tool(edit_file)
-/// }).await?;
-///
-/// agent.stream_chat("DS", vec![], Some(&shutdown)).await?;
-/// ```
+/// All provider selection, API key resolution, and agent builder configuration
+/// is handled here. Callers simply call [`AgentFactory::build()`] with a role,
+/// preamble, and tool configurator.
 pub struct AgentFactory {
     /// Shared daemon configuration.
     config: Arc<BotConfig>,
     /// Shared secrets (API keys from `.env`).
     secrets: Arc<BotSecrets>,
-    /// In-memory cache for GitHub Copilot session tokens.
-    ///
-    /// The `std::sync::Mutex` is used (not `tokio::sync::Mutex`) because the
-    /// lock is held only briefly to check/store cached tokens — never across
-    /// `.await` points.
-    copilot_cache: std::sync::Mutex<CopilotTokenCache>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -236,22 +192,14 @@ impl std::fmt::Debug for AgentFactory {
         f.debug_struct("AgentFactory")
             .field("config", &"<BotConfig>")
             .field("secrets", &"<BotSecrets>")
-            .field("copilot_cache", &"<CopilotTokenCache>")
             .finish()
     }
 }
 
 impl AgentFactory {
     /// Create a new `AgentFactory`.
-    ///
-    /// The `CopilotTokenCache` is created internally — callers do not need to
-    /// manage it.
     pub fn new(config: Arc<BotConfig>, secrets: Arc<BotSecrets>) -> Self {
-        Self {
-            config,
-            secrets,
-            copilot_cache: std::sync::Mutex::new(CopilotTokenCache::new()),
-        }
+        Self { config, secrets }
     }
 
     /// Resolve the [`LlmRoleConfig`] for a given role.
@@ -364,81 +312,6 @@ impl AgentFactory {
 
                 Ok(BuiltAgent::OpenAiResponses(agent))
             }
-            "github-copilot" => {
-                let (session_token, base_url) = self.resolve_copilot_session(&api_key).await?;
-
-                if copilot_requires_responses_api(model) {
-                    // OpenAI model family → Responses API
-                    let client: openai::Client = openai::Client::builder()
-                        .api_key(&session_token)
-                        .base_url(&base_url)
-                        .http_headers(copilot_headers())
-                        .build()
-                        .map_err(|e| ProviderError::ClientCreation {
-                            provider: "github-copilot".to_string(),
-                            reason: e.to_string(),
-                        })?;
-
-                    let builder = client.agent(model).preamble(preamble);
-                    let builder = apply_reasoning_effort(
-                        builder,
-                        reasoning_effort,
-                        "github-copilot",
-                        model,
-                        role,
-                    );
-                    let agent = configure_tools.configure_openai_responses(builder);
-
-                    tracing::info!(
-                        action = "agent_built",
-                        provider = "github-copilot",
-                        api_format = "responses",
-                        model = %model,
-                        role = %role,
-                        reasoning_effort = reasoning_effort.unwrap_or("none"),
-                        "AgentFactory built Copilot agent (Responses API)"
-                    );
-
-                    Ok(BuiltAgent::OpenAiResponses(agent))
-                } else {
-                    // Non-OpenAI model → Completions API (safe fallback)
-                    let client: openai::CompletionsClient = openai::Client::builder()
-                        .api_key(&session_token)
-                        .base_url(&base_url)
-                        .http_headers(copilot_headers())
-                        .build()
-                        .map_err(|e| ProviderError::ClientCreation {
-                            provider: "github-copilot".to_string(),
-                            reason: e.to_string(),
-                        })?
-                        .completions_api();
-
-                    let builder = client.agent(model).preamble(preamble);
-
-                    if reasoning_effort.is_some() {
-                        tracing::warn!(
-                            provider = "github-copilot",
-                            api_format = "completions",
-                            model = %model,
-                            role = %role,
-                            "reasoning_effort is not supported for Completions API models — ignoring"
-                        );
-                    }
-
-                    let agent = configure_tools.configure_openai_completions(builder);
-
-                    tracing::info!(
-                        action = "agent_built",
-                        provider = "github-copilot",
-                        api_format = "completions",
-                        model = %model,
-                        role = %role,
-                        "AgentFactory built Copilot agent (Completions API)"
-                    );
-
-                    Ok(BuiltAgent::OpenAiCompletions(agent))
-                }
-            }
             other => Err(ProviderError::UnsupportedProvider {
                 provider: other.to_string(),
             }),
@@ -454,60 +327,6 @@ impl AgentFactory {
         preamble: &str,
     ) -> Result<BuiltAgent, ProviderError> {
         self.build(role, preamble, NoTools).await
-    }
-
-    /// Resolve a Copilot session token and base URL from the OAuth token.
-    ///
-    /// Uses the internal [`CopilotTokenCache`] so that repeated calls within
-    /// the same daemon run reuse a valid cached token. Returns
-    /// `(session_token, base_url)` on success.
-    ///
-    /// The `std::sync::Mutex` guard is NOT held across the async exchange call
-    /// to satisfy clippy's `await_holding_lock` lint.
-    async fn resolve_copilot_session(
-        &self,
-        oauth_token: &str,
-    ) -> Result<(String, String), ProviderError> {
-        // Phase 1: check cache under lock, return immediately if valid
-        {
-            let cache = self
-                .copilot_cache
-                .lock()
-                .map_err(|e| ProviderError::ClientCreation {
-                    provider: "github-copilot".to_string(),
-                    reason: format!("Copilot cache lock poisoned: {e}"),
-                })?;
-            if let Some(pair) = cache.try_get_cached() {
-                return Ok(pair);
-            }
-        } // MutexGuard dropped here
-
-        // Phase 2: exchange token WITHOUT holding the lock
-        let http_client = ReqwestCopilotHttpClient::new();
-        let resp = http_client
-            .exchange_copilot_token(oauth_token)
-            .await
-            .map_err(|e| ProviderError::ClientCreation {
-                provider: "github-copilot".to_string(),
-                reason: format!("Copilot token exchange failed: {e}"),
-            })?;
-
-        let base_url = crate::auth::github_copilot::derive_base_url_from_token(&resp.token);
-        let token = resp.token.clone();
-
-        // Phase 3: store result under lock
-        {
-            let mut cache =
-                self.copilot_cache
-                    .lock()
-                    .map_err(|e| ProviderError::ClientCreation {
-                        provider: "github-copilot".to_string(),
-                        reason: format!("Copilot cache lock poisoned: {e}"),
-                    })?;
-            cache.store(resp.token, base_url.clone(), resp.expires_at);
-        }
-
-        Ok((token, base_url))
     }
 
     /// Get a reference to the shared [`BotConfig`].
@@ -719,36 +538,9 @@ impl_agent_configurator!(
 );
 
 // ---------------------------------------------------------------------------
-// Copilot API format heuristic
+// apply_reasoning_effort
 // ---------------------------------------------------------------------------
 
-/// Determine whether a model proxied via GitHub Copilot requires the OpenAI Responses API.
-///
-/// GitHub Copilot is a proxy that routes to multiple backends (OpenAI, Anthropic,
-/// Mistral, etc.). OpenAI models require the Responses API — Chat Completions
-/// returns 400 for newer models (e.g. `gpt-5.2-codex`).
-///
-/// All other models (Claude, Mistral, unknown) use Chat Completions through the
-/// proxy — this is the safe fallback.
-///
-/// **This is hardcoded by design.** The API format is a deterministic property of
-/// the provider behind the model, not a user preference. There is no `api_format`
-/// config option.
-///
-/// # Known OpenAI model families
-///
-/// - `gpt-*` — GPT family (gpt-4o, gpt-4o-mini, gpt-5.2-codex, etc.)
-/// - `o1-*` — O1 reasoning models (o1-mini, o1-preview, etc.)
-/// - `o3-*` — O3 reasoning models (o3-pro, o3-mini, etc.)
-/// - `*codex*` — Codex models (any model with "codex" in the name)
-///
-/// # Fallback
-///
-/// If the model name doesn't match any known OpenAI pattern, returns `false`
-/// (Completions API). This is the safe default — it works for all non-OpenAI
-/// models. The inverse (defaulting to Responses API) would break non-OpenAI models.
-///
-/// Adding a new OpenAI model family is a one-liner addition to this function.
 /// Apply `reasoning.effort` as `additional_params` on an OpenAI Responses API builder.
 ///
 /// If `effort` is `None`, the builder is returned unchanged. Otherwise, injects:
@@ -756,7 +548,7 @@ impl_agent_configurator!(
 /// { "reasoning": { "effort": "<value>" } }
 /// ```
 ///
-/// Only call this for Responses API builders (OpenAI direct or Copilot Responses path).
+/// Only call this for Responses API builders (OpenAI direct).
 fn apply_reasoning_effort<M: rig::completion::CompletionModel>(
     builder: AgentBuilder<M>,
     effort: Option<&str>,
@@ -781,15 +573,6 @@ fn apply_reasoning_effort<M: rig::completion::CompletionModel>(
     }
 }
 
-pub fn copilot_requires_responses_api(model: &str) -> bool {
-    let m = model.to_lowercase();
-    m.starts_with("gpt-")
-        || m.starts_with("o1-")
-        || m.starts_with("o3-")
-        || m.starts_with("o4-")
-        || m.contains("codex")
-}
-
 // ---------------------------------------------------------------------------
 // resolve_api_key (re-export from provider.rs)
 // ---------------------------------------------------------------------------
@@ -805,57 +588,6 @@ pub use crate::session::provider::resolve_api_key;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- copilot_requires_responses_api tests --
-
-    #[test]
-    fn test_copilot_requires_responses_api_gpt_models() {
-        assert!(copilot_requires_responses_api("gpt-4o"));
-        assert!(copilot_requires_responses_api("gpt-4o-mini"));
-        assert!(copilot_requires_responses_api("gpt-5.2-codex"));
-        assert!(copilot_requires_responses_api("gpt-3.5-turbo"));
-    }
-
-    #[test]
-    fn test_copilot_requires_responses_api_o1_models() {
-        assert!(copilot_requires_responses_api("o1-mini"));
-        assert!(copilot_requires_responses_api("o1-preview"));
-    }
-
-    #[test]
-    fn test_copilot_requires_responses_api_o3_models() {
-        assert!(copilot_requires_responses_api("o3-pro"));
-        assert!(copilot_requires_responses_api("o3-mini"));
-    }
-
-    #[test]
-    fn test_copilot_requires_responses_api_o4_models() {
-        assert!(copilot_requires_responses_api("o4-mini"));
-    }
-
-    #[test]
-    fn test_copilot_requires_responses_api_codex_models() {
-        assert!(copilot_requires_responses_api("gpt-5.2-codex"));
-        assert!(copilot_requires_responses_api("some-codex-model"));
-        assert!(copilot_requires_responses_api("codex"));
-    }
-
-    #[test]
-    fn test_copilot_requires_responses_api_case_insensitive() {
-        assert!(copilot_requires_responses_api("GPT-4o"));
-        assert!(copilot_requires_responses_api("O1-Mini"));
-        assert!(copilot_requires_responses_api("O3-Pro"));
-        assert!(copilot_requires_responses_api("CODEX"));
-    }
-
-    #[test]
-    fn test_copilot_requires_responses_api_non_openai_models() {
-        assert!(!copilot_requires_responses_api("claude-sonnet-4-20250514"));
-        assert!(!copilot_requires_responses_api("claude-3.5-sonnet"));
-        assert!(!copilot_requires_responses_api("mistral-large"));
-        assert!(!copilot_requires_responses_api("unknown-model"));
-        assert!(!copilot_requires_responses_api(""));
-    }
 
     // -- LlmRole tests --
 

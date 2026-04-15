@@ -131,24 +131,6 @@ fn is_transient_llm_error(error: &str) -> bool {
         || lower.contains("unauthorized")
 }
 
-/// Detect Copilot session token expiry errors.
-///
-/// GitHub Copilot session tokens are short-lived (~30 min). When a session
-/// runs longer than the token TTL, the LLM API returns a 401 with
-/// "token expired". Unlike other transient errors, retrying with the same
-/// agent is pointless — the token baked into the rig HTTP client is dead.
-/// The fix is to rebuild the agent (which exchanges a fresh session token
-/// via [`CopilotTokenCache`]) and retry with the existing chat history.
-fn is_token_expired_error(error: &str) -> bool {
-    let lower = error.to_lowercase();
-    lower.contains("token expired")
-}
-
-/// Maximum number of times we rebuild the agent due to token expiry within
-/// a single session. Prevents infinite rebuild loops if something is
-/// fundamentally broken with the Copilot token exchange.
-const MAX_TOKEN_REFRESHES: usize = 5;
-
 /// Maximum number of retries for transient LLM errors during activation.
 const ACTIVATION_MAX_RETRIES: usize = 3;
 
@@ -329,7 +311,7 @@ pub(crate) fn truncate_summary(text: &str, max_len: usize) -> String {
 pub struct SessionRunner {
     /// Shared daemon configuration.
     config: Arc<BotConfig>,
-    /// Centralized agent construction factory (owns secrets + Copilot token cache).
+    /// Centralized agent construction factory (owns secrets and provider credentials).
     agent_factory: Arc<AgentFactory>,
     /// Path to the WAL state file: `{implementation_artifacts}/.bmad-bot-session.yaml`.
     state_file_path: PathBuf,
@@ -533,7 +515,7 @@ impl SessionRunner {
             }
         }
 
-        // Phase 2 — Build agent via factory (handles API key resolution + Copilot token exchange)
+        // Phase 2 — Build agent via factory (handles API key resolution)
         let provider_name = state.provider.clone();
         let model_name = state.model.clone();
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
@@ -1298,7 +1280,6 @@ impl SessionRunner {
         recovered_state: Option<SessionState>,
     ) -> SessionOutcome {
         let mut retries: usize = 0;
-        let mut token_refreshes: usize = 0;
         const MAX_RETRIES: usize = 3;
 
         // --- Initialization: normal vs recovery path ---
@@ -1340,31 +1321,6 @@ impl SessionRunner {
                     {
                         Ok(pair) => break pair,
                         Err(e) => {
-                            // Token expired during activation — rebuild agent with fresh token
-                            if is_token_expired_error(&e) && token_refreshes < MAX_TOKEN_REFRESHES {
-                                token_refreshes += 1;
-                                self.ui.llm_retry("dev", 0, token_refreshes as u32, 0.0);
-                                tracing::warn!(
-                                    action = "token_expired_rebuild",
-                                    step = "activation",
-                                    refresh = %token_refreshes,
-                                    "Copilot token expired during activation — rebuilding agent"
-                                );
-                                if let Ok(new_agent) = self
-                                    .build_agent_for_role(
-                                        LlmRole::Dev,
-                                        story,
-                                        escalation_slot.clone(),
-                                        decision_log.clone(),
-                                    )
-                                    .await
-                                {
-                                    *agent = new_agent;
-                                    continue;
-                                }
-                                // Fall through to normal error handling if rebuild fails
-                            }
-
                             if is_transient_llm_error(&e)
                                 && activation_retries < ACTIVATION_MAX_RETRIES
                             {
@@ -1469,33 +1425,6 @@ impl SessionRunner {
                             log_llm_error("dev", 0, &e);
                             self.ui.llm_error("dev", 0, &e.to_string());
                             let error_str = e.to_string();
-
-                            // Token expired during DS send — rebuild agent with fresh token
-                            if is_token_expired_error(&error_str)
-                                && token_refreshes < MAX_TOKEN_REFRESHES
-                            {
-                                token_refreshes += 1;
-                                self.ui.llm_retry("dev", 0, token_refreshes as u32, 0.0);
-                                tracing::warn!(
-                                    action = "token_expired_rebuild",
-                                    step = "initial_ds",
-                                    refresh = %token_refreshes,
-                                    "Copilot token expired during DS send — rebuilding agent"
-                                );
-                                if let Ok(new_agent) = self
-                                    .build_agent_for_role(
-                                        LlmRole::Dev,
-                                        story,
-                                        escalation_slot.clone(),
-                                        decision_log.clone(),
-                                    )
-                                    .await
-                                {
-                                    *agent = new_agent;
-                                    continue;
-                                }
-                                // Fall through to normal error handling if rebuild fails
-                            }
 
                             // Context limit during initial DS send — the activation history
                             // is already too large. Trigger recovery immediately; retrying
@@ -1865,67 +1794,13 @@ impl SessionRunner {
                         Err(e) => {
                             log_llm_error("dev", turn, &e);
                             self.ui.llm_error("dev", turn as u32, &e.to_string());
-                            let error_str = e.to_string();
-
-                            // Token expired on final commit — rebuild and retry once
-                            if is_token_expired_error(&error_str)
-                                && token_refreshes < MAX_TOKEN_REFRESHES
-                            {
-                                token_refreshes += 1;
-                                self.ui
-                                    .llm_retry("dev", turn as u32, token_refreshes as u32, 0.0);
-                                tracing::warn!(
-                                    action = "token_expired_rebuild",
-                                    turn = %turn,
-                                    step = "final_commit",
-                                    "Copilot token expired during final commit — rebuilding agent"
-                                );
-                                if let Ok(new_agent) = self
-                                    .build_agent_for_role(
-                                        LlmRole::Dev,
-                                        story,
-                                        escalation_slot.clone(),
-                                        decision_log.clone(),
-                                    )
-                                    .await
-                                {
-                                    *agent = new_agent;
-                                    if let Ok((r, new_hist)) = agent
-                                        .stream_chat(
-                                            commit_msg,
-                                            full_history.clone(),
-                                            Some(&self.shutdown),
-                                            Some(&self.ui),
-                                        )
-                                        .await
-                                    {
-                                        log_llm_response("dev", turn, &r);
-                                        self.ui.llm_response("dev", turn as u32, r.len());
-                                        self.ui.llm_response_content("dev", turn as u32, &r);
-                                        full_history = new_hist;
-                                        state.add_assistant_message(&r);
-                                        let _ = state.save(&self.state_file_path).await;
-                                        self.ui.phase_complete(
-                                            "Final Commit",
-                                            final_commit_start.elapsed(),
-                                        );
-                                        tracing::info!(
-                                            action = "final_commit_done",
-                                            turn = %turn,
-                                            story_key = %story.story_key,
-                                            "Final commit completed after token refresh"
-                                        );
-                                    }
-                                }
-                            } else {
-                                self.ui.phase_error("Final Commit", &e.to_string());
-                                tracing::warn!(
-                                    action = "final_commit_failed",
-                                    error = %e,
-                                    story_key = %story.story_key,
-                                    "Final commit request failed — proceeding anyway"
-                                );
-                            }
+                            self.ui.phase_error("Final Commit", &e.to_string());
+                            tracing::warn!(
+                                action = "final_commit_failed",
+                                error = %e,
+                                story_key = %story.story_key,
+                                "Final commit request failed — proceeding anyway"
+                            );
                         }
                     }
 
@@ -2043,71 +1918,13 @@ impl SessionRunner {
                         Err(e) => {
                             log_llm_error("dev", turn + 1, &e);
                             self.ui.llm_error("dev", (turn + 1) as u32, &e.to_string());
-                            let error_str = e.to_string();
-
-                            // Token expired on impact analysis — rebuild and retry once
-                            if is_token_expired_error(&error_str)
-                                && token_refreshes < MAX_TOKEN_REFRESHES
-                            {
-                                token_refreshes += 1;
-                                self.ui.llm_retry(
-                                    "dev",
-                                    (turn + 1) as u32,
-                                    token_refreshes as u32,
-                                    0.0,
-                                );
-                                tracing::warn!(
-                                    action = "token_expired_rebuild",
-                                    turn = %(turn + 1),
-                                    step = "impact_analysis",
-                                    "Copilot token expired during impact analysis — rebuilding agent"
-                                );
-                                if let Ok(new_agent) = self
-                                    .build_agent_for_role(
-                                        LlmRole::Dev,
-                                        story,
-                                        escalation_slot.clone(),
-                                        decision_log.clone(),
-                                    )
-                                    .await
-                                {
-                                    *agent = new_agent;
-                                    if let Ok((r, new_hist)) = agent
-                                        .stream_chat(
-                                            &*impact_prompt,
-                                            full_history.clone(),
-                                            Some(&self.shutdown),
-                                            Some(&self.ui),
-                                        )
-                                        .await
-                                    {
-                                        log_llm_response("dev", turn + 1, &r);
-                                        self.ui.llm_response("dev", (turn + 1) as u32, r.len());
-                                        self.ui.llm_response_content("dev", (turn + 1) as u32, &r);
-                                        full_history = new_hist;
-                                        state.add_assistant_message(&r);
-                                        let _ = state.save(&self.state_file_path).await;
-                                        self.ui.phase_complete(
-                                            "Impact Analysis",
-                                            impact_start.elapsed(),
-                                        );
-                                        tracing::info!(
-                                            action = "impact_analysis_done",
-                                            turn = %(turn + 1),
-                                            story_key = %story.story_key,
-                                            "Impact analysis completed after token refresh"
-                                        );
-                                    }
-                                }
-                            } else {
-                                self.ui.phase_error("Impact Analysis", &e.to_string());
-                                tracing::warn!(
-                                    action = "impact_analysis_failed",
-                                    error = %e,
-                                    story_key = %story.story_key,
-                                    "Impact analysis failed — proceeding to PR summary"
-                                );
-                            }
+                            self.ui.phase_error("Impact Analysis", &e.to_string());
+                            tracing::warn!(
+                                action = "impact_analysis_failed",
+                                error = %e,
+                                story_key = %story.story_key,
+                                "Impact analysis failed — proceeding to PR summary"
+                            );
                         }
                     }
 
@@ -2201,81 +2018,14 @@ impl SessionRunner {
                             self.ui.llm_error("dev", (turn + 2) as u32, &e.to_string());
                             let error_str = e.to_string();
 
-                            // Token expired on PR summary — rebuild and retry once
-                            if is_token_expired_error(&error_str)
-                                && token_refreshes < MAX_TOKEN_REFRESHES
-                            {
-                                token_refreshes += 1;
-                                self.ui.llm_retry(
-                                    "dev",
-                                    (turn + 2) as u32,
-                                    token_refreshes as u32,
-                                    0.0,
-                                );
-                                tracing::warn!(
-                                    action = "token_expired_rebuild",
-                                    turn = %(turn + 2),
-                                    step = "pr_summary",
-                                    "Copilot token expired during PR summary — rebuilding agent"
-                                );
-                                if let Ok(new_agent) = self
-                                    .build_agent_for_role(
-                                        LlmRole::Dev,
-                                        story,
-                                        escalation_slot.clone(),
-                                        decision_log.clone(),
-                                    )
-                                    .await
-                                {
-                                    *agent = new_agent;
-                                    match agent
-                                        .stream_chat(
-                                            &*pr_summary_prompt,
-                                            full_history.clone(),
-                                            Some(&self.shutdown),
-                                            Some(&self.ui),
-                                        )
-                                        .await
-                                    {
-                                        Ok((r, _)) => {
-                                            log_llm_response("dev", turn + 2, &r);
-                                            self.ui.llm_response("dev", (turn + 2) as u32, r.len());
-                                            self.ui.llm_response_content(
-                                                "dev",
-                                                (turn + 2) as u32,
-                                                &r,
-                                            );
-                                            state.add_assistant_message(&r);
-                                            let _ = state.save(&self.state_file_path).await;
-                                            self.ui
-                                                .phase_complete("PR Summary", pr_start.elapsed());
-                                            match parse_pr_summary(&r) {
-                                                Some((ctx, test, info)) => {
-                                                    tracing::info!(
-                                                        action = "pr_summary_parsed",
-                                                        story_key = %story.story_key,
-                                                        "PR summary extracted after token refresh"
-                                                    );
-                                                    (Some(ctx), Some(test), Some(info))
-                                                }
-                                                None => (None, None, None),
-                                            }
-                                        }
-                                        Err(_) => (None, None, None),
-                                    }
-                                } else {
-                                    (None, None, None)
-                                }
-                            } else {
-                                self.ui.phase_error("PR Summary", &error_str);
-                                tracing::warn!(
-                                    action = "pr_summary_failed",
-                                    error = %e,
-                                    story_key = %story.story_key,
-                                    "PR summary turn failed — using defaults"
-                                );
-                                (None, None, None)
-                            }
+                            self.ui.phase_error("PR Summary", &error_str);
+                            tracing::warn!(
+                                action = "pr_summary_failed",
+                                error = %e,
+                                story_key = %story.story_key,
+                                "PR summary turn failed — using defaults"
+                            );
+                            (None, None, None)
                         }
                     };
 
@@ -2419,60 +2169,6 @@ impl SessionRunner {
                                 // Write decisions regardless of outcome
                                 self.write_decisions(story, &decision_log).await;
                                 return outcome;
-                            }
-
-                            // Token expired — rebuild agent with fresh Copilot session token.
-                            // The existing full_history is reusable; only the HTTP client
-                            // (with the baked-in bearer token) needs replacing.
-                            if is_token_expired_error(&error_str)
-                                && token_refreshes < MAX_TOKEN_REFRESHES
-                            {
-                                token_refreshes += 1;
-                                tracing::warn!(
-                                    action = "token_expired_rebuild",
-                                    turn = %turn,
-                                    refresh = %token_refreshes,
-                                    max_refreshes = %MAX_TOKEN_REFRESHES,
-                                    "Copilot token expired — rebuilding agent with fresh token"
-                                );
-
-                                match self
-                                    .build_agent_for_role(
-                                        LlmRole::Dev,
-                                        story,
-                                        escalation_slot.clone(),
-                                        decision_log.clone(),
-                                    )
-                                    .await
-                                {
-                                    Ok(new_agent) => {
-                                        *agent = new_agent;
-                                        self.ui.llm_retry(
-                                            "dev",
-                                            turn as u32,
-                                            token_refreshes as u32,
-                                            0.0,
-                                        );
-                                        tracing::info!(
-                                            action = "token_refreshed",
-                                            refresh = %token_refreshes,
-                                            "Agent rebuilt with fresh token — retrying turn"
-                                        );
-                                        // Remove the user message we just added (it failed)
-                                        state.chat_history.pop();
-                                        // Do NOT increment retries — this is not a transient error,
-                                        // it's a token lifecycle event.
-                                        continue;
-                                    }
-                                    Err(rebuild_err) => {
-                                        tracing::error!(
-                                            action = "token_refresh_failed",
-                                            error = %rebuild_err,
-                                            "Failed to rebuild agent after token expiry"
-                                        );
-                                        // Fall through to normal retry/failure logic
-                                    }
-                                }
                             }
 
                             // Non-context-limit error — retry with exponential backoff
@@ -3615,58 +3311,6 @@ mod tests {
         ));
         assert!(is_transient_llm_error("token expired"));
         assert!(is_transient_llm_error("unauthorized: token expired"));
-    }
-
-    // ---- Token expired detection tests ----
-
-    #[test]
-    fn test_is_token_expired_error_exact_copilot_message() {
-        assert!(is_token_expired_error(
-            "CompletionError: ResponseError: CompletionError: ProviderError: Invalid status code 401 Unauthorized with message: unauthorized: token expired\n"
-        ));
-    }
-
-    #[test]
-    fn test_is_token_expired_error_simple() {
-        assert!(is_token_expired_error("token expired"));
-        assert!(is_token_expired_error("unauthorized: token expired"));
-        assert!(is_token_expired_error("Token Expired"));
-    }
-
-    #[test]
-    fn test_is_token_expired_error_false_for_other_auth_errors() {
-        assert!(!is_token_expired_error("authentication failed"));
-        assert!(!is_token_expired_error("bad credentials"));
-        assert!(!is_token_expired_error("HTTP 401 Unauthorized"));
-        assert!(!is_token_expired_error("token exchange failed"));
-    }
-
-    #[test]
-    fn test_is_token_expired_error_false_for_transient_errors() {
-        assert!(!is_token_expired_error("503 Service Unavailable"));
-        assert!(!is_token_expired_error("429 Rate limit"));
-        assert!(!is_token_expired_error("connection reset"));
-        assert!(!is_token_expired_error("timeout"));
-    }
-
-    #[test]
-    fn test_is_token_expired_error_false_for_context_limit() {
-        assert!(!is_token_expired_error("prompt is too long"));
-        assert!(!is_token_expired_error("context window exceeded"));
-    }
-
-    #[test]
-    fn test_max_token_refreshes_is_reasonable() {
-        // Ensure the constant is set to a sane value — enough for long sessions
-        // (each refresh buys ~30 min) but bounded to prevent infinite loops.
-        assert!(
-            MAX_TOKEN_REFRESHES >= 3,
-            "Should allow at least 3 refreshes"
-        );
-        assert!(
-            MAX_TOKEN_REFRESHES <= 10,
-            "Should not allow unbounded refreshes"
-        );
     }
 
     #[test]

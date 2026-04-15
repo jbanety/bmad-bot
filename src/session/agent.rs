@@ -264,8 +264,8 @@ OVERRIDE: communication_language = English
 /// Send a prompt via streaming and collect the complete text response.
 ///
 /// This is a drop-in replacement for `agent.chat(prompt, history)` that uses
-/// rig's streaming API instead. All providers (Anthropic, OpenAI, GitHub Copilot)
-/// support streaming — and Copilot **requires** it (`stream: false` is rejected).
+/// rig's streaming API instead. All providers (Anthropic, OpenAI-compatible)
+/// support streaming.
 ///
 /// Tool calls are handled automatically by rig within the stream.
 ///

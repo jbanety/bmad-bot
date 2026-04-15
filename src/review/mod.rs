@@ -44,10 +44,6 @@ use crate::watcher::StoryInfo;
 /// Maximum chat turns for a review session (safety net).
 const MAX_REVIEW_TURNS: usize = 100;
 
-/// Maximum number of times we rebuild the agent due to Copilot token expiry
-/// within a single review session. Mirrors [`crate::session::runner::MAX_TOKEN_REFRESHES`].
-const MAX_TOKEN_REFRESHES: usize = 5;
-
 /// Maximum number of full session retries for transient errors (e.g. malformed tool calls).
 ///
 /// When the LLM sends malformed tool call arguments (e.g. two JSON objects concatenated),
@@ -57,19 +53,6 @@ const MAX_TOKEN_REFRESHES: usize = 5;
 ///
 /// Shared with [`epic::EpicReviewRunner`] to ensure both runners use the same retry budget.
 pub(super) const MAX_SESSION_RETRIES: usize = 2;
-
-/// Detect Copilot session token expiry errors.
-///
-/// GitHub Copilot session tokens are short-lived (~30 min). When a review
-/// session runs longer than the token TTL, the LLM API returns a 401 with
-/// "token expired". Unlike other transient errors, retrying with the same
-/// agent is pointless — the token baked into the rig HTTP client is dead.
-/// The fix is to rebuild the agent (which exchanges a fresh session token
-/// via [`crate::auth::CopilotTokenCache`]) and retry with the existing chat history.
-fn is_token_expired_error(error: &str) -> bool {
-    let lower = error.to_lowercase();
-    lower.contains("token expired")
-}
 
 /// Build the post-review message sent after the CR workflow completes.
 ///
@@ -551,7 +534,7 @@ impl ReviewRunner {
         agent: &mut BuiltAgent,
         story: &StoryInfo,
         escalation_slot: EscalationSlot,
-        decision_log: DecisionLog,
+        _decision_log: DecisionLog,
     ) -> Result<ReviewOutcome, ReviewError> {
         // The CR workflow asks "which story file to review" — reply with the file path
         let story_reply = story.specs_path.display().to_string();
@@ -642,7 +625,6 @@ impl ReviewRunner {
             });
         }
         const MAX_RETRIES: usize = 3;
-        let mut token_refreshes: usize = 0;
 
         loop {
             // Cooperative shutdown check — between chat turns
@@ -835,51 +817,6 @@ impl ReviewRunner {
                     log_llm_error("review", turn, &e);
                     self.ui.llm_error("review", turn as u32, &e.to_string());
                     let error_str = e.to_string();
-
-                    // Token expired — rebuild agent with fresh Copilot session token.
-                    // The existing full_history is reusable; only the HTTP client
-                    // (with the baked-in bearer token) needs replacing.
-                    if is_token_expired_error(&error_str) && token_refreshes < MAX_TOKEN_REFRESHES {
-                        token_refreshes += 1;
-                        tracing::warn!(
-                            action = "token_expired_rebuild",
-                            turn = %turn,
-                            refresh = %token_refreshes,
-                            max_refreshes = %MAX_TOKEN_REFRESHES,
-                            phase = if post_review_phase { "post_review" } else { "normal" },
-                            "Copilot token expired in review — rebuilding agent with fresh token"
-                        );
-
-                        match self
-                            .build_review_agent(escalation_slot.clone(), decision_log.clone())
-                            .await
-                        {
-                            Ok(new_agent) => {
-                                *agent = new_agent;
-                                self.ui.llm_retry(
-                                    "review",
-                                    turn as u32,
-                                    token_refreshes as u32,
-                                    0.0,
-                                );
-                                tracing::info!(
-                                    action = "token_refreshed",
-                                    refresh = %token_refreshes,
-                                    "Review agent rebuilt with fresh token — retrying turn"
-                                );
-                                // Do NOT increment retries — this is a token lifecycle event
-                                continue;
-                            }
-                            Err(rebuild_err) => {
-                                tracing::error!(
-                                    action = "token_refresh_failed",
-                                    error = %rebuild_err,
-                                    "Failed to rebuild review agent after token expiry"
-                                );
-                                // Fall through to normal retry/failure logic
-                            }
-                        }
-                    }
 
                     retries += 1;
                     tracing::warn!(
@@ -1298,48 +1235,5 @@ None.
     fn test_max_review_turns_is_reasonable() {
         assert!(MAX_REVIEW_TURNS >= 50, "Max turns should be at least 50");
         assert!(MAX_REVIEW_TURNS <= 200, "Max turns should be at most 200");
-    }
-
-    // -----------------------------------------------------------------------
-    // Token expiry detection tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_is_token_expired_error_exact_copilot_message() {
-        assert!(is_token_expired_error(
-            "CompletionError: ResponseError: CompletionError: ProviderError: Invalid status code 401 Unauthorized with message: unauthorized: token expired\n"
-        ));
-    }
-
-    #[test]
-    fn test_is_token_expired_error_simple() {
-        assert!(is_token_expired_error("token expired"));
-        assert!(is_token_expired_error("Token Expired"));
-    }
-
-    #[test]
-    fn test_is_token_expired_error_false_for_other_auth_errors() {
-        assert!(!is_token_expired_error("bad credentials"));
-        assert!(!is_token_expired_error("authentication failed"));
-        assert!(!is_token_expired_error("HTTP 403 forbidden"));
-    }
-
-    #[test]
-    fn test_is_token_expired_error_false_for_transient_errors() {
-        assert!(!is_token_expired_error("status code 503"));
-        assert!(!is_token_expired_error("connection timeout"));
-        assert!(!is_token_expired_error("rate limit exceeded"));
-    }
-
-    #[test]
-    fn test_max_token_refreshes_is_reasonable() {
-        assert!(
-            MAX_TOKEN_REFRESHES >= 3,
-            "Should allow at least 3 token refreshes for long review sessions"
-        );
-        assert!(
-            MAX_TOKEN_REFRESHES <= 10,
-            "Should cap token refreshes to prevent infinite loops"
-        );
     }
 }

@@ -141,7 +141,7 @@ impl ArchitectSession {
     /// # Legacy constructor
     ///
     /// The previous constructor resolved API keys from the environment directly.
-    /// Now the `AgentFactory` handles all provider setup (API keys, Copilot token
+    /// Now the `AgentFactory` handles all provider setup (API keys, token
     /// exchange, API format detection).
     pub fn new(config: &BotConfig) -> Result<Self, ArchitectSessionError> {
         Self::new_with_factory(config, None, Arc::new(crate::mcp::McpManager::empty()))

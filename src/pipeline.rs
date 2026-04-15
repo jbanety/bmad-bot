@@ -185,7 +185,7 @@ impl StoryPipeline {
             .unwrap_or("bmad-bot");
         let notifier = create_notifier(&config.notifications, &secrets, project_name);
 
-        // Create the centralized AgentFactory — owns secrets + Copilot token cache.
+        // Create the centralized AgentFactory — owns secrets and provider credentials.
         let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
 
         let session_runner = SessionRunner::new(
@@ -2219,11 +2219,11 @@ async fn commit_sprint_status(
 /// failures, and provider setup issues.
 ///
 /// **Exception:** "token expired" is NOT an infra error — it's a transient
-/// Copilot token refresh issue that the session runner retries with backoff.
+/// token expiry/auth error that the session runner retries with backoff.
 fn is_infra_error(error: &str) -> bool {
     let lower = error.to_lowercase();
 
-    // Copilot token expiry is transient, not infrastructure failure
+    // Token expiry is transient, not infrastructure failure
     if lower.contains("token expired") {
         return false;
     }
@@ -2251,12 +2251,12 @@ fn is_infra_error(error: &str) -> bool {
 /// The daemon should stop, notify the human, and wait for creds to be fixed.
 ///
 /// **Exception:** "token expired" is NOT an auth error — it's a transient
-/// Copilot token refresh issue (short-lived session token expired mid-session).
+/// token expiry/auth error (short-lived session token expired mid-session).
 /// The session runner retries these with exponential backoff.
 fn is_auth_error(error: &str) -> bool {
     let lower = error.to_lowercase();
 
-    // Copilot token expiry ≠ bad credentials — it's transient
+    // Token expiry ≠ bad credentials — it's transient
     if lower.contains("token expired") {
         return false;
     }

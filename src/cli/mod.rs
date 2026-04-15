@@ -5,13 +5,10 @@
 //! and graceful shutdown via signal handling.
 //! Also provides the interactive `init` wizard for first-time setup.
 
-use crate::auth::github_copilot::{self, ReqwestCopilotHttpClient};
-
 pub mod git_detect;
 pub mod state;
 
 use std::fs::OpenOptions;
-use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -50,12 +47,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Interactive setup: generates bmad-bot.yaml and .env files.
-    Init {
-        /// Skip interactive setup and only re-run the GitHub Copilot OAuth Device Flow.
-        /// Updates GITHUB_COPILOT_OAUTH_TOKEN in .env.
-        #[arg(long)]
-        copilot_login: bool,
-    },
+    Init,
     /// Start the daemon. Polls sprint-status.yaml and processes stories.
     Start,
     /// Show current daemon state: stories processed, in progress, blocked.
@@ -262,35 +254,6 @@ pub async fn run_init(config_path: &Path) -> Result<(), CliError> {
     // Validate the generated config
     config.validate().map_err(CliError::Config)?;
 
-    // --- GitHub Copilot Device Flow (after all LLM role selections) ---
-    let copilot_oauth_token = {
-        let uses_copilot = config.llm.dev.provider == "github-copilot"
-            || config.llm.review.provider == "github-copilot"
-            || config.llm.supervisor.provider == "github-copilot";
-
-        if uses_copilot {
-            if std::io::stdin().is_terminal() {
-                let client = ReqwestCopilotHttpClient::new();
-                match github_copilot::run_device_flow(&client).await {
-                    Ok(token) => Some(token),
-                    Err(e) => {
-                        eprintln!("\n⚠ GitHub Copilot authorization failed: {e}");
-                        eprintln!(
-                            "  You can set GITHUB_COPILOT_OAUTH_TOKEN manually in .env later."
-                        );
-                        None
-                    }
-                }
-            } else {
-                eprintln!("\n⚠ GitHub Copilot Device Flow requires an interactive terminal.");
-                eprintln!("  Set GITHUB_COPILOT_OAUTH_TOKEN manually in .env after setup.");
-                None
-            }
-        } else {
-            None
-        }
-    };
-
     // Generate and write bmad-bot.yaml
     let yaml_content = generate_config_yaml(&config)?;
     tokio::fs::write(config_path, &yaml_content).await?;
@@ -318,7 +281,7 @@ pub async fn run_init(config_path: &Path) -> Result<(), CliError> {
         }
     }
 
-    let env_content = generate_env_file(&config, copilot_oauth_token.as_deref())?;
+    let env_content = generate_env_file(&config)?;
     tokio::fs::write(env_path, &env_content).await?;
     tracing::info!("Generated .env");
 
@@ -328,76 +291,7 @@ pub async fn run_init(config_path: &Path) -> Result<(), CliError> {
     println!("\n\u{1f4dd} Next steps:");
     println!("   1. Edit .env and fill in your API keys");
     println!("   2. Run `bmad-bot start` to launch the daemon");
-    println!("\n\u{1f4a1} If GitHub Copilot auth failed, re-run: bmad-bot init --copilot-login");
 
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Copilot login (standalone Device Flow)
-// ---------------------------------------------------------------------------
-
-/// Run the GitHub Copilot OAuth Device Flow and patch the `.env` file.
-///
-/// Reads the existing `.env` to locate `GITHUB_COPILOT_OAUTH_TOKEN=`, runs the
-/// Device Flow, then overwrites the value in-place. If the line doesn't exist
-/// yet it is appended.
-///
-/// Triggered via `bmad-bot init --copilot-login`.
-pub async fn run_copilot_login() -> Result<(), CliError> {
-    tracing::info!("Starting GitHub Copilot Device Flow (--copilot-login)");
-
-    if !std::io::stdin().is_terminal() {
-        return Err(CliError::Init {
-            reason: "GitHub Copilot Device Flow requires an interactive terminal".to_string(),
-        });
-    }
-
-    let client = ReqwestCopilotHttpClient::new();
-    let token = github_copilot::run_device_flow(&client)
-        .await
-        .map_err(|e| CliError::Init {
-            reason: format!("GitHub Copilot Device Flow failed: {e}"),
-        })?;
-
-    // Patch .env file
-    let env_path = Path::new(".env");
-    let key = "GITHUB_COPILOT_OAUTH_TOKEN";
-
-    if env_path.exists() {
-        let content = tokio::fs::read_to_string(env_path).await?;
-        let mut found = false;
-        let patched: Vec<String> = content
-            .lines()
-            .map(|line| {
-                if line.starts_with(key) {
-                    found = true;
-                    format!("{key}={token}")
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect();
-
-        let mut output = patched.join("\n");
-        if !found {
-            if !output.ends_with('\n') {
-                output.push('\n');
-            }
-            output.push_str(&format!("{key}={token}\n"));
-        } else if !output.ends_with('\n') {
-            output.push('\n');
-        }
-
-        tokio::fs::write(env_path, &output).await?;
-    } else {
-        let content = format!(
-            "# BMAD Bot Secrets\n# Generated by `bmad-bot init --copilot-login`\n{key}={token}\n"
-        );
-        tokio::fs::write(env_path, &content).await?;
-    }
-
-    println!("\n✅ GITHUB_COPILOT_OAUTH_TOKEN written to .env");
     Ok(())
 }
 
@@ -776,13 +670,7 @@ fn generate_config_yaml(config: &BotConfig) -> Result<String, CliError> {
 /// Only includes secrets relevant to the chosen providers. Each secret line
 /// has a dynamic comment specifying which roles use that provider.
 ///
-/// If `copilot_oauth_token` is `Some`, the token is pre-filled in the output.
-/// If `None` and `github-copilot` is configured, an empty placeholder with a
-/// comment is written instead.
-fn generate_env_file(
-    config: &BotConfig,
-    copilot_oauth_token: Option<&str>,
-) -> Result<String, CliError> {
+fn generate_env_file(config: &BotConfig) -> Result<String, CliError> {
     let mut lines = vec![
         "# BMAD Bot Secrets".to_string(),
         "# Generated by `bmad-bot init`".to_string(),
@@ -813,19 +701,6 @@ fn generate_env_file(
     if let Some(roles) = provider_roles.get("openai") {
         lines.push(format!("# Required: used by {} role(s)", roles.join(", ")));
         lines.push("OPENAI_API_KEY=".to_string());
-    }
-    if let Some(roles) = provider_roles.get("github-copilot") {
-        lines.push(format!("# Required: used by {} role(s)", roles.join(", ")));
-        match copilot_oauth_token {
-            Some(token) if !token.is_empty() => {
-                lines.push(format!("GITHUB_COPILOT_OAUTH_TOKEN={token}"));
-            }
-            _ => {
-                lines
-                    .push("# Obtain via `bmad-bot init` (Device Flow) or set manually".to_string());
-                lines.push("GITHUB_COPILOT_OAUTH_TOKEN=".to_string());
-            }
-        }
     }
 
     lines.push(String::new());
@@ -1822,42 +1697,35 @@ mod tests {
     #[test]
     fn test_generate_env_includes_anthropic_key() {
         let config = make_test_config();
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         assert!(env.contains("ANTHROPIC_API_KEY="));
     }
 
     #[test]
     fn test_generate_env_includes_openai_key_for_supervisor() {
         let config = make_test_config(); // supervisor uses openai
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         assert!(env.contains("OPENAI_API_KEY="));
-    }
-
-    #[test]
-    fn test_generate_env_excludes_github_copilot_token() {
-        let config = make_test_config(); // no role uses github-copilot
-        let env = generate_env_file(&config, None).unwrap();
-        assert!(!env.contains("GITHUB_COPILOT_OAUTH_TOKEN="));
     }
 
     #[test]
     fn test_generate_env_includes_github_token() {
         let config = make_test_config(); // git_provider is github
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         assert!(env.contains("GITHUB_TOKEN="));
     }
 
     #[test]
     fn test_generate_env_excludes_gitlab_token() {
         let config = make_test_config(); // git_provider is github, not gitlab
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         assert!(!env.contains("GITLAB_TOKEN="));
     }
 
     #[test]
     fn test_generate_env_excludes_telegram_when_disabled() {
         let config = make_test_config(); // telegram.enabled = false
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         assert!(!env.contains("TELEGRAM_BOT_TOKEN="));
     }
 
@@ -1866,27 +1734,8 @@ mod tests {
         let mut config = make_test_config();
         config.notifications.telegram.enabled = true;
         config.notifications.telegram.chat_id = "12345".to_string();
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         assert!(env.contains("TELEGRAM_BOT_TOKEN="));
-    }
-
-    #[test]
-    fn test_generate_env_copilot_token_prefilled() {
-        let mut config = make_test_config();
-        config.llm.dev.provider = "github-copilot".to_string();
-        let env = generate_env_file(&config, Some("gho_test_token_123")).unwrap();
-        assert!(env.contains("GITHUB_COPILOT_OAUTH_TOKEN=gho_test_token_123"));
-        // Should NOT contain the "set manually" comment when token is present
-        assert!(!env.contains("Obtain via"));
-    }
-
-    #[test]
-    fn test_generate_env_copilot_token_empty_when_none() {
-        let mut config = make_test_config();
-        config.llm.dev.provider = "github-copilot".to_string();
-        let env = generate_env_file(&config, None).unwrap();
-        assert!(env.contains("GITHUB_COPILOT_OAUTH_TOKEN="));
-        assert!(env.contains("Obtain via"));
     }
 
     #[test]
@@ -1906,7 +1755,7 @@ mod tests {
     #[test]
     fn test_generate_env_comments_specify_correct_roles() {
         let config = make_test_config(); // dev+review=anthropic, supervisor=openai
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         // Anthropic used by dev and review
         assert!(
             env.contains("dev, review") || env.contains("review, dev"),
@@ -1923,7 +1772,7 @@ mod tests {
     fn test_generate_env_gitlab_provider() {
         let mut config = make_test_config();
         config.git_provider.provider = "gitlab".to_string();
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         assert!(env.contains("GITLAB_TOKEN="));
         assert!(!env.contains("GITHUB_TOKEN="));
     }
@@ -1946,7 +1795,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: None,
         };
-        let env = generate_env_file(&config, None).unwrap();
+        let env = generate_env_file(&config).unwrap();
         let count = env.matches("ANTHROPIC_API_KEY=").count();
         assert_eq!(count, 1, "Expected exactly one ANTHROPIC_API_KEY line");
         assert!(!env.contains("OPENAI_API_KEY="));
@@ -1967,11 +1816,6 @@ mod tests {
     #[test]
     fn test_default_model_for_provider_openai() {
         assert_eq!(default_model_for_provider("openai"), "gpt-4o");
-    }
-
-    #[test]
-    fn test_default_model_for_provider_github_copilot() {
-        assert_eq!(default_model_for_provider("github-copilot"), "gpt-4o");
     }
 
     #[test]

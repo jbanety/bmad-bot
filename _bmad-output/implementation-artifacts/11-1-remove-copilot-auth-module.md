@@ -1,6 +1,6 @@
 # Story 11.1: Remove Copilot Auth Module
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -42,76 +42,83 @@ So that the project no longer carries ~1,350 lines of OAuth Device Flow, token e
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1: Delete `src/auth/` directory** (AC: #1)
-  - [ ] Delete `src/auth/github_copilot.rs` (~1,351 lines including ~680 lines of tests)
-  - [ ] Delete `src/auth/mod.rs` (3 lines: doc comment + `pub mod github_copilot;`)
+- [x] **Task 1: Delete `src/auth/` directory** (AC: #1)
+  - [x] Delete `src/auth/github_copilot.rs` (~1,351 lines including ~680 lines of tests)
+  - [x] Delete `src/auth/mod.rs` (3 lines: doc comment + `pub mod github_copilot;`)
 
-- [ ] **Task 2: Clean `src/main.rs`** (AC: #2)
-  - [ ] Remove `mod auth;` declaration
-  - [ ] Remove `copilot_login: bool` from `Commands::Init` destructure
-  - [ ] Remove the `if copilot_login { cli::run_copilot_login().await?; }` branch
-  - [ ] The `Init` match arm simplifies to calling `cli::run_init().await?` directly
+- [x] **Task 2: Clean `src/main.rs`** (AC: #2)
+  - [x] Remove `mod auth;` declaration
+  - [x] Remove `copilot_login: bool` from `Commands::Init` destructure
+  - [x] Remove the `if copilot_login { cli::run_copilot_login().await?; }` branch
+  - [x] The `Init` match arm simplifies to calling `cli::run_init().await?` directly
 
-- [ ] **Task 3: Clean `src/cli/mod.rs`** (AC: #4)
-  - [ ] Remove `use crate::auth::github_copilot::{self, ReqwestCopilotHttpClient};` import
-  - [ ] Remove `copilot_login: bool` field from `Commands::Init` variant definition (the `#[arg(long)]` block)
-  - [ ] Remove entire `copilot_oauth_token` block in `run_init()` — the `let copilot_oauth_token = { ... }` block that checks `uses_copilot` and runs the Device Flow
-  - [ ] Remove the `println!` hint pointing users to `bmad-bot init --copilot-login`
-  - [ ] Delete the `run_copilot_login()` function entirely
-  - [ ] Remove `copilot_oauth_token` parameter from `generate_env_file()` signature — new signature is `fn generate_env_file(config: &BotConfig) -> ...`
-  - [ ] Remove `"github-copilot"` block inside `generate_env_file()` that writes `GITHUB_COPILOT_OAUTH_TOKEN`
-  - [ ] Update the **one production call site** of `generate_env_file` in `run_init()` (line ~321) — remove the `copilot_oauth_token.as_deref()` argument
-  - [ ] Update **all ~12 test call sites** of `generate_env_file` — remove the second argument from every call (they all pass `None` or a token literal). Test call sites are at approximately lines 1825, 1832, 1839, 1846, 1853, 1860, 1869, 1877, 1887, 1909, 1926, 1949
-  - [ ] Delete Copilot-specific tests: `test_generate_env_excludes_github_copilot_token`, `test_generate_env_copilot_token_prefilled`, `test_generate_env_copilot_token_empty_when_none`, `test_default_model_for_provider_github_copilot`
+- [x] **Task 3: Clean `src/cli/mod.rs`** (AC: #4)
+  - [x] Remove `use crate::auth::github_copilot::{self, ReqwestCopilotHttpClient};` import
+  - [x] Remove `copilot_login: bool` field from `Commands::Init` variant definition (the `#[arg(long)]` block)
+  - [x] Remove entire `copilot_oauth_token` block in `run_init()` — the `let copilot_oauth_token = { ... }` block that checks `uses_copilot` and runs the Device Flow
+  - [x] Remove the `println!` hint pointing users to `bmad-bot init --copilot-login`
+  - [x] Delete the `run_copilot_login()` function entirely
+  - [x] Remove `copilot_oauth_token` parameter from `generate_env_file()` signature — new signature is `fn generate_env_file(config: &BotConfig) -> ...`
+  - [x] Remove `"github-copilot"` block inside `generate_env_file()` that writes `GITHUB_COPILOT_OAUTH_TOKEN`
+  - [x] Update the **one production call site** of `generate_env_file` in `run_init()` (line ~321) — remove the `copilot_oauth_token.as_deref()` argument
+  - [x] Update **all ~12 test call sites** of `generate_env_file` — remove the second argument from every call (they all pass `None` or a token literal). Test call sites are at approximately lines 1825, 1832, 1839, 1846, 1853, 1860, 1869, 1877, 1887, 1909, 1926, 1949
+  - [x] Delete Copilot-specific tests: `test_generate_env_excludes_github_copilot_token`, `test_generate_env_copilot_token_prefilled`, `test_generate_env_copilot_token_empty_when_none`, `test_default_model_for_provider_github_copilot`
 
-- [ ] **Task 4: Clean `src/llm/agent_factory.rs`** (AC: #5)
-  - [ ] Remove `use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};` import
-  - [ ] Remove `copilot_headers` from the provider import — change `use crate::session::provider::{ProviderError, copilot_headers};` to `use crate::session::provider::ProviderError;`
-  - [ ] Remove `copilot_cache: std::sync::Mutex<CopilotTokenCache>` field from the `AgentFactory` struct
-  - [ ] Remove `copilot_cache: std::sync::Mutex::new(CopilotTokenCache::new())` from `AgentFactory::new()`
-  - [ ] Delete the entire `"github-copilot" => { ... }` match arm in `AgentFactory::build()` (the arm that calls `resolve_copilot_session`, constructs the OpenAI client with `copilot_headers()`, and returns `BuiltAgent::OpenAiCompletions`)
-  - [ ] Delete `resolve_copilot_session()` method
-  - [ ] Delete `copilot_requires_responses_api()` function and all its associated tests (~6 test functions)
-  - [ ] **Remove `BuiltAgent::OpenAiCompletions` variant** — it is confirmed Copilot-only (its only constructor is inside the `"github-copilot"` build arm just deleted; with `#![deny(dead_code)]` the compiler will reject it). Remove the variant definition, its `stream_chat` match arm, and its `Debug` match arm
-  - [ ] Update module-level doc comment to remove references to "Copilot token exchange" and "Copilot API Format Detection"
-  - [ ] Update `BuiltAgent` enum doc comment to remove the `OpenAiCompletions` variant description
+- [x] **Task 4: Clean `src/llm/agent_factory.rs`** (AC: #5)
+  - [x] Remove `use crate::auth::github_copilot::{CopilotHttpClient, CopilotTokenCache, ReqwestCopilotHttpClient};` import
+  - [x] Remove `copilot_headers` from the provider import — change `use crate::session::provider::{ProviderError, copilot_headers};` to `use crate::session::provider::ProviderError;`
+  - [x] Remove `copilot_cache: std::sync::Mutex<CopilotTokenCache>` field from the `AgentFactory` struct
+  - [x] Remove `copilot_cache: std::sync::Mutex::new(CopilotTokenCache::new())` from `AgentFactory::new()`
+  - [x] Delete the entire `"github-copilot" => { ... }` match arm in `AgentFactory::build()` (the arm that calls `resolve_copilot_session`, constructs the OpenAI client with `copilot_headers()`, and returns `BuiltAgent::OpenAiCompletions`)
+  - [x] Delete `resolve_copilot_session()` method
+  - [x] Delete `copilot_requires_responses_api()` function and all its associated tests (~7 test functions)
+  - [x] **Remove `BuiltAgent::OpenAiCompletions` variant** — removed variant definition, its `stream_chat` match arm, `activate_agent` match arm, and `Debug` match arm
+  - [x] Update module-level doc comment to remove references to "Copilot token exchange" and "Copilot API Format Detection"
+  - [x] Update `BuiltAgent` enum doc comment to remove the `OpenAiCompletions` variant description
 
-- [ ] **Task 5: Clean `src/session/runner.rs`** (AC: #6)
-  - [ ] Delete `is_token_expired_error()` function
-  - [ ] Delete `MAX_TOKEN_REFRESHES` constant
-  - [ ] Remove `token_refreshes` counter variable declaration (at the top of `run_session`)
-  - [ ] Remove all **6 confirmed** token-refresh retry branches — run `grep -n "is_token_expired_error" src/session/runner.rs` to locate them all before editing; confirmed at approximately lines 1344, 1474, 1871, 2049, 2205, 2427
-  - [ ] For each branch: remove only the `if is_token_expired_error(...) && token_refreshes < MAX_TOKEN_REFRESHES { ... }` block; leave the surrounding error handling intact
-  - [ ] Update `SessionRunner` struct doc comment — remove "Copilot token cache" reference
-  - [ ] Update `resume_session` inline comment — remove "Copilot token exchange" reference
-  - [ ] Delete tests: `test_is_token_expired_error_exact_copilot_message`, `test_is_token_expired_error_simple`, `test_is_token_expired_error_false_for_other_auth_errors`, `test_is_token_expired_error_false_for_transient_errors`, `test_is_token_expired_error_false_for_context_limit`
+- [x] **Task 5: Clean `src/session/runner.rs`** (AC: #6)
+  - [x] Delete `is_token_expired_error()` function
+  - [x] Delete `MAX_TOKEN_REFRESHES` constant
+  - [x] Remove `token_refreshes` counter variable declaration (at the top of `run_session`)
+  - [x] Remove all **6 confirmed** token-refresh retry branches
+  - [x] For each branch: removed only the `if is_token_expired_error(...) && token_refreshes < MAX_TOKEN_REFRESHES { ... }` block; surrounding error handling left intact
+  - [x] Update `SessionRunner` struct doc comment — remove "Copilot token cache" reference
+  - [x] Update `resume_session` inline comment — remove "Copilot token exchange" reference
+  - [x] Delete tests: `test_is_token_expired_error_exact_copilot_message`, `test_is_token_expired_error_simple`, `test_is_token_expired_error_false_for_other_auth_errors`, `test_is_token_expired_error_false_for_transient_errors`, `test_is_token_expired_error_false_for_context_limit`
 
-- [ ] **Task 6: Clean `src/review/mod.rs`** (AC: #7)
-  - [ ] Delete `is_token_expired_error()` function (defined locally at ~line 69, independent from the auth module)
-  - [ ] Delete `MAX_TOKEN_REFRESHES` constant (~line 49) and its doc comment referencing `crate::session::runner::MAX_TOKEN_REFRESHES`
-  - [ ] Remove the token-refresh retry branch in the review chat loop (~line 842): the `if is_token_expired_error(&error_str) && token_refreshes < MAX_TOKEN_REFRESHES { ... }` block
-  - [ ] Remove `token_refreshes` counter variable declaration (~line 645)
-  - [ ] Remove the broken intra-doc link `[`crate::auth::CopilotTokenCache`]` in the `is_token_expired_error` doc comment (the type no longer exists)
-  - [ ] Delete tests: `test_is_token_expired_error_exact_copilot_message`, `test_is_token_expired_error_simple`, `test_is_token_expired_error_false_for_other_auth_errors`, `test_is_token_expired_error_false_for_transient_errors`, `test_max_token_refreshes_is_reasonable`
+- [x] **Task 6: Clean `src/review/mod.rs`** (AC: #7)
+  - [x] Delete `is_token_expired_error()` function (defined locally, independent from the auth module)
+  - [x] Delete `MAX_TOKEN_REFRESHES` constant and its doc comment referencing `crate::session::runner::MAX_TOKEN_REFRESHES`
+  - [x] Remove the token-refresh retry branch in the review chat loop
+  - [x] Remove `token_refreshes` counter variable declaration
+  - [x] Remove the broken intra-doc link `[crate::auth::CopilotTokenCache]` in the `is_token_expired_error` doc comment (deleted with function)
+  - [x] Delete tests: `test_is_token_expired_error_exact_copilot_message`, `test_is_token_expired_error_simple`, `test_is_token_expired_error_false_for_other_auth_errors`, `test_is_token_expired_error_false_for_transient_errors`, `test_max_token_refreshes_is_reasonable`
 
-- [ ] **Task 7: Clean `src/review/epic.rs`** (AC: #7)
-  - [ ] Remove `is_token_expired_error` and `MAX_TOKEN_REFRESHES` from the `use super::{ ... }` import at line 40
-  - [ ] Remove the token-refresh retry branch at ~line 354: `if is_token_expired_error(&err_str) && token_refreshes < MAX_TOKEN_REFRESHES { ... }` and the subsequent agent-rebuild block
-  - [ ] Remove `token_refreshes` counter variable declaration (~line 304) and all `token_refreshes += 1` / `token_refreshes as u32` usages
-  - [ ] Update doc comment at ~line 57 referencing `MAX_TOKEN_REFRESHES` separately from session retries
+- [x] **Task 7: Clean `src/review/epic.rs`** (AC: #7)
+  - [x] Remove `is_token_expired_error` and `MAX_TOKEN_REFRESHES` from the `use super::{ ... }` import
+  - [x] Remove the token-refresh retry branch and the subsequent agent-rebuild block
+  - [x] Remove `token_refreshes` counter variable declaration and all usages
+  - [x] Update doc comment referencing `MAX_TOKEN_REFRESHES` separately from session retries
 
-- [ ] **Task 8: Update doc comments in adjacent files** (AC: #8 — prevents clippy doc-link warnings)
-  - [ ] `src/session/agent.rs` — update doc comment at ~line 267 that references "All providers (Anthropic, OpenAI, GitHub Copilot)"
-  - [ ] `src/pipeline.rs` — update doc comment at ~line 188 that says "owns secrets + Copilot token cache"; update doc comments at ~lines 2222, 2226, 2254, 2259 that reference "Copilot token refresh issue" (these describe the `is_infra_error`/`is_auth_error` classification logic — rephrase as generic token expiry)
-  - [ ] `src/supervisor/architect.rs` — update doc comment at ~line 144 that references "Copilot token"
+- [x] **Task 8: Update doc comments in adjacent files** (AC: #8 — prevents clippy doc-link warnings)
+  - [x] `src/session/agent.rs` — updated doc comment: "All providers (Anthropic, OpenAI, GitHub Copilot)" → "All providers (Anthropic, OpenAI-compatible)"
+  - [x] `src/pipeline.rs` — updated "owns secrets + Copilot token cache" → "owns secrets + provider token cache"; updated 4 doc comments referencing "Copilot token refresh issue" → generic "token expiry/auth error"
+  - [x] `src/supervisor/architect.rs` — updated doc comment referencing "Copilot token" → generic phrasing
 
-- [ ] **Task 9: Verify compilation and tests** (AC: #8)
-  - [ ] Run `grep -rn "crate::auth" src/` — must return zero results
-  - [ ] Run `grep -rn "CopilotTokenCache\|copilot_headers\|run_device_flow\|request_device_code\|poll_for_access_token\|derive_base_url_from_token\|exchange_copilot_token" src/` — must return zero results
-  - [ ] Run `cargo build` — zero errors
-  - [ ] Run `cargo clippy -- -D warnings` — zero warnings
-  - [ ] Run `cargo test` — all remaining tests pass; if unexpected failures appear, see Rollback Guidance below
-  - [ ] Run `cargo fmt --check` — no formatting issues
+- [x] **Task 9: Verify compilation and tests** (AC: #8)
+  - [x] Run `grep -rn "crate::auth" src/` — zero results ✅
+  - [x] Run `grep -rn "CopilotTokenCache\|copilot_headers\|run_device_flow\|..." src/` — zero results (only `copilot_headers` pub fn in `provider.rs` — deferred to 11.3 per spec) ✅
+  - [x] Run `cargo build` — zero errors ✅
+  - [x] Run `cargo clippy -- -D warnings` — failures are all pre-existing (confirmed via git stash); `copilot_headers` unused warning acknowledged per spec (deferred 11.3) ⚠️ pre-existing
+  - [x] Run `cargo test` — 1121 passed, 1 pre-existing failure (`test_build_context_limit_recovery_message_contains_all_sections` — fails on original code too, unrelated to this story) ✅
+  - [x] Run `cargo fmt --check` — no formatting issues ✅
+
+### Review Findings
+
+- [x] [Review][Patch] Stale Copilot reference in `src/session/agent.rs` doc comment — line 268 still says "and Copilot **requires** it (`stream: false` is rejected)" after the provider list was updated to remove Copilot. Remove the Copilot-specific sentence. [src/session/agent.rs:268]
+- [x] [Review][Patch] Misleading "provider token cache" comment in `src/pipeline.rs` — line 188 says "owns secrets + provider token cache" but `AgentFactory` no longer contains any cache after `copilot_cache` removal. Change to "owns secrets and provider credentials". [src/pipeline.rs:188]
+- [x] [Review][Defer] `is_transient_llm_error` in `runner.rs` still classifies "unauthorized" and "token expired" as transient retry-worthy errors, but the token-refresh recovery mechanism was removed — deferred, pre-existing logic not modified in this diff
+- [x] [Review][Defer] `pipeline.rs` `is_infra_error`/`is_auth_error` still carve out "token expired" as non-error with no recovery mechanism — deferred, pre-existing functional code not modified in this diff
 
 ## Dev Notes
 
@@ -333,10 +340,47 @@ All epics 1–10 are done. The codebase is stable. This is a clean starting poin
 
 ### Agent Model Used
 
+Claude Sonnet 4.6 (claude-sonnet-4-6)
+
 ### Debug Log References
+
+- **Pre-existing clippy failures:** `cargo clippy -- -D warnings` was already failing before this story (confirmed via `git stash` + rerun). Failures are dead_code/unused_imports throughout the codebase, protected by `#![warn(dead_code)] // FIXME` in `main.rs`. Not introduced by this story.
+- **Pre-existing test failure:** `test_build_context_limit_recovery_message_contains_all_sections` in `runner.rs` was already failing before this story. Test asserts `msg.contains("summary text")` but the function never includes a summary — pre-existing mismatch. Confirmed via git stash.
+- **`copilot_headers` unused warning:** After removing the call site in `agent_factory.rs`, `pub fn copilot_headers()` in `provider.rs` is now unused. Story explicitly defers deletion of this function to Story 11.3. The warning is intentionally accepted.
+- **`review/mod.rs` `decision_log` parameter:** Agent prefixed with `_` to silence unused variable warning after the token-refresh block (which was the only user of this parameter) was removed.
+- **`review/epic.rs` `agent` mutability:** Agent removed `mut` from the `agent` parameter of `drive_epic_review` since the token-refresh agent-rebuild was the only mutation site.
 
 ### Completion Notes List
 
+- Deleted `src/auth/` directory entirely (~1,351 lines including ~680 test lines)
+- Cleaned `src/main.rs`: removed `mod auth;`, simplified `Commands::Init` to unit variant, removed copilot_login branch
+- Cleaned `src/cli/mod.rs`: removed auth import, `Commands::Init.copilot_login` field, Device Flow block in `run_init()`, `run_copilot_login()` function, `generate_env_file()` copilot parameter and block, updated 9 test call sites, deleted 4 copilot-specific tests
+- Cleaned `src/llm/agent_factory.rs`: removed auth imports, `copilot_headers` import, `copilot_cache` field, `"github-copilot"` build arm, `resolve_copilot_session()`, `copilot_requires_responses_api()` + 7 tests, `BuiltAgent::OpenAiCompletions` variant (all 4 match locations), updated doc comments
+- Cleaned `src/session/runner.rs`: deleted `is_token_expired_error()`, `MAX_TOKEN_REFRESHES`, `token_refreshes` counter, all 6 retry branches, updated doc comments, deleted 5 token-expiry tests
+- Cleaned `src/review/mod.rs`: deleted local `is_token_expired_error()`, `MAX_TOKEN_REFRESHES`, token-refresh retry branch, `token_refreshes` counter, deleted 5 tests
+- Cleaned `src/review/epic.rs`: removed imported symbols from `use super::{}`, removed retry branch and counter, updated doc comment
+- Updated doc comments in `src/session/agent.rs`, `src/pipeline.rs`, `src/supervisor/architect.rs`
+- **Total estimated removal: ~1,950 lines**
+- `cargo build`: zero errors ✅ | `cargo test`: 1121 passed (1 pre-existing failure) ✅ | `cargo fmt --check`: clean ✅
+
 ### Change Log
 
+- Removed GitHub Copilot OAuth Device Flow authentication module (`src/auth/`) — 2026-04-15
+- Removed all Copilot auth imports, token-refresh retry logic, and Copilot-specific CLI commands — 2026-04-15
+- Removed `BuiltAgent::OpenAiCompletions` variant (Copilot-only) from agent factory — 2026-04-15
+
 ### File List
+
+- `src/auth/github_copilot.rs` — DELETED
+- `src/auth/mod.rs` — DELETED
+- `src/main.rs` — MODIFIED
+- `src/cli/mod.rs` — MODIFIED
+- `src/llm/agent_factory.rs` — MODIFIED
+- `src/session/runner.rs` — MODIFIED
+- `src/session/agent.rs` — MODIFIED (doc comment only)
+- `src/review/mod.rs` — MODIFIED
+- `src/review/epic.rs` — MODIFIED
+- `src/pipeline.rs` — MODIFIED (doc comments only)
+- `src/supervisor/architect.rs` — MODIFIED (doc comment only)
+- `_bmad-output/implementation-artifacts/11-1-remove-copilot-auth-module.md` — MODIFIED (this file)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — MODIFIED
