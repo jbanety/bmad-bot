@@ -22,3 +22,8 @@
 ## Deferred from: code review of story 11.4 (2026-04-16)
 
 - **`unwrap_or_default()` in test code silently swallows malformed JSON arguments:** In `tests/e2e/mcp_playwright.rs`, the pattern `.as_object().cloned().unwrap_or_default()` degrades to an empty map if `.as_object()` returns `None`. Since these are hardcoded JSON object literals, failure is currently impossible — but if anyone refactors the JSON value, the test will silently send empty arguments instead of failing loudly. Consider replacing with `.expect("arguments must be a JSON object")`. Pre-existing pattern not introduced by this diff.
+
+
+## Deferred from: code review of story 11.5 (2026-04-16)
+
+- **No CI gate or automated quality checks visible:** A commit with a .bak file, one-word message, whitespace-only churn, and contradictory status fields landed without any automated quality gate preventing it. Pre-existing process gap not introduced by this change.

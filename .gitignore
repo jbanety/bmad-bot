@@ -14,3 +14,4 @@ bmad-bot.yaml
 
 # OS files
 .DS_Store
+*.bak

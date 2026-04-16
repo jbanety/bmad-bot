@@ -81,7 +81,7 @@ BMAD Bot is a Rust daemon that autonomously picks up user stories from a sprint 
 ## Key Features
 
 - **Autonomous Story Implementation** — LLM agents execute the full BMAD `dev-story` workflow with git, filesystem, and terminal tools
-- **Multi-Provider LLM Support** — Anthropic (Claude), OpenAI (GPT), and GitHub Copilot — configure different providers per role (dev, review, supervisor)
+- **Multi-Provider LLM Support** — Anthropic (Claude) and OpenAI-compatible (GPT, Ollama, LM Studio, Groq via optional `base_url`) — configure different providers per role (dev, review, supervisor)
 - **Intelligent Supervisor** — Three-tier question handling: deterministic rule engine → LLM fallback with project context → human escalation
 - **Automated Code Review** — Optional adversarial review by a separate LLM session after PR creation, with findings posted as PR comments
 - **Dependency Resolution** — Topological sort with cascade blocking — stories are processed in the correct order
@@ -123,7 +123,6 @@ The daemon uses [rig](https://github.com/0xPlaygrounds/rig) as the LLM orchestra
 - **LLM API Key** — At least one of:
   - [Anthropic API Key](https://console.anthropic.com/) (recommended: Claude Sonnet)
   - [OpenAI API Key](https://platform.openai.com/)
-  - [GitHub Copilot](https://github.com/marketplace/models) access
 - **Git Provider Token** — One of:
   - [GitHub Personal Access Token](https://github.com/settings/tokens) with `repo` scope
   - [GitLab Personal Access Token](https://gitlab.com/-/user_settings/personal_access_tokens) with `api` scope
@@ -254,7 +253,7 @@ git_provider:
   target_branch: main
 
 # LLM providers — one provider+model per role
-# Supported: "anthropic", "openai", "github-copilot"
+# Supported: "anthropic", "openai"
 llm:
   dev:
     provider: anthropic
@@ -262,10 +261,11 @@ llm:
   review:
     provider: anthropic
     model: claude-sonnet-4-20250514
-    reasoning_effort: high    # optional: "low", "medium", "high", "xhigh" (OpenAI/Copilot only)
+    reasoning_effort: high    # optional: "low", "medium", "high", "xhigh" (OpenAI only)
   supervisor:
     provider: anthropic
     model: claude-sonnet-4-20250514
+    # base_url: "http://localhost:11434/v1"  # optional: use any OpenAI-compatible endpoint
 
 # Notifications
 notifications:
@@ -667,7 +667,6 @@ cargo clippy -- -D warnings
 | [rig-core](https://crates.io/crates/rig-core) | LLM orchestration framework with tool-calling agents |
 | [tokio](https://crates.io/crates/tokio) | Async runtime |
 | [clap](https://crates.io/crates/clap) | CLI argument parsing |
-| [git2](https://crates.io/crates/git2) | Native git operations (libgit2 bindings) |
 | [octocrab](https://crates.io/crates/octocrab) | GitHub REST API client |
 | [serde](https://crates.io/crates/serde) + [serde_yml](https://crates.io/crates/serde_yml) | YAML serialization/deserialization |
 | [tracing](https://crates.io/crates/tracing) | Structured logging |

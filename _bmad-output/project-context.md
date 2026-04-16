@@ -96,17 +96,15 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - PR description is agent-written and includes a dedicated "🤖 Supervisor Decisions" section
 
 #### Multi-Provider LLM Config — AgentFactory + BuiltAgent
-- Three independent LLM roles: **dev** (Amelia session), **review** (code review), **supervisor** (question answering)
-- Supported providers: Anthropic, OpenAI, GitHub Copilot
+- Four LLM roles: **dev** (Amelia session), **review** (code review), **supervisor** (question answering), **epic_review** (autonomous post-epic retrospective — optional, defaults to `review` config when provider is empty)
+- Supported providers: `anthropic`, `openai`
 - **All provider construction is centralized in `AgentFactory`** (`src/llm/agent_factory.rs`). Since rig's `Chat` trait is not object-safe, `BuiltAgent` uses enum dispatch to wrap concrete agent types with a unified `stream_chat()` method.
-- **API format is hardcoded per provider/model — not configurable:**
-  - **Anthropic** → Messages API (always)
-  - **OpenAI direct** → Responses API (always, rig default)
-  - **GitHub Copilot** → proxy to multiple backends. Known OpenAI model families (`gpt-*`, `o1-*`, `o3-*`, `codex`) → Responses API. **Everything else → Completions API** (safe fallback for non-OpenAI models like Claude, Mistral, etc.)
-- `copilot_requires_responses_api()` is the hardcoded heuristic — new OpenAI model families are a one-liner addition. No `api_format` config — the API format is a deterministic property of the provider behind the model, not a user preference.
+- **API format per provider:**
+  - **Anthropic** -> Messages API (always)
+  - **OpenAI** -> Responses API (always, rig default)
+- **Optional `base_url` per role:** Both providers accept an optional `base_url` field. For OpenAI, this enables any OpenAI-compatible endpoint (Ollama: `http://localhost:11434/v1`, LM Studio: `http://localhost:1234/v1`, Groq: `https://api.groq.com/openai/v1`, vLLM, etc.). For Anthropic, `base_url` can point to a compatible proxy. When absent, defaults to the provider's standard endpoint. Validated as a valid `http://` or `https://` URL at config load time.
+- **Optional `reasoning_effort` per role:** `LlmRoleConfig` supports an optional `reasoning_effort` field (`"low"`, `"medium"`, `"high"`, `"xhigh"`). When set, `AgentFactory` injects it as `additional_params({"reasoning": {"effort": "<value>"}})` on the rig `AgentBuilder`. Only effective for OpenAI providers. Ignored with a tracing warning for Anthropic. Validated at config load time.
 - API keys stored in environment variables, never in config files
-- `AgentFactory` owns the `CopilotTokenCache` — Copilot token exchange is handled internally, not passed around
-- **Optional `reasoning_effort` per role:** `LlmRoleConfig` supports an optional `reasoning_effort` field (`"low"`, `"medium"`, `"high"`, `"xhigh"`). When set, `AgentFactory` injects it as `additional_params({"reasoning": {"effort": "<value>"}})` on the rig `AgentBuilder`. Only effective for Responses API paths (OpenAI direct, GitHub Copilot with OpenAI models). Ignored with a tracing warning for Anthropic and Copilot Completions API models. Validated at config load time.
 
 ### Testing Rules
 
@@ -130,7 +128,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
   │   └── mod.rs           # YAML config + .env secrets loading + validation
   ├── llm/
   │   ├── mod.rs           # LLM module root (re-exports context, logging, agent_factory)
-  │   ├── agent_factory.rs # AgentFactory + BuiltAgent enum dispatch — centralized provider construction, Copilot API format detection
+  │   ├── agent_factory.rs # AgentFactory + BuiltAgent enum dispatch — centralized provider construction
   │   ├── context.rs       # Zed-style XML ContextBuilder
   │   └── logging.rs       # LLM request/response debug logging
   ├── watcher/
@@ -192,7 +190,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - The `ui/` module is the **sole** user-facing terminal output point during daemon execution (`bmad-bot start`)
 - All other modules use `tracing` for debug logging only — debug logs go to the JSON log file, not stdout
 - Never use `println!`/`eprintln!` in daemon runtime code for user-facing output — use `UiHandle` methods
-- **Exception:** `cli/mod.rs` interactive commands (`init`, `status`, `copilot-login`, `logs`) may use `println!` directly as they run before the daemon loop
+- **Exception:** `cli/mod.rs` interactive commands (`init`, `status`, `logs`) may use `println!` directly as they run before the daemon loop
 - The `UiRenderer` trait must remain rendering-backend agnostic — no `indicatif` or `console` types in the trait signature
 - `UiHandle` wraps `Arc<dyn UiRenderer>` — must be `Send + Sync + Clone`, shared across async tasks
 - `UiHandle` is propagated like `ShutdownFlag`: `cli/run_start()` → `StoryPipeline` → `SessionRunner` / `ReviewRunner`
@@ -231,4 +229,4 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Review quarterly for outdated rules
 - Remove rules that become obvious over time
 
-Last Updated: 2026-03-05 — Added Terminal UI rules for new `ui/` module (Epic 10). The daemon displays structured user-facing terminal output in foreground mode via `UiRenderer` trait with `ConsoleRenderer` (indicatif + console) and `NullRenderer` (tests/CI). Stdout tracing layer removed when ConsoleRenderer is active — debug logs go to JSON file only. See sprint-change-proposal-2026-03-05.md for full rationale.
+Last Updated: 2026-04-16 — Epic 11: Copilot removed, two-provider model documented (`anthropic`, `openai`), `base_url` option added for both providers, four LLM roles corrected (added `epic_review`). Technology stack updated: `rig-core 0.35` (crates.io), `serde_yml`.
