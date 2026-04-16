@@ -71,9 +71,7 @@ pub enum ArchitectSessionError {
     },
 
     /// The configured provider string is not recognised.
-    #[error(
-        "Unsupported LLM provider: '{provider}' — expected 'anthropic', 'openai', or 'github-copilot'"
-    )]
+    #[error("Unsupported LLM provider: '{provider}' — expected 'anthropic' or 'openai'")]
     UnsupportedProvider {
         /// The provider string from config.
         provider: String,
@@ -178,7 +176,6 @@ impl ArchitectSession {
                 let env_var = match provider.as_str() {
                     "anthropic" => "ANTHROPIC_API_KEY",
                     "openai" => "OPENAI_API_KEY",
-                    "github-copilot" => "GITHUB_COPILOT_OAUTH_TOKEN",
                     other => {
                         return Err(ArchitectSessionError::UnsupportedProvider {
                             provider: other.to_string(),
@@ -207,11 +204,6 @@ impl ArchitectSession {
                         Some(api_key.clone())
                     } else {
                         std::env::var("OPENAI_API_KEY").ok()
-                    },
-                    github_copilot_oauth_token: if provider == "github-copilot" {
-                        Some(api_key)
-                    } else {
-                        std::env::var("GITHUB_COPILOT_OAUTH_TOKEN").ok()
                     },
                     github_token: std::env::var("GITHUB_TOKEN").ok(),
                     gitlab_token: std::env::var("GITLAB_TOKEN").ok(),

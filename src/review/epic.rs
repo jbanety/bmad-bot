@@ -1093,7 +1093,7 @@ mod tests {
                     base_url: None,
                 },
                 supervisor: LlmRoleConfig {
-                    provider: "github-copilot".to_string(),
+                    provider: "openai".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
                     base_url: None,

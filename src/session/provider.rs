@@ -19,7 +19,7 @@ use crate::config::{BotSecrets, LlmRoleConfig};
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     /// The configured LLM provider is not supported.
-    #[error("Unsupported LLM provider: '{provider}'. Supported: anthropic, openai, github-copilot")]
+    #[error("Unsupported LLM provider: '{provider}'. Supported: anthropic, openai")]
     UnsupportedProvider {
         /// The unsupported provider name from config.
         provider: String,
@@ -52,15 +52,10 @@ pub enum ProviderError {
 /// # Supported providers
 /// - `"anthropic"` → `ANTHROPIC_API_KEY`
 /// - `"openai"` → `OPENAI_API_KEY`
-/// - `"github-copilot"` → `GITHUB_COPILOT_OAUTH_TOKEN`
 pub fn resolve_api_key(provider: &str, secrets: &BotSecrets) -> Result<String, ProviderError> {
     let (key_opt, env_var) = match provider {
         "anthropic" => (&secrets.anthropic_api_key, "ANTHROPIC_API_KEY"),
         "openai" => (&secrets.openai_api_key, "OPENAI_API_KEY"),
-        "github-copilot" => (
-            &secrets.github_copilot_oauth_token,
-            "GITHUB_COPILOT_OAUTH_TOKEN",
-        ),
         other => {
             return Err(ProviderError::UnsupportedProvider {
                 provider: other.to_string(),
@@ -98,7 +93,7 @@ pub fn create_completion_model(
 ) -> Result<String, ProviderError> {
     // Validate provider is supported
     match role_config.provider.as_str() {
-        "anthropic" | "openai" | "github-copilot" => {}
+        "anthropic" | "openai" => {}
         other => {
             return Err(ProviderError::UnsupportedProvider {
                 provider: other.to_string(),
@@ -108,31 +103,6 @@ pub fn create_completion_model(
 
     // Resolve API key
     resolve_api_key(&role_config.provider, secrets)
-}
-
-/// Build an [`http::HeaderMap`] with headers required by the GitHub Copilot API.
-///
-/// The Copilot chat-completions endpoint requires an `Editor-Version` header
-/// for IDE-based authentication tokens. Without it the API returns **400**
-/// `"missing Editor-Version header for IDE auth"`.
-///
-/// Pass the returned map via `.http_headers()` on the rig `openai::Client`
-/// builder **only** when the provider is `github-copilot`.
-pub fn copilot_headers() -> http::HeaderMap {
-    use http::{HeaderMap, HeaderValue};
-
-    let mut headers = HeaderMap::new();
-    headers.insert("Editor-Version", HeaderValue::from_static("bmad-bot/0.1.0"));
-    headers.insert(
-        "Editor-Plugin-Version",
-        HeaderValue::from_static("bmad-bot/0.1.0"),
-    );
-    headers.insert(
-        "Copilot-Integration-Id",
-        HeaderValue::from_static("vscode-chat"),
-    );
-
-    headers
 }
 
 #[cfg(test)]
@@ -145,7 +115,6 @@ mod tests {
         BotSecrets {
             anthropic_api_key: Some("sk-ant-test-key".to_string()),
             openai_api_key: Some("sk-openai-test-key".to_string()),
-            github_copilot_oauth_token: Some("gh-models-test-key".to_string()),
             github_token: Some("ghp_test".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,
@@ -157,7 +126,6 @@ mod tests {
         BotSecrets {
             anthropic_api_key: None,
             openai_api_key: None,
-            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,
@@ -232,13 +200,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_api_key_github_copilot() {
-        let secrets = secrets_with_all_keys();
-        let key = resolve_api_key("github-copilot", &secrets).expect("should resolve");
-        assert_eq!(key, "gh-models-test-key");
-    }
-
-    #[test]
     fn test_resolve_api_key_missing_returns_error() {
         let secrets = empty_secrets();
         let result = resolve_api_key("anthropic", &secrets);
@@ -258,7 +219,6 @@ mod tests {
         let secrets = BotSecrets {
             anthropic_api_key: Some(String::new()),
             openai_api_key: None,
-            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,
@@ -310,19 +270,6 @@ mod tests {
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "sk-openai-test-key");
-    }
-
-    #[test]
-    fn test_create_completion_model_github_copilot_returns_key() {
-        let secrets = secrets_with_all_keys();
-        let config = LlmRoleConfig {
-            provider: "github-copilot".to_string(),
-            model: "gpt-4o".to_string(),
-            reasoning_effort: None,
-            base_url: None,
-        };
-        let key = create_completion_model(&config, &secrets).expect("should succeed");
-        assert_eq!(key, "gh-models-test-key");
     }
 
     #[test]

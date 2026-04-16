@@ -999,7 +999,6 @@ mod tests {
         let secrets = Arc::new(BotSecrets {
             anthropic_api_key: Some("sk-test".to_string()),
             openai_api_key: None,
-            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,

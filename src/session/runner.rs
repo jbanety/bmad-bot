@@ -2312,7 +2312,6 @@ mod tests {
         BotSecrets {
             anthropic_api_key: Some("sk-test".to_string()),
             openai_api_key: Some("sk-test".to_string()),
-            github_copilot_oauth_token: Some("gh-test".to_string()),
             github_token: Some("ghp-test".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,

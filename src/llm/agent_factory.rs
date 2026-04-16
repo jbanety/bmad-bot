@@ -641,7 +641,7 @@ mod tests {
                     base_url: None,
                 },
                 supervisor: LlmRoleConfig {
-                    provider: "github-copilot".to_string(),
+                    provider: "openai".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
                     base_url: None,
@@ -675,7 +675,6 @@ mod tests {
         BotSecrets {
             anthropic_api_key: Some("sk-ant-test-key".to_string()),
             openai_api_key: Some("sk-openai-test-key".to_string()),
-            github_copilot_oauth_token: Some("gh-copilot-test-key".to_string()),
             github_token: Some("ghp_test".to_string()),
             gitlab_token: None,
             telegram_bot_token: None,
@@ -686,7 +685,6 @@ mod tests {
         BotSecrets {
             anthropic_api_key: None,
             openai_api_key: None,
-            github_copilot_oauth_token: None,
             github_token: None,
             gitlab_token: None,
             telegram_bot_token: None,
@@ -731,7 +729,7 @@ mod tests {
         let factory = AgentFactory::new(config, secrets);
 
         let role_config = factory.config_for_role(LlmRole::Supervisor);
-        assert_eq!(role_config.provider, "github-copilot");
+        assert_eq!(role_config.provider, "openai");
         assert_eq!(role_config.model, "claude-sonnet-4-20250514");
     }
 

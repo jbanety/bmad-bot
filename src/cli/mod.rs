@@ -124,7 +124,7 @@ pub enum CliError {
 // ---------------------------------------------------------------------------
 
 /// Recognised LLM provider identifiers for interactive selection.
-const LLM_PROVIDERS: &[&str] = &["anthropic", "openai", "github-copilot"];
+const LLM_PROVIDERS: &[&str] = &["anthropic", "openai"];
 
 /// Recognised git provider identifiers for interactive selection.
 const GIT_PROVIDERS: &[&str] = &["github", "gitlab"];
@@ -139,9 +139,22 @@ const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
 fn default_model_for_provider(provider: &str) -> &str {
     match provider {
         "anthropic" => "claude-sonnet-4-20250514",
-        "openai" => "gpt-4o",
-        "github-copilot" => "gpt-4o",
+        "openai" => "gpt-4.1",
         _ => "",
+    }
+}
+
+/// Parses a raw base_url input from stdin.
+/// Returns None if empty, Some(trimmed + trailing-slash-stripped) otherwise.
+///
+/// Emptiness is evaluated *after* stripping trailing slashes so that inputs like
+/// `"/"` or `"///"` correctly return `None` instead of `Some("")`.
+fn parse_base_url_input(raw: &str) -> Option<String> {
+    let stripped = raw.trim().trim_end_matches('/');
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
     }
 }
 
@@ -469,6 +482,21 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             reason: e.to_string(),
         })?;
 
+    let dev_base_url = if dev_provider == "openai" || dev_provider == "anthropic" {
+        let raw: String = dialoguer::Input::new()
+            .with_prompt(format!(
+                "base_url for DEV {dev_provider} agent (optional, press Enter for default)"
+            ))
+            .default(String::new())
+            .interact_text()
+            .map_err(|e| CliError::Init {
+                reason: e.to_string(),
+            })?;
+        parse_base_url_input(&raw)
+    } else {
+        None
+    };
+
     let same_for_all = dialoguer::Confirm::new()
         .with_prompt("Use same provider/model for REVIEW and SUPERVISOR roles?")
         .default(true)
@@ -477,12 +505,21 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             reason: e.to_string(),
         })?;
 
-    let (review_provider, review_model, supervisor_provider, supervisor_model) = if same_for_all {
+    let (
+        review_provider,
+        review_model,
+        review_base_url,
+        supervisor_provider,
+        supervisor_model,
+        supervisor_base_url,
+    ) = if same_for_all {
         (
             dev_provider.clone(),
             dev_model.clone(),
+            dev_base_url.clone(),
             dev_provider.clone(),
             dev_model.clone(),
+            dev_base_url.clone(),
         )
     } else {
         let rp_idx = dialoguer::Select::new()
@@ -501,6 +538,20 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             .map_err(|e| CliError::Init {
                 reason: e.to_string(),
             })?;
+        let rb = if rp == "openai" || rp == "anthropic" {
+            let raw: String = dialoguer::Input::new()
+                .with_prompt(format!(
+                    "base_url for REVIEW {rp} agent (optional, press Enter for default)"
+                ))
+                .default(String::new())
+                .interact_text()
+                .map_err(|e| CliError::Init {
+                    reason: e.to_string(),
+                })?;
+            parse_base_url_input(&raw)
+        } else {
+            None
+        };
 
         let sp_idx = dialoguer::Select::new()
             .with_prompt("LLM provider for SUPERVISOR agent")
@@ -518,8 +569,22 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             .map_err(|e| CliError::Init {
                 reason: e.to_string(),
             })?;
+        let sb = if sp == "openai" || sp == "anthropic" {
+            let raw: String = dialoguer::Input::new()
+                .with_prompt(format!(
+                    "base_url for SUPERVISOR {sp} agent (optional, press Enter for default)"
+                ))
+                .default(String::new())
+                .interact_text()
+                .map_err(|e| CliError::Init {
+                    reason: e.to_string(),
+                })?;
+            parse_base_url_input(&raw)
+        } else {
+            None
+        };
 
-        (rp, rm, sp, sm)
+        (rp, rm, rb, sp, sm, sb)
     };
 
     // --- Notifications ---
@@ -601,19 +666,19 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
                 provider: dev_provider,
                 model: dev_model,
                 reasoning_effort: None,
-                base_url: None,
+                base_url: dev_base_url,
             },
             review: LlmRoleConfig {
                 provider: review_provider,
                 model: review_model,
                 reasoning_effort: None,
-                base_url: None,
+                base_url: review_base_url,
             },
             supervisor: LlmRoleConfig {
                 provider: supervisor_provider,
                 model: supervisor_model,
                 reasoning_effort: None,
-                base_url: None,
+                base_url: supervisor_base_url,
             },
             epic_review: LlmRoleConfig::default(),
         },
@@ -1822,12 +1887,50 @@ mod tests {
 
     #[test]
     fn test_default_model_for_provider_openai() {
-        assert_eq!(default_model_for_provider("openai"), "gpt-4o");
+        assert_eq!(default_model_for_provider("openai"), "gpt-4.1");
     }
 
     #[test]
     fn test_default_model_for_provider_unknown() {
         assert_eq!(default_model_for_provider("unknown"), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_base_url_input tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_base_url_input_empty_returns_none() {
+        assert!(parse_base_url_input("").is_none());
+        assert!(parse_base_url_input("   ").is_none());
+        // Slash-only inputs must also return None after stripping
+        assert!(parse_base_url_input("/").is_none());
+        assert!(parse_base_url_input("///").is_none());
+        assert!(parse_base_url_input(" / ").is_none());
+    }
+
+    #[test]
+    fn test_parse_base_url_input_strips_trailing_slash() {
+        assert_eq!(
+            parse_base_url_input("http://localhost:11434/v1/"),
+            Some("http://localhost:11434/v1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_base_url_input_trims_whitespace() {
+        assert_eq!(
+            parse_base_url_input("  https://api.openai.com/v1  "),
+            Some("https://api.openai.com/v1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_base_url_input_no_trailing_slash_unchanged() {
+        assert_eq!(
+            parse_base_url_input("http://localhost:11434/v1"),
+            Some("http://localhost:11434/v1".to_string())
+        );
     }
 
     // -----------------------------------------------------------------------
