@@ -18,11 +18,12 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 - **Language:** Rust (edition 2024, rustc 1.86.0+)
 - **Async Runtime:** tokio (latest stable)
-- **AI Agent Framework:** rig-core (0.35, crates.io)
-- **Serialization:** serde + serde_yml
+- **AI Agent Framework:** rig-core (latest stable)
+- **Serialization:** serde + serde_yaml
 - **Git Operations:** Git CLI (>= 2.30) via subprocess (`tokio::process::Command` / `std::process::Command`). Requires `git` installed on host. Inherits user's full git configuration (credential managers, commit signing, SSH agent, `.gitconfig` identity). Validated at daemon startup.
-- **HTTP Client:** reqwest (Telegram API, GitHub/GitLab API)
+- **HTTP Client:** reqwest (Telegram API, GitHub Copilot adapter)
 - **Logging:** tracing (structured logging for daemon)
+- **All crates:** latest stable versions, no pinned versions
 
 ## Critical Implementation Rules
 
