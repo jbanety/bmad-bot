@@ -24,7 +24,7 @@ use crate::tools::{
 };
 
 use futures::StreamExt;
-use rig::agent::{MultiTurnStreamItem, StreamingPromptHook};
+use rig::agent::{MultiTurnStreamItem, PromptHook};
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
 use rig::message::Text;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
@@ -167,7 +167,7 @@ impl ChatHistoryHook {
     }
 }
 
-impl<M: CompletionModel> StreamingPromptHook<M> for ChatHistoryHook {
+impl<M: CompletionModel> PromptHook<M> for ChatHistoryHook {
     fn on_completion_call(
         &self,
         prompt: &Message,
@@ -293,6 +293,7 @@ where
     A: StreamingChat<M, M::StreamingResponse>,
     M: CompletionModel + 'static,
     M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    <A as StreamingChat<M, M::StreamingResponse>>::Hook: 'static,
 {
     let hook = ChatHistoryHook::new();
     let prompt_msg: Message = prompt.into();
@@ -678,6 +679,7 @@ where
     A: Chat + StreamingChat<M, M::StreamingResponse>,
     M: CompletionModel + 'static,
     M::StreamingResponse: Clone + Unpin + GetTokenUsage,
+    <A as StreamingChat<M, M::StreamingResponse>>::Hook: 'static,
 {
     let agent_path = Path::new(project_root).join(agent_relative_path);
 

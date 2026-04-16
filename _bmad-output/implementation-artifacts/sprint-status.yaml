@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-15T22:17:00Z
+# last_updated: 2026-04-16T11:48:00Z
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -134,7 +134,7 @@ development_status:
   11-1-remove-copilot-auth-module: done
   11-2-simplify-agent-factory-openai-compatible: done # depends-on: 11-1
   11-3-clean-provider-routing-config-secrets: done # depends-on: 11-2
-  11-4-migrate-rig-fork-to-official-crate: backlog # depends-on: 11-3
+  11-4-migrate-rig-fork-to-official-crate: done # depends-on: 11-3
   11-5-update-docs-remove-copilot-references: backlog # depends-on: 11-4
   epic-11-retrospective: optional
 

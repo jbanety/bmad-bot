@@ -17,3 +17,8 @@
 
 - **Base-URL collection logic duplicated 3× in `collect_config_interactively()`:** The dev, review, and supervisor base_url prompt blocks in `src/cli/mod.rs` are near-identical 12-line stanzas differing only in the prompt string. Extract a shared helper (e.g., `prompt_base_url(role_label, provider)`) to reduce maintenance burden. Code style concern, not a bug — the story spec prescribes per-role prompting.
 - **Duplicated provider-to-env-var mapping in `architect.rs`:** `src/supervisor/architect.rs` `new_with_factory()` still reimplements the provider → env var mapping (`"anthropic"` → `ANTHROPIC_API_KEY`, etc.) and manually constructs `BotSecrets` from `std::env::var` calls instead of calling the canonical `resolve_api_key()` in `provider.rs`. Pre-existing architectural debt not introduced by this diff (also noted in 11.2 review).
+
+
+## Deferred from: code review of story 11.4 (2026-04-16)
+
+- **`unwrap_or_default()` in test code silently swallows malformed JSON arguments:** In `tests/e2e/mcp_playwright.rs`, the pattern `.as_object().cloned().unwrap_or_default()` degrades to an empty map if `.as_object()` returns `None`. Since these are hardcoded JSON object literals, failure is currently impossible — but if anyone refactors the JSON value, the test will silently send empty arguments instead of failing loudly. Consider replacing with `.expect("arguments must be a JSON object")`. Pre-existing pattern not introduced by this diff.

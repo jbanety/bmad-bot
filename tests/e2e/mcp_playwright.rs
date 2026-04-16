@@ -157,18 +157,14 @@ async fn test_playwright_mcp_navigate_returns_content() {
 
     // Call browser_navigate directly via the ServerSink (Peer<RoleClient>).
     // This validates MCP tool invocation without requiring an LLM API key.
-    let params = rmcp::model::CallToolRequestParam {
-        name: "browser_navigate".into(),
-        arguments: Some(
-            serde_json::json!({
-                "url": "https://example.com"
-            })
-            .as_object()
-            .cloned()
-            .unwrap_or_default(),
-        ),
-        task: None,
-    };
+    let params = rmcp::model::CallToolRequestParams::new("browser_navigate").with_arguments(
+        serde_json::json!({
+            "url": "https://example.com"
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
 
     let result = tokio::time::timeout(Duration::from_secs(30), sink.call_tool(params))
         .await
@@ -223,18 +219,14 @@ async fn test_playwright_mcp_screenshot_returns_data() {
     let (_, ref sink) = tools[0];
 
     // First navigate to a page so there's content to screenshot
-    let nav_params = rmcp::model::CallToolRequestParam {
-        name: "browser_navigate".into(),
-        arguments: Some(
-            serde_json::json!({
-                "url": "https://example.com"
-            })
-            .as_object()
-            .cloned()
-            .unwrap_or_default(),
-        ),
-        task: None,
-    };
+    let nav_params = rmcp::model::CallToolRequestParams::new("browser_navigate").with_arguments(
+        serde_json::json!({
+            "url": "https://example.com"
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
 
     tokio::time::timeout(Duration::from_secs(30), sink.call_tool(nav_params))
         .await
@@ -242,11 +234,7 @@ async fn test_playwright_mcp_screenshot_returns_data() {
         .expect("navigate failed");
 
     // Now take a screenshot
-    let screenshot_params = rmcp::model::CallToolRequestParam {
-        name: "browser_screenshot".into(),
-        arguments: None,
-        task: None,
-    };
+    let screenshot_params = rmcp::model::CallToolRequestParams::new("browser_screenshot");
 
     let result = tokio::time::timeout(Duration::from_secs(30), sink.call_tool(screenshot_params))
         .await
@@ -360,18 +348,14 @@ async fn test_mcp_server_crash_does_not_terminate_session() {
     let (_, ref sink) = tools[0];
 
     // Verify the server is working first
-    let nav_params = rmcp::model::CallToolRequestParam {
-        name: "browser_navigate".into(),
-        arguments: Some(
-            serde_json::json!({
-                "url": "https://example.com"
-            })
-            .as_object()
-            .cloned()
-            .unwrap_or_default(),
-        ),
-        task: None,
-    };
+    let nav_params = rmcp::model::CallToolRequestParams::new("browser_navigate").with_arguments(
+        serde_json::json!({
+            "url": "https://example.com"
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
 
     let result = tokio::time::timeout(Duration::from_secs(30), sink.call_tool(nav_params.clone()))
         .await
