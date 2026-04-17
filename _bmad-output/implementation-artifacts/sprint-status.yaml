@@ -139,7 +139,7 @@ development_status:
   epic-11-retrospective: optional
 
   epic-12: in-progress # Skill-Based Sessions & SpawnAgent Tool — depends-on: epic-11
-  12-1-parameterize-activation-by-skill: review
+  12-1-parameterize-activation-by-skill: done
   12-2-simplify-response-analyzer: backlog # depends-on: 12-1
   12-3-spawn-agent-tool: backlog
   12-4-universal-spawn-agent-registration: backlog # depends-on: 12-3

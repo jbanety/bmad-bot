@@ -27,3 +27,10 @@
 ## Deferred from: code review of story 11.5 (2026-04-16)
 
 - **No CI gate or automated quality checks visible:** A commit with a .bak file, one-word message, whitespace-only churn, and contradictory status fields landed without any automated quality gate preventing it. Pre-existing process gap not introduced by this change.
+
+
+## Deferred from: code review of story 12.1 (2026-04-17)
+
+- **Recovery paths omit branch reminder:** `drive_activation_and_recover()` and the empty-history recovery path in `run_session()` send initial messages without a `BRANCH REMINDER`. The LLM may attempt branch operations during recovery. Pre-existing pattern — recovery paths never had branch reminders before Story 12.1.
+- **Recovery `ch_msg` sent before recovery context summary:** In `drive_activation_and_recover()`, the initial message ("Continue recovery for story file") is sent before the `recovery_message` containing the compressed prior work summary. The skill may begin executing from scratch before receiving recovery context. Pre-existing architectural pattern unchanged by this story.
+- **Architect session filename-based skill detection fragility:** The preamble's skill/persona distinction relies on the LLM interpreting the `SKILL.md` filename substring. If the architect file were ever renamed to contain `SKILL.md`, the flow would break. Currently safe — Story 12.4 scope.

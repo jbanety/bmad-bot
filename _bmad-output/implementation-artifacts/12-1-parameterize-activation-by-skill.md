@@ -1,6 +1,6 @@
 # Story 12.1: Parameterize Activation by Skill
 
-Status: review
+Status: done
 
 ## Story
 
