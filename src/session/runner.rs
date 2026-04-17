@@ -323,6 +323,9 @@ pub struct SessionRunner {
     mcp_manager: Arc<crate::mcp::McpManager>,
     /// UI handle for rendering terminal output (fire-and-forget, Story 10.3).
     ui: crate::ui::UiHandle,
+    /// Skill file path passed to `activate_agent()` for dev sessions (Story 12.1).
+    /// Uses BMAD skill-based activation instead of persona/menu files.
+    skill_path: String,
 }
 
 impl SessionRunner {
@@ -351,6 +354,7 @@ impl SessionRunner {
             shutdown,
             mcp_manager,
             ui,
+            skill_path: ".github/skills/bmad-dev-story/SKILL.md".to_string(),
         }
     }
 
@@ -1073,15 +1077,15 @@ impl SessionRunner {
         recovery_message: &str,
         recovery_depth: usize,
     ) -> Result<SessionOutcome, SessionOutcome> {
-        // Step 4a — Activate agent: send dev.md as user message
+        // Step 4a — Activate agent: send SKILL.md as user message (Story 12.1)
         self.ui.activation_start();
         self.ui.llm_request("recovery", 0);
         self.ui
-            .llm_request_content("recovery", 0, "[activate dev.md]");
+            .llm_request_content("recovery", 0, "[activate skill]");
         let (mut activation_history, mut compressed_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
-                "_bmad/bmm/agents/dev.md",
+                &self.skill_path,
                 "recovery",
                 Some(&self.shutdown),
                 Some(&self.ui),
@@ -1109,19 +1113,22 @@ impl SessionRunner {
         }
         self.ui.activation_complete();
 
-        // Step 4b — Enter chat mode with English language override.
-        // The BMAD activation loads config.yaml which may set communication_language
-        // to a non-English language. The response analyzer only matches English patterns.
-        let ch_msg = "IMPORTANT: ALL communication MUST be in English regardless of config file settings. CH";
+        // Step 4b — Send recovery continuation message with story file path.
+        // Story 12.1: skill-based activation replaces the persona menu + CH command.
+        // The skill is self-directing; this message provides English override and story context.
+        let ch_msg = format!(
+            "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Continue recovery for story file: {}",
+            story.specs_path.display()
+        );
 
         let ch_turn = compressed_history.len() / 2;
-        log_llm_request("recovery", ch_turn, ch_msg, activation_history.len());
+        log_llm_request("recovery", ch_turn, &ch_msg, activation_history.len());
         self.ui.llm_request("recovery", ch_turn as u32);
         self.ui
-            .llm_request_content("recovery", ch_turn as u32, ch_msg);
+            .llm_request_content("recovery", ch_turn as u32, &ch_msg);
         let (ch_response, ch_full_history) = agent
             .stream_chat(
-                ch_msg,
+                &ch_msg,
                 activation_history,
                 Some(&self.shutdown),
                 Some(&self.ui),
@@ -1149,7 +1156,7 @@ impl SessionRunner {
         activation_history = ch_full_history;
         compressed_history.push(ChatMessage {
             role: "user".to_string(),
-            content: ch_msg.to_string(),
+            content: ch_msg,
         });
         compressed_history.push(ChatMessage {
             role: "assistant".to_string(),
@@ -1301,18 +1308,18 @@ impl SessionRunner {
                     };
                 }
 
-                // Activate agent: send dev.md as user message so the LLM
-                // processes activation steps (load config via tools, show menu).
+                // Activate agent: send SKILL.md as user message (Story 12.1).
+                // The skill is self-contained and self-directing — no menu command needed.
                 // Retries transient errors (503, 429, timeouts) with exponential backoff.
                 let mut activation_retries = 0usize;
                 self.ui.activation_start();
                 self.ui.llm_request("dev", 0);
-                self.ui.llm_request_content("dev", 0, "[activate dev.md]");
+                self.ui.llm_request_content("dev", 0, "[activate skill]");
                 let (activation_rig_history, activation_chat_history) = loop {
                     match agent
                         .activate_agent(
                             &self.config.bmad_paths.project_root,
-                            "_bmad/bmm/agents/dev.md",
+                            &self.skill_path,
                             "dev",
                             Some(&self.shutdown),
                             Some(&self.ui),
@@ -1378,7 +1385,8 @@ impl SessionRunner {
                 }
                 let _ = state.save(&self.state_file_path).await;
 
-                // Now send "DS" — the agent is activated and recognizes the menu command.
+                // Now send the initial story message — the skill is activated and self-directing.
+                // Story 12.1: no [DS] command needed; skill executes autonomously.
                 // IMPORTANT: Override language to English. The BMAD activation loads
                 // config.yaml which may set communication_language to a non-English
                 // language, causing the agent to respond in that language. The response
@@ -1386,7 +1394,7 @@ impl SessionRunner {
                 let initial_message = format!(
                     "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
                      BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
-                     Execute [DS] for story file: {}",
+                     Story file: {}",
                     story.branch_name,
                     story.specs_path.display()
                 );
@@ -1514,15 +1522,15 @@ impl SessionRunner {
                         "Empty chat history — sending initial DS"
                     );
 
-                    // Activate agent: send dev.md as user message
+                    // Activate agent: send SKILL.md as user message (Story 12.1)
                     self.ui.activation_start();
                     self.ui.llm_request("recovery", 0);
                     self.ui
-                        .llm_request_content("recovery", 0, "[activate dev.md]");
+                        .llm_request_content("recovery", 0, "[activate skill]");
                     let (activation_rig_history, activation_chat_history) = match agent
                         .activate_agent(
                             &self.config.bmad_paths.project_root,
-                            "_bmad/bmm/agents/dev.md",
+                            &self.skill_path,
                             "recovery",
                             Some(&self.shutdown),
                             Some(&self.ui),
@@ -1566,10 +1574,11 @@ impl SessionRunner {
                         }
                     }
 
-                    // Now send "DS" — the agent is activated.
+                    // Now send the initial story message — skill is activated and self-directing.
+                    // Story 12.1: no [DS] command needed.
                     // Override language to English (see normal path comment for rationale).
                     let initial_message = format!(
-                        "IMPORTANT: ALL communication MUST be in English regardless of config file settings. DS for story file: {}",
+                        "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Story file: {}",
                         story.specs_path.display()
                     );
                     state.add_user_message(&initial_message);

@@ -8,8 +8,13 @@
 //! 1. Build a generic preamble with tool usage rules and English override
 //! 2. Create the standard tool set via [`create_base_tools()`] or [`create_tools_with_supervisor()`]
 //! 3. Send the agent file as a user message (Zed-style XML context) to trigger BMAD activation
-//! 4. The agent processes activation steps: loads `config.yaml`, greets user, shows menu
-//! 5. Caller sends a menu command (`DS` for dev, `CR` for review, `CH` for supervisor)
+//! 4. Dual-mode activation depending on the file provided:
+//!    - **Skill mode** (e.g., `.github/skills/bmad-dev-story/SKILL.md`): the agent
+//!      follows the skill's instructions autonomously — no follow-up command needed.
+//!    - **Persona mode** (e.g., `_bmad/bmm/agents/architect.md`): the agent loads
+//!      `config.yaml`, greets the user, displays the menu, and waits for input.
+//! 5. Skill mode: the skill is self-contained and self-directing — execution proceeds
+//!    automatically. Persona mode: caller sends a menu command (`CH` for supervisor).
 
 use crate::config::BotConfig;
 use crate::llm::agent_factory::AgentFactory;
@@ -255,7 +260,8 @@ OVERRIDE: communication_language = English
 - When the user provides an agent file in <context><files> tags, you MUST fully embody that agent's persona and follow ALL activation instructions exactly as specified.
 - NEVER break character until given an exit command.
 - Execute activation steps in order — load configuration files via tools, then greet and display the menu.
-- Wait for user input after displaying the menu."#,
+- Wait for user input after displaying the menu.
+- When provided a SKILL.md file in context, follow its instructions completely. Use your read_file tool to load any referenced workflow files (e.g., ./workflow.md). The skill is self-contained — execute it autonomously without waiting for user commands."#,
         mcp_line = mcp_line,
         sequential_tool_rule = sequential_tool_rule
     )
@@ -649,21 +655,21 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
-/// Activate a BMAD agent by sending the agent file as the first user message.
+/// The LLM receives the full agent file content as a Zed-style XML context user
+/// message. Dual-mode behavior depending on the file provided:
+/// - **Skill mode** (e.g., `.github/skills/bmad-dev-story/SKILL.md`): the agent
+///   follows the skill's instructions autonomously — no follow-up command needed.
+/// - **Persona mode** (e.g., `_bmad/bmm/agents/architect.md`): the agent loads
+///   `config.yaml`, greets the user, shows the greeting and menu, and awaits a command.
 ///
 /// Returns `(rig_history, chat_history)` — the rig `Message` vec for subsequent
 /// `streaming_chat` calls and the `ChatMessage` vec for WAL state persistence.
 ///
-/// The LLM receives the full agent file content as a Zed-style XML context user
-/// message, processes the activation steps (loads `config.yaml` via tools, reads
-/// the story file, shows the greeting and menu), and is then ready to accept
-/// commands like `"DS"`, `"CR"`, or `"CH"`.
-///
 /// # Arguments
 /// - `agent` — the built rig agent (with preamble and tools already attached)
 /// - `project_root` — path to the project root
-/// - `agent_relative_path` — relative path from project root to the agent file
-///   (e.g. `"_bmad/bmm/agents/dev.md"` or `"_bmad/bmm/agents/architect.md"`)
+/// - `agent_relative_path` — relative path from project root to the agent/skill file
+///   (e.g. `.github/skills/bmad-dev-story/SKILL.md` or `_bmad/bmm/agents/architect.md`)
 /// - `label` — logging label (e.g. `"dev"`, `"review"`, `"supervisor"`)
 /// - `shutdown` — optional shutdown flag for cooperative cancellation
 /// - `ui` — optional UI handle for emitting tool call events during activation
@@ -757,9 +763,40 @@ mod tests {
 
     #[test]
     fn test_build_preamble_contains_activation_rules() {
+        // Dual-mode intent: persona rules are retained (Architect compatibility guard)
+        // AND skill instruction is added. Both must coexist — see Story 12.1.
         let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
         assert!(preamble.contains("<context><files>"));
         assert!(preamble.contains("activation instructions"));
+    }
+
+    #[test]
+    fn test_build_preamble_contains_skill_instructions() {
+        // Story 12.1: skill instruction added alongside persona rules.
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
+        assert!(
+            preamble.contains("SKILL.md"),
+            "Preamble must instruct agent to follow SKILL.md files"
+        );
+        assert!(
+            preamble.contains("workflow.md"),
+            "Preamble must instruct agent to load referenced workflow files"
+        );
+    }
+
+    #[test]
+    fn test_build_preamble_retains_persona_rules() {
+        // Architect compatibility guard — persona instructions must NEVER be removed.
+        // ArchitectSession calls build_preamble() and depends on persona activation rules.
+        let preamble = build_preamble(&[], "claude-sonnet-4-20250514");
+        assert!(
+            preamble.contains("activation instructions"),
+            "Persona activation rules must be retained for Architect session compatibility"
+        );
+        assert!(
+            preamble.contains("Wait for user input"),
+            "Persona 'wait for user input' rule must be retained for Architect session"
+        );
     }
 
     #[test]

@@ -539,15 +539,15 @@ impl ReviewRunner {
         // The CR workflow asks "which story file to review" — reply with the file path
         let story_reply = story.specs_path.display().to_string();
 
-        // Activate agent: send dev.md as user message (same flow as dev session)
+        // Activate agent: send code review SKILL.md as user message (Story 12.1)
         self.ui.activation_start();
         self.ui.llm_request("review", 0);
         self.ui
-            .llm_request_content("review", 0, "[activate dev.md]");
+            .llm_request_content("review", 0, "[activate skill]");
         let (activation_rig_history, _activation_chat_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
-                "_bmad/bmm/agents/dev.md",
+                ".github/skills/bmad-code-review/SKILL.md",
                 "review",
                 Some(&self.shutdown),
                 Some(&self.ui),
@@ -574,9 +574,10 @@ impl ReviewRunner {
         }
         self.ui.activation_complete();
 
-        // Send "CR" with English language override (same pattern as DS in dev session)
+        // Send initial story message with English language override (Story 12.1).
+        // Skill is self-directing — no [CR] command needed. No branch reminder for review sessions.
         let initial_message = format!(
-            "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Execute [CR] for story file: {}",
+            "IMPORTANT: ALL communication MUST be in English regardless of config file settings. Story file: {}",
             story.specs_path.display()
         );
         log_llm_request("review", 1, &initial_message, activation_rig_history.len());
