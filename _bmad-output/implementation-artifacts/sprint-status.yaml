@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-16T22:05:00Z
+# last_updated: 2026-04-16T20:19:44Z
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -138,8 +138,8 @@ development_status:
   11-5-update-docs-remove-copilot-references: done # depends-on: 11-4
   epic-11-retrospective: optional
 
-  epic-12: backlog # Skill-Based Sessions & SpawnAgent Tool — depends-on: epic-11
-  12-1-parameterize-activation-by-skill: backlog
+  epic-12: in-progress # Skill-Based Sessions & SpawnAgent Tool — depends-on: epic-11
+  12-1-parameterize-activation-by-skill: ready-for-dev
   12-2-simplify-response-analyzer: backlog # depends-on: 12-1
   12-3-spawn-agent-tool: backlog
   12-4-universal-spawn-agent-registration: backlog # depends-on: 12-3
