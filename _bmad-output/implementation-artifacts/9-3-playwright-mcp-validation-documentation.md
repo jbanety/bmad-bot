@@ -1,6 +1,6 @@
 # Story 9.3: Playwright MCP Validation & Documentation
 
-Status: review
+Status: done
 
 ## Story
 
@@ -87,6 +87,7 @@ So that I can confidently enable browser automation and extend the agent with ne
 - **Doc comments** (`///`) mandatory on all public test functions. [Source: project-context.md#Code Quality & Style Rules]
 - **No `println!` or `eprintln!`** — use `tracing` for any diagnostic output in test helpers. [Source: project-context.md#Language-Specific Rules]
 - **Non-blocking failures:** MCP server crashes during a session MUST NOT crash the daemon or terminate the agent session. The agent continues with native tools. This is enforced by rig's `McpTool` error handling — tool call returns an error string to the LLM, which then decides how to proceed. [Source: architect-brief-mcp-client-integration.md#Risk Assessment]
+- **AC #4 coverage split** (added 2026-04-18 during code review): `test_mcp_server_crash_does_not_terminate_session` validates the error-propagation half of AC #4 at the `ServerSink` level only. The "native tools continue to work" half is covered at the framework level by rig's `McpTool` wrapper — tool-call failures surface as LLM-visible error strings while other registered tools remain untouched — and is not exercised by this story's E2E suite.
 
 ### Source Tree Components to Touch
 
@@ -386,4 +387,20 @@ Claude Opus 4.6 (via Copilot)
 - `tests/e2e.rs` — Created: E2E test binary entry point with `#[path]` submodule declaration
 - `tests/e2e/mod.rs` — Deleted: replaced by `tests/e2e.rs` (Rust 2024 edition module resolution)
 - `tests/e2e/mcp_playwright.rs` — Created: 5 E2E tests for Playwright MCP (connect, navigate, screenshot, configurator, crash resilience)
+
+### Review Findings (2026-04-18)
+
+- [x] [Review][Patch] Document AC #4 partial coverage — `test_mcp_server_crash_does_not_terminate_session` only validates `ServerSink`-level error propagation; the "native tools continue" half of AC #4 is covered at the framework level by rig's `McpTool` wrapper. Added Dev Notes clarification + expanded the test docstring to state this split explicitly. (Fixed 2026-04-18)
+- [x] [Review][Patch] `McpGuard::drop` uses `Handle::block_on` on a tokio worker thread — will panic when E2E tests actually run [tests/e2e/mcp_playwright.rs:62-71]. Wrapped with `tokio::task::block_in_place` so the runtime can be re-entered from the drop. (Fixed 2026-04-18)
+- [x] [Review][Patch] Wrong GitHub URL for Playwright MCP: `https://github.com/anthropics/mcp-playwright` does not exist. Replaced with `https://github.com/microsoft/playwright-mcp` [docs/mcp-servers.md:81]. (Fixed 2026-04-18)
+- [x] [Review][Patch] `mcp_servers` commented-out section placed BEFORE `bmad_paths`. Moved to AFTER the `bmad_paths` section as Task 1.1 requires [bmad-bot.yaml.example]. (Fixed 2026-04-18)
+- [x] [Review][Patch] Tool-count inconsistency across docs and test. Aligned prose ("approximately 18"), kept table at 18 rows, and tightened test threshold from `> 5` to `>= 15` so regressions surface [docs/mcp-servers.md:122 and tests/e2e/mcp_playwright.rs:103]. (Fixed 2026-04-18)
+- [x] [Review][Patch] Crash-resilience test accepted `Ok(Ok(_))` as success. Changed the arm to `panic!` so AC #4 regression actually surfaces; `Ok(Err(_))` and `Err(timeout)` remain acceptable outcomes [tests/e2e/mcp_playwright.rs:380-400]. (Fixed 2026-04-18)
+- [x] [Review][Patch] `BMAD_E2E` gate accepted any non-absent value including `""` and `"0"`. Tightened to `std::env::var("BMAD_E2E").as_deref() != Ok("1")` across all 5 test sites [tests/e2e/mcp_playwright.rs]. (Fixed 2026-04-18)
+- [x] [Review][Patch] E2E tests fetched `https://example.com`. Switched all navigations to `data:text/html,<body>test</body>` so tests run offline [tests/e2e/mcp_playwright.rs]. (Fixed 2026-04-18)
+
+- [x] [Review][Defer] `timeout_secs: 0` is accepted and causes immediate handshake timeout [src/mcp/manager.rs:226] — deferred, pre-existing validation gap from Story 9.1. Add `BotConfig::validate` rejection of `Some(0)`.
+- [x] [Review][Defer] `name` field documented as "must be unique" but uniqueness is never enforced in `BotConfig::validate` [docs/mcp-servers.md:292, src/config/mod.rs] — deferred, pre-existing from Story 9.1.
+- [x] [Review][Defer] `@playwright/mcp` is not version-pinned in tests/docs (`args: ["-y", "@playwright/mcp"]`) — upstream tool-name drift (e.g., `browser_screenshot` → `browser_take_screenshot`) will break assertions without notice. Defer pinning to a follow-up that also aligns the doc tool table.
+
 - `README.md` — Added MCP Tool Extensibility line in Key Features section

@@ -78,7 +78,7 @@ If `mcp_servers` is absent or empty, the daemon behaves identically to pre-MCP v
 
 ## Playwright Setup
 
-[Playwright MCP](https://github.com/anthropics/mcp-playwright) provides browser automation tools — navigate pages, click elements, fill forms, take screenshots, and more.
+[Playwright MCP](https://github.com/microsoft/playwright-mcp) provides browser automation tools — navigate pages, click elements, fill forms, take screenshots, and more.
 
 ### Prerequisites
 
@@ -119,7 +119,7 @@ bmad-bot start
 
 ### Expected Tools
 
-When Playwright MCP connects successfully, it discovers approximately 20 browser automation tools (exact count varies by `@playwright/mcp` version):
+When Playwright MCP connects successfully, it discovers approximately 18 browser automation tools (exact count varies by `@playwright/mcp` version):
 
 | Tool | Description |
 |------|-------------|

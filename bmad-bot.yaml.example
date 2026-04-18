@@ -57,6 +57,13 @@ notifications:
 # When enabled, a separate LLM runs the BMAD CR workflow to review code before PR creation.
 code_review_enabled: true
 
+# BMAD project paths — adjust to match your project layout
+bmad_paths:
+  project_root: "."
+  output_folder: "_bmad-output"
+  planning_artifacts: "_bmad-output/planning-artifacts"
+  implementation_artifacts: "_bmad-output/implementation-artifacts"
+
 # MCP (Model Context Protocol) server configuration — optional
 # The daemon connects to configured MCP servers at startup, discovers their tools,
 # and exposes them to the dev agent alongside native tools (edit_file, grep, etc.).
@@ -79,10 +86,3 @@ code_review_enabled: true
 #   #   transport: stdio
 #   #   enabled: true
 #   #   timeout_secs: 60      # Increase timeout for slow-starting servers
-
-# BMAD project paths — adjust to match your project layout
-bmad_paths:
-  project_root: "."
-  output_folder: "_bmad-output"
-  planning_artifacts: "_bmad-output/planning-artifacts"
-  implementation_artifacts: "_bmad-output/implementation-artifacts"

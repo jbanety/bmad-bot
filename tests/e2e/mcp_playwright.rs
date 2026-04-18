@@ -61,11 +61,15 @@ impl<'a> McpGuard<'a> {
 
 impl Drop for McpGuard<'_> {
     fn drop(&mut self) {
-        // Use block_in_place to run async shutdown in drop context.
-        // This is safe because we're inside a multi-thread tokio runtime.
+        // `Handle::block_on` cannot be called from within a tokio worker
+        // thread — `block_in_place` moves the current task off the worker so
+        // the runtime can be re-entered without panicking.
         let manager = self.manager;
-        self.rt.block_on(async {
-            manager.shutdown().await;
+        let rt = self.rt.clone();
+        tokio::task::block_in_place(|| {
+            rt.block_on(async {
+                manager.shutdown().await;
+            });
         });
     }
 }
@@ -77,7 +81,7 @@ impl Drop for McpGuard<'_> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn test_playwright_mcp_server_connects_and_discovers_tools() {
-    if std::env::var("BMAD_E2E").is_err() {
+    if std::env::var("BMAD_E2E").as_deref() != Ok("1") {
         tracing::info!("Skipping E2E test: set BMAD_E2E=1 to run");
         return;
     }
@@ -100,8 +104,8 @@ async fn test_playwright_mcp_server_connects_and_discovers_tools() {
 
     let (ref tool_defs, _) = tools[0];
     assert!(
-        tool_defs.len() > 5,
-        "Playwright MCP should discover more than 5 tools, got {}",
+        tool_defs.len() >= 15,
+        "Playwright MCP should discover at least 15 tools, got {}",
         tool_defs.len()
     );
 
@@ -136,7 +140,7 @@ async fn test_playwright_mcp_server_connects_and_discovers_tools() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn test_playwright_mcp_navigate_returns_content() {
-    if std::env::var("BMAD_E2E").is_err() {
+    if std::env::var("BMAD_E2E").as_deref() != Ok("1") {
         tracing::info!("Skipping E2E test: set BMAD_E2E=1 to run");
         return;
     }
@@ -159,7 +163,7 @@ async fn test_playwright_mcp_navigate_returns_content() {
     // This validates MCP tool invocation without requiring an LLM API key.
     let params = rmcp::model::CallToolRequestParams::new("browser_navigate").with_arguments(
         serde_json::json!({
-            "url": "https://example.com"
+            "url": "data:text/html,<body>test</body>"
         })
         .as_object()
         .cloned()
@@ -199,7 +203,7 @@ async fn test_playwright_mcp_navigate_returns_content() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn test_playwright_mcp_screenshot_returns_data() {
-    if std::env::var("BMAD_E2E").is_err() {
+    if std::env::var("BMAD_E2E").as_deref() != Ok("1") {
         tracing::info!("Skipping E2E test: set BMAD_E2E=1 to run");
         return;
     }
@@ -221,7 +225,7 @@ async fn test_playwright_mcp_screenshot_returns_data() {
     // First navigate to a page so there's content to screenshot
     let nav_params = rmcp::model::CallToolRequestParams::new("browser_navigate").with_arguments(
         serde_json::json!({
-            "url": "https://example.com"
+            "url": "data:text/html,<body>test</body>"
         })
         .as_object()
         .cloned()
@@ -273,7 +277,7 @@ async fn test_playwright_mcp_screenshot_returns_data() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn test_playwright_mcp_tools_registered_on_configurator() {
-    if std::env::var("BMAD_E2E").is_err() {
+    if std::env::var("BMAD_E2E").as_deref() != Ok("1") {
         tracing::info!("Skipping E2E test: set BMAD_E2E=1 to run");
         return;
     }
@@ -320,8 +324,12 @@ async fn test_playwright_mcp_tools_registered_on_configurator() {
 
 /// Verify that an MCP server crash mid-session does not terminate the session.
 ///
-/// Validates AC #4: server crash → clear error returned → native tools still work →
-/// session not terminated.
+/// Validates the error-propagation half of AC #4: server crash → clear error
+/// returned to the caller → no panic → session not terminated. The "native
+/// tools continue to work" half of AC #4 is covered at the framework level
+/// by rig's `McpTool` wrapper, which converts tool-call errors into LLM-
+/// visible error strings while leaving other registered tools untouched; it
+/// is not exercised here.
 ///
 /// Strategy: connect to Playwright MCP, manually kill the child process by
 /// dropping the manager (which shuts down servers), then verify that calling
@@ -329,7 +337,7 @@ async fn test_playwright_mcp_tools_registered_on_configurator() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn test_mcp_server_crash_does_not_terminate_session() {
-    if std::env::var("BMAD_E2E").is_err() {
+    if std::env::var("BMAD_E2E").as_deref() != Ok("1") {
         tracing::info!("Skipping E2E test: set BMAD_E2E=1 to run");
         return;
     }
@@ -350,7 +358,7 @@ async fn test_mcp_server_crash_does_not_terminate_session() {
     // Verify the server is working first
     let nav_params = rmcp::model::CallToolRequestParams::new("browser_navigate").with_arguments(
         serde_json::json!({
-            "url": "https://example.com"
+            "url": "data:text/html,<body>test</body>"
         })
         .as_object()
         .cloned()
@@ -386,8 +394,8 @@ async fn test_mcp_server_crash_does_not_terminate_session() {
             );
         }
         Ok(Ok(_)) => {
-            // Unlikely but acceptable — the server might have buffered the response
-            tracing::info!("Post-crash tool call unexpectedly succeeded (buffered response?)");
+            // AC #4 requires a clear error after server crash — success is a regression.
+            panic!("Post-crash tool call unexpectedly succeeded — crash resilience regressed");
         }
         Err(_) => {
             // Timeout is also acceptable — the dead server can't respond

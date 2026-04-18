@@ -29,6 +29,13 @@
 - **No CI gate or automated quality checks visible:** A commit with a .bak file, one-word message, whitespace-only churn, and contradictory status fields landed without any automated quality gate preventing it. Pre-existing process gap not introduced by this change.
 
 
+## Deferred from: code review of story 9.3 (2026-04-18)
+
+- **`timeout_secs: 0` is accepted and causes immediate handshake timeout:** `src/mcp/manager.rs:226` builds `Duration::from_secs(config.timeout_secs.unwrap_or(30))` without rejecting a user-supplied `Some(0)`. Zero triggers an immediate `tokio::time::timeout` and every connect fails with `HandshakeTimeout`. Pre-existing validation gap from Story 9.1 — add a `BotConfig::validate` check that rejects `Some(0)`.
+- **`name` uniqueness constraint documented but not enforced:** `docs/mcp-servers.md:292` states the `name` field "must be unique across all configured servers", but `BotConfig::validate` never checks for duplicate names. Duplicate entries silently spawn both servers and create undefined tool-name collisions. Pre-existing from Story 9.1.
+- **`@playwright/mcp` is not version-pinned in tests or docs:** `args: ["-y", "@playwright/mcp"]` always fetches `latest`. Upstream renamed `browser_screenshot` → `browser_take_screenshot` in recent versions and removed `browser_fill`. Asserted tool names (`browser_navigate`, `browser_click`, `browser_snapshot`) may not exist in future versions. Defer pinning to a follow-up that also aligns the `docs/mcp-servers.md` tool table with the pinned version's actual output.
+
+
 ## Deferred from: code review of story 12.1 (2026-04-17)
 
 - **Recovery paths omit branch reminder:** `drive_activation_and_recover()` and the empty-history recovery path in `run_session()` send initial messages without a `BRANCH REMINDER`. The LLM may attempt branch operations during recovery. Pre-existing pattern — recovery paths never had branch reminders before Story 12.1.
