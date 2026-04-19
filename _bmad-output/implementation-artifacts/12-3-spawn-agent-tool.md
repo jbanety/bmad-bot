@@ -1,6 +1,6 @@
 # Story 12.3: SpawnAgent Tool
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -115,51 +115,51 @@ So that I can delegate research, parallel investigation, or specialized work wit
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `uuid` dependency (AC: #7)
-  - [ ] 1.1 Edit `Cargo.toml` — insert `uuid = { version = "1", features = ["v4"] }` alphabetically between `tracing-subscriber` and the `[dev-dependencies]` header
-  - [ ] 1.2 Run `cargo build` once so `Cargo.lock` is regenerated with `uuid`
-  - [ ] 1.3 Verify via `cargo tree | grep uuid` that `uuid v1.x` appears as a direct dependency
+- [x] Task 1: Add `uuid` dependency (AC: #7)
+  - [x] 1.1 Edit `Cargo.toml` — insert `uuid = { version = "1", features = ["v4"] }` alphabetically between `tracing-subscriber` and the `[dev-dependencies]` header
+  - [x] 1.2 Run `cargo build` once so `Cargo.lock` is regenerated with `uuid`
+  - [x] 1.3 Verify via `cargo tree | grep uuid` that `uuid v1.x` appears as a direct dependency
 
-- [ ] Task 2: Add `build_sub_agent_preamble()` to `src/session/agent.rs` (AC: #2)
-  - [ ] 2.1 Add a new `pub fn build_sub_agent_preamble(model: &str) -> String` after `build_preamble()` (~L268). Reuse the same `format!` template but with the tool inventory line changed to `"You have access to these tools: edit_file, read_file, grep, find_path, list_directory, git, terminal, plus a built-in think tool for reasoning."` — no `ask_supervisor`, no `spawn_agent`, no MCP line (sub-agents receive no MCP tools per AC-2)
-  - [ ] 2.2 Omit the `ask_supervisor` reference from the "Tool Usage Rules" section too — remove the bullet `"Use `ask_supervisor` when you need clarification..."` from the sub-agent template
-  - [ ] 2.3 Retain: tool usage rules, branch management, completion sentinel, English override, sequential-tool workaround for preview models, session completion protocol, and communication section
-  - [ ] 2.4 Retain the persona activation rules at the bottom of the preamble (same as `build_preamble` — sub-agents may receive persona files in context; this is a low-risk dormant rule for new-session first-user-message style)
-  - [ ] 2.5 Add a doc comment explaining the divergence from `build_preamble()`: sub-agents get a different tool inventory line because their registered tool set differs
-  - [ ] 2.6 Add three unit tests: `test_build_sub_agent_preamble_excludes_ask_supervisor` (asserts `!preamble.contains("ask_supervisor")`), `test_build_sub_agent_preamble_excludes_spawn_agent` (asserts `!preamble.contains("spawn_agent")`), `test_build_sub_agent_preamble_retains_completion_sentinel` (asserts `preamble.contains("<<BMAD_JOB_DONE>>")`). These three tests are in `src/session/agent.rs` and are counted separately from the 10 tests in AC-8 — adjust test count claim if needed (see Task 8.3)
+- [x] Task 2: Add `build_sub_agent_preamble()` to `src/session/agent.rs` (AC: #2)
+  - [x] 2.1 Add a new `pub fn build_sub_agent_preamble(model: &str) -> String` after `build_preamble()` (~L268). Reuse the same `format!` template but with the tool inventory line changed to `"You have access to these tools: edit_file, read_file, grep, find_path, list_directory, git, terminal, plus a built-in think tool for reasoning."` — no `ask_supervisor`, no `spawn_agent`, no MCP line (sub-agents receive no MCP tools per AC-2)
+  - [x] 2.2 Omit the `ask_supervisor` reference from the "Tool Usage Rules" section too — remove the bullet `"Use `ask_supervisor` when you need clarification..."` from the sub-agent template
+  - [x] 2.3 Retain: tool usage rules, branch management, completion sentinel, English override, sequential-tool workaround for preview models, session completion protocol, and communication section
+  - [x] 2.4 Retain the persona activation rules at the bottom of the preamble (same as `build_preamble` — sub-agents may receive persona files in context; this is a low-risk dormant rule for new-session first-user-message style)
+  - [x] 2.5 Add a doc comment explaining the divergence from `build_preamble()`: sub-agents get a different tool inventory line because their registered tool set differs
+  - [x] 2.6 Add three unit tests: `test_build_sub_agent_preamble_excludes_ask_supervisor` (asserts `!preamble.contains("ask_supervisor")`), `test_build_sub_agent_preamble_excludes_spawn_agent` (asserts `!preamble.contains("spawn_agent")`), `test_build_sub_agent_preamble_retains_completion_sentinel` (asserts `preamble.contains("<<BMAD_JOB_DONE>>")`). These three tests are in `src/session/agent.rs` and are counted separately from the 10 tests in AC-8 — adjust test count claim if needed (see Task 8.3)
 
-- [ ] Task 3: Create `src/tools/spawn_agent.rs` with core types (AC: #1, #6)
-  - [ ] 3.1 Module-level doc comment: purpose, Zed inspiration, contrast with daemon-orchestrated consultations (architecture.md Decision 10), shared-state design with `Arc<Mutex<HashMap>>`, note that ownership of the sessions map is Story 12.4 scope
-  - [ ] 3.2 Define `SpawnAgentArgs { label: String, message: String, session_id: Option<String> }` with `#[derive(Debug, Deserialize)]`
-  - [ ] 3.3 Define `SpawnAgentError` enum with `#[derive(Debug, thiserror::Error)]`: variants `SessionNotFound { session_id: String }` (Display: `"No sub-agent session found for id: {session_id}"`) and `AgentBuildFailed { reason: String }` (Display: `"Failed to build sub-agent: {reason}"`). Do NOT add `LockPoisoned` — the `lock_sessions()` helper recovers from poisoning and never errors
-  - [ ] 3.4 Define `SubAgentState { agent: BuiltAgent, history: Vec<rig::completion::Message>, role: LlmRole, model: String }` with `#[derive(Debug)]`. Does NOT derive serde traits. Marker comment: "In-memory-only state — never serialized, dropped when the parent pipeline drops the sessions map (Story 12.4 owns the lifecycle)"
-  - [ ] 3.5 Define `SpawnAgentTool` struct with **only `#[derive(Debug)]`** (see AC-6). Fields: `agent_factory: Arc<AgentFactory>`, `role: LlmRole`, `project_root: PathBuf`, `sessions: Arc<Mutex<HashMap<String, SubAgentState>>>`, `shutdown: Option<ShutdownFlag>`
-  - [ ] 3.6 Implement `SpawnAgentTool::new(agent_factory, role, project_root, sessions, shutdown) -> Self` with a doc comment listing each field's purpose
-  - [ ] 3.7 Implement private helper `fn lock_sessions(&self) -> MutexGuard<'_, HashMap<String, SubAgentState>>` per AC-6 — `unwrap_or_else(|p| { tracing::error!(...); p.into_inner() })`
-  - [ ] 3.8 Implement private helpers `fn build_success_json(session_id: &str, output: &str) -> String` and `fn build_error_json(session_id: &str, error: &str) -> String` per AC-5. Both use `serde_json::json!({...}).to_string()`
+- [x] Task 3: Create `src/tools/spawn_agent.rs` with core types (AC: #1, #6)
+  - [x] 3.1 Module-level doc comment: purpose, Zed inspiration, contrast with daemon-orchestrated consultations (architecture.md Decision 10), shared-state design with `Arc<Mutex<HashMap>>`, note that ownership of the sessions map is Story 12.4 scope
+  - [x] 3.2 Define `SpawnAgentArgs { label: String, message: String, session_id: Option<String> }` with `#[derive(Debug, Deserialize)]`
+  - [x] 3.3 Define `SpawnAgentError` enum with `#[derive(Debug, thiserror::Error)]`: variants `SessionNotFound { session_id: String }` (Display: `"No sub-agent session found for id: {session_id}"`) and `AgentBuildFailed { reason: String }` (Display: `"Failed to build sub-agent: {reason}"`). Do NOT add `LockPoisoned` — the `lock_sessions()` helper recovers from poisoning and never errors
+  - [x] 3.4 Define `SubAgentState { agent: BuiltAgent, history: Vec<rig::completion::Message>, role: LlmRole, model: String }` with `#[derive(Debug)]`. Does NOT derive serde traits. Marker comment: "In-memory-only state — never serialized, dropped when the parent pipeline drops the sessions map (Story 12.4 owns the lifecycle)"
+  - [x] 3.5 Define `SpawnAgentTool` struct with **only `#[derive(Debug)]`** (see AC-6). Fields: `agent_factory: Arc<AgentFactory>`, `role: LlmRole`, `project_root: PathBuf`, `sessions: Arc<Mutex<HashMap<String, SubAgentState>>>`, `shutdown: Option<ShutdownFlag>`
+  - [x] 3.6 Implement `SpawnAgentTool::new(agent_factory, role, project_root, sessions, shutdown) -> Self` with a doc comment listing each field's purpose
+  - [x] 3.7 Implement private helper `fn lock_sessions(&self) -> MutexGuard<'_, HashMap<String, SubAgentState>>` per AC-6 — `unwrap_or_else(|p| { tracing::error!(...); p.into_inner() })`
+  - [x] 3.8 Implement private helpers `fn build_success_json(session_id: &str, output: &str) -> String` and `fn build_error_json(session_id: &str, error: &str) -> String` per AC-5. Both use `serde_json::json!({...}).to_string()`
 
-- [ ] Task 4: Implement `Tool::definition()` (AC: #4)
-  - [ ] 4.1 Populate `ToolDefinition::name` as `"spawn_agent"`
-  - [ ] 4.2 Write the description string (target length 500–800 chars — well above the 400-char floor in AC-8.2). Structure as:
+- [x] Task 4: Implement `Tool::definition()` (AC: #4)
+  - [x] 4.1 Populate `ToolDefinition::name` as `"spawn_agent"`
+  - [x] 4.2 Write the description string (target length 500–800 chars — well above the 400-char floor in AC-8.2). Structure as:
     - One-sentence purpose
     - "**When to use**" paragraph — delegation scenarios
     - "**When NOT to use**" paragraph — "Do not spawn sub-agents for tasks accomplishable with one or two direct tool calls — the delegation overhead is not worth it."
     - "**Guidelines**" numbered list with 5 items matching AC-4 exactly
     - "**Output**" section showing both JSON shapes literally (`{"session_id": "...", "output": "..."}` and `{"session_id": "...", "error": "..."}`)
     - "**label**" sentence explaining the field is for structured logging correlation (per AC-4)
-  - [ ] 4.3 Populate `parameters` JSON schema with three properties; mark `label` and `message` as required; each property gets a `description` field
-  - [ ] 4.4 Add a doc comment above `definition()` noting that description quality directly drives LLM delegation behavior (per architecture.md:802)
+  - [x] 4.3 Populate `parameters` JSON schema with three properties; mark `label` and `message` as required; each property gets a `description` field
+  - [x] 4.4 Add a doc comment above `definition()` noting that description quality directly drives LLM delegation behavior (per architecture.md:802)
 
-- [ ] Task 5: Implement `Tool::call()` — new-session path (AC: #2, #5, #6)
-  - [ ] 5.1 Log entry: `tracing::info!(action = "spawn_agent_start", label = %args.label, follow_up = args.session_id.is_some(), role = ?self.role, "Spawning sub-agent")`
-  - [ ] 5.2 Branch on `args.session_id.is_none()`. Resolve model + preamble:
+- [x] Task 5: Implement `Tool::call()` — new-session path (AC: #2, #5, #6)
+  - [x] 5.1 Log entry: `tracing::info!(action = "spawn_agent_start", label = %args.label, follow_up = args.session_id.is_some(), role = ?self.role, "Spawning sub-agent")`
+  - [x] 5.2 Branch on `args.session_id.is_none()`. Resolve model + preamble:
     ```rust
     let model = self.agent_factory.config_for_role(self.role).model.clone();
     let preamble = crate::session::agent::build_sub_agent_preamble(&model);
     let (git, read_file, edit_file, grep, find_path, list_dir, terminal) =
         crate::session::agent::create_base_tools(&self.project_root);
     ```
-  - [ ] 5.3 Build the agent:
+  - [x] 5.3 Build the agent:
     ```rust
     let agent = self
         .agent_factory
@@ -171,8 +171,8 @@ So that I can delegate research, parallel investigation, or specialized work wit
         .await
         .map_err(|e| SpawnAgentError::AgentBuildFailed { reason: e.to_string() })?;
     ```
-  - [ ] 5.4 Generate UUID: `let session_id = uuid::Uuid::new_v4().to_string();`
-  - [ ] 5.5 Run the stream:
+  - [x] 5.4 Generate UUID: `let session_id = uuid::Uuid::new_v4().to_string();`
+  - [x] 5.5 Run the stream:
     ```rust
     // NOTE: effective turn cap is STREAMING_MAX_TURNS (300) from session/agent.rs.
     // Epic 12.3 AC's "default 100" is deferred to a future tuning pass.
@@ -185,18 +185,18 @@ So that I can delegate research, parallel investigation, or specialized work wit
         )
         .await;
     ```
-  - [ ] 5.6 On `Ok((text, history))`: insert `SubAgentState { agent, history, role: self.role, model }` via `self.lock_sessions()` under `session_id.clone()`; log `tracing::info!(action = "spawn_agent_complete", session_id = %session_id, label = %args.label, output_len = text.len(), history_len = self.lock_sessions().get(&session_id).map(|s| s.history.len()).unwrap_or(0), "Sub-agent completed")` (NO `output = %text` — see Anti-Patterns); return `Ok(build_success_json(&session_id, &text))`
-  - [ ] 5.7 On `Err(prompt_error)`: `tracing::warn!(action = "spawn_agent_exec_failed", session_id = %session_id, label = %args.label, error = %prompt_error, "Sub-agent execution failed")`; DO NOT insert into the map; return `Ok(build_error_json(&session_id, &prompt_error.to_string()))`
+  - [x] 5.6 On `Ok((text, history))`: insert `SubAgentState { agent, history, role: self.role, model }` via `self.lock_sessions()` under `session_id.clone()`; log `tracing::info!(action = "spawn_agent_complete", session_id = %session_id, label = %args.label, output_len = text.len(), history_len = self.lock_sessions().get(&session_id).map(|s| s.history.len()).unwrap_or(0), "Sub-agent completed")` (NO `output = %text` — see Anti-Patterns); return `Ok(build_success_json(&session_id, &text))`
+  - [x] 5.7 On `Err(prompt_error)`: `tracing::warn!(action = "spawn_agent_exec_failed", session_id = %session_id, label = %args.label, error = %prompt_error, "Sub-agent execution failed")`; DO NOT insert into the map; return `Ok(build_error_json(&session_id, &prompt_error.to_string()))`
 
-- [ ] Task 6: Implement `Tool::call()` — follow-up-session path (AC: #3, #5, #6)
-  - [ ] 6.1 On `Some(id)`: atomic remove under a short-lived lock:
+- [x] Task 6: Implement `Tool::call()` — follow-up-session path (AC: #3, #5, #6)
+  - [x] 6.1 On `Some(id)`: atomic remove under a short-lived lock:
     ```rust
     let state = {
         let mut guard = self.lock_sessions();
         guard.remove(&id).ok_or_else(|| SpawnAgentError::SessionNotFound { session_id: id.clone() })?
     }; // guard dropped here
     ```
-  - [ ] 6.2 Run the stream with ownership-preserving borrow (`state.agent.stream_chat` uses `&self`, so `state.agent` is NOT consumed):
+  - [x] 6.2 Run the stream with ownership-preserving borrow (`state.agent.stream_chat` uses `&self`, so `state.agent` is NOT consumed):
     ```rust
     let original_history = state.history.clone();  // kept for non-destructive error path
     let result = state
@@ -209,7 +209,7 @@ So that I can delegate research, parallel investigation, or specialized work wit
         )
         .await;
     ```
-  - [ ] 6.3 On `Ok((text, new_history))`: re-insert updated state under SAME id:
+  - [x] 6.3 On `Ok((text, new_history))`: re-insert updated state under SAME id:
     ```rust
     self.lock_sessions().insert(
         id.clone(),
@@ -218,7 +218,7 @@ So that I can delegate research, parallel investigation, or specialized work wit
     tracing::info!(action = "spawn_agent_followup_complete", session_id = %id, label = %args.label, output_len = text.len(), "Sub-agent follow-up completed");
     Ok(build_success_json(&id, &text))
     ```
-  - [ ] 6.4 On `Err(prompt_error)` — **non-destructive**: re-insert with ORIGINAL history (the session survives a transient failure):
+  - [x] 6.4 On `Err(prompt_error)` — **non-destructive**: re-insert with ORIGINAL history (the session survives a transient failure):
     ```rust
     self.lock_sessions().insert(
         id.clone(),
@@ -227,16 +227,16 @@ So that I can delegate research, parallel investigation, or specialized work wit
     tracing::warn!(action = "spawn_agent_followup_failed", session_id = %id, label = %args.label, error = %prompt_error, "Sub-agent follow-up failed — session preserved for retry");
     Ok(build_error_json(&id, &prompt_error.to_string()))
     ```
-  - [ ] 6.5 Add a doc comment on the follow-up branch explaining the non-destructive policy and referencing this story by number
+  - [x] 6.5 Add a doc comment on the follow-up branch explaining the non-destructive policy and referencing this story by number
 
-- [ ] Task 7: Export from `src/tools/mod.rs` (AC: #1)
-  - [ ] 7.1 Add `pub mod spawn_agent;` alphabetically (after `read_file` line 16)
-  - [ ] 7.2 Add `pub use spawn_agent::SpawnAgentTool;` alphabetically (after `pub use read_file::ReadFileTool;` line 24)
-  - [ ] 7.3 Update the module-level doc comment to list `SpawnAgentTool` — describe as "daemon-provided; fresh sub-agents for delegated tasks with follow-up via `session_id`"
-  - [ ] 7.4 Do NOT add `SpawnAgentTool` to `create_base_tools()` or any `configure_agent_tools!` call — Story 12.4 scope
+- [x] Task 7: Export from `src/tools/mod.rs` (AC: #1)
+  - [x] 7.1 Add `pub mod spawn_agent;` alphabetically (after `read_file` line 16)
+  - [x] 7.2 Add `pub use spawn_agent::SpawnAgentTool;` alphabetically (after `pub use read_file::ReadFileTool;` line 24)
+  - [x] 7.3 Update the module-level doc comment to list `SpawnAgentTool` — describe as "daemon-provided; fresh sub-agents for delegated tasks with follow-up via `session_id`"
+  - [x] 7.4 Do NOT add `SpawnAgentTool` to `create_base_tools()` or any `configure_agent_tools!` call — Story 12.4 scope
 
-- [ ] Task 8: Unit tests in `src/tools/spawn_agent.rs` (AC: #8)
-  - [ ] 8.1 Test fixture: expose `make_test_config()` and `make_test_secrets()` as `#[cfg(test)] pub(crate)` at the bottom of `src/llm/agent_factory.rs` — minimal refactor (change two `fn`s to `pub(crate) fn`). This is a 2-line change to one test-only block. Add a helper inside `spawn_agent.rs`:
+- [x] Task 8: Unit tests in `src/tools/spawn_agent.rs` (AC: #8)
+  - [x] 8.1 Test fixture: expose `make_test_config()` and `make_test_secrets()` as `#[cfg(test)] pub(crate)` at the bottom of `src/llm/agent_factory.rs` — minimal refactor (change two `fn`s to `pub(crate) fn`). This is a 2-line change to one test-only block. Add a helper inside `spawn_agent.rs`:
     ```rust
     #[cfg(test)]
     fn test_tool() -> SpawnAgentTool {
@@ -251,14 +251,14 @@ So that I can delegate research, parallel investigation, or specialized work wit
         )
     }
     ```
-  - [ ] 8.2 Write the 10 tests listed in AC-8.1 through AC-8.10 exactly as specified
-  - [ ] 8.3 Task 2.6 adds 3 tests to `src/session/agent.rs` — update expected test count in AC-9 (1124 + 10 + 3 = 1137) during implementation if the count changes from this pre-dev estimate. Story uses **1134** as the target (AC-9 count matches Task 8 only); the 3 preamble tests are separately additive and push the real total to 1137. If the implementer bundles the helper and tests as described, cite 1137 in Dev Agent Record's Completion Notes.
+  - [x] 8.2 Write the 10 tests listed in AC-8.1 through AC-8.10 exactly as specified
+  - [x] 8.3 Task 2.6 adds 3 tests to `src/session/agent.rs` — update expected test count in AC-9 (1124 + 10 + 3 = 1137) during implementation if the count changes from this pre-dev estimate. Story uses **1134** as the target (AC-9 count matches Task 8 only); the 3 preamble tests are separately additive and push the real total to 1137. If the implementer bundles the helper and tests as described, cite 1137 in Dev Agent Record's Completion Notes.
 
-- [ ] Task 9: Verify (AC: #9)
-  - [ ] 9.1 `cargo build` — zero new warnings. Confirm `uuid` compiles.
-  - [ ] 9.2 `cargo clippy -- -D warnings` — zero new errors in the new/modified files (pre-existing errors in `src/session/branch.rs` are out of scope; running with `-D warnings` may still fail on those pre-existing errors — in that case run `cargo clippy` without `-D warnings` and manually review output for any NEW items in the touched files)
-  - [ ] 9.3 `cargo test` — expect **1134 passing** (Story 12.2 baseline 1124 + 10 new tests from Task 8) OR **1137 passing** if Task 2.6 preamble tests land in the same commit. Either target is acceptable; record the actual count in the Dev Agent Record.
-  - [ ] 9.4 `cargo doc --no-deps` — no broken intra-doc links on new public items
+- [x] Task 9: Verify (AC: #9)
+  - [x] 9.1 `cargo build` — zero new warnings. Confirm `uuid` compiles.
+  - [x] 9.2 `cargo clippy -- -D warnings` — zero new errors in the new/modified files (pre-existing errors in `src/session/branch.rs` are out of scope; running with `-D warnings` may still fail on those pre-existing errors — in that case run `cargo clippy` without `-D warnings` and manually review output for any NEW items in the touched files)
+  - [x] 9.3 `cargo test` — expect **1134 passing** (Story 12.2 baseline 1124 + 10 new tests from Task 8) OR **1137 passing** if Task 2.6 preamble tests land in the same commit. Either target is acceptable; record the actual count in the Dev Agent Record.
+  - [x] 9.4 `cargo doc --no-deps` — no broken intra-doc links on new public items
 
 ## Dev Notes
 
@@ -460,10 +460,72 @@ Last 5 commits:
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+anthropic/claude-opus-4-7 (1M context)
 
 ### Debug Log References
 
+- Initial `cargo build` after adding `uuid` succeeded — `uuid v1.23.1` confirmed via `cargo tree` as a direct dependency.
+- First test run failed `test_spawn_agent_definition_meets_quality_bar` with "missing: sub-agents do not see" — the description had `Sub-agents` (capital S). Rephrased the guideline-1 sentence to "Remember that sub-agents do not see your conversation history." so the lowercase substring is present without sacrificing readability.
+- First `cargo build` produced 11 new dead-code/unused-import warnings because `SpawnAgentTool` is not yet wired into the bin entry chain (Story 12.4 scope). Resolved by adding `#![allow(dead_code)]` at module scope in `src/tools/spawn_agent.rs`, `#[allow(dead_code)]` on `build_sub_agent_preamble` in `src/session/agent.rs`, and `#[allow(unused_imports)]` on the `pub use spawn_agent::SpawnAgentTool;` re-export in `src/tools/mod.rs` — each annotated with a comment pointing to Story 12.4.
+- The shared test fixtures `make_test_config` / `make_test_secrets` in `agent_factory::tests` are referenced by `spawn_agent::tests`. Required two tweaks: marking the fns `pub(crate) fn` AND elevating the surrounding `mod tests` to `pub(crate) mod tests` so the cross-module path `crate::llm::agent_factory::tests::*` resolves under `cfg(test)`.
+
 ### Completion Notes List
 
+- All 9 ACs implemented. Story 12.4 will register `SpawnAgentTool` in `create_base_tools` and own the sessions-map lifecycle.
+- **Test count: 1137 passing, 1 pre-existing failure** (`session::runner::tests::test_build_context_limit_recovery_message_contains_all_sections`). Net delta vs Story 12.2 baseline (1124): +13 (10 from `tools::spawn_agent::tests` per AC-8 + 3 from `session::agent::tests` per Task 2.6). Matches the 1137 target in Task 9.3.
+- `cargo clippy` reports 2 errors — both pre-existing in `src/session/branch.rs` (`needless_splitn`, `unnecessary_map_or`); neither touched per story constraints.
+- `cargo doc --no-deps` reports 1 warning — pre-existing broken intra-doc link in `src/config/mod.rs:174` (`AgentFactory::config_for_role`); unrelated to this story.
+- Three happy-path tests deferred to Story 12.5 per AC-8 (require a mock `AgentFactory`): `test_spawn_agent_new_session_returns_session_id`, `test_spawn_agent_follow_up_reuses_session`, `test_spawn_agent_session_cleanup`, plus the non-destructive follow-up-error test `test_spawn_agent_follow_up_error_preserves_session`. Non-destructive policy (AC-3) is documented in the `continue_followup` doc comment until 12.5's mock lands.
+- `STREAMING_MAX_TURNS = 300` accepted per Dev Notes — refactoring `streaming_chat()` to add a per-call cap is explicitly deferred to a future tuning story. Marked with a `// NOTE:` comment in `spawn_new`.
+
 ### File List
+
+- `Cargo.toml` — added `uuid = { version = "1", features = ["v4"] }`
+- `Cargo.lock` — auto-regenerated by cargo build
+- `src/session/agent.rs` — added `build_sub_agent_preamble()` helper + 3 unit tests
+- `src/llm/agent_factory.rs` — `mod tests` → `pub(crate) mod tests`; `make_test_config` and `make_test_secrets` → `pub(crate) fn`
+- `src/tools/spawn_agent.rs` — NEW module: `SpawnAgentArgs`, `SpawnAgentError`, `SubAgentState`, `SpawnAgentTool`, JSON helpers, `Tool` impl, 10 unit tests
+- `src/tools/mod.rs` — added `pub mod spawn_agent;`, `pub use spawn_agent::SpawnAgentTool;` (with `#[allow(unused_imports)]` until 12.4 wires it), updated module-level doc
+
+### Change Log
+
+| Date | Author | Change |
+|---|---|---|
+| 2026-04-19 | Amelia (claude-opus-4-7) | Story 12.3 implementation complete — SpawnAgentTool with 10 unit tests + 3 sub-agent preamble tests; module wired for export but registration deferred to Story 12.4. |
+| 2026-04-19 | Code Review (claude-opus-4-7) | Adversarial review complete — Blind Hunter + Edge Case Hunter + Acceptance Auditor. 5 `decision-needed`, 3 `patch`, 7 `defer`, ~20 dismissed. |
+
+### Review Findings
+
+- [x] [Review][Decision→Patch] **Concurrent follow-up race on same `session_id`** — Fixed by adding an `in_flight: Arc<Mutex<HashSet<String>>>` field on `SpawnAgentTool` + a new `SpawnAgentError::SessionBusy { session_id }` variant. A second concurrent follow-up on an id already streaming returns `SessionBusy` immediately (enforced by `InFlightGuard` RAII cleanup). **AC-6 constructor signature change:** `new()` now also takes `in_flight: Arc<Mutex<HashSet<String>>>` — Story 12.4 must construct and wire this alongside `sessions`. Covered by `test_spawn_agent_session_busy_when_in_flight`.
+- [x] [Review][Decision→Patch] **Panic between `remove` and re-insert silently loses session** — Fixed by introducing `PanicReinsertGuard`: the guard holds the removed `SubAgentState` across the `.await` and re-inserts the original state during unwind. The normal Ok/Err paths call `disarm_and_take()` to cancel the fallback. AC-3 non-destructive invariant now extends to panics.
+- [x] [Review][Decision→Patch] **`spawn_new` error path returns a `session_id` that is NOT in the map** — Fixed by adding `build_error_json_no_session(error)` helper and returning it from the `spawn_new` `Err` branch. **Minor AC-5 deviation documented:** `session_id` is now emitted only for error payloads where the session remains follow-up-capable. Covered by `test_build_error_json_no_session_omits_session_id`.
+- [x] [Review][Decision→Patch] **Sub-agent preamble retains "Wait for user input after displaying the menu"** — Fixed by deleting the line from `build_sub_agent_preamble`. Doc comment updated to explain the divergence from `build_preamble`. **Minor Task 2.4 deviation documented:** persona rules are retained *except* the interactive wait-for-input rule (inapplicable to non-interactive sub-agents). Covered by `test_build_sub_agent_preamble_excludes_wait_for_user_input`.
+- [x] [Review][Decision→Patch] **Non-destructive doc comment overpromises** — `continue_followup` doc now explicitly documents three guarantees: concurrent-follow-up rejection (`SessionBusy`), non-destructive on `Err` (AC-3), and non-destructive on panic (via `PanicReinsertGuard`).
+
+- [x] [Review][Patch] **Clamp/sanitize `label` in tracing logs** [src/tools/spawn_agent.rs: `sanitize_label` + call sites] — Added `sanitize_label()` helper (control chars → space, truncation at `LABEL_LOG_MAX_LEN = 200` with UTF-8 char-boundary handling). All `%args.label` sites now route through it. Covered by `test_sanitize_label_truncates_and_strips_control_chars`.
+- [x] [Review][Patch] **Empty `session_id = Some("")` treated as unknown follow-up** [src/tools/spawn_agent.rs: `call()`] — Normalized via `.filter(|s| !s.is_empty())` before routing to `spawn_new` / `continue_followup`. Covered by `test_spawn_agent_empty_session_id_is_treated_as_fresh_spawn`.
+- [x] [Review][Patch] **Asymmetric `history_len` logging** [src/tools/spawn_agent.rs: `continue_followup` Ok branch] — Added `history_len = state.history.len()` to the follow-up success log for parity with `spawn_new`.
+
+### Review Test Count Update
+
+- Pre-review baseline: 1137 passing, 1 pre-existing failure.
+- Post-review: **1142 passing, 1 pre-existing failure.** +5 new tests:
+  - `test_build_sub_agent_preamble_excludes_wait_for_user_input`
+  - `test_spawn_agent_session_busy_when_in_flight`
+  - `test_spawn_agent_empty_session_id_is_treated_as_fresh_spawn`
+  - `test_build_error_json_no_session_omits_session_id`
+  - `test_sanitize_label_truncates_and_strips_control_chars`
+
+### Review Deviations From Spec (Documented)
+
+- **AC-6 constructor signature** — `SpawnAgentTool::new` now takes one additional arg: `in_flight: Arc<Mutex<HashSet<String>>>`. Rationale: atomic check-and-reserve of a per-session in-flight slot is not expressible with the single `sessions` map alone. Story 12.4 must supply this shared set alongside the sessions map.
+- **AC-5 (`spawn_new` error payload)** — `session_id` omitted when the spawn did not produce a follow-up-capable session. Rationale: returning a UUID the parent cannot resume creates confusion (`SessionNotFound` on retry).
+- **Task 2.4 (persona activation rules)** — Dropped the "Wait for user input after displaying the menu" rule from `build_sub_agent_preamble`. Rationale: sub-agents are non-interactive; the rule can stall persona execution.
+
+- [x] [Review][Defer] **Unbounded `sessions` HashMap growth (no eviction)** [src/tools/spawn_agent.rs: map field] — deferred to Story 12.4 (owns map lifecycle per spec).
+- [x] [Review][Defer] **No upfront empty-`message` validation** [src/tools/spawn_agent.rs: `call()`] — deferred; provider returns 400 and flows through `build_error_json` — acceptable for v1.
+- [x] [Review][Defer] **`#![allow(dead_code)]` + public re-export create a permanent silence blanket** [src/tools/mod.rs + spawn_agent.rs:1] — deferred to Story 12.4 which registers the tool and lets us drop the blanket allow.
+- [x] [Review][Defer] **Shutdown flag is a stored snapshot (possible staleness across parent-session rotation)** [src/tools/spawn_agent.rs:135] — deferred to Story 12.4 (ownership/lifecycle design).
+- [x] [Review][Defer] **Shutdown race: sub-agent Err re-insert while daemon drops the `sessions Arc`** [src/tools/spawn_agent.rs: `continue_followup` Err branch] — deferred to Story 12.4 (lifecycle).
+- [x] [Review][Defer] **Preamble negative-substring tests are brittle** [src/session/agent.rs:1150–1157] — deferred; polish, parse the tool-inventory line instead.
+- [x] [Review][Defer] **No cross-check between preamble tool names and rig Tool `NAME` constants** [src/session/agent.rs:297] — deferred; add a small integration test that walks the registered tools and asserts each appears in the preamble string.

@@ -576,7 +576,7 @@ pub use crate::session::provider::resolve_api_key;
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // -- LlmRole tests --
@@ -615,7 +615,7 @@ mod tests {
 
     // -- AgentFactory tests --
 
-    fn make_test_config() -> BotConfig {
+    pub(crate) fn make_test_config() -> BotConfig {
         use crate::config::{
             BmadPathsConfig, GitProviderConfig, LlmConfig, LlmRoleConfig, NotificationConfig,
             TelegramConfig,
@@ -672,7 +672,7 @@ mod tests {
         }
     }
 
-    fn make_test_secrets() -> BotSecrets {
+    pub(crate) fn make_test_secrets() -> BotSecrets {
         BotSecrets {
             anthropic_api_key: Some("sk-ant-test-key".to_string()),
             openai_api_key: Some("sk-openai-test-key".to_string()),

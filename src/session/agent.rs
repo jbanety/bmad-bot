@@ -267,6 +267,77 @@ OVERRIDE: communication_language = English
     )
 }
 
+/// Build a preamble for sub-agents spawned by `SpawnAgentTool`.
+///
+/// Produces an output identical in structure to [`build_preamble`] `(&[], model)` BUT
+/// diverges in the tool inventory line and the Tool Usage Rules section:
+///
+/// - Tool inventory omits `ask_supervisor` and `spawn_agent` — sub-agents do NOT receive
+///   either tool (preventing escalation on the parent slot and nested delegation recursion)
+/// - The `ask_supervisor` bullet is dropped from Tool Usage Rules
+/// - No MCP line — sub-agents receive no MCP tools in Story 12.3
+/// - The "Wait for user input after displaying the menu" persona rule is dropped —
+///   sub-agents are spawned non-interactively via a single `message`, and retaining the
+///   rule risks stalling the sub-agent after persona activation
+///
+/// All other sections (branch management, completion sentinel, English override,
+/// remaining persona activation rules, skill instructions, preview-model sequential
+/// workaround) are retained identically. See Story 12.3 Task 2 for rationale.
+#[allow(dead_code)] // Used by SpawnAgentTool — wired into the bin entry chain by Story 12.4
+pub fn build_sub_agent_preamble(model: &str) -> String {
+    // Workaround: preview models (e.g. gemini-3.1-pro-preview) sometimes
+    // concatenate parallel tool call args into invalid JSON. Force sequential.
+    let sequential_tool_rule = if model.contains("preview") {
+        "- **CRITICAL: Call tools ONE AT A TIME, sequentially.** Never attempt parallel tool calls or combine arguments from multiple calls into one."
+    } else {
+        ""
+    };
+
+    format!(
+        r#"You are an AI agent operating autonomously in a BMAD workflow environment.
+
+## Tools
+You have access to these tools: edit_file, read_file, grep, find_path, list_directory, git, terminal, plus a built-in think tool for reasoning.
+
+## Tool Usage Rules
+- **ALWAYS use `edit_file` with mode="edit"** to modify existing files. NEVER rewrite entire files unless creating a new file (mode="create") or a complete rewrite is truly necessary (mode="overwrite").
+- **Use `read_file` with line ranges** for large files. Read the outline first, then target specific sections with start_line/end_line.
+- **Use `grep` to find symbols** before editing — never assume file paths or line numbers.
+- **Use `find_path`** to discover files by name pattern when you don't know the full path.
+- **Use `list_directory`** to explore directory structure.
+- **Use `terminal`** for build commands, tests, mkdir, rm, and other shell operations.
+- When `edit_file` fails (ambiguous match), use `read_file` with a line range to get more context, then retry with a larger `old_text` fragment.
+- When making multiple related changes in one file, batch them in a single `edit_file` call with multiple edit operations.
+{sequential_tool_rule}
+
+## Branch Management — CRITICAL
+- **The story branch is ALREADY created and checked out by the daemon before your session starts.** You are on the correct branch.
+- **NEVER use `git checkout -b`, `git branch`, `git switch -c`, or any command that creates a new branch.** The daemon manages branch lifecycle.
+- **NEVER use `git checkout <branch>` or `git switch <branch>` to switch to a different branch.** Stay on the current branch for the entire session.
+- You MAY use `git add`, `git commit`, `git status`, `git diff`, `git log`, and other non-branch-switching git operations.
+- If you need to know the current branch name, use `git branch --show-current`.
+
+## Session Completion Protocol
+When you have fully completed your workflow (all tasks done, all tests passing, story file updated, all changes committed), your **final message** MUST end with exactly:
+
+<<BMAD_JOB_DONE>>
+
+Rules:
+- `<<BMAD_JOB_DONE>>` MUST appear on its own line as the very last thing in your final message.
+- Do NOT paraphrase, omit, or embed the sentinel mid-sentence. Emit it exactly as shown.
+
+## Communication
+OVERRIDE: communication_language = English
+
+## Rules
+- When the user provides an agent file in <context><files> tags, you MUST fully embody that agent's persona and follow ALL activation instructions exactly as specified.
+- NEVER break character until given an exit command.
+- Execute activation steps in order — load configuration files via tools, then greet and display the menu.
+- When provided a SKILL.md file in context, follow its instructions completely. Use your read_file tool to load any referenced workflow files (e.g., ./workflow.md). The skill is self-contained — execute it autonomously without waiting for user commands."#,
+        sequential_tool_rule = sequential_tool_rule
+    )
+}
+
 /// Send a prompt via streaming and collect the complete text response.
 ///
 /// This is a drop-in replacement for `agent.chat(prompt, history)` that uses
@@ -1062,5 +1133,45 @@ mod tests {
         let fake_root = Path::new("/nonexistent/project/root");
         let tools = create_base_tools(fake_root);
         let _ = tools; // 7-tuple constructed without panic
+    }
+
+    // -----------------------------------------------------------------------
+    // build_sub_agent_preamble tests (Story 12.3 Task 2.6)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_sub_agent_preamble_excludes_ask_supervisor() {
+        let preamble = build_sub_agent_preamble("claude-sonnet-4-20250514");
+        assert!(
+            !preamble.contains("ask_supervisor"),
+            "Sub-agent preamble must NOT advertise ask_supervisor (sub-agents must not escalate)"
+        );
+    }
+
+    #[test]
+    fn test_build_sub_agent_preamble_excludes_spawn_agent() {
+        let preamble = build_sub_agent_preamble("claude-sonnet-4-20250514");
+        assert!(
+            !preamble.contains("spawn_agent"),
+            "Sub-agent preamble must NOT advertise spawn_agent (prevents nested delegation)"
+        );
+    }
+
+    #[test]
+    fn test_build_sub_agent_preamble_retains_completion_sentinel() {
+        let preamble = build_sub_agent_preamble("claude-sonnet-4-20250514");
+        assert!(
+            preamble.contains("<<BMAD_JOB_DONE>>"),
+            "Sub-agent preamble must retain the completion sentinel"
+        );
+    }
+
+    #[test]
+    fn test_build_sub_agent_preamble_excludes_wait_for_user_input() {
+        let preamble = build_sub_agent_preamble("claude-sonnet-4-20250514");
+        assert!(
+            !preamble.contains("Wait for user input"),
+            "Sub-agent preamble must NOT tell non-interactive sub-agents to wait for user input"
+        );
     }
 }
