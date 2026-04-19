@@ -1748,9 +1748,7 @@ impl SessionRunner {
             }
 
             // Analyze response
-            let action =
-                self.analyzer
-                    .analyze(&current_response, &escalation_slot, &story.story_key);
+            let action = self.analyzer.analyze(&current_response, &escalation_slot);
 
             match action {
                 ResponseAction::Completed => {

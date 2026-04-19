@@ -1,10 +1,10 @@
-//! Response analyzer — pattern-matching engine for LLM agent responses.
+//! Response analyzer — essential-detection engine for LLM agent responses.
 //!
 //! The [`ResponseAnalyzer`] examines each agent response and determines the
-//! appropriate [`ResponseAction`] for the session chat loop. It uses a
-//! deterministic sentinel token (`<<BMAD_JOB_DONE>>`) as the primary completion
-//! signal, with case-insensitive substring matching (and a few regex patterns)
-//! as fallback, in a strict priority order.
+//! appropriate [`ResponseAction`] for the session chat loop. It focuses on
+//! essential detections only: workflow completion (via the `<<BMAD_JOB_DONE>>`
+//! sentinel and fuzzy fallbacks) and supervisor escalation. Persona-driven
+//! menu auto-responses have been removed — skills provide their own protocol.
 //!
 //! **Design principle:** The sentinel token is injected in the system preamble
 //! and provides a model-agnostic, deterministic completion signal. The fuzzy
@@ -21,6 +21,11 @@ use std::sync::LazyLock;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseAction {
     /// Send the contained reply and continue the chat loop.
+    ///
+    /// Currently unused by the analyzer — kept as an extension point for Epic 13
+    /// daemon-orchestrated consultations, where the daemon will inject critic /
+    /// adversarial findings into the chat loop via this variant.
+    #[allow(dead_code)]
     Continue {
         /// The reply message to send back to the agent.
         reply: String,
@@ -32,10 +37,10 @@ pub enum ResponseAction {
     /// Escalation detected via the shared escalation slot — exit the chat loop.
     Escalated,
 
-    /// Reserved for future streaming/async response support where the agent may
-    /// still be processing tool calls. Currently treated as
-    /// `Continue("Continue.")` but kept as a distinct variant for
-    /// forward-compatibility with rig streaming APIs.
+    /// The analyzer has nothing specific to say. Call sites decide what to send
+    /// (currently `"Continue."`). Kept distinct from `Continue { reply }` so
+    /// future callers can inject consultation/critic findings via `Continue`
+    /// while still using the generic no-op path when no guidance is needed.
     NoReply,
 }
 
@@ -84,9 +89,9 @@ pub fn strip_agent_artifacts(text: &str) -> String {
 /// Review completion patterns (case-insensitive).
 ///
 /// Detects CR workflow step 5 completion output. Checked at priority 1.5
-/// (after escalation, before dev-session completion signals) to avoid
-/// the step 5 summary (which contains "Issues Fixed:") from triggering
-/// `REVIEW_FIX_PATTERNS` at priority 5.5.
+/// (after escalation, before dev-session completion signals) as a fuzzy
+/// fallback in case the review skill doesn't emit the `<<BMAD_JOB_DONE>>`
+/// sentinel reliably.
 const REVIEW_COMPLETE_PATTERNS: &[&str] = &[
     "review complete",
     "✅ review complete",
@@ -94,26 +99,6 @@ const REVIEW_COMPLETE_PATTERNS: &[&str] = &[
     "issues fixed:",
     "action items created:",
     "sprint status synced",
-];
-
-/// Review fix decision patterns (case-insensitive).
-///
-/// Detects the CR workflow step 4 prompt asking how to handle findings.
-/// Auto-responds with "1" (fix automatically). Checked at priority 5.5
-/// (between YOLO and Story Selection) — AFTER `REVIEW_COMPLETE_PATTERNS`
-/// to prevent the step 5 summary from accidentally triggering a fix response.
-const REVIEW_FIX_PATTERNS: &[&str] = &[
-    "fix them automatically",
-    "create action items",
-    "show me details",
-    "choose [1]",
-    "choose [2]",
-    "choose [3]",
-    "[1] fix",
-    "[2] create",
-    "[3] show",
-    "what should i do with these issues",
-    "what should i do with these findings",
 ];
 
 /// Completion signal phrases (case-insensitive).
@@ -150,73 +135,18 @@ static COMPLETION_REGEX_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
-/// Confirmation/proceed patterns (case-insensitive).
-const PROCEED_PATTERNS: &[&str] = &[
-    "should i proceed",
-    "shall i proceed",
-    "continue?",
-    "ready to move on",
-    "shall i continue",
-    "should i continue",
-    "do you want me to proceed",
-    "do you want me to continue",
-    "would you like me to proceed",
-    "would you like me to continue",
-    "may i proceed",
-    "can i proceed",
-    "want me to go ahead",
-];
-
-/// Step-by-step detection patterns (case-insensitive).
-const STEP_BY_STEP_PATTERNS: &[&str] = &[
-    "step by step",
-    "one at a time",
-    "one step at a time",
-    "walk you through",
-    "walk through each",
-    "shall i do them one",
-    "do each step separately",
-    "handle each task individually",
-];
-
-/// YOLO/batch mode patterns (case-insensitive).
-const YOLO_PATTERNS: &[&str] = &[
-    "yolo mode",
-    "batch mode",
-    "yolo or",
-    "interactive or batch",
-    "want yolo",
-    "enable yolo",
-    "[y] yolo",
-];
-
-/// Story selection patterns (case-insensitive).
-const STORY_SELECTION_PATTERNS: &[&str] = &[
-    "which story",
-    "story to work on",
-    "what story",
-    "specify a story",
-    "provide the story",
-    "story file path",
-    "which story to develop",
-    "story would you like",
-];
-
 /// Stateless response analyzer for the session chat loop.
 ///
 /// Examines agent responses using a strict priority order:
-/// 0. **Sentinel** — `<<BMAD_JOB_DONE>>` deterministic token (model-agnostic)
-/// 1. Escalation (slot check)
-///    - 1.5. Review completion detection (`REVIEW_COMPLETE_PATTERNS`)
-/// 2. Completion signals (dev-session) — fuzzy fallback
-/// 3. Confirmation/proceed requests
-/// 4. Step-by-step detection
-/// 5. YOLO/batch mode questions
-///    - 5.5. Review fix decision (`REVIEW_FIX_PATTERNS`)
-/// 6. Story selection questions
-/// 7. Default — "Continue."
 ///
-/// All pattern matching is case-insensitive substring search.
+/// - **Sentinel** — `<<BMAD_JOB_DONE>>` deterministic token (model-agnostic)
+/// - **Escalation** — supervisor escalation slot check
+/// - **Review completion** — `REVIEW_COMPLETE_PATTERNS` fuzzy fallback
+/// - **Completion signals** — dev-session completion phrases (substring)
+/// - **Completion regex** — `COMPLETION_REGEX_PATTERNS` for variable text
+/// - **Default** — `NoReply`, call sites decide what (if anything) to send
+///
+/// Substring matching is case-insensitive.
 #[derive(Debug)]
 pub struct ResponseAnalyzer;
 
@@ -231,22 +161,16 @@ impl ResponseAnalyzer {
     /// # Arguments
     /// - `response` — the text response from the LLM agent
     /// - `escalation_slot` — shared slot checked for supervisor escalation
-    /// - `story_key` — the current story key, used as reply for story selection questions
     ///
     /// # Priority Order
-    /// 1. **Escalation** — if `escalation_slot` contains `Some(EscalationInfo)`, return `Escalated`
-    /// 2. **Completion** — strong completion signals → `Completed`
-    /// 3. **Confirmation** — "Should I proceed?" → `Continue { "Yes, proceed." }`
-    /// 4. **Step-by-step** — step-by-step approval → `Continue { "Continue with all steps..." }`
-    /// 5. **YOLO/batch** — YOLO mode questions → `Continue { "Use YOLO mode..." }`
-    /// 6. **Story selection** — which story → `Continue { story_key }`
-    /// 7. **Default** — `Continue { "Continue." }`
-    pub fn analyze(
-        &self,
-        response: &str,
-        escalation_slot: &EscalationSlot,
-        story_key: &str,
-    ) -> ResponseAction {
+    ///
+    /// - **Sentinel** — `<<BMAD_JOB_DONE>>` → `Completed`
+    /// - **Escalation** — slot contains `Some(EscalationInfo)` → `Escalated`
+    /// - **Review completion** — `REVIEW_COMPLETE_PATTERNS` → `Completed`
+    /// - **Completion signals** — substring match → `Completed`
+    /// - **Completion regex** — regex match → `Completed`
+    /// - **Default** — `NoReply`, analyzer has no specific reply to send
+    pub fn analyze(&self, response: &str, escalation_slot: &EscalationSlot) -> ResponseAction {
         // Priority 0: Deterministic sentinel check (model-agnostic)
         if response.contains(JOB_DONE_SENTINEL) {
             tracing::debug!(
@@ -304,7 +228,7 @@ impl ResponseAnalyzer {
             return ResponseAction::Completed;
         }
 
-        // Priority 2b: Completion detection (regex)
+        // Priority 2.5: Completion detection (regex)
         if COMPLETION_REGEX_PATTERNS
             .iter()
             .any(|re| re.is_match(response))
@@ -318,97 +242,14 @@ impl ResponseAnalyzer {
             return ResponseAction::Completed;
         }
 
-        // Priority 3: Confirmation/proceed patterns
-        if PROCEED_PATTERNS
-            .iter()
-            .any(|pattern| lower.contains(pattern))
-        {
-            tracing::debug!(
-                action = "response_analysis",
-                priority = 3,
-                result = "proceed",
-                "Proceed confirmation detected"
-            );
-            return ResponseAction::Continue {
-                reply: "Yes, proceed.".to_string(),
-            };
-        }
-
-        // Priority 4: Step-by-step detection
-        if STEP_BY_STEP_PATTERNS
-            .iter()
-            .any(|pattern| lower.contains(pattern))
-        {
-            tracing::debug!(
-                action = "response_analysis",
-                priority = 4,
-                result = "step_by_step",
-                "Step-by-step detection"
-            );
-            return ResponseAction::Continue {
-                reply: "Continue with all steps. Do not ask for confirmation between steps."
-                    .to_string(),
-            };
-        }
-
-        // Priority 5: YOLO/mode questions
-        if YOLO_PATTERNS.iter().any(|pattern| lower.contains(pattern)) {
-            tracing::debug!(
-                action = "response_analysis",
-                priority = 5,
-                result = "yolo",
-                "YOLO mode question detected"
-            );
-            return ResponseAction::Continue {
-                reply:
-                    "Use YOLO mode. Complete all remaining work without asking for confirmation."
-                        .to_string(),
-            };
-        }
-
-        // Priority 5.5: Review fix decision
-        if REVIEW_FIX_PATTERNS
-            .iter()
-            .any(|pattern| lower.contains(pattern))
-        {
-            tracing::debug!(
-                action = "response_analysis",
-                priority = 5.5,
-                result = "review_fix_decision",
-                "Review fix decision detected — auto-fixing"
-            );
-            return ResponseAction::Continue {
-                reply: "1".to_string(),
-            };
-        }
-
-        // Priority 6: Story selection
-        if STORY_SELECTION_PATTERNS
-            .iter()
-            .any(|pattern| lower.contains(pattern))
-        {
-            tracing::debug!(
-                action = "response_analysis",
-                priority = 6,
-                result = "story_selection",
-                story_key = %story_key,
-                "Story selection question detected"
-            );
-            return ResponseAction::Continue {
-                reply: story_key.to_string(),
-            };
-        }
-
-        // Priority 7: Default
+        // Default: no specific reply — call sites decide what to send
         tracing::debug!(
             action = "response_analysis",
-            priority = 7,
-            result = "default",
-            "No pattern matched — sending default continue"
+            priority = "default",
+            result = "no_reply",
+            "No pattern matched — returning NoReply"
         );
-        ResponseAction::Continue {
-            reply: "Continue.".to_string(),
-        }
+        ResponseAction::NoReply
     }
 }
 
@@ -439,7 +280,7 @@ mod tests {
         // Sentinel on its own line at the end (expected usage)
         let response = "All done.\n\n<<BMAD_JOB_DONE>>";
         assert_eq!(
-            analyzer.analyze(response, &slot, "1-1-test"),
+            analyzer.analyze(response, &slot),
             ResponseAction::Completed,
             "Sentinel on its own line should trigger Completed"
         );
@@ -453,7 +294,7 @@ mod tests {
         // Sentinel embedded mid-message (not ideal but still valid)
         let response = "Story is done. <<BMAD_JOB_DONE>> That's all.";
         assert_eq!(
-            analyzer.analyze(response, &slot, "1-1-test"),
+            analyzer.analyze(response, &slot),
             ResponseAction::Completed,
             "Sentinel embedded in text should still trigger Completed"
         );
@@ -465,10 +306,7 @@ mod tests {
         let slot = empty_slot();
 
         let response = "Summary of work done:\n\n  <<BMAD_JOB_DONE>>  \n";
-        assert_eq!(
-            analyzer.analyze(response, &slot, "1-1-test"),
-            ResponseAction::Completed,
-        );
+        assert_eq!(analyzer.analyze(response, &slot), ResponseAction::Completed,);
     }
 
     #[test]
@@ -479,23 +317,9 @@ mod tests {
         // Sentinel (priority 0) should beat escalation (priority 1)
         let response = "<<BMAD_JOB_DONE>>";
         assert_eq!(
-            analyzer.analyze(response, &slot, "1-1-test"),
+            analyzer.analyze(response, &slot),
             ResponseAction::Completed,
             "Sentinel at priority 0 should take precedence over escalation at priority 1"
-        );
-    }
-
-    #[test]
-    fn test_analyzer_sentinel_takes_priority_over_proceed() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-
-        // Both sentinel and proceed pattern present — sentinel wins
-        let response = "Should I proceed?\n\n<<BMAD_JOB_DONE>>";
-        assert_eq!(
-            analyzer.analyze(response, &slot, "1-1-test"),
-            ResponseAction::Completed,
-            "Sentinel should take priority over proceed patterns"
         );
     }
 
@@ -514,7 +338,7 @@ mod tests {
         ];
 
         for response in non_sentinels {
-            let action = analyzer.analyze(response, &slot, "1-1-test");
+            let action = analyzer.analyze(response, &slot);
             assert_ne!(
                 action,
                 ResponseAction::Completed,
@@ -539,86 +363,12 @@ mod tests {
         ];
 
         for response in cases {
-            let action = analyzer.analyze(response, &slot, "4-2-test");
+            let action = analyzer.analyze(response, &slot);
             assert_eq!(
                 action,
                 ResponseAction::Completed,
                 "Expected Completed for: {response}"
             );
-        }
-    }
-
-    #[test]
-    fn test_analyzer_detects_proceed_question() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-
-        let cases = vec![
-            "I've finished Task 1. Should I proceed to Task 2?",
-            "Ready to move on to the next step.",
-            "Shall I continue with the implementation?",
-            "Continue? I have more tasks to complete.",
-            "Would you like me to proceed with the refactoring?",
-        ];
-
-        for response in cases {
-            let action = analyzer.analyze(response, &slot, "test-key");
-            match &action {
-                ResponseAction::Continue { reply } => {
-                    assert_eq!(reply, "Yes, proceed.", "Wrong reply for: {response}");
-                }
-                other => panic!("Expected Continue for: {response}, got: {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_analyzer_detects_step_by_step() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-
-        let cases = vec![
-            "I'll go step by step through each task.",
-            "Let me walk you through each change.",
-            "I'll handle each task individually.",
-        ];
-
-        for response in cases {
-            let action = analyzer.analyze(response, &slot, "test-key");
-            match &action {
-                ResponseAction::Continue { reply } => {
-                    assert!(
-                        reply.contains("Continue with all steps"),
-                        "Wrong reply for: {response}, got: {reply}"
-                    );
-                }
-                other => panic!("Expected Continue for: {response}, got: {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_analyzer_detects_yolo_question() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-
-        let cases = vec![
-            "Would you like to enable YOLO mode for this workflow?",
-            "[y] YOLO the rest of this document only",
-            "Interactive or batch mode?",
-        ];
-
-        for response in cases {
-            let action = analyzer.analyze(response, &slot, "test-key");
-            match &action {
-                ResponseAction::Continue { reply } => {
-                    assert!(
-                        reply.contains("YOLO mode"),
-                        "Wrong reply for: {response}, got: {reply}"
-                    );
-                }
-                other => panic!("Expected Continue for: {response}, got: {other:?}"),
-            }
         }
     }
 
@@ -629,7 +379,7 @@ mod tests {
 
         // Even though the response text looks like a completion signal,
         // escalation takes priority because the slot is filled.
-        let action = analyzer.analyze("All tasks completed", &slot, "test-key");
+        let action = analyzer.analyze("All tasks completed", &slot);
         assert_eq!(action, ResponseAction::Escalated);
     }
 
@@ -641,7 +391,6 @@ mod tests {
         let action = analyzer.analyze(
             "Story implementation complete and all acceptance criteria met",
             &slot,
-            "test-key",
         );
         assert_eq!(
             action,
@@ -651,21 +400,41 @@ mod tests {
     }
 
     #[test]
-    fn test_analyzer_default_continues() {
+    fn test_analyzer_default_is_no_reply() {
         let analyzer = ResponseAnalyzer::new();
         let slot = empty_slot();
 
-        let action = analyzer.analyze(
-            "I'm working on implementing the database schema.",
-            &slot,
-            "test-key",
-        );
-        assert_eq!(
-            action,
-            ResponseAction::Continue {
-                reply: "Continue.".to_string()
-            }
-        );
+        let action = analyzer.analyze("I'm working on implementing the database schema.", &slot);
+        assert_eq!(action, ResponseAction::NoReply);
+    }
+
+    #[test]
+    fn test_analyzer_unrecognized_responses_return_no_reply() {
+        let analyzer = ResponseAnalyzer::new();
+        let slot = empty_slot();
+
+        // Various unrecognized responses — working text, questions, partial progress
+        let cases = vec![
+            "Let me think about this...",
+            "I'll start by reading the file.",
+            "Working on Task 2, currently analyzing the database schema.",
+            "Should I use PostgreSQL or MySQL for this?", // question — no longer auto-answered
+            "Do you want me to proceed with refactoring?", // proceed pattern — no longer auto-answered
+            "Let me walk you through each change step by step.", // step-by-step — no longer auto-answered
+            "Would you like YOLO mode or interactive?",          // YOLO — no longer auto-answered
+            "Which story would you like me to develop?", // story selection — no longer auto-answered
+            "What should I do with these findings? [1] Fix [2] Items", // review fix — no longer auto-answered
+            "Here's a partial summary of progress so far.",
+        ];
+
+        for response in cases {
+            let action = analyzer.analyze(response, &slot);
+            assert_eq!(
+                action,
+                ResponseAction::NoReply,
+                "Expected NoReply for unrecognized response: {response}"
+            );
+        }
     }
 
     #[test]
@@ -683,32 +452,12 @@ mod tests {
         ];
 
         for response in cases {
-            let action = analyzer.analyze(response, &slot, "test-key");
+            let action = analyzer.analyze(response, &slot);
             assert_eq!(
                 action,
                 ResponseAction::Completed,
                 "Expected Completed (case-insensitive) for: {response}"
             );
-        }
-
-        // Test proceed patterns in various cases
-        let proceed_cases = vec![
-            "SHOULD I PROCEED?",
-            "Should I Proceed?",
-            "should i proceed?",
-        ];
-
-        for response in proceed_cases {
-            let action = analyzer.analyze(response, &slot, "test-key");
-            match &action {
-                ResponseAction::Continue { reply } => {
-                    assert_eq!(
-                        reply, "Yes, proceed.",
-                        "Case-insensitive proceed for: {response}"
-                    );
-                }
-                other => panic!("Expected Continue for: {response}, got: {other:?}"),
-            }
         }
     }
 
@@ -720,7 +469,7 @@ mod tests {
         // Each completion signal phrase should trigger Completed
         for signal in COMPLETION_SIGNALS {
             let response = format!("Here is the result: {signal}.");
-            let action = analyzer.analyze(&response, &slot, "test-key");
+            let action = analyzer.analyze(&response, &slot);
             assert_eq!(
                 action,
                 ResponseAction::Completed,
@@ -730,105 +479,11 @@ mod tests {
     }
 
     #[test]
-    fn test_analyzer_proceed_various_phrases() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-
-        for pattern in PROCEED_PATTERNS {
-            let response = format!("I've done the work. {pattern}");
-            let action = analyzer.analyze(&response, &slot, "test-key");
-            match &action {
-                ResponseAction::Continue { reply } => {
-                    assert_eq!(
-                        reply, "Yes, proceed.",
-                        "Expected proceed reply for pattern: {pattern}"
-                    );
-                }
-                other => panic!("Expected Continue for pattern: {pattern}, got: {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_analyzer_story_selection_replies_with_story_key() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-
-        let cases = vec![
-            "Which story would you like me to work on?",
-            "Please provide the story file path to develop.",
-            "What story should I develop next?",
-        ];
-
-        for response in cases {
-            let action = analyzer.analyze(response, &slot, "4-2-agent-session-setup-chat-loop");
-            match &action {
-                ResponseAction::Continue { reply } => {
-                    assert_eq!(
-                        reply, "4-2-agent-session-setup-chat-loop",
-                        "Expected story_key reply for: {response}"
-                    );
-                }
-                other => panic!("Expected Continue with story_key for: {response}, got: {other:?}"),
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Review pattern tests (Story 5.2)
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_analyzer_detects_review_fix_decision() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-        // Simulates the CR workflow step 4 prompt
-        let response = "Here are the findings.\n\nChoose [1], [2], or specify which issue to examine:\n1. Fix them automatically\n2. Create action items\n3. Show me details";
-        let action = analyzer.analyze(response, &slot, "5-2-story");
-        assert_eq!(
-            action,
-            ResponseAction::Continue {
-                reply: "1".to_string()
-            },
-            "Should auto-respond with '1' to fix automatically"
-        );
-    }
-
-    #[test]
-    fn test_analyzer_detects_fix_automatically_pattern() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-        let response = "What should I do with these findings?\n[1] Fix them automatically\n[2] Create action items";
-        let action = analyzer.analyze(response, &slot, "key");
-        assert_eq!(
-            action,
-            ResponseAction::Continue {
-                reply: "1".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn test_analyzer_review_fix_does_not_false_positive() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-        // Normal text with "fix" should NOT trigger review fix pattern
-        let response = "I will fix the compilation error in main.rs and then run the tests.";
-        let action = analyzer.analyze(response, &slot, "key");
-        // Should fall through to default, NOT match review fix patterns
-        assert_eq!(
-            action,
-            ResponseAction::Continue {
-                reply: "Continue.".to_string()
-            }
-        );
-    }
-
-    #[test]
     fn test_analyzer_detects_review_complete() {
         let analyzer = ResponseAnalyzer::new();
         let slot = empty_slot();
         let response = "✅ Review Complete!\n\n**Story Status:** done\n**Issues Fixed:** 3\n**Action Items Created:** 0\n\nCode review complete!";
-        let action = analyzer.analyze(response, &slot, "key");
+        let action = analyzer.analyze(response, &slot);
         assert_eq!(
             action,
             ResponseAction::Completed,
@@ -842,27 +497,11 @@ mod tests {
         let slot = empty_slot();
         // Normal text with "complete" should NOT trigger review complete
         let response = "I need to complete the implementation of the parser module.";
-        let action = analyzer.analyze(response, &slot, "key");
+        let action = analyzer.analyze(response, &slot);
         assert_ne!(
             action,
             ResponseAction::Completed,
             "Should not false-positive on 'complete' in normal text"
-        );
-    }
-
-    #[test]
-    fn test_analyzer_review_complete_priority_over_fix_patterns() {
-        let analyzer = ResponseAnalyzer::new();
-        let slot = empty_slot();
-        // Step 5 output contains "Issues Fixed:" which could match REVIEW_FIX_PATTERNS
-        // but REVIEW_COMPLETE_PATTERNS is at priority 1.5, before fix patterns at 5.5
-        let response =
-            "✅ Review Complete!\n\nIssues Fixed: 5\nAction Items Created: 0\nSprint status synced";
-        let action = analyzer.analyze(response, &slot, "key");
-        assert_eq!(
-            action,
-            ResponseAction::Completed,
-            "Review complete should fire before fix patterns"
         );
     }
 
@@ -880,7 +519,7 @@ mod tests {
         ];
 
         for response in non_completion {
-            let action = analyzer.analyze(response, &slot, "test-key");
+            let action = analyzer.analyze(response, &slot);
             assert_ne!(
                 action,
                 ResponseAction::Completed,
@@ -999,7 +638,7 @@ mod tests {
 
         // Exact pattern from real agent output
         let response = "✅ **Story 7.1: Integration Test Infrastructure & Fixtures — COMPLETE**\n\nSummary: ...";
-        let action = analyzer.analyze(response, &slot, "7-1-test");
+        let action = analyzer.analyze(response, &slot);
         assert_eq!(
             action,
             ResponseAction::Completed,
@@ -1020,7 +659,7 @@ mod tests {
         ];
 
         for response in completions {
-            let action = analyzer.analyze(response, &slot, "key");
+            let action = analyzer.analyze(response, &slot);
             assert_eq!(
                 action,
                 ResponseAction::Completed,
@@ -1043,7 +682,7 @@ mod tests {
         ];
 
         for response in responses {
-            let action = analyzer.analyze(response, &slot, "key");
+            let action = analyzer.analyze(response, &slot);
             assert_eq!(
                 action,
                 ResponseAction::Completed,
@@ -1059,7 +698,7 @@ mod tests {
 
         // "story" without "complete" nearby should NOT trigger
         let response = "Working on Story 7.1 task 3 now. Building test infrastructure.";
-        let action = analyzer.analyze(response, &slot, "key");
+        let action = analyzer.analyze(response, &slot);
         assert_ne!(
             action,
             ResponseAction::Completed,

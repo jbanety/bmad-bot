@@ -522,13 +522,10 @@ impl ReviewRunner {
     /// Drive the review session chat loop.
     ///
     /// Two-phase approach:
-    /// 1. **Normal phase:** Send `"CR"`, analyze responses with `ResponseAnalyzer`,
-    ///    auto-respond to workflow prompts. On `Completed` → enter post-review phase.
+    /// 1. **Normal phase:** Send `"CR"`, analyze responses with `ResponseAnalyzer`
+    ///    for completion/escalation detection. On `Completed` → enter post-review phase.
     /// 2. **Post-review phase:** Send `POST_REVIEW_MESSAGE`, capture the agent's
     ///    next response as the review report. Return `ReviewOutcome::Completed`.
-    ///
-    /// The `story_reply` parameter for the analyzer uses `story.specs_path` (file path),
-    /// NOT the story key, because the CR workflow asks for the story file path.
     async fn drive_review_session(
         &self,
         agent: &mut BuiltAgent,
@@ -536,14 +533,10 @@ impl ReviewRunner {
         escalation_slot: EscalationSlot,
         _decision_log: DecisionLog,
     ) -> Result<ReviewOutcome, ReviewError> {
-        // The CR workflow asks "which story file to review" — reply with the file path
-        let story_reply = story.specs_path.display().to_string();
-
         // Activate agent: send code review SKILL.md as user message (Story 12.1)
         self.ui.activation_start();
         self.ui.llm_request("review", 0);
-        self.ui
-            .llm_request_content("review", 0, "[activate skill]");
+        self.ui.llm_request_content("review", 0, "[activate skill]");
         let (activation_rig_history, _activation_chat_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
@@ -763,9 +756,7 @@ impl ReviewRunner {
             }
 
             // Normal phase: analyze response
-            let action = self
-                .analyzer
-                .analyze(&current_response, &escalation_slot, &story_reply);
+            let action = self.analyzer.analyze(&current_response, &escalation_slot);
 
             let reply = match action {
                 ResponseAction::Completed => {
