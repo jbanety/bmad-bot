@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-19 (12-3 corrected: no story file exists → backlog)
+# last_updated: 2026-04-19 (12-3 story created → ready-for-dev)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -141,7 +141,7 @@ development_status:
   epic-12: in-progress # Skill-Based Sessions & SpawnAgent Tool — depends-on: epic-11
   12-1-parameterize-activation-by-skill: done
   12-2-simplify-response-analyzer: done # depends-on: 12-1
-  12-3-spawn-agent-tool: backlog
+  12-3-spawn-agent-tool: ready-for-dev
   12-4-universal-spawn-agent-registration: backlog # depends-on: 12-3
   12-5-skill-session-and-spawn-agent-tests: backlog # depends-on: 12-4
 
