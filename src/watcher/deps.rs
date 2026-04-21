@@ -749,7 +749,20 @@ pub fn filter_eligible(
         }
     }
 
+    eligible.sort_by_key(|s| status_priority(&s.status));
+
     Ok((eligible, cascade_count))
+}
+
+/// Priority order for eligible statuses: resume interrupted work first, then
+/// ready stories, then fresh backlog stories.
+fn status_priority(status: &str) -> u8 {
+    match status {
+        "review" => 0,
+        "ready-for-dev" => 1,
+        "backlog" => 2,
+        _ => 3,
+    }
 }
 
 #[cfg(test)]
@@ -2112,5 +2125,82 @@ development_status:
             "absorbed should stop cascade propagation, but 1-3-next was blocked: {:?}",
             cascades
         );
+    }
+
+    // --- status priority sorting tests (Story 13.1) ---
+
+    #[test]
+    fn test_filter_eligible_priority_review_before_ready_for_dev() {
+        let all_statuses = vec![
+            ("epic-1".to_string(), "done".to_string()),
+            ("1-1-foo".to_string(), "done".to_string()),
+            ("epic-2".to_string(), "done".to_string()),
+            ("2-1-bar".to_string(), "ready-for-dev".to_string()),
+            ("epic-3".to_string(), "done".to_string()),
+            ("3-1-baz".to_string(), "review".to_string()),
+        ];
+        let stories = vec![
+            make_story("2-1-bar", "ready-for-dev"),
+            make_story("3-1-baz", "review"),
+        ];
+        let comment_deps = HashMap::new();
+        let (result, _) = filter_eligible(stories, &all_statuses, &comment_deps).unwrap();
+        assert_eq!(result[0].story_key, "3-1-baz", "review must come before ready-for-dev");
+        assert_eq!(result[1].story_key, "2-1-bar");
+    }
+
+    #[test]
+    fn test_filter_eligible_priority_ready_for_dev_before_backlog() {
+        let all_statuses = vec![
+            ("epic-1".to_string(), "done".to_string()),
+            ("1-1-foo".to_string(), "done".to_string()),
+            ("epic-2".to_string(), "done".to_string()),
+            ("2-1-bar".to_string(), "backlog".to_string()),
+            ("epic-3".to_string(), "done".to_string()),
+            ("3-1-baz".to_string(), "ready-for-dev".to_string()),
+        ];
+        let stories = vec![
+            make_story("2-1-bar", "backlog"),
+            make_story("3-1-baz", "ready-for-dev"),
+        ];
+        let comment_deps = HashMap::new();
+        let (result, _) = filter_eligible(stories, &all_statuses, &comment_deps).unwrap();
+        assert_eq!(result[0].story_key, "3-1-baz", "ready-for-dev must come before backlog");
+        assert_eq!(result[1].story_key, "2-1-bar");
+    }
+
+    #[test]
+    fn test_filter_eligible_priority_preserves_order_within_group() {
+        let all_statuses = vec![
+            ("epic-1".to_string(), "done".to_string()),
+            ("1-1-foo".to_string(), "done".to_string()),
+            ("epic-2".to_string(), "done".to_string()),
+            ("2-1-bar".to_string(), "ready-for-dev".to_string()),
+            ("epic-3".to_string(), "done".to_string()),
+            ("3-1-baz".to_string(), "ready-for-dev".to_string()),
+        ];
+        let stories = vec![
+            make_story("2-1-bar", "ready-for-dev"),
+            make_story("3-1-baz", "ready-for-dev"),
+        ];
+        let comment_deps = HashMap::new();
+        let (result, _) = filter_eligible(stories, &all_statuses, &comment_deps).unwrap();
+        assert_eq!(result[0].story_key, "2-1-bar", "document order preserved within group");
+        assert_eq!(result[1].story_key, "3-1-baz");
+    }
+
+    #[test]
+    fn test_backlog_story_deps_enforced() {
+        let all_statuses = vec![
+            ("epic-1".to_string(), "in-progress".to_string()),
+            ("1-1-foo".to_string(), "in-progress".to_string()),
+            ("1-2-bar".to_string(), "backlog".to_string()),
+        ];
+        let stories = vec![
+            make_story("1-2-bar", "backlog"),
+        ];
+        let comment_deps = HashMap::new();
+        let (result, _) = filter_eligible(stories, &all_statuses, &comment_deps).unwrap();
+        assert!(result.is_empty(), "backlog story with unmet dep should be filtered out");
     }
 }

@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-21 (12-5 code review complete → done)
+# last_updated: 2026-04-21 (13-1 code review complete → done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -146,7 +146,7 @@ development_status:
   12-5-skill-session-and-spawn-agent-tests: done # depends-on: 12-4
 
   epic-13: in-progress # Multi-Phase Pipeline & Story Critic — depends-on: epic-12
-  13-1-watcher-backlog-stories-extension: ready-for-dev
+  13-1-watcher-backlog-stories-extension: done
   13-2-pipeline-orchestrator-refonte: backlog # depends-on: 13-1
   13-3-daemon-orchestrated-consultation-mechanism: backlog # depends-on: 13-2
   13-4-create-story-phase-with-consultations: backlog # depends-on: 13-3

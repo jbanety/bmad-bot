@@ -40,10 +40,10 @@ pub enum WatcherError {
     #[error("Failed to read sprint status file: {0}")]
     SprintStatusRead(std::io::Error),
 
-    /// No stories with `ready-for-dev` status found in current cycle.
-    /// This is NOT a failure — it's an expected state when all stories are
-    /// either completed or not yet prepared.
-    #[error("No eligible stories found (all stories are either done, in-progress, or backlog)")]
+    /// No stories with an actionable status (`backlog`, `ready-for-dev`, or `review`)
+    /// found in current cycle. This is NOT a failure — it's an expected state when
+    /// all stories are either completed, in-progress, or blocked.
+    #[error("No eligible stories found")]
     NoEligibleStories,
 
     /// A cyclic dependency was detected among stories in sprint-status.yaml.
@@ -138,9 +138,9 @@ impl StoryInfo {
         })
     }
 
-    /// Returns true if this story has `ready-for-dev` status.
+    /// Returns true if this story has an actionable status (`backlog`, `ready-for-dev`, or `review`).
     pub fn is_eligible(&self) -> bool {
-        self.status == "ready-for-dev"
+        matches!(self.status.as_str(), "backlog" | "ready-for-dev" | "review")
     }
 }
 
@@ -399,6 +399,7 @@ impl Watcher {
 
         let all_stories = sprint_status.stories();
         let eligible = sprint_status.eligible_stories();
+        let eligible_count = eligible.len();
 
         // Log stories with needs-clarification status for observability
         for story in &all_stories {
@@ -413,12 +414,6 @@ impl Watcher {
             }
         }
 
-        tracing::info!(
-            total_stories = all_stories.len(),
-            eligible_count = eligible.len(),
-            "Sprint status polled"
-        );
-
         if eligible.is_empty() {
             return Err(WatcherError::NoEligibleStories);
         }
@@ -429,10 +424,14 @@ impl Watcher {
         let (filtered, cascade_count) = deps::filter_eligible(eligible, entries, comment_deps)?;
 
         tracing::info!(
-            pre_gate_input = all_stories.len(),
-            pre_gate_output = filtered.len(),
+            total_stories = all_stories.len(),
+            pre_filter_eligible = eligible_count,
+            post_filter_eligible = filtered.len(),
             cascade_blocked = cascade_count,
-            "Pre-gate dependency filter applied"
+            backlog = filtered.iter().filter(|s| s.status == "backlog").count(),
+            ready_for_dev = filtered.iter().filter(|s| s.status == "ready-for-dev").count(),
+            review = filtered.iter().filter(|s| s.status == "review").count(),
+            "Sprint status polled"
         );
 
         if filtered.is_empty() {
@@ -536,9 +535,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_story_info_is_not_eligible_backlog() {
+    fn test_story_info_is_eligible_backlog() {
         let info = StoryInfo::from_key_and_status("1-1-scaffolding", "backlog", Path::new("/tmp"))
             .unwrap();
+        assert!(info.is_eligible());
+    }
+
+    #[test]
+    fn test_story_info_is_eligible_review() {
+        let info =
+            StoryInfo::from_key_and_status("1-1-scaffolding", "review", Path::new("/tmp")).unwrap();
+        assert!(info.is_eligible());
+    }
+
+    #[test]
+    fn test_story_info_is_not_eligible_in_progress() {
+        let info = StoryInfo::from_key_and_status("1-1-scaffolding", "in-progress", Path::new("/tmp"))
+            .unwrap();
+        assert!(!info.is_eligible());
+    }
+
+    #[test]
+    fn test_story_info_is_not_eligible_blocked() {
+        let info =
+            StoryInfo::from_key_and_status("1-1-scaffolding", "blocked", Path::new("/tmp")).unwrap();
         assert!(!info.is_eligible());
     }
 
@@ -739,7 +759,7 @@ development_status:
     }
 
     #[test]
-    fn test_sprint_status_eligible_stories_filters_ready_for_dev() {
+    fn test_sprint_status_eligible_stories_filters_actionable_statuses() {
         let tmp = tempfile::tempdir().unwrap();
         let content = r#"
 development_status:
@@ -748,13 +768,34 @@ development_status:
   1-2-cli: ready-for-dev
   1-3-init: ready-for-dev
   1-4-status: backlog
+  epic-2: in-progress
+  2-1-polling: review
 "#;
         let path = write_test_sprint_status(tmp.path(), content);
         let ssf = SprintStatusFile::load(&path, tmp.path()).unwrap();
         let eligible = ssf.eligible_stories();
-        assert_eq!(eligible.len(), 2);
+        assert_eq!(eligible.len(), 4);
         assert_eq!(eligible[0].story_key, "1-2-cli");
         assert_eq!(eligible[1].story_key, "1-3-init");
+        assert_eq!(eligible[2].story_key, "1-4-status");
+        assert_eq!(eligible[3].story_key, "2-1-polling");
+    }
+
+    #[test]
+    fn test_sprint_status_eligible_stories_excludes_in_progress_and_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = r#"
+development_status:
+  epic-1: in-progress
+  1-1-scaffolding: done
+  1-2-cli: in-progress
+  1-3-init: ready-for-dev
+"#;
+        let path = write_test_sprint_status(tmp.path(), content);
+        let ssf = SprintStatusFile::load(&path, tmp.path()).unwrap();
+        let eligible = ssf.eligible_stories();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].story_key, "1-3-init");
     }
 
     #[test]
@@ -785,7 +826,7 @@ development_status:
   epic-1: in-progress
   1-1-scaffolding: done
   1-2-cli: in-progress
-  1-3-init: backlog
+  1-3-init: in-progress
 "#;
         let path = write_test_sprint_status(tmp.path(), content);
         let ssf = SprintStatusFile::load(&path, tmp.path()).unwrap();

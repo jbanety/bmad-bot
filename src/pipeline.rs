@@ -896,7 +896,6 @@ impl StoryPipeline {
     ///
     /// A run summary notification is sent after all processing completes.
     pub async fn process_eligible_stories(&self, stories: Vec<StoryInfo>) -> RunSummary {
-        self.ui.batch_start(stories.len());
         let mut results: Vec<PipelineResult> = Vec::new();
 
         let sprint_status_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
@@ -919,7 +918,8 @@ impl StoryPipeline {
         // the eligible list so that dependency changes (e.g., 1-1 done →
         // 1-2 now eligible) are reflected immediately instead of processing
         // a stale batch (which would jump to 2-1 instead of 1-2).
-        let mut current_stories = stories;
+        let mut current_stories = guard_processable_stories(stories);
+        self.ui.batch_start(current_stories.len());
 
         loop {
             // Find next unprocessed story from the current eligible list
@@ -1023,7 +1023,7 @@ impl StoryPipeline {
                         fresh_eligible = fresh_stories.len(),
                         "Re-polled sprint-status after story completion"
                     );
-                    current_stories = fresh_stories;
+                    current_stories = guard_processable_stories(fresh_stories);
                 }
                 Err(e) => {
                     // Re-poll failed — stop processing to avoid stale data decisions.
@@ -1637,6 +1637,35 @@ fn resolve_epic_title(planning_artifacts: &Path, epic_num: u32) -> String {
             .unwrap_or_else(|| format!("Epic {epic_num}")),
         Err(_) => format!("Epic {epic_num}"),
     }
+}
+
+/// Temporary guard: filters stories to only those the current pipeline can process.
+/// Remove this function when Story 13.2 implements multi-phase pipeline routing.
+fn guard_processable_stories(stories: Vec<StoryInfo>) -> Vec<StoryInfo> {
+    let mut skipped_keys: Vec<String> = Vec::new();
+    for s in &stories {
+        if s.status != "ready-for-dev" {
+            tracing::info!(
+                story_key = %s.story_key,
+                status = %s.status,
+                "Story eligible but skipped — pipeline phase routing not yet implemented (Story 13.2)"
+            );
+            skipped_keys.push(s.story_key.clone());
+        }
+    }
+    let processable: Vec<StoryInfo> = stories
+        .into_iter()
+        .filter(|s| s.status == "ready-for-dev")
+        .collect();
+    if !skipped_keys.is_empty() {
+        tracing::info!(
+            skipped_count = skipped_keys.len(),
+            skipped_keys = ?skipped_keys,
+            processable_count = processable.len(),
+            "Guard filtered eligible stories to processable subset (Story 13.2 pending)"
+        );
+    }
+    processable
 }
 
 fn re_poll_eligible(sprint_status_path: &Path, story_dir: &Path) -> Result<Vec<StoryInfo>, String> {
@@ -3626,5 +3655,29 @@ development_status:
             recover_window.contains("let _sub_agent_cleanup = StorySubAgentCleanup"),
             "recover_and_process() must install StorySubAgentCleanup at its top (AC-2)."
         );
+    }
+
+    // --- guard_processable_stories tests (Story 13.1) ---
+
+    #[test]
+    fn test_guard_processable_stories_filters_non_ready_for_dev() {
+        let stories = vec![
+            StoryInfo::from_key_and_status("1-1-foo", "backlog", Path::new("/tmp")).unwrap(),
+            StoryInfo::from_key_and_status("2-1-bar", "ready-for-dev", Path::new("/tmp")).unwrap(),
+            StoryInfo::from_key_and_status("3-1-baz", "review", Path::new("/tmp")).unwrap(),
+        ];
+        let result = guard_processable_stories(stories);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].story_key, "2-1-bar");
+    }
+
+    #[test]
+    fn test_guard_processable_stories_returns_empty_when_all_non_ready() {
+        let stories = vec![
+            StoryInfo::from_key_and_status("1-1-foo", "backlog", Path::new("/tmp")).unwrap(),
+            StoryInfo::from_key_and_status("2-1-bar", "review", Path::new("/tmp")).unwrap(),
+        ];
+        let result = guard_processable_stories(stories);
+        assert!(result.is_empty());
     }
 }
