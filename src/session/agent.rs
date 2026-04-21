@@ -1215,6 +1215,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_sub_agent_preamble_diverges_from_parent_preamble() {
+        let model = "claude-sonnet-4-20250514";
+        let parent = build_preamble(&[], model);
+        let sub_agent = build_sub_agent_preamble(model);
+
+        assert!(
+            parent.contains("ask_supervisor"),
+            "Parent preamble must list ask_supervisor in tool inventory"
+        );
+        assert!(
+            !sub_agent.contains("ask_supervisor"),
+            "Sub-agent preamble must NOT mention ask_supervisor"
+        );
+
+        assert!(
+            parent.contains("Wait for user input"),
+            "Parent preamble must contain persona menu-wait rule"
+        );
+        assert!(
+            !sub_agent.contains("Wait for user input"),
+            "Sub-agent preamble must NOT contain menu-wait rule (prevents stalling)"
+        );
+    }
+
+    #[test]
+    fn test_sub_agent_preamble_retains_skill_instructions() {
+        let preamble = build_sub_agent_preamble("claude-sonnet-4-20250514");
+        assert!(
+            preamble.contains("SKILL.md"),
+            "Sub-agent preamble must include skill handling instructions"
+        );
+        assert!(
+            preamble.contains("workflow.md"),
+            "Sub-agent preamble must instruct loading referenced workflow files"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // create_spawn_agent_tool tests (Story 12.4 AC-3)
     // -----------------------------------------------------------------------

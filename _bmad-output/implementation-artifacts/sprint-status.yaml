@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-21 (epic-13 → in-progress, 13-1 → ready-for-dev)
+# last_updated: 2026-04-21 (12-5 code review complete → done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -143,7 +143,7 @@ development_status:
   12-2-simplify-response-analyzer: done # depends-on: 12-1
   12-3-spawn-agent-tool: done
   12-4-universal-spawn-agent-registration: done # depends-on: 12-3
-  12-5-skill-session-and-spawn-agent-tests: backlog # depends-on: 12-4
+  12-5-skill-session-and-spawn-agent-tests: done # depends-on: 12-4
 
   epic-13: in-progress # Multi-Phase Pipeline & Story Critic — depends-on: epic-12
   13-1-watcher-backlog-stories-extension: ready-for-dev

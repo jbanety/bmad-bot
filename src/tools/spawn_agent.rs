@@ -911,4 +911,104 @@ mod tests {
         );
         assert!(truncated.ends_with('…'));
     }
+
+    #[tokio::test]
+    async fn test_spawn_agent_follow_up_reinserts_state_on_stream_error() {
+        let factory = Arc::new(AgentFactory::new(
+            Arc::new(make_test_config()),
+            Arc::new(make_test_secrets()),
+        ));
+        let agent = factory
+            .build_bare(LlmRole::Dev, "test sub-agent")
+            .await
+            .unwrap();
+
+        let sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+        let test_session_id = "test-follow-up-session-001".to_string();
+        sessions
+            .lock()
+            .unwrap()
+            .insert(test_session_id.clone(), SubAgentState {
+                agent,
+                history: vec![],
+                role: LlmRole::Dev,
+                model: "test-model".to_string(),
+            });
+
+        let tool = SpawnAgentTool::new(
+            factory,
+            LlmRole::Dev,
+            std::env::temp_dir(),
+            Arc::clone(&sessions),
+            Arc::clone(&in_flight),
+            None,
+        );
+
+        let result = tool
+            .call(SpawnAgentArgs {
+                label: "follow-up test".to_string(),
+                message: "Continue the work".to_string(),
+                session_id: Some(test_session_id.clone()),
+            })
+            .await;
+
+        let json_str = result.expect("follow-up stream error must return Ok(error_json)");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("response must be valid JSON");
+        assert_eq!(
+            parsed.get("session_id").and_then(|v| v.as_str()),
+            Some(test_session_id.as_str()),
+            "Error JSON must include the session_id for parent-LLM retry"
+        );
+        assert!(
+            parsed.get("error").is_some(),
+            "Error JSON must include an error field"
+        );
+        assert!(
+            sessions.lock().unwrap().contains_key(&test_session_id),
+            "SubAgentState must be re-inserted after stream error"
+        );
+        assert!(
+            in_flight.lock().unwrap().is_empty(),
+            "in_flight set must be empty after follow-up completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_agent_spawn_new_stores_nothing_on_error() {
+        let sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+        let factory = Arc::new(AgentFactory::new(
+            Arc::new(make_test_config()),
+            Arc::new(make_test_secrets()),
+        ));
+        let tool = SpawnAgentTool::new(
+            factory,
+            LlmRole::Dev,
+            std::env::temp_dir(),
+            Arc::clone(&sessions),
+            Arc::clone(&in_flight),
+            None,
+        );
+
+        let result = tool
+            .call(SpawnAgentArgs {
+                label: "spawn-new error test".to_string(),
+                message: "Do something".to_string(),
+                session_id: None,
+            })
+            .await;
+
+        assert!(result.is_ok(), "spawn_new stream error must return Ok");
+        assert!(
+            sessions.lock().unwrap().is_empty(),
+            "Sessions map must remain empty after failed spawn_new — \
+             no SubAgentState should be inserted on error"
+        );
+    }
 }
