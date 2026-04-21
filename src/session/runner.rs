@@ -31,14 +31,16 @@ use crate::session::provider::ProviderError;
 use crate::session::state::{ChatMessage, SessionState};
 use crate::supervisor::EscalationSlot;
 use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
+use crate::tools::SubAgentState;
 
 use crate::watcher::StoryInfo;
 
 use rig::completion::Message;
 use rig::tools::think::ThinkTool;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 /// Maximum number of chat turns before the safety net kicks in.
 ///
@@ -321,6 +323,12 @@ pub struct SessionRunner {
     shutdown: ShutdownFlag,
     /// MCP server manager — provides external tool capabilities (Story 9.2 usage).
     mcp_manager: Arc<crate::mcp::McpManager>,
+    /// Shared sub-agent session map — threaded into `SpawnAgentTool` at
+    /// `build_agent_for_role` time (Story 12.4).
+    sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>>,
+    /// Shared in-flight-follow-up set — prevents concurrent follow-ups on the same
+    /// sub-agent session (Story 12.4).
+    sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
     /// UI handle for rendering terminal output (fire-and-forget, Story 10.3).
     ui: crate::ui::UiHandle,
     /// Skill file path passed to `activate_agent()` for dev sessions (Story 12.1).
@@ -337,11 +345,17 @@ impl SessionRunner {
     /// The `shutdown` flag is shared with the signal handler task spawned by the
     /// daemon. When set to `true`, the session exits cleanly after the current
     /// streaming chunk, saving partial work via the WAL.
+    ///
+    /// `sub_agent_sessions` and `sub_agent_in_flight` are the pipeline-owned shared
+    /// state that backs [`SpawnAgentTool`](crate::tools::SpawnAgentTool); the runner
+    /// clones them into the tool at agent-build time (Story 12.4).
     pub fn new(
         config: Arc<BotConfig>,
         agent_factory: Arc<AgentFactory>,
         shutdown: ShutdownFlag,
         mcp_manager: Arc<crate::mcp::McpManager>,
+        sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>>,
+        sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
         ui: crate::ui::UiHandle,
     ) -> Self {
         let state_file_path =
@@ -353,6 +367,8 @@ impl SessionRunner {
             analyzer: ResponseAnalyzer::new(),
             shutdown,
             mcp_manager,
+            sub_agent_sessions,
+            sub_agent_in_flight,
             ui,
             skill_path: ".github/skills/bmad-dev-story/SKILL.md".to_string(),
         }
@@ -823,13 +839,30 @@ impl SessionRunner {
                 reason: format!("Failed to create AskSupervisor: {e}"),
             })?;
 
+        let spawn_agent = agent::create_spawn_agent_tool(
+            &self.agent_factory,
+            LlmRole::Dev,
+            &project_root,
+            &self.sub_agent_sessions,
+            &self.sub_agent_in_flight,
+            Some(&self.shutdown),
+        );
+
         let mcp_data = self.mcp_manager.tools_for_builder().await;
         self.agent_factory
             .build(
                 role,
                 &preamble,
                 crate::configure_agent_tools!(
-                    git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
+                    git,
+                    read_file,
+                    edit_file,
+                    grep,
+                    find_path,
+                    list_dir,
+                    terminal,
+                    supervisor,
+                    spawn_agent,
                     ThinkTool
                 )
                 .with_mcp(mcp_data),
@@ -2335,6 +2368,18 @@ mod tests {
         Arc::new(crate::mcp::McpManager::empty())
     }
 
+    type SubAgentArcs = (
+        Arc<Mutex<HashMap<String, SubAgentState>>>,
+        Arc<Mutex<HashSet<String>>>,
+    );
+
+    fn make_empty_sub_agent_arcs() -> SubAgentArcs {
+        (
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashSet::new())),
+        )
+    }
+
     #[test]
     fn test_session_runner_new_sets_state_file_path() {
         let dir = tempfile::tempdir().expect("create temp dir");
@@ -2342,11 +2387,14 @@ mod tests {
         let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
 
@@ -2368,11 +2416,14 @@ mod tests {
         let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
 
@@ -2386,17 +2437,50 @@ mod tests {
         let config = Arc::new(make_runner_test_config(dir.path()));
         let factory = make_test_factory(Arc::clone(&config));
         let mcp = make_test_mcp_manager();
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             Arc::clone(&config),
             Arc::clone(&factory),
             Arc::new(AtomicBool::new(false)),
             Arc::clone(&mcp),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
         // Verify mcp_manager is stored (Arc strong count increased)
         assert_eq!(Arc::strong_count(&mcp), 2);
         drop(runner);
         assert_eq!(Arc::strong_count(&mcp), 1);
+    }
+
+    #[test]
+    fn test_session_runner_stores_sub_agent_arcs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Arc::new(make_runner_test_config(dir.path()));
+        let factory = make_test_factory(Arc::clone(&config));
+        let mcp = make_test_mcp_manager();
+        let sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        assert_eq!(Arc::strong_count(&sessions), 1);
+        assert_eq!(Arc::strong_count(&in_flight), 1);
+
+        let runner = SessionRunner::new(
+            Arc::clone(&config),
+            Arc::clone(&factory),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&mcp),
+            Arc::clone(&sessions),
+            Arc::clone(&in_flight),
+            crate::ui::UiHandle::null(),
+        );
+
+        // >= 2, not == 2: internal cloning is an implementation detail.
+        assert!(Arc::strong_count(&sessions) >= 2);
+        assert!(Arc::strong_count(&in_flight) >= 2);
+        drop(runner);
+        assert_eq!(Arc::strong_count(&sessions), 1);
+        assert_eq!(Arc::strong_count(&in_flight), 1);
     }
 
     #[test]
@@ -2408,11 +2492,14 @@ mod tests {
         let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
 
@@ -2571,11 +2658,14 @@ mod tests {
         let factory = make_test_factory(Arc::clone(&config));
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
 
@@ -2599,11 +2689,14 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory = make_test_factory(Arc::clone(&config));
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
 
@@ -2634,11 +2727,14 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory = make_test_factory(Arc::clone(&config));
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
 
@@ -2748,11 +2844,14 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory = make_test_factory(Arc::clone(&config));
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
         let recovery = runner
@@ -2787,11 +2886,14 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory = make_test_factory(Arc::clone(&config));
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         let runner = SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
         let recovery = runner
@@ -3068,11 +3170,14 @@ mod tests {
     fn make_test_runner_with_dir(dir: &std::path::Path) -> SessionRunner {
         let config = Arc::new(make_runner_test_config(dir));
         let factory = make_test_factory(Arc::clone(&config));
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         SessionRunner::new(
             config,
             factory,
             Arc::new(AtomicBool::new(false)),
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         )
     }
@@ -3084,11 +3189,14 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         // Leak the tempdir so it isn't dropped (this is fine in tests)
         std::mem::forget(dir);
+        let (subs, inflt) = make_empty_sub_agent_arcs();
         SessionRunner::new(
             config,
             factory,
             shutdown,
             make_test_mcp_manager(),
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         )
     }

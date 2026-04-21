@@ -10,8 +10,9 @@
 //! changes (e.g., story 1-1 done → 1-2 now eligible) are reflected immediately
 //! instead of processing a stale batch from the initial poll.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::{BotConfig, BotSecrets};
 use crate::git_provider::{
@@ -33,6 +34,7 @@ use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
 use crate::supervisor::decisions::format_pr_decisions_section;
+use crate::tools::SubAgentState;
 use crate::ui::UiHandle;
 use crate::watcher::deps as watcher_deps;
 use crate::watcher::{SprintStatusFile, StoryInfo};
@@ -143,8 +145,58 @@ pub struct StoryPipeline {
     review_runner: ReviewRunner,
     /// Epic review session runner (autonomous post-epic retrospective).
     epic_review_runner: EpicReviewRunner,
+    /// Shared sub-agent sessions map — cleared between stories via
+    /// [`StorySubAgentCleanup`] (Story 12.4).
+    sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>>,
+    /// Shared in-flight-follow-up set — cleared between stories alongside
+    /// `sub_agent_sessions` (Story 12.4).
+    sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
     /// UI handle for rendering terminal output (fire-and-forget).
     ui: UiHandle,
+}
+
+/// RAII guard that clears the sub-agent sessions map and in-flight set on drop.
+///
+/// Constructed at the top of [`StoryPipeline::process_story`] and
+/// [`StoryPipeline::recover_and_process`] so that all exit paths — success,
+/// error, or panic unwind — leave the shared state clean for the next story.
+struct StorySubAgentCleanup<'a> {
+    sessions: &'a Arc<Mutex<HashMap<String, SubAgentState>>>,
+    in_flight: &'a Arc<Mutex<HashSet<String>>>,
+}
+
+impl<'a> Drop for StorySubAgentCleanup<'a> {
+    fn drop(&mut self) {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let cleared_sessions = sessions.len();
+        sessions.clear();
+        drop(sessions);
+
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let cleared_in_flight = in_flight.len();
+        in_flight.clear();
+        drop(in_flight);
+
+        // Skip tracing during panic unwind — a subscriber panic here
+        // would convert single-panic into double-panic → process abort.
+        if std::thread::panicking() {
+            return;
+        }
+        if cleared_sessions > 0 || cleared_in_flight > 0 {
+            tracing::info!(
+                action = "sub_agent_sessions_cleared",
+                sessions_cleared = cleared_sessions,
+                in_flight_cleared = cleared_in_flight,
+                "Cleared sub-agent state between stories"
+            );
+        }
+    }
 }
 
 impl StoryPipeline {
@@ -188,11 +240,20 @@ impl StoryPipeline {
         // Create the centralized AgentFactory — owns secrets and provider credentials.
         let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
 
+        // Pipeline-owned shared state backing SpawnAgentTool (Story 12.4).
+        // Created once per daemon run; cleared between stories by StorySubAgentCleanup.
+        let sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> =
+            Arc::new(Mutex::new(HashSet::new()));
+
         let session_runner = SessionRunner::new(
             Arc::clone(&config),
             Arc::clone(&agent_factory),
             Arc::clone(&shutdown),
             Arc::clone(&mcp_manager),
+            Arc::clone(&sub_agent_sessions),
+            Arc::clone(&sub_agent_in_flight),
             ui.clone(),
         );
         let review_runner = ReviewRunner::new(
@@ -201,6 +262,8 @@ impl StoryPipeline {
             Arc::clone(&agent_factory),
             Arc::clone(&shutdown),
             Arc::clone(&mcp_manager),
+            Arc::clone(&sub_agent_sessions),
+            Arc::clone(&sub_agent_in_flight),
             ui.clone(),
         );
         let epic_review_runner = EpicReviewRunner::new(
@@ -219,8 +282,32 @@ impl StoryPipeline {
             session_runner,
             review_runner,
             epic_review_runner,
+            sub_agent_sessions,
+            sub_agent_in_flight,
             ui,
         })
+    }
+
+    /// Returns `(sessions_len, in_flight_len)` — current size of the two
+    /// pipeline-owned shared maps backing [`SpawnAgentTool`](crate::tools::SpawnAgentTool).
+    ///
+    /// Poison-safe (never panics on a poisoned mutex; recovers via
+    /// [`std::sync::PoisonError::into_inner`], matching the cleanup guard's policy).
+    /// Used by tests to observe map state without reaching into private fields.
+    // Story 12.4 AC-1: observer accessor for tests; no runtime caller yet.
+    #[allow(dead_code)]
+    pub(crate) fn sub_agent_state_counts(&self) -> (usize, usize) {
+        let sessions_len = self
+            .sub_agent_sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len();
+        let in_flight_len = self
+            .sub_agent_in_flight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len();
+        (sessions_len, in_flight_len)
     }
 
     /// Process a single story through the full pipeline.
@@ -232,6 +319,11 @@ impl StoryPipeline {
         story: &StoryInfo,
         base_branch_override: Option<&str>,
     ) -> PipelineResult {
+        let _sub_agent_cleanup = StorySubAgentCleanup {
+            sessions: &self.sub_agent_sessions,
+            in_flight: &self.sub_agent_in_flight,
+        };
+
         let story_title = story_title_from_label(&story.label);
         self.ui.story_start(&story.story_key, &story_title);
 
@@ -1694,6 +1786,11 @@ impl StoryPipeline {
     /// **Critical:** This must be called BEFORE the polling loop starts. The daemon
     /// must not poll for new stories while a recovered session is in progress.
     pub async fn recover_and_process(&self) -> Option<PipelineResult> {
+        let _sub_agent_cleanup = StorySubAgentCleanup {
+            sessions: &self.sub_agent_sessions,
+            in_flight: &self.sub_agent_in_flight,
+        };
+
         self.ui.crash_recovery_start();
         let recovery = self.session_runner.check_and_recover_wal().await?;
 
@@ -3469,6 +3566,65 @@ development_status:
         assert_eq!(
             resolve_epic_title(planning, 4),
             "LLM Agent Session & Tool Calling"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // StorySubAgentCleanup tests (Story 12.4 AC-9)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_story_sub_agent_cleanup_clears_on_drop() {
+        let sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+        // Populate only in_flight — SubAgentState requires a real BuiltAgent, which is
+        // prohibitive in a unit test. The guard clears both maps equally, so in_flight
+        // coverage demonstrates the clear-on-drop contract.
+        in_flight
+            .lock()
+            .unwrap()
+            .insert("fake-session-id".to_string());
+        assert_eq!(in_flight.lock().unwrap().len(), 1);
+
+        {
+            let _guard = StorySubAgentCleanup {
+                sessions: &sessions,
+                in_flight: &in_flight,
+            };
+        }
+
+        assert!(sessions.lock().unwrap().is_empty());
+        assert!(in_flight.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_process_story_installs_cleanup_guard_source_check() {
+        let src = include_str!("pipeline.rs");
+        // Find the start of process_story's body.
+        let process_story_pos = src
+            .find("pub async fn process_story(")
+            .expect("process_story method must exist");
+        // Take a slice of ~2000 chars starting at the method signature — enough
+        // to capture the opening brace and the guard construction line.
+        let window = &src[process_story_pos..(process_story_pos + 2000).min(src.len())];
+        assert!(
+            window.contains("let _sub_agent_cleanup = StorySubAgentCleanup"),
+            "process_story() must install StorySubAgentCleanup at its top (AC-2 / AC-9). \
+             If this test breaks because the guard was legitimately renamed, update the \
+             expected substring here."
+        );
+
+        // Secondary assertion: the recover_and_process entry point (the WAL-resume
+        // path referenced by AC-2) must install the same guard.
+        let recover_pos = src
+            .find("pub async fn recover_and_process(")
+            .expect("recover_and_process method must exist");
+        let recover_window = &src[recover_pos..(recover_pos + 2000).min(src.len())];
+        assert!(
+            recover_window.contains("let _sub_agent_cleanup = StorySubAgentCleanup"),
+            "recover_and_process() must install StorySubAgentCleanup at its top (AC-2)."
         );
     }
 }

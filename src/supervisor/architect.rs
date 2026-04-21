@@ -359,6 +359,18 @@ impl AnswerProvider for ArchitectSession {
             .build(
                 LlmRole::Supervisor,
                 &preamble,
+                // TODO (post-12.4): Migrate the Architect off the 4-turn scripted handshake.
+                //
+                // The current flow (architect.md activation → [CH] → load-context → question)
+                // does not map to spawn_agent's single-message contract. Per architecture.md
+                // Decision 10 (_bmad-output/planning-artifacts/architecture.md:664–694), the
+                // Architect is a supervisor-fallback AnswerProvider, not an LLM-initiated
+                // delegation target — so a straight spawn_agent migration would also conflate
+                // the two delegation flavors. Migration becomes feasible once either:
+                //   (a) spawn_agent gains a multi-turn activation API, or
+                //   (b) the Architect adopts a skill-based activation path (Story 12.1
+                //       precedent for dev sessions).
+                // Tracked by Story 12.4 AC-7.
                 crate::configure_agent_tools!(
                     git, read_file, edit_file, grep, find_path, list_dir, terminal, ThinkTool
                 )

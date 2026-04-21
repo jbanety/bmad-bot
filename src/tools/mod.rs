@@ -8,8 +8,10 @@
 //! - **[`GitTool`]** — Git operations via Git CLI
 //! - **[`TerminalTool`]** — Shell command execution with timeout
 //! - **[`SpawnAgentTool`]** — daemon-provided; spawn fresh sub-agents for delegated tasks
-//!   with follow-up via `session_id`. Not registered in `create_base_tools` — Story 12.4
-//!   wires it into the pipeline.
+//!   with follow-up via `session_id`. Registered on dev + review sessions via
+//!   [`session::agent::create_spawn_agent_tool`](crate::session::agent).
+//! - **[`SubAgentState`]** — in-memory state of a live sub-agent session (opaque to
+//!   callers; managed by `SpawnAgentTool`).
 
 pub mod edit_file;
 pub mod find_path;
@@ -26,6 +28,6 @@ pub use git::GitTool;
 pub use grep::GrepTool;
 pub use list_directory::ListDirectoryTool;
 pub use read_file::ReadFileTool;
-#[allow(unused_imports)] // Wired into the bin entry chain by Story 12.4
 pub use spawn_agent::SpawnAgentTool;
+pub use spawn_agent::SubAgentState;
 pub use terminal::TerminalTool;

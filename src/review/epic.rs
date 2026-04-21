@@ -213,6 +213,10 @@ impl EpicReviewRunner {
             .build(
                 LlmRole::EpicReview,
                 &preamble,
+                // NOTE (Story 12.4): SpawnAgentTool intentionally NOT registered — sub-agents
+                // receive edit_file unconditionally (see spawn_agent.rs:414–436), which would
+                // let EpicReview escape its read-only invariant. Revisit if sub-agent tool sets
+                // become role-aware.
                 crate::configure_agent_tools!(
                     git, read_file, grep, find_path, list_dir, terminal, ThinkTool
                 )

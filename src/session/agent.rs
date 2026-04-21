@@ -25,10 +25,13 @@ use crate::session::state::ChatMessage;
 use crate::supervisor::decisions::DecisionLog;
 use crate::supervisor::{AskSupervisor, EscalationSlot};
 use crate::tools::{
-    EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, TerminalTool,
+    EditFileTool, FindPathTool, GitTool, GrepTool, ListDirectoryTool, ReadFileTool, SpawnAgentTool,
+    SubAgentState, TerminalTool,
 };
 
+use crate::llm::agent_factory::LlmRole;
 use futures::StreamExt;
+use std::collections::{HashMap, HashSet};
 use rig::agent::{MultiTurnStreamItem, PromptHook};
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
 use rig::message::Text;
@@ -109,6 +112,44 @@ pub fn create_tools_with_supervisor(
     Ok((
         git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
     ))
+}
+
+/// Construct a [`SpawnAgentTool`] bound to the parent session's role, project root,
+/// and the pipeline-owned shared state.
+///
+/// This helper is the deliberate counterpart to [`create_base_tools()`] and
+/// [`create_tools_with_supervisor()`] — [`SpawnAgentTool`] is intentionally NOT included
+/// in the base set. Two callers of `create_base_tools()` MUST NOT receive it:
+///
+/// 1. [`SpawnAgentTool::spawn_new`](crate::tools::spawn_agent::SpawnAgentTool) itself
+///    calls `create_base_tools()` to wire tools on each sub-agent. Registering
+///    `SpawnAgentTool` there would let sub-agents spawn further sub-agents — an
+///    anti-pattern explicitly called out by Story 12.3.
+/// 2. [`ArchitectSession::ask`](crate::supervisor::architect::ArchitectSession) also
+///    builds its tool set via `create_base_tools()` — giving the supervisor-role
+///    Architect a spawn_agent tool would open a supervisor-spawns-supervisor recursion
+///    path. Story 12.4 AC-7 explicitly excludes it.
+///
+/// The helper captures the parent's [`LlmRole`] at construction time (Story 12.3 AC-6),
+/// and clones the `sessions` and `in_flight` Arcs internally so call sites don't need
+/// to repeat `Arc::clone` four times. Visibility is `pub(crate)` — no downstream
+/// consumer should construct `SpawnAgentTool` directly.
+pub(crate) fn create_spawn_agent_tool(
+    agent_factory: &Arc<AgentFactory>,
+    role: LlmRole,
+    project_root: &Path,
+    sessions: &Arc<Mutex<HashMap<String, SubAgentState>>>,
+    in_flight: &Arc<Mutex<HashSet<String>>>,
+    shutdown: Option<&ShutdownFlag>,
+) -> SpawnAgentTool {
+    SpawnAgentTool::new(
+        Arc::clone(agent_factory),
+        role,
+        project_root.to_path_buf(),
+        Arc::clone(sessions),
+        Arc::clone(in_flight),
+        shutdown.cloned(),
+    )
 }
 
 /// Shared shutdown flag — set to `true` when Ctrl+C or SIGTERM is received.
@@ -283,7 +324,6 @@ OVERRIDE: communication_language = English
 /// All other sections (branch management, completion sentinel, English override,
 /// remaining persona activation rules, skill instructions, preview-model sequential
 /// workaround) are retained identically. See Story 12.3 Task 2 for rationale.
-#[allow(dead_code)] // Used by SpawnAgentTool — wired into the bin entry chain by Story 12.4
 pub fn build_sub_agent_preamble(model: &str) -> String {
     // Workaround: preview models (e.g. gemini-3.1-pro-preview) sometimes
     // concatenate parallel tool call args into invalid JSON. Force sequential.
@@ -1173,5 +1213,68 @@ mod tests {
             !preamble.contains("Wait for user input"),
             "Sub-agent preamble must NOT tell non-interactive sub-agents to wait for user input"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // create_spawn_agent_tool tests (Story 12.4 AC-3)
+    // -----------------------------------------------------------------------
+
+    fn make_factory_for_spawn_tests() -> Arc<crate::llm::agent_factory::AgentFactory> {
+        use crate::config::BotSecrets;
+        let config = Arc::new(crate::config::BotConfig::_test_minimal("pretty", "info"));
+        let secrets = Arc::new(BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        Arc::new(crate::llm::agent_factory::AgentFactory::new(config, secrets))
+    }
+
+    #[test]
+    fn test_create_spawn_agent_tool_role_matches_parent() {
+        let factory = make_factory_for_spawn_tests();
+        let sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let root = Path::new("/tmp/bmad-bot-test");
+
+        let tool = create_spawn_agent_tool(
+            &factory,
+            LlmRole::Review,
+            root,
+            &sessions,
+            &in_flight,
+            None,
+        );
+        assert_eq!(tool.role_for_tests(), LlmRole::Review);
+    }
+
+    #[test]
+    fn test_create_spawn_agent_tool_shares_arcs() {
+        let factory = make_factory_for_spawn_tests();
+        let sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        assert_eq!(Arc::strong_count(&sessions), 1);
+        assert_eq!(Arc::strong_count(&in_flight), 1);
+        let root = Path::new("/tmp/bmad-bot-test");
+
+        let tool = create_spawn_agent_tool(
+            &factory,
+            LlmRole::Dev,
+            root,
+            &sessions,
+            &in_flight,
+            None,
+        );
+
+        // >= 2, not == 2: internal Arc cloning is an implementation detail.
+        assert!(Arc::strong_count(&sessions) >= 2);
+        assert!(Arc::strong_count(&in_flight) >= 2);
+        drop(tool);
+        assert_eq!(Arc::strong_count(&sessions), 1);
+        assert_eq!(Arc::strong_count(&in_flight), 1);
     }
 }

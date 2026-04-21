@@ -21,9 +21,10 @@
 
 pub mod epic;
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::session::cleanup::get_dirty_files;
@@ -39,6 +40,7 @@ use crate::session::provider::ProviderError;
 use crate::session::runner::truncate_summary;
 use crate::supervisor::EscalationSlot;
 use crate::supervisor::decisions::DecisionLog;
+use crate::tools::SubAgentState;
 use crate::watcher::StoryInfo;
 
 /// Maximum chat turns for a review session (safety net).
@@ -319,18 +321,29 @@ pub struct ReviewRunner {
     shutdown: ShutdownFlag,
     /// MCP server manager — provides external tool capabilities (Story 9.2 usage).
     mcp_manager: Arc<crate::mcp::McpManager>,
+    /// Shared sub-agent session map — threaded into `SpawnAgentTool` at
+    /// `build_review_agent` time (Story 12.4).
+    sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>>,
+    /// Shared in-flight-follow-up set — prevents concurrent follow-ups on the same
+    /// sub-agent session (Story 12.4).
+    sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
     /// UI handle for rendering terminal output (fire-and-forget, Story 10.2).
     ui: crate::ui::UiHandle,
 }
 
 impl ReviewRunner {
     /// Create a new review runner.
+    // 8 args: construction aggregates daemon-wide shared state; splitting into a
+    // builder would add a layer of indirection without hiding any one parameter.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<BotConfig>,
         secrets: Arc<BotSecrets>,
         agent_factory: Arc<AgentFactory>,
         shutdown: ShutdownFlag,
         mcp_manager: Arc<crate::mcp::McpManager>,
+        sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>>,
+        sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
         ui: crate::ui::UiHandle,
     ) -> Self {
         Self {
@@ -340,6 +353,8 @@ impl ReviewRunner {
             analyzer: ResponseAnalyzer::new(),
             shutdown,
             mcp_manager,
+            sub_agent_sessions,
+            sub_agent_in_flight,
             ui,
         }
     }
@@ -452,12 +467,29 @@ impl ReviewRunner {
                 reason: format!("Failed to create AskSupervisor: {e}"),
             })?;
 
+        let spawn_agent = agent::create_spawn_agent_tool(
+            &self.agent_factory,
+            LlmRole::Review,
+            &project_root,
+            &self.sub_agent_sessions,
+            &self.sub_agent_in_flight,
+            Some(&self.shutdown),
+        );
+
         self.agent_factory
             .build(
                 LlmRole::Review,
                 &preamble,
                 crate::configure_agent_tools!(
-                    git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,
+                    git,
+                    read_file,
+                    edit_file,
+                    grep,
+                    find_path,
+                    list_dir,
+                    terminal,
+                    supervisor,
+                    spawn_agent,
                     ThinkTool
                 )
                 .with_mcp(mcp_data),
@@ -999,16 +1031,60 @@ mod tests {
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let agent_factory = Arc::new(AgentFactory::new(config.clone(), secrets.clone()));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> =
+            Arc::new(Mutex::new(HashSet::new()));
         let runner = ReviewRunner::new(
             config.clone(),
             secrets,
             agent_factory,
             shutdown,
             mcp_manager,
+            sub_agent_sessions,
+            sub_agent_in_flight,
             crate::ui::UiHandle::null(),
         );
         // Verify config is stored by checking a known field
         assert_eq!(runner.config.llm.review.provider, "anthropic");
+    }
+
+    #[test]
+    fn test_review_runner_stores_sub_agent_arcs() {
+        let config = Arc::new(BotConfig::_test_minimal("pretty", "info"));
+        let secrets = Arc::new(BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let agent_factory = Arc::new(AgentFactory::new(config.clone(), secrets.clone()));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        assert_eq!(Arc::strong_count(&sessions), 1);
+        assert_eq!(Arc::strong_count(&in_flight), 1);
+
+        let runner = ReviewRunner::new(
+            config,
+            secrets,
+            agent_factory,
+            shutdown,
+            mcp_manager,
+            Arc::clone(&sessions),
+            Arc::clone(&in_flight),
+            crate::ui::UiHandle::null(),
+        );
+
+        // >= 2, not == 2: internal cloning is an implementation detail.
+        assert!(Arc::strong_count(&sessions) >= 2);
+        assert!(Arc::strong_count(&in_flight) >= 2);
+        drop(runner);
+        assert_eq!(Arc::strong_count(&sessions), 1);
+        assert_eq!(Arc::strong_count(&in_flight), 1);
     }
 
     #[test]

@@ -18,10 +18,14 @@
 //!
 //! The tool holds an `Arc<Mutex<HashMap<String, SubAgentState>>>` so multiple parent
 //! sessions (and follow-up calls within the same parent) can resume sub-agent
-//! conversations by passing back a previously-returned `session_id`. **This story
-//! (12.3) does not own the lifecycle of the sessions map** — Story 12.4 wires the
-//! map's construction into the pipeline, registers this tool in `create_base_tools()`,
-//! and decides whether the Architect session should also receive it.
+//! conversations by passing back a previously-returned `session_id`. Story 12.4 wires
+//! the map's construction into the pipeline and registers this tool in
+//! [`SessionRunner`](crate::session::runner::SessionRunner) and
+//! [`ReviewRunner`](crate::review::ReviewRunner) via the
+//! [`create_spawn_agent_tool`](crate::session::agent::create_spawn_agent_tool) helper.
+//! [`EpicReviewRunner`](crate::review::epic::EpicReviewRunner) and
+//! [`ArchitectSession`](crate::supervisor::architect::ArchitectSession) are deliberately
+//! excluded — see Story 12.4 AC-7.
 //!
 //! # Error policy (AC-5)
 //!
@@ -31,11 +35,6 @@
 //! react to. Returning `Err` would poison rig's tool-call loop with an opaque error.
 //! `SpawnAgentError` is reserved for infrastructure failures only (missing session,
 //! agent build failure).
-
-// All items in this module are reachable only from tests until Story 12.4 wires
-// SpawnAgentTool into create_base_tools() and the pipeline. Suppressed module-wide
-// to avoid scattering per-item attributes; revisit when 12.4 lands.
-#![allow(dead_code)]
 
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole, ShutdownFlag};
 use crate::session::agent::{build_sub_agent_preamble, create_base_tools};
@@ -140,8 +139,12 @@ pub struct SubAgentState {
     pub history: Vec<Message>,
     /// LLM role copied from the parent at construction time — kept for future logging
     /// and to preserve the provider/model pairing across follow-ups.
+    // Preserved for follow-up introspection/logging; no runtime reader today.
+    #[allow(dead_code)]
     pub role: LlmRole,
     /// Model id resolved at construction time — preserved across follow-ups.
+    // Preserved for follow-up introspection/logging; no runtime reader today.
+    #[allow(dead_code)]
     pub model: String,
 }
 
@@ -202,6 +205,13 @@ impl SpawnAgentTool {
             in_flight,
             shutdown,
         }
+    }
+
+    // Test-only accessor — private role field is otherwise inaccessible for
+    // cross-module assertions (Story 12.4 AC-3).
+    #[cfg(test)]
+    pub(crate) fn role_for_tests(&self) -> LlmRole {
+        self.role
     }
 
     /// Lock the shared sessions map, recovering silently from poison.
