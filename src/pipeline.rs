@@ -312,7 +312,11 @@ impl StoryPipeline {
 
     /// Process a single story through the full pipeline.
     ///
-    /// Runs dev session → optional code review → PR creation → notification.
+    /// Routes to the correct phase based on the story's current status:
+    /// - `backlog` → create phase (placeholder — Story 13.4)
+    /// - `ready-for-dev` → dev phase (session → push → PR → review → notify)
+    /// - `review` → review phase (placeholder — Story 13.6)
+    ///
     /// Never panics — all errors are caught and returned as [`PipelineResult`].
     pub async fn process_story(
         &self,
@@ -331,9 +335,91 @@ impl StoryPipeline {
             action = "pipeline_start",
             story_key = %story.story_key,
             story_id = %story.story_id,
+            status = %story.status,
             "Starting pipeline for story"
         );
 
+        match route_story_status(&story.status) {
+            StoryPhase::Create => {
+                self.run_create_pipeline(story, &story_title, base_branch_override)
+                    .await
+            }
+            StoryPhase::Dev => {
+                self.run_dev_pipeline(story, &story_title, base_branch_override)
+                    .await
+            }
+            StoryPhase::Review => self.run_review_pipeline(story, &story_title).await,
+            StoryPhase::Unknown => {
+                tracing::error!(
+                    action = "unexpected_status",
+                    story_key = %story.story_key,
+                    status = %story.status,
+                    "Unexpected status in process_story — should not reach pipeline"
+                );
+                self.ui.story_error(
+                    &story.story_key,
+                    &format!(
+                        "Unexpected status '{}' — should not reach pipeline",
+                        story.status
+                    ),
+                );
+                let result = PipelineResult {
+                    story_key: story.story_key.clone(),
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(format!(
+                        "Unexpected status '{}' in process_story — should not reach pipeline",
+                        story.status
+                    )),
+                    fatal: false,
+                };
+                self.notify_story_result(&result).await;
+                result
+            }
+        }
+    }
+
+    /// Placeholder for the create-story pipeline phase.
+    ///
+    /// Story 13.4 will implement: create-story session → adversarial consultation →
+    /// critic consultation → commit. On success, continues to dev phase.
+    async fn run_create_pipeline(
+        &self,
+        story: &StoryInfo,
+        _story_title: &str,
+        _base_branch_override: Option<&str>,
+    ) -> PipelineResult {
+        tracing::warn!(
+            action = "create_phase_not_implemented",
+            story_key = %story.story_key,
+            "Create-story phase not yet implemented (Story 13.4) — skipping story"
+        );
+        self.ui.story_error(
+            &story.story_key,
+            "Create-story phase not yet implemented (Story 13.4)",
+        );
+        let result = PipelineResult {
+            story_key: story.story_key.clone(),
+            status: StoryStatus::Error,
+            pr_url: None,
+            error_detail: Some(
+                "Create-story phase not yet implemented (Story 13.4)".to_string(),
+            ),
+            fatal: false,
+        };
+        self.notify_story_result(&result).await;
+        result
+    }
+
+    /// Run the full dev pipeline: session → push → PR → review → mark done → notify.
+    ///
+    /// This is the existing `process_story()` behavior, extracted verbatim.
+    async fn run_dev_pipeline(
+        &self,
+        story: &StoryInfo,
+        story_title: &str,
+        base_branch_override: Option<&str>,
+    ) -> PipelineResult {
         // Phase 1 — Dev Session
         self.ui.phase_start("Dev Session");
         let session_start = std::time::Instant::now();
@@ -396,10 +482,10 @@ impl StoryPipeline {
                     how_to_test: pr_how_to_test.unwrap_or_default(),
                     additional_info: pr_additional_info.unwrap_or_default(),
                 });
-                let pr_title = build_pr_title(&story_key, &story_title, false);
+                let pr_title = build_pr_title(&story_key, story_title, false);
                 let pr_body = build_pr_description(&PrDescriptionParams {
                     story_key: story_key.clone(),
-                    story_title: story_title.clone(),
+                    story_title: story_title.to_string(),
                     outcome_summary: "completed successfully".to_string(),
                     decisions_section,
                     failure_details: None,
@@ -669,10 +755,10 @@ impl StoryPipeline {
                 };
 
                 let decisions_section = format_pr_decisions_section(&decisions);
-                let pr_title = build_pr_title(&report.story_key, &story_title, true);
+                let pr_title = build_pr_title(&report.story_key, story_title, true);
                 let pr_body = build_pr_description(&PrDescriptionParams {
                     story_key: report.story_key.clone(),
-                    story_title: story_title.clone(),
+                    story_title: story_title.to_string(),
                     outcome_summary: "escalated — needs clarification".to_string(),
                     decisions_section,
                     failure_details: Some(format!(
@@ -802,10 +888,10 @@ impl StoryPipeline {
                     }
 
                     let decisions_section = format_pr_decisions_section(&decisions);
-                    let pr_title = build_pr_title(&story_key, &story_title, true);
+                    let pr_title = build_pr_title(&story_key, story_title, true);
                     let pr_body = build_pr_description(&PrDescriptionParams {
                         story_key: story_key.clone(),
-                        story_title: story_title.clone(),
+                        story_title: story_title.to_string(),
                         outcome_summary: "failed".to_string(),
                         decisions_section,
                         failure_details: Some(error.clone()),
@@ -875,6 +961,38 @@ impl StoryPipeline {
         }
     }
 
+    /// Placeholder for the code-review pipeline phase.
+    ///
+    /// Story 13.6 will implement: code-review session → optional critic consultation →
+    /// push → PR → notify. Handles `review` status stories (resumed after crash or
+    /// entering directly from watcher).
+    async fn run_review_pipeline(
+        &self,
+        story: &StoryInfo,
+        _story_title: &str,
+    ) -> PipelineResult {
+        tracing::warn!(
+            action = "review_phase_not_implemented",
+            story_key = %story.story_key,
+            "Code-review phase not yet implemented (Story 13.6) — skipping story"
+        );
+        self.ui.story_error(
+            &story.story_key,
+            "Code-review phase not yet implemented (Story 13.6)",
+        );
+        let result = PipelineResult {
+            story_key: story.story_key.clone(),
+            status: StoryStatus::Error,
+            pr_url: None,
+            error_detail: Some(
+                "Code-review phase not yet implemented (Story 13.6)".to_string(),
+            ),
+            fatal: false,
+        };
+        self.notify_story_result(&result).await;
+        result
+    }
+
     /// Process eligible stories sequentially with re-polling between each story.
     ///
     /// The initial `stories` list seeds the first iteration. After each story
@@ -918,7 +1036,7 @@ impl StoryPipeline {
         // the eligible list so that dependency changes (e.g., 1-1 done →
         // 1-2 now eligible) are reflected immediately instead of processing
         // a stale batch (which would jump to 2-1 instead of 1-2).
-        let mut current_stories = guard_processable_stories(stories);
+        let mut current_stories = stories;
         self.ui.batch_start(current_stories.len());
 
         loop {
@@ -1023,7 +1141,7 @@ impl StoryPipeline {
                         fresh_eligible = fresh_stories.len(),
                         "Re-polled sprint-status after story completion"
                     );
-                    current_stories = guard_processable_stories(fresh_stories);
+                    current_stories = fresh_stories;
                 }
                 Err(e) => {
                     // Re-poll failed — stop processing to avoid stale data decisions.
@@ -1639,33 +1757,23 @@ fn resolve_epic_title(planning_artifacts: &Path, epic_num: u32) -> String {
     }
 }
 
-/// Temporary guard: filters stories to only those the current pipeline can process.
-/// Remove this function when Story 13.2 implements multi-phase pipeline routing.
-fn guard_processable_stories(stories: Vec<StoryInfo>) -> Vec<StoryInfo> {
-    let mut skipped_keys: Vec<String> = Vec::new();
-    for s in &stories {
-        if s.status != "ready-for-dev" {
-            tracing::info!(
-                story_key = %s.story_key,
-                status = %s.status,
-                "Story eligible but skipped — pipeline phase routing not yet implemented (Story 13.2)"
-            );
-            skipped_keys.push(s.story_key.clone());
-        }
+/// Pure routing discriminant for story status → pipeline phase mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoryPhase {
+    Create,
+    Dev,
+    Review,
+    Unknown,
+}
+
+/// Map a story status string to the pipeline phase it should enter.
+fn route_story_status(status: &str) -> StoryPhase {
+    match status {
+        "backlog" => StoryPhase::Create,
+        "ready-for-dev" => StoryPhase::Dev,
+        "review" => StoryPhase::Review,
+        _ => StoryPhase::Unknown,
     }
-    let processable: Vec<StoryInfo> = stories
-        .into_iter()
-        .filter(|s| s.status == "ready-for-dev")
-        .collect();
-    if !skipped_keys.is_empty() {
-        tracing::info!(
-            skipped_count = skipped_keys.len(),
-            skipped_keys = ?skipped_keys,
-            processable_count = processable.len(),
-            "Guard filtered eligible stories to processable subset (Story 13.2 pending)"
-        );
-    }
-    processable
 }
 
 fn re_poll_eligible(sprint_status_path: &Path, story_dir: &Path) -> Result<Vec<StoryInfo>, String> {
@@ -3657,27 +3765,225 @@ development_status:
         );
     }
 
-    // --- guard_processable_stories tests (Story 13.1) ---
+    // --- Status routing tests (Story 13.2) ---
 
-    #[test]
-    fn test_guard_processable_stories_filters_non_ready_for_dev() {
-        let stories = vec![
-            StoryInfo::from_key_and_status("1-1-foo", "backlog", Path::new("/tmp")).unwrap(),
-            StoryInfo::from_key_and_status("2-1-bar", "ready-for-dev", Path::new("/tmp")).unwrap(),
-            StoryInfo::from_key_and_status("3-1-baz", "review", Path::new("/tmp")).unwrap(),
-        ];
-        let result = guard_processable_stories(stories);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].story_key, "2-1-bar");
+    // Helper infrastructure for process_story-level integration tests.
+    // Constructs a minimal StoryPipeline with noop/mock components so that
+    // placeholder paths (backlog, review, unknown) can be exercised without
+    // requiring a real LLM provider or git host.
+
+    use crate::config::{
+        BmadPathsConfig, GitProviderConfig, LlmConfig, LlmRoleConfig, NotificationConfig,
+        TelegramConfig,
+    };
+    use crate::notifier::NoopNotifier;
+
+    struct MockGitProvider;
+
+    #[async_trait::async_trait]
+    impl GitProvider for MockGitProvider {
+        async fn create_pr(
+            &self,
+            _params: CreatePrParams,
+        ) -> Result<crate::git_provider::PrInfo, crate::git_provider::GitProviderError> {
+            unimplemented!("MockGitProvider::create_pr not expected in placeholder tests")
+        }
+        async fn add_comment(
+            &self,
+            _pr_id: &str,
+            _body: &str,
+        ) -> Result<(), crate::git_provider::GitProviderError> {
+            unimplemented!("MockGitProvider::add_comment not expected in placeholder tests")
+        }
+        async fn get_pr_url(
+            &self,
+            _pr_id: &str,
+        ) -> Result<String, crate::git_provider::GitProviderError> {
+            unimplemented!("MockGitProvider::get_pr_url not expected in placeholder tests")
+        }
+    }
+
+    fn make_pipeline_test_config() -> BotConfig {
+        BotConfig {
+            polling_interval_secs: 10,
+            git_provider: GitProviderConfig {
+                provider: "github".to_string(),
+                repo_owner: "test".to_string(),
+                repo_name: "test".to_string(),
+                target_branch: "main".to_string(),
+            },
+            llm: LlmConfig {
+                dev: LlmRoleConfig {
+                    provider: "anthropic".to_string(),
+                    model: "test-model".to_string(),
+                    reasoning_effort: None,
+                    base_url: None,
+                },
+                review: LlmRoleConfig {
+                    provider: "anthropic".to_string(),
+                    model: "test-model".to_string(),
+                    reasoning_effort: None,
+                    base_url: None,
+                },
+                supervisor: LlmRoleConfig {
+                    provider: "anthropic".to_string(),
+                    model: "test-model".to_string(),
+                    reasoning_effort: None,
+                    base_url: None,
+                },
+                epic_review: LlmRoleConfig::default(),
+            },
+            notifications: NotificationConfig {
+                telegram: TelegramConfig {
+                    enabled: false,
+                    chat_id: String::new(),
+                },
+            },
+            bmad_paths: BmadPathsConfig {
+                project_root: "/tmp/test-pipeline".to_string(),
+                output_folder: "/tmp/test-pipeline".to_string(),
+                planning_artifacts: "/tmp/test-pipeline".to_string(),
+                implementation_artifacts: "/tmp/test-pipeline".to_string(),
+            },
+            log_format: "pretty".to_string(),
+            log_level: "info".to_string(),
+            log_file: "test.log".to_string(),
+            ui_mode: "silent".to_string(),
+            ui_verbosity: "normal".to_string(),
+            code_review_enabled: false,
+            mcp_servers: vec![],
+        }
+    }
+
+    fn make_pipeline_test_secrets() -> BotSecrets {
+        BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: Some("sk-test".to_string()),
+            github_token: Some("ghp-test".to_string()),
+            gitlab_token: None,
+            telegram_bot_token: None,
+        }
+    }
+
+    fn make_test_pipeline() -> StoryPipeline {
+        let config = Arc::new(make_pipeline_test_config());
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+
+        StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            review_runner: ReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_story_routes_backlog_returns_placeholder() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("1-1-foo", "backlog", Path::new("/tmp")).unwrap();
+        let result = pipeline.process_story(&story, None).await;
+        assert_eq!(result.status, StoryStatus::Error);
+        assert!(!result.fatal);
+        assert!(
+            result
+                .error_detail
+                .as_deref()
+                .unwrap()
+                .contains("Story 13.4")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_story_routes_review_returns_placeholder() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("2-1-bar", "review", Path::new("/tmp")).unwrap();
+        let result = pipeline.process_story(&story, None).await;
+        assert_eq!(result.status, StoryStatus::Error);
+        assert!(!result.fatal);
+        assert!(
+            result
+                .error_detail
+                .as_deref()
+                .unwrap()
+                .contains("Story 13.6")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_story_routes_unexpected_status() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("3-1-baz", "done", Path::new("/tmp")).unwrap();
+        let result = pipeline.process_story(&story, None).await;
+        assert_eq!(result.status, StoryStatus::Error);
+        assert!(!result.fatal);
+        assert!(
+            result
+                .error_detail
+                .as_deref()
+                .unwrap()
+                .contains("Unexpected status")
+        );
     }
 
     #[test]
-    fn test_guard_processable_stories_returns_empty_when_all_non_ready() {
-        let stories = vec![
-            StoryInfo::from_key_and_status("1-1-foo", "backlog", Path::new("/tmp")).unwrap(),
-            StoryInfo::from_key_and_status("2-1-bar", "review", Path::new("/tmp")).unwrap(),
-        ];
-        let result = guard_processable_stories(stories);
-        assert!(result.is_empty());
+    fn test_route_story_status_returns_correct_phase() {
+        assert_eq!(route_story_status("backlog"), StoryPhase::Create);
+        assert_eq!(route_story_status("ready-for-dev"), StoryPhase::Dev);
+        assert_eq!(route_story_status("review"), StoryPhase::Review);
+        assert_eq!(route_story_status("done"), StoryPhase::Unknown);
+        assert_eq!(route_story_status("blocked"), StoryPhase::Unknown);
+        assert_eq!(route_story_status("in-progress"), StoryPhase::Unknown);
+        assert_eq!(route_story_status(""), StoryPhase::Unknown);
+    }
+
+    #[test]
+    fn test_route_story_status_backlog_maps_to_create() {
+        assert_eq!(route_story_status("backlog"), StoryPhase::Create);
+    }
+
+    #[test]
+    fn test_route_story_status_unexpected_maps_to_unknown() {
+        assert_eq!(route_story_status("some-random-status"), StoryPhase::Unknown);
     }
 }

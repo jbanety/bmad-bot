@@ -55,6 +55,12 @@
  `build_sub_agent_preamble` hardcodes `edit_file, read_file, grep, find_path, list_directory, git, terminal`. If any registered tool's `NAME` drifts (e.g., `list_dir`), the LLM attempts a non-existent tool. Add a small integration test that walks the registered tools and asserts each appears in the preamble string.
 
 
+## Deferred from: code review of story 13.2 (2026-04-22)
+
+- **`review` stories prioritized first by `status_priority()`, guaranteed to fail with placeholder:** `status_priority("review")` returns 0 (highest), so review stories are ordered before ready-for-dev stories. Now that the guard is removed, review stories enter the pipeline first, hit the placeholder error, and waste a notification before actionable ready-for-dev stories. Resolves when Story 13.6 implements the review phase.
+- **Duplicated status string literals between `route_story_status` and `is_eligible`:** Both `route_story_status()` in `src/pipeline.rs` and `is_eligible()` in `src/watcher/mod.rs` match `"backlog"`, `"ready-for-dev"`, `"review"` as independent string literals. No shared constant links them. If someone adds a status to one but not the other, stories either enter the pipeline but fall through to Unknown, or are routed but never eligible.
+
+
 ## Deferred from: code review of story 12.4 (2026-04-20)
 
 - **`build_agent_for_role` hardcodes `LlmRole::Dev` for `SpawnAgentTool`:** `src/session/runner.rs:844` always passes `LlmRole::Dev` to `create_spawn_agent_tool` even though the enclosing function accepts a `role: LlmRole` parameter. All current call sites pass `LlmRole::Dev` so no bug today, but if a future caller passes a different role, sub-agents would use the wrong provider/model pairing.
