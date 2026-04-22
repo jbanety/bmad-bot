@@ -22,6 +22,9 @@ use crate::session::agent;
 /// Re-export [`ShutdownFlag`] so existing callers (`pipeline.rs`, `cli/mod.rs`) keep working.
 pub use crate::session::agent::ShutdownFlag;
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
+use crate::session::consultation::{
+    ConsultationConfig, ConsultationRunner, ConsultationState,
+};
 use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
 use crate::session::cleanup::{
     get_dirty_files, mark_story_needs_clarification, preserve_partial_work,
@@ -334,6 +337,8 @@ pub struct SessionRunner {
     /// Skill file path passed to `activate_agent()` for dev sessions (Story 12.1).
     /// Uses BMAD skill-based activation instead of persona/menu files.
     skill_path: String,
+    /// Consultation runner for daemon-orchestrated consultations (Decision 10).
+    consultation_runner: ConsultationRunner,
 }
 
 impl SessionRunner {
@@ -360,6 +365,12 @@ impl SessionRunner {
     ) -> Self {
         let state_file_path =
             Path::new(&config.bmad_paths.implementation_artifacts).join(".bmad-bot-session.yaml");
+        let consultation_runner = ConsultationRunner::new(
+            agent_factory.clone(),
+            shutdown.clone(),
+            ui.clone(),
+            PathBuf::from(&config.bmad_paths.project_root),
+        );
         Self {
             config,
             agent_factory,
@@ -371,6 +382,7 @@ impl SessionRunner {
             sub_agent_in_flight,
             ui,
             skill_path: ".github/skills/bmad-dev-story/SKILL.md".to_string(),
+            consultation_runner,
         }
     }
 
@@ -593,6 +605,7 @@ impl SessionRunner {
                 escalation_slot.clone(),
                 decision_log.clone(),
                 None,
+                &mut [],
             )
             .await
         } else {
@@ -652,14 +665,30 @@ impl SessionRunner {
 
     /// Run a full development session for the given story.
     ///
-    /// Opens a `tracing::info_span!("story_session")` and drives the entire
-    /// session lifecycle: build agent → create WAL → chat loop → cleanup.
-    ///
-    /// Returns a [`SessionOutcome`] indicating success, escalation, or failure.
+    /// Delegates to [`run_with_consultations()`](Self::run_with_consultations)
+    /// with an empty consultation list — zero behavior change.
     pub async fn run(
         &self,
         story: &StoryInfo,
         base_branch_override: Option<&str>,
+    ) -> SessionOutcome {
+        self.run_with_consultations(story, base_branch_override, vec![])
+            .await
+    }
+
+    /// Run a development session with optional daemon-orchestrated consultations.
+    ///
+    /// Opens a `tracing::info_span!("story_session")` and drives the entire
+    /// session lifecycle: build agent → create WAL → chat loop → cleanup.
+    /// When `consultations` is non-empty, trigger patterns are checked after each
+    /// agent response and matching consultations are executed inline.
+    ///
+    /// Returns a [`SessionOutcome`] indicating success, escalation, or failure.
+    pub async fn run_with_consultations(
+        &self,
+        story: &StoryInfo,
+        base_branch_override: Option<&str>,
+        consultations: Vec<ConsultationConfig>,
     ) -> SessionOutcome {
         let span = tracing::info_span!(
             "story_session",
@@ -673,6 +702,8 @@ impl SessionRunner {
             story_key = %story.story_key,
             "Starting dev session"
         );
+
+        let mut consultation_states = ConsultationState::from_configs(consultations);
 
         // --- Branch setup (BEFORE agent build) ---
         let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
@@ -793,6 +824,7 @@ impl SessionRunner {
                 escalation_slot.clone(),
                 decision_log.clone(),
                 None,
+                &mut consultation_states,
             )
             .await;
 
@@ -1282,6 +1314,7 @@ impl SessionRunner {
             escalation_slot,
             decision_log,
             Some(compressed_state),
+            &mut [],
         ))
         .await;
 
@@ -1318,6 +1351,7 @@ impl SessionRunner {
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
         recovered_state: Option<SessionState>,
+        consultation_states: &mut [ConsultationState],
     ) -> SessionOutcome {
         let mut retries: usize = 0;
         const MAX_RETRIES: usize = 3;
@@ -2141,11 +2175,21 @@ impl SessionRunner {
                 }
 
                 ResponseAction::NoReply | ResponseAction::Continue { .. } => {
-                    // Extract the reply: NoReply defaults to "Continue." for
-                    // forward-compatibility with future rig streaming APIs.
-                    let reply = match action {
-                        ResponseAction::Continue { reply } => reply,
-                        _ => "Continue.".to_string(),
+                    let reply = match &action {
+                        ResponseAction::NoReply => {
+                            match self
+                                .check_consultation_triggers(
+                                    &current_response,
+                                    consultation_states,
+                                )
+                                .await
+                            {
+                                Some(ResponseAction::Continue { reply }) => reply,
+                                _ => "Continue.".to_string(),
+                            }
+                        }
+                        ResponseAction::Continue { reply } => reply.clone(),
+                        _ => unreachable!(),
                     };
                     state.add_user_message(&reply);
 
@@ -2274,6 +2318,56 @@ impl SessionRunner {
     }
 
     /// Write decisions file at session end (best-effort).
+    async fn check_consultation_triggers(
+        &self,
+        response: &str,
+        consultation_states: &mut [ConsultationState],
+    ) -> Option<ResponseAction> {
+        for state in consultation_states.iter_mut() {
+            if state.triggered {
+                continue;
+            }
+            if !state.compiled_regex.is_match(response) {
+                continue;
+            }
+
+            state.triggered = true;
+            tracing::info!(
+                action = "consultation_triggered",
+                label = %state.config.label,
+                "Consultation trigger matched — executing"
+            );
+
+            match self.consultation_runner.execute(&state.config).await {
+                Ok(findings) => {
+                    let formatted = state.config.format_findings(&findings);
+                    tracing::info!(
+                        action = "consultation_complete",
+                        label = %state.config.label,
+                        findings_len = %findings.len(),
+                        "Consultation completed — injecting findings"
+                    );
+                    return Some(ResponseAction::Continue { reply: formatted });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        action = "consultation_failed",
+                        label = %state.config.label,
+                        error = %e,
+                        "Consultation failed — continuing without external input"
+                    );
+                    return Some(ResponseAction::Continue {
+                        reply: format!(
+                            "Consultation '{}' failed: {}. Continue without external input.",
+                            state.config.label, e
+                        ),
+                    });
+                }
+            }
+        }
+        None
+    }
+
     async fn write_decisions(&self, story: &StoryInfo, decision_log: &DecisionLog) {
         let decisions = decision_log.records();
         if !decisions.is_empty() {

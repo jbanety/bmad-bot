@@ -61,6 +61,11 @@
 - **Duplicated status string literals between `route_story_status` and `is_eligible`:** Both `route_story_status()` in `src/pipeline.rs` and `is_eligible()` in `src/watcher/mod.rs` match `"backlog"`, `"ready-for-dev"`, `"review"` as independent string literals. No shared constant links them. If someone adds a status to one but not the other, stories either enter the pipeline but fall through to Unknown, or are routed but never eligible.
 
 
+## Deferred from: code review of story 13.3 (2026-04-22)
+
+- **`unwrap_or("")` on non-UTF-8 `project_root` in `ConsultationRunner::execute()`:** `self.project_root.to_str().unwrap_or("")` at `src/session/consultation.rs:240` silently degrades to empty string if the path contains non-UTF-8 bytes, causing cryptic `activate_agent` failures. Pre-existing pattern used in `session/agent.rs` and `tools/spawn_agent.rs`.
+
+
 ## Deferred from: code review of story 12.4 (2026-04-20)
 
 - **`build_agent_for_role` hardcodes `LlmRole::Dev` for `SpawnAgentTool`:** `src/session/runner.rs:844` always passes `LlmRole::Dev` to `create_spawn_agent_tool` even though the enclosing function accepts a `role: LlmRole` parameter. All current call sites pass `LlmRole::Dev` so no bug today, but if a future caller passes a different role, sub-agents would use the wrong provider/model pairing.

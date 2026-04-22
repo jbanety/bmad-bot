@@ -22,10 +22,9 @@ use std::sync::LazyLock;
 pub enum ResponseAction {
     /// Send the contained reply and continue the chat loop.
     ///
-    /// Currently unused by the analyzer — kept as an extension point for Epic 13
-    /// daemon-orchestrated consultations, where the daemon will inject critic /
-    /// adversarial findings into the chat loop via this variant.
-    #[allow(dead_code)]
+    /// Used by the consultation mechanism (Story 13.3) to inject critic /
+    /// adversarial findings into the chat loop. Not constructed by the analyzer
+    /// itself — callers build it when injecting findings.
     Continue {
         /// The reply message to send back to the agent.
         reply: String,

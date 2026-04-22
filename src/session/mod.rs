@@ -21,6 +21,8 @@
 pub mod agent;
 /// Response analyzer — pattern matching for workflow interactions.
 pub mod analyzer;
+/// Daemon-orchestrated consultation mechanism (Architecture Decision 10).
+pub mod consultation;
 /// Branch management — dependency-aware branch chaining for story sessions.
 pub mod branch;
 /// Session cleanup: partial work preservation and sprint-status updates.
