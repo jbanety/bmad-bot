@@ -106,6 +106,12 @@ pub struct SessionState {
     /// (crash recovery) to verify branch state on restart.
     #[serde(default)]
     pub base_branch: String,
+    /// The skill path used for this session (e.g., ".claude/skills/bmad-create-story/SKILL.md").
+    ///
+    /// Persisted so crash recovery can rebuild the correct preamble and activation
+    /// for the session phase (create-story vs dev-story).
+    #[serde(default)]
+    pub skill_path: String,
     /// Complete serialized chat history.
     pub chat_history: Vec<ChatMessage>,
 }
@@ -127,6 +133,7 @@ impl SessionState {
             model: model.to_string(),
             branch_name: String::new(),
             base_branch: String::new(),
+            skill_path: String::new(),
             chat_history: Vec::new(),
         }
     }

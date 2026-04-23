@@ -554,12 +554,43 @@ impl SessionRunner {
         let decision_log = DecisionLog::new();
         let base_branch = state.base_branch.clone();
 
+        // Resolve skill path and preamble from WAL — create-story sessions
+        // use a different preamble than dev-story sessions.
+        let effective_skill_path = if state.skill_path.is_empty() {
+            self.skill_path.clone()
+        } else {
+            state.skill_path.clone()
+        };
+        let is_create_session = effective_skill_path.contains("bmad-create-story");
+
+        let dev_preamble = if is_create_session {
+            agent::build_create_preamble()
+        } else {
+            match self.build_preamble(&story_info).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(
+                        action = "crash_recovery_preamble_failed",
+                        error = %e,
+                        "Preamble build failed during recovery"
+                    );
+                    let _ = SessionState::delete(&self.state_file_path).await;
+                    return SessionOutcome::Failed {
+                        story_key: story_info.story_key.clone(),
+                        error: format!("Recovery preamble build failed: {e}"),
+                        decisions: decision_log.records(),
+                    };
+                }
+            }
+        };
+
         let agent = match self
             .build_agent_for_role(
                 LlmRole::Dev,
                 &story_info,
                 escalation_slot.clone(),
                 decision_log.clone(),
+                &dev_preamble,
             )
             .await
         {
@@ -606,6 +637,8 @@ impl SessionRunner {
                 decision_log.clone(),
                 None,
                 &mut [],
+                &effective_skill_path,
+                &dev_preamble,
             )
             .await
         } else {
@@ -638,6 +671,8 @@ impl SessionRunner {
                     decision_log.clone(),
                     &recovery_message,
                     0, // recovery_depth: first attempt (not a recursive context-limit recovery)
+                    &effective_skill_path,
+                    &dev_preamble,
                 )
                 .await
             {
@@ -672,7 +707,7 @@ impl SessionRunner {
         story: &StoryInfo,
         base_branch_override: Option<&str>,
     ) -> SessionOutcome {
-        self.run_with_consultations(story, base_branch_override, vec![])
+        self.run_with_consultations(story, base_branch_override, vec![], None, None)
             .await
     }
 
@@ -689,6 +724,8 @@ impl SessionRunner {
         story: &StoryInfo,
         base_branch_override: Option<&str>,
         consultations: Vec<ConsultationConfig>,
+        skill_path_override: Option<&str>,
+        preamble_override: Option<String>,
     ) -> SessionOutcome {
         let span = tracing::info_span!(
             "story_session",
@@ -788,6 +825,30 @@ impl SessionRunner {
         let provider = &self.config.llm.dev.provider;
         let model = &self.config.llm.dev.model;
 
+        // Resolve effective skill path and preamble — create-story phase
+        // passes overrides; dev sessions get defaults from SessionRunner.
+        let effective_skill_path = skill_path_override
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.skill_path.clone());
+        let effective_preamble = match preamble_override {
+            Some(p) => p,
+            None => match self.build_preamble(story).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(
+                        action = "preamble_build_failed",
+                        error = %e,
+                        "Failed to build agent preamble"
+                    );
+                    return SessionOutcome::Failed {
+                        story_key: story.story_key.clone(),
+                        error: format!("Preamble build failed: {e}"),
+                        decisions: vec![],
+                    };
+                }
+            },
+        };
+
         // Build agent via AgentFactory — single call replaces 3-arm provider match
         let agent = match self
             .build_agent_for_role(
@@ -795,6 +856,7 @@ impl SessionRunner {
                 story,
                 escalation_slot.clone(),
                 decision_log.clone(),
+                &effective_preamble,
             )
             .await
         {
@@ -825,6 +887,8 @@ impl SessionRunner {
                 decision_log.clone(),
                 None,
                 &mut consultation_states,
+                &effective_skill_path,
+                &effective_preamble,
             )
             .await;
 
@@ -851,11 +915,11 @@ impl SessionRunner {
     async fn build_agent_for_role(
         &self,
         role: LlmRole,
-        story: &StoryInfo,
+        _story: &StoryInfo,
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
+        preamble: &str,
     ) -> Result<BuiltAgent, ProviderError> {
-        let preamble = self.build_preamble(story).await?;
         let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
         let (git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor) =
             agent::create_tools_with_supervisor(
@@ -884,7 +948,7 @@ impl SessionRunner {
         self.agent_factory
             .build(
                 role,
-                &preamble,
+                preamble,
                 crate::configure_agent_tools!(
                     git,
                     read_file,
@@ -1048,6 +1112,8 @@ impl SessionRunner {
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
         recovery_depth: usize,
+        skill_path: &str,
+        preamble: &str,
     ) -> SessionOutcome {
         // Step 0 — Check recovery depth
         if recovery_depth >= MAX_RECOVERY_DEPTH {
@@ -1083,6 +1149,7 @@ impl SessionRunner {
                 story,
                 escalation_slot.clone(),
                 decision_log.clone(),
+                preamble,
             )
             .await
         {
@@ -1113,6 +1180,8 @@ impl SessionRunner {
                 decision_log,
                 &recovery_message,
                 recovery_depth,
+                skill_path,
+                preamble,
             )
             .await
         {
@@ -1141,6 +1210,8 @@ impl SessionRunner {
         decision_log: DecisionLog,
         recovery_message: &str,
         recovery_depth: usize,
+        skill_path: &str,
+        preamble: &str,
     ) -> Result<SessionOutcome, SessionOutcome> {
         // Step 4a — Activate agent: send SKILL.md as user message (Story 12.1)
         self.ui.activation_start();
@@ -1150,7 +1221,7 @@ impl SessionRunner {
         let (mut activation_history, mut compressed_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
-                &self.skill_path,
+                skill_path,
                 "recovery",
                 Some(&self.shutdown),
                 Some(&self.ui),
@@ -1299,6 +1370,7 @@ impl SessionRunner {
             model: original_state.model.clone(),
             branch_name: original_state.branch_name.clone(),
             base_branch: original_state.base_branch.clone(),
+            skill_path: original_state.skill_path.clone(),
             chat_history: compressed_history,
         };
 
@@ -1315,6 +1387,8 @@ impl SessionRunner {
             decision_log,
             Some(compressed_state),
             &mut [],
+            skill_path,
+            preamble,
         ))
         .await;
 
@@ -1352,6 +1426,8 @@ impl SessionRunner {
         decision_log: DecisionLog,
         recovered_state: Option<SessionState>,
         consultation_states: &mut [ConsultationState],
+        skill_path: &str,
+        preamble: &str,
     ) -> SessionOutcome {
         let mut retries: usize = 0;
         const MAX_RETRIES: usize = 3;
@@ -1365,6 +1441,7 @@ impl SessionRunner {
                 // Normal path — create new WAL, send "DS"
                 let mut state = SessionState::new(story, provider, model);
                 state.set_branch_info(&story.branch_name, base_branch);
+                state.skill_path = skill_path.to_string();
 
                 if let Err(e) = state.save(&self.state_file_path).await {
                     tracing::error!(action = "wal_write_failed", error = %e, "Failed to create initial WAL");
@@ -1386,7 +1463,7 @@ impl SessionRunner {
                     match agent
                         .activate_agent(
                             &self.config.bmad_paths.project_root,
-                            &self.skill_path,
+                            skill_path,
                             "dev",
                             Some(&self.shutdown),
                             Some(&self.ui),
@@ -1458,13 +1535,23 @@ impl SessionRunner {
                 // config.yaml which may set communication_language to a non-English
                 // language, causing the agent to respond in that language. The response
                 // analyzer only matches English patterns, so we must enforce English here.
-                let initial_message = format!(
-                    "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
-                     BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
-                     Story file: {}",
-                    story.branch_name,
-                    story.specs_path.display()
-                );
+                let initial_message = if skill_path.contains("bmad-create-story") {
+                    format!(
+                        "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+                         BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
+                         Create story: {}",
+                        story.branch_name,
+                        story.story_key
+                    )
+                } else {
+                    format!(
+                        "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+                         BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
+                         Story file: {}",
+                        story.branch_name,
+                        story.specs_path.display()
+                    )
+                };
                 state.add_user_message(&initial_message);
 
                 let activation_turn = activation_chat_history.len() / 2;
@@ -1523,6 +1610,8 @@ impl SessionRunner {
                                         escalation_slot.clone(),
                                         decision_log.clone(),
                                         0,
+                                        skill_path,
+                                        preamble,
                                     )
                                     .await;
                                 self.write_decisions(story, &decision_log).await;
@@ -1597,7 +1686,7 @@ impl SessionRunner {
                     let (activation_rig_history, activation_chat_history) = match agent
                         .activate_agent(
                             &self.config.bmad_paths.project_root,
-                            &self.skill_path,
+                            skill_path,
                             "recovery",
                             Some(&self.shutdown),
                             Some(&self.ui),
@@ -1816,6 +1905,24 @@ impl SessionRunner {
 
             // Analyze response
             let action = self.analyzer.analyze(&current_response, &escalation_slot);
+
+            // Check consultation triggers even when the sentinel is detected —
+            // the LLM may combine the completion report and <<BMAD_JOB_DONE>>
+            // in a single turn. If a trigger matches, run the consultation
+            // first; the agent will re-emit the sentinel after handling findings.
+            let action = if matches!(action, ResponseAction::Completed)
+                && !consultation_states.is_empty()
+            {
+                match self
+                    .check_consultation_triggers(&current_response, consultation_states)
+                    .await
+                {
+                    Some(override_action) => override_action,
+                    None => action,
+                }
+            } else {
+                action
+            };
 
             match action {
                 ResponseAction::Completed => {
@@ -2247,6 +2354,8 @@ impl SessionRunner {
                                         escalation_slot.clone(),
                                         decision_log.clone(),
                                         0, // recovery_depth: first recovery attempt
+                                        skill_path,
+                                        preamble,
                                     )
                                     .await;
 
@@ -2621,6 +2730,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             branch_name: "story/6-3-crash-recovery-via-session-wal".to_string(),
             base_branch: "main".to_string(),
+            skill_path: String::new(),
             chat_history: vec![],
         }
     }
@@ -2637,6 +2747,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             branch_name: String::new(), // Empty — pre-4.3 WAL
             base_branch: String::new(),
+            skill_path: String::new(),
             chat_history: vec![],
         }
     }
@@ -3710,6 +3821,7 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
             model: "claude-sonnet-4-20250514".to_string(),
             branch_name: "story/6-4-context-window-limit-recovery".to_string(),
             base_branch: "main".to_string(),
+            skill_path: String::new(),
             chat_history: vec![],
         };
 
@@ -3724,6 +3836,7 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
             model: original.model.clone(),
             branch_name: original.branch_name.clone(),
             base_branch: original.base_branch.clone(),
+            skill_path: original.skill_path.clone(),
             chat_history: vec![],
         };
 

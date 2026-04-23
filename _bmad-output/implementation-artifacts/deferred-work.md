@@ -61,6 +61,16 @@
 - **Duplicated status string literals between `route_story_status` and `is_eligible`:** Both `route_story_status()` in `src/pipeline.rs` and `is_eligible()` in `src/watcher/mod.rs` match `"backlog"`, `"ready-for-dev"`, `"review"` as independent string literals. No shared constant links them. If someone adds a status to one but not the other, stories either enter the pipeline but fall through to Unknown, or are routed but never eligible.
 
 
+## Deferred from: code review of story 13.4 (2026-04-23)
+
+- **Adversarial trigger regex fragile:** Trigger pattern depends on LLM exact phrasing; plausible variations like "story context is now created" won't match. Design limitation inherited from the consultation mechanism (Story 13.3). [src/pipeline.rs:1290]
+- **Critic trigger regex fragile:** Same concern for the critic consultation trigger; agent could say "updated the story based on feedback" and miss the pattern. [src/pipeline.rs:1305]
+- **reload_story_info linear scan with no file locking:** Concurrent write to sprint-status.yaml during read could produce corrupt YAML parse. Pre-existing concern for all sprint-status reads across the daemon.
+- **Test validates copy of message format, not actual code path:** `test_create_story_initial_message_format` manually reconstructs the format string and checks properties; doesn't call the actual `run_session()` code that builds it. Extracting into a testable function is a non-trivial refactor beyond this story.
+- **Fragile string-match skill dispatch:** `skill_path.contains("bmad-create-story")` for initial message branching. Should become a typed enum when more skill types are added. Premature with only 2 skill types.
+- **Duplicated preamble content:** `build_create_preamble()` shares ~40 lines with `build_preamble()` (tool rules, communication override, branch management). Future drift guaranteed as the daemon evolves. Extracting shared parts needs design discussion.
+
+
 ## Deferred from: code review of story 13.3 (2026-04-22)
 
 - **`unwrap_or("")` on non-UTF-8 `project_root` in `ConsultationRunner::execute()`:** `self.project_root.to_str().unwrap_or("")` at `src/session/consultation.rs:240` silently degrades to empty string if the path contains non-UTF-8 bytes, causing cryptic `activate_agent` failures. Pre-existing pattern used in `session/agent.rs` and `tools/spawn_agent.rs`.

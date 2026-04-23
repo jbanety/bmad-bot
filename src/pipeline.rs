@@ -20,6 +20,7 @@ use crate::git_provider::{
     build_pr_title, create_provider,
 };
 use crate::llm::AgentFactory;
+use crate::llm::agent_factory::LlmRole;
 use crate::notifier::{
     EpicGateNotification, Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier,
 };
@@ -30,6 +31,7 @@ use crate::review::epic::{
 };
 use crate::session::SessionOutcome;
 use crate::session::analyzer::strip_agent_artifacts;
+use crate::session::consultation::{ConsultationConfig, ConsultationToolSet};
 use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
@@ -379,36 +381,303 @@ impl StoryPipeline {
         }
     }
 
-    /// Placeholder for the create-story pipeline phase.
+    /// Run the create-story pipeline phase: session with consultations → chain to dev.
     ///
-    /// Story 13.4 will implement: create-story session → adversarial consultation →
-    /// critic consultation → commit. On success, continues to dev phase.
+    /// Creates a story file via a `bmad-create-story` session enriched with adversarial
+    /// review and critic consultations. On success, chains to `run_dev_pipeline()`.
     async fn run_create_pipeline(
         &self,
         story: &StoryInfo,
-        _story_title: &str,
-        _base_branch_override: Option<&str>,
+        story_title: &str,
+        base_branch_override: Option<&str>,
     ) -> PipelineResult {
-        tracing::warn!(
-            action = "create_phase_not_implemented",
-            story_key = %story.story_key,
-            "Create-story phase not yet implemented (Story 13.4) — skipping story"
-        );
-        self.ui.story_error(
-            &story.story_key,
-            "Create-story phase not yet implemented (Story 13.4)",
-        );
-        let result = PipelineResult {
-            story_key: story.story_key.clone(),
-            status: StoryStatus::Error,
-            pr_url: None,
-            error_detail: Some(
-                "Create-story phase not yet implemented (Story 13.4)".to_string(),
-            ),
-            fatal: false,
-        };
-        self.notify_story_result(&result).await;
-        result
+        // Phase 1 — Create-Story Session with consultations
+        self.ui.phase_start("Create Story");
+        let session_start = std::time::Instant::now();
+
+        let consultations = self.build_create_story_consultations(story);
+        let create_preamble = crate::session::agent::build_create_preamble();
+
+        let session_outcome = self
+            .session_runner
+            .run_with_consultations(
+                story,
+                base_branch_override,
+                consultations,
+                Some(".claude/skills/bmad-create-story/SKILL.md"),
+                Some(create_preamble),
+            )
+            .await;
+
+        let session_elapsed = session_start.elapsed();
+
+        match session_outcome {
+            SessionOutcome::Completed {
+                story_key,
+                branch,
+                ..
+            } => {
+                self.ui.phase_complete("Create Story", session_elapsed);
+                tracing::info!(
+                    action = "create_phase_complete",
+                    story_key = %story_key,
+                    branch = %branch,
+                    "Create-story phase completed — chaining to dev phase"
+                );
+
+                // Re-read sprint-status.yaml to get updated StoryInfo
+                // (the create-story agent set status to "ready-for-dev")
+                let updated_story = match self.reload_story_info(&story.story_key) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            action = "create_phase_reload_failed",
+                            error = %e,
+                            "Failed to re-read story info — using original with updated status"
+                        );
+                        let mut fallback = story.clone();
+                        fallback.status = "ready-for-dev".to_string();
+                        fallback
+                    }
+                };
+
+                // Chain to dev phase — story is now ready-for-dev
+                self.run_dev_pipeline(&updated_story, story_title, Some(&branch))
+                    .await
+            }
+
+            SessionOutcome::Escalated { report, decisions } => {
+                self.ui
+                    .phase_error("Create Story", &format!("Escalated: {}", report.reason));
+                tracing::warn!(
+                    action = "create_session_escalated",
+                    story_key = %report.story_key,
+                    question = %report.question,
+                    reason = %report.reason,
+                    "Create-story session escalated — needs human clarification"
+                );
+
+                // Push branch to remote (best-effort)
+                let branch = report.branch_name.clone();
+                self.ui.phase_start("Push Branch");
+                let push_start = std::time::Instant::now();
+                if let Err(e) = self.push_branch(&branch).await {
+                    self.ui.phase_error("Push Branch", &e.to_string());
+                    tracing::warn!(
+                        action = "escalation_push_failed",
+                        story_key = %report.story_key,
+                        branch = %branch,
+                        error = %e,
+                        "Git push failed for escalation branch"
+                    );
+                } else {
+                    self.ui.phase_complete("Push Branch", push_start.elapsed());
+                }
+
+                // Build escalation PR
+                let partial_work = if report.partial_work_summary.is_empty() {
+                    "No partial work summary available.".to_string()
+                } else {
+                    format!("Partial work summary: {}", report.partial_work_summary)
+                };
+                let pr_summary = PrSummary {
+                    context: format!(
+                        "Create-story session escalated. Question: {}. Reason: {}",
+                        report.question, report.reason
+                    ),
+                    how_to_test: "N/A — session was escalated during story creation.".to_string(),
+                    additional_info: partial_work,
+                };
+
+                let decisions_section = format_pr_decisions_section(&decisions);
+                let pr_title = build_pr_title(&report.story_key, story_title, true);
+                let pr_body = build_pr_description(&PrDescriptionParams {
+                    story_key: report.story_key.clone(),
+                    story_title: story_title.to_string(),
+                    outcome_summary: "escalated — needs clarification (create phase)".to_string(),
+                    decisions_section,
+                    failure_details: Some(format!(
+                        "**Question:** {}\n**Reason:** {}",
+                        report.question, report.reason
+                    )),
+                    pr_summary: Some(pr_summary),
+                });
+                let pr_params = CreatePrParams {
+                    title: pr_title,
+                    body: pr_body,
+                    source_branch: branch.clone(),
+                    target_branch: self.config.git_provider.target_branch.clone(),
+                };
+
+                self.ui.phase_start("Create PR");
+                let pr_start = std::time::Instant::now();
+                let pr_url = match self.git_provider.create_pr(pr_params).await {
+                    Ok(pr_info) => {
+                        self.ui.phase_complete("Create PR", pr_start.elapsed());
+                        Some(pr_info.url.clone())
+                    }
+                    Err(e) => {
+                        self.ui.phase_error("Create PR", &e.to_string());
+                        tracing::error!(
+                            action = "escalation_pr_creation_failed",
+                            story_key = %report.story_key,
+                            error = %e,
+                            "Failed to create escalation PR"
+                        );
+                        None
+                    }
+                };
+
+                self.ui.phase_start("Notification");
+                let notify_start = std::time::Instant::now();
+                let result = PipelineResult {
+                    story_key: report.story_key.clone(),
+                    status: StoryStatus::Blocked,
+                    pr_url,
+                    error_detail: Some(format!(
+                        "Create phase escalated: {} — {}",
+                        report.question, report.reason
+                    )),
+                    fatal: false,
+                };
+                self.notify_story_result(&result).await;
+                self.ui
+                    .phase_complete("Notification", notify_start.elapsed());
+                self.ui.story_escalated(&report.story_key, &report.reason);
+                result
+            }
+
+            SessionOutcome::Failed {
+                story_key,
+                error,
+                decisions,
+            } => {
+                self.ui.phase_error("Create Story", &error);
+                let infra = is_infra_error(&error);
+
+                if infra {
+                    tracing::error!(
+                        action = "create_session_failed_fatal",
+                        story_key = %story_key,
+                        error = %error,
+                        "Fatal infrastructure error during create phase"
+                    );
+
+                    self.ui.phase_start("Notification");
+                    let notify_start = std::time::Instant::now();
+                    let result = PipelineResult {
+                        story_key: story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(error),
+                        fatal: true,
+                    };
+                    self.notify_story_result(&result).await;
+                    self.ui
+                        .phase_complete("Notification", notify_start.elapsed());
+                    self.ui
+                        .story_error(&story_key, "Fatal infrastructure error");
+                    result
+                } else {
+                    tracing::error!(
+                        action = "create_session_failed",
+                        story_key = %story_key,
+                        error = %error,
+                        "Create-story session failed — creating failure PR to preserve partial work"
+                    );
+
+                    let branch = story.branch_name.clone();
+
+                    self.ui.phase_start("Push Branch");
+                    let push_start = std::time::Instant::now();
+                    if let Err(e) = self.push_branch(&branch).await {
+                        self.ui.phase_error("Push Branch", &e.to_string());
+                        tracing::warn!(
+                            action = "failure_push_failed",
+                            story_key = %story_key,
+                            branch = %branch,
+                            error = %e,
+                            "Git push failed for failure branch"
+                        );
+                    } else {
+                        self.ui.phase_complete("Push Branch", push_start.elapsed());
+                    }
+
+                    let decisions_section = format_pr_decisions_section(&decisions);
+                    let pr_title = build_pr_title(&story_key, story_title, true);
+                    let pr_body = build_pr_description(&PrDescriptionParams {
+                        story_key: story_key.clone(),
+                        story_title: story_title.to_string(),
+                        outcome_summary: "failed (create phase)".to_string(),
+                        decisions_section,
+                        failure_details: Some(error.clone()),
+                        pr_summary: None,
+                    });
+                    let pr_params = CreatePrParams {
+                        title: pr_title,
+                        body: pr_body,
+                        source_branch: branch.clone(),
+                        target_branch: self.config.git_provider.target_branch.clone(),
+                    };
+
+                    self.ui.phase_start("Create PR");
+                    let pr_start = std::time::Instant::now();
+                    match self.git_provider.create_pr(pr_params).await {
+                        Ok(pr_info) => {
+                            self.ui.phase_complete("Create PR", pr_start.elapsed());
+                            self.ui.phase_start("Notification");
+                            let notify_start = std::time::Instant::now();
+                            let result = PipelineResult {
+                                story_key: story_key.clone(),
+                                status: StoryStatus::Error,
+                                pr_url: Some(pr_info.url.clone()),
+                                error_detail: Some(error),
+                                fatal: false,
+                            };
+                            self.notify_story_result(&result).await;
+                            self.ui
+                                .phase_complete("Notification", notify_start.elapsed());
+                            self.ui.story_error(
+                                &story_key,
+                                "Create session failed — failure PR created",
+                            );
+                            result
+                        }
+                        Err(pr_err) => {
+                            self.ui.phase_error("Create PR", &pr_err.to_string());
+                            tracing::error!(
+                                action = "failure_pr_creation_failed",
+                                story_key = %story_key,
+                                error = %pr_err,
+                                "Failed to create failure PR"
+                            );
+
+                            self.ui.phase_start("Notification");
+                            let notify_start = std::time::Instant::now();
+                            let result = PipelineResult {
+                                story_key: story_key.clone(),
+                                status: StoryStatus::Error,
+                                pr_url: None,
+                                error_detail: Some(format!(
+                                    "Create session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
+                                )),
+                                fatal: false,
+                            };
+                            self.notify_story_result(&result).await;
+                            self.ui
+                                .phase_complete("Notification", notify_start.elapsed());
+                            self.ui.story_error(
+                                &story_key,
+                                &format!(
+                                    "Create session failed, PR creation also failed: {pr_err}"
+                                ),
+                            );
+                            result
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Run the full dev pipeline: session → push → PR → review → mark done → notify.
@@ -991,6 +1260,68 @@ impl StoryPipeline {
         };
         self.notify_story_result(&result).await;
         result
+    }
+
+    /// Build consultation configs for the create-story phase.
+    ///
+    /// Returns two consultations:
+    /// 1. Adversarial review — triggered after story creation, uses `preamble_override`
+    /// 2. Story critic — triggered after adversarial corrections, placeholder preamble
+    fn build_create_story_consultations(
+        &self,
+        story: &StoryInfo,
+    ) -> Vec<ConsultationConfig> {
+        let story_file_path = PathBuf::from(&self.config.bmad_paths.project_root)
+            .join(&story.specs_path)
+            .to_string_lossy()
+            .to_string();
+
+        vec![
+            // Consultation 1 — Adversarial Review
+            ConsultationConfig {
+                label: "adversarial".to_string(),
+                skill_path: None,
+                preamble_override: Some(build_adversarial_consultation_preamble()),
+                role: LlmRole::Review,
+                tool_set: ConsultationToolSet::Full,
+                context_files: vec![story_file_path.clone()],
+                trigger_pattern: r"(?i)(STORY\s+CONTEXT\s+CREATED|story\s+file\s+(?:created|saved|written)|Status:\s*ready-for-dev)".to_string(),
+                prompt_template: "Review the following story file for completeness, correctness, and potential issues. Be adversarial — find every weakness, missing detail, and potential disaster.\n\n{context}".to_string(),
+                resume_message_template: "An external adversarial reviewer has analyzed this story and found the following issues:\n\n{findings}\n\nPlease fix all these issues and update the story file.".to_string(),
+            },
+            // Consultation 2 — Story Critic (placeholder until Story 13.9)
+            ConsultationConfig {
+                label: "critic".to_string(),
+                skill_path: None,
+                preamble_override: Some(build_placeholder_critic_preamble()),
+                role: LlmRole::Review,
+                tool_set: ConsultationToolSet::Restricted,
+                context_files: vec![story_file_path],
+                trigger_pattern: r"(?i)(corrections?\s+(applied|made|done|implemented)|issues?\s+(fixed|resolved|addressed)|changes?\s+(applied|made|done))".to_string(),
+                prompt_template: "Review the following story for alignment with product vision and technical coherence. Identify any deviations from the project's goals or architectural principles.\n\n{context}".to_string(),
+                resume_message_template: "An external product/technical vision reviewer has analyzed this story:\n\n{findings}\n\nPlease apply the relevant corrections to the story file.".to_string(),
+            },
+        ]
+    }
+
+    /// Re-read sprint-status.yaml and return an updated `StoryInfo` for the given key.
+    fn reload_story_info(&self, story_key: &str) -> Result<StoryInfo, String> {
+        let sprint_status_path =
+            PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
+                .join("sprint-status.yaml");
+        let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
+
+        let sprint_status = SprintStatusFile::load(&sprint_status_path, &story_dir)
+            .map_err(|e| format!("Failed to reload sprint-status.yaml: {e}"))?;
+
+        for (key, status) in sprint_status.entries() {
+            if key == story_key {
+                return StoryInfo::from_key_and_status(key, status, &story_dir)
+                    .ok_or_else(|| format!("Failed to parse reloaded story info for {key}"));
+            }
+        }
+
+        Err(format!("Story key {story_key} not found in sprint-status.yaml"))
     }
 
     /// Process eligible stories sequentially with re-polling between each story.
@@ -2454,6 +2785,38 @@ async fn commit_sprint_status(
 ///
 /// **Exception:** "token expired" is NOT an infra error — it's a transient
 /// token expiry/auth error that the session runner retries with backoff.
+fn build_adversarial_consultation_preamble() -> String {
+    "You are a cynical, jaded adversarial reviewer. Your job is to find every \
+     weakness, missing detail, and potential disaster in the content provided.\n\n\
+     ## Rules\n\
+     - Be skeptical of everything — look for what's missing, not just what's wrong\n\
+     - Find at least ten issues to fix or improve\n\
+     - Use a precise, professional tone\n\
+     - Output all findings as a Markdown list\n\
+     - Signal completion with <<BMAD_JOB_DONE>> when finished\n\n\
+     ## Communication\n\
+     - Respond in English\n\
+     - Descriptions only — no code fixes, just identify problems"
+        .to_string()
+}
+
+fn build_placeholder_critic_preamble() -> String {
+    "You are a Story Critic — an independent product and technical vision reviewer.\n\n\
+     Your role is to evaluate whether a story aligns with the project's goals, \
+     architecture, and product vision. You are NOT part of the BMAD methodology — \
+     you are an external advisor.\n\n\
+     ## Rules\n\
+     - Be direct and specific in your observations\n\
+     - Focus on product-vision alignment, not implementation details\n\
+     - Identify scope creep, missing requirements, and architectural concerns\n\
+     - Output all findings in a single response\n\
+     - Signal completion with <<BMAD_JOB_DONE>> when finished\n\n\
+     ## Communication\n\
+     - Respond in English\n\
+     - Be constructive but honest"
+        .to_string()
+}
+
 fn is_infra_error(error: &str) -> bool {
     let lower = error.to_lowercase();
 
@@ -3916,20 +4279,14 @@ development_status:
     }
 
     #[tokio::test]
-    async fn test_process_story_routes_backlog_returns_placeholder() {
+    async fn test_process_story_routes_backlog_to_create_phase() {
         let pipeline = make_test_pipeline();
         let story =
             StoryInfo::from_key_and_status("1-1-foo", "backlog", Path::new("/tmp")).unwrap();
         let result = pipeline.process_story(&story, None).await;
+        // Create phase runs but fails (no git repo at /tmp/test-pipeline) — still an error
         assert_eq!(result.status, StoryStatus::Error);
-        assert!(!result.fatal);
-        assert!(
-            result
-                .error_detail
-                .as_deref()
-                .unwrap()
-                .contains("Story 13.4")
-        );
+        assert!(result.fatal);
     }
 
     #[tokio::test]
@@ -3985,5 +4342,94 @@ development_status:
     #[test]
     fn test_route_story_status_unexpected_maps_to_unknown() {
         assert_eq!(route_story_status("some-random-status"), StoryPhase::Unknown);
+    }
+
+    // --- Create-story consultation tests (Story 13.4) ---
+
+    #[test]
+    fn test_build_create_story_consultations() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("13-4-test", "backlog", Path::new("/tmp")).unwrap();
+        let consultations = pipeline.build_create_story_consultations(&story);
+        assert_eq!(consultations.len(), 2);
+
+        let adversarial = &consultations[0];
+        assert_eq!(adversarial.label, "adversarial");
+        assert!(
+            adversarial.skill_path.is_none(),
+            "adversarial should use preamble_override, not skill_path"
+        );
+        assert!(adversarial.preamble_override.is_some());
+        assert!(regex::Regex::new(&adversarial.trigger_pattern).is_ok());
+        assert!(adversarial.resume_message_template.contains("{findings}"));
+        assert!(adversarial.prompt_template.contains("{context}"));
+
+        let critic = &consultations[1];
+        assert_eq!(critic.label, "critic");
+        assert!(critic.skill_path.is_none());
+        assert!(critic.preamble_override.is_some());
+        assert!(regex::Regex::new(&critic.trigger_pattern).is_ok());
+        assert!(critic.resume_message_template.contains("{findings}"));
+        assert!(critic.prompt_template.contains("{context}"));
+    }
+
+    #[test]
+    fn test_adversarial_trigger_matches_bmad_output() {
+        let pattern = r"(?i)(STORY\s+CONTEXT\s+CREATED|story\s+file\s+(?:created|saved|written)|Status:\s*ready-for-dev)";
+        let re = regex::Regex::new(pattern).unwrap();
+        // Should match
+        assert!(re.is_match("ULTIMATE BMad Method STORY CONTEXT CREATED, user!"));
+        assert!(re.is_match("Status: ready-for-dev"));
+        assert!(re.is_match("story file created successfully"));
+        assert!(re.is_match("story file saved to disk"));
+        assert!(re.is_match("The story file written and committed"));
+        // Should NOT match
+        assert!(!re.is_match("creating the story structure now"));
+        assert!(!re.is_match("I'll create the story"));
+    }
+
+    #[test]
+    fn test_create_preamble_contains_sentinel_separation() {
+        let preamble = crate::session::agent::build_create_preamble();
+        assert!(preamble.contains("NEXT response"));
+        assert!(preamble.contains("<<BMAD_JOB_DONE>>"));
+        assert!(preamble.contains("SEPARATE turns"));
+    }
+
+    #[test]
+    fn test_create_story_initial_message_format() {
+        let create_skill = ".claude/skills/bmad-create-story/SKILL.md";
+        let dev_skill = ".github/skills/bmad-dev-story/SKILL.md";
+
+        let story =
+            StoryInfo::from_key_and_status("13-4-test-story", "backlog", Path::new("/tmp"))
+                .unwrap();
+
+        // Create-story skill → message should contain story_key, not file path
+        let is_create = create_skill.contains("bmad-create-story");
+        assert!(is_create);
+        let create_msg = format!(
+            "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+             BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
+             Create story: {}",
+            story.branch_name, story.story_key
+        );
+        assert!(create_msg.contains("Create story:"));
+        assert!(create_msg.contains(&story.story_key));
+        assert!(!create_msg.contains("Story file:"));
+
+        // Dev-story skill → message should contain file path
+        let is_dev = !dev_skill.contains("bmad-create-story");
+        assert!(is_dev);
+        let dev_msg = format!(
+            "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+             BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
+             Story file: {}",
+            story.branch_name,
+            story.specs_path.display()
+        );
+        assert!(dev_msg.contains("Story file:"));
+        assert!(!dev_msg.contains("Create story:"));
     }
 }
