@@ -381,7 +381,7 @@ impl SessionRunner {
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
-            skill_path: ".github/skills/bmad-dev-story/SKILL.md".to_string(),
+            skill_path: ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
             consultation_runner,
         }
     }

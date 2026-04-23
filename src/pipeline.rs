@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{BotConfig, BotSecrets};
 use crate::git_provider::{
-    CreatePrParams, GitProvider, PrDescriptionParams, PrSummary, build_pr_description,
+    CreatePrParams, GitProvider, PrDescriptionParams, PrInfo, PrSummary, build_pr_description,
     build_pr_title, create_provider,
 };
 use crate::llm::AgentFactory;
@@ -30,7 +30,6 @@ use crate::review::epic::{
     EpicReviewOutcome, EpicReviewRunner, extract_epic_recap, generate_failure_report,
 };
 use crate::session::SessionOutcome;
-use crate::session::analyzer::strip_agent_artifacts;
 use crate::session::consultation::{ConsultationConfig, ConsultationToolSet};
 use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::runner::SessionRunner;
@@ -350,7 +349,10 @@ impl StoryPipeline {
                 self.run_dev_pipeline(story, &story_title, base_branch_override)
                     .await
             }
-            StoryPhase::Review => self.run_review_pipeline(story, &story_title).await,
+            StoryPhase::Review => {
+                self.run_review_pipeline(story, &story_title, None, None)
+                    .await
+            }
             StoryPhase::Unknown => {
                 tracing::error!(
                     action = "unexpected_status",
@@ -680,9 +682,9 @@ impl StoryPipeline {
         }
     }
 
-    /// Run the full dev pipeline: session → push → PR → review → mark done → notify.
+    /// Run the dev session phase: session → push → PR → mark review → chain to review phase.
     ///
-    /// This is the existing `process_story()` behavior, extracted verbatim.
+    /// On successful completion, chains to `run_review_pipeline()` for code review and notification.
     async fn run_dev_pipeline(
         &self,
         story: &StoryInfo,
@@ -728,15 +730,32 @@ impl StoryPipeline {
                 };
 
                 if !push_ok {
-                    // Work is committed locally on the branch — skip PR/review, mark Completed
-                    self.ui
-                        .story_error(&story_key, "Push failed — work preserved locally");
+                    // Mark as "review" so next poll retries via run_review_pipeline()
+                    let sprint_status_path =
+                        Path::new(&self.config.bmad_paths.implementation_artifacts)
+                            .join("sprint-status.yaml");
+                    if sprint_status_path.exists()
+                        && let Err(e) =
+                            update_story_status(&sprint_status_path, &story_key, "review").await
+                    {
+                        tracing::warn!(
+                            action = "sprint_status_update_failed",
+                            story_key = %story_key,
+                            error = %e,
+                            "Failed to mark story as review after push failure — story may not retry automatically"
+                        );
+                    }
+
+                    self.ui.story_error(
+                        &story_key,
+                        "Push failed — work preserved locally, will retry via review phase",
+                    );
                     let result = PipelineResult {
                         story_key: story_key.clone(),
-                        status: StoryStatus::Completed,
+                        status: StoryStatus::Error,
                         pr_url: None,
                         error_detail: Some(format!(
-                            "Push failed — work preserved on local branch: {branch}"
+                            "Push failed — work preserved on local branch: {branch}. Story marked review for retry."
                         )),
                         fatal: false,
                     };
@@ -800,183 +819,40 @@ impl StoryPipeline {
                     }
                 };
 
-                // Phase 4 — Code Review (optional, on existing PR)
-                let review_report = if self.config.code_review_enabled {
-                    self.ui.phase_start("Code Review");
-                    let review_start = std::time::Instant::now();
-                    match self.review_runner.run(story).await {
-                        ReviewOutcome::Completed { report, .. } => {
-                            self.ui
-                                .phase_complete("Code Review", review_start.elapsed());
-                            Some(report)
-                        }
-                        ReviewOutcome::Failed {
-                            story_key: rk,
-                            error,
-                        } => {
-                            self.ui.phase_error("Code Review", &error);
-                            tracing::warn!(
-                                action = "review_failed",
-                                story_key = %rk,
-                                error = %error,
-                                "Code review failed — PR already exists"
-                            );
-                            None
-                        }
-                        ReviewOutcome::Skipped { reason } => {
-                            self.ui
-                                .phase_complete("Code Review", review_start.elapsed());
-                            tracing::info!(
-                                action = "review_skipped",
-                                reason = %reason,
-                                "Code review skipped — PR already exists"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    self.ui
-                        .phase_complete("Code Review", std::time::Duration::ZERO);
-                    None
-                };
-
-                // Phase 5 — Push review fix commits to update PR (if review ran)
-                if review_report.is_some()
-                    && let Err(e) = self.push_branch(&branch).await
-                {
-                    tracing::warn!(
-                        action = "review_push_failed",
-                        story_key = %story_key,
-                        branch = %branch,
-                        error = %e,
-                        "Failed to push review fix commits — PR still exists with dev commits"
-                    );
-                }
-
-                // Phase 6 — Post review comment on PR (non-blocking)
-                // Report is already formatted by build_review_comment() — no stripping needed.
-                if let Some(ref report) = review_report {
-                    match self.git_provider.add_comment(&pr_info.id, report).await {
-                        Ok(()) => {
-                            self.ui.tool_result("pr_comment", "Review posted");
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                action = "pr_comment_failed",
-                                pr_id = %pr_info.id,
-                                error = %e,
-                                "Failed to post review comment — PR created successfully"
-                            );
-                            self.ui.tool_result("pr_comment", &format!("Failed: {e}"));
-                        }
-                    }
-                }
-
-                // Phase 7 — Mark story done in sprint-status.yaml, commit & push
+                // Mark story as "review" in sprint-status.yaml
                 let sprint_status_path =
                     Path::new(&self.config.bmad_paths.implementation_artifacts)
                         .join("sprint-status.yaml");
-                if sprint_status_path.exists() {
-                    if let Err(e) =
-                        update_story_status(&sprint_status_path, &story_key, "done").await
-                    {
-                        tracing::warn!(
-                            action = "sprint_status_update_failed",
-                            story_key = %story_key,
-                            error = %e,
-                            "Failed to mark story as done in sprint-status.yaml"
-                        );
-                    } else {
-                        // Unblock dependent stories (blocked → ready-for-dev)
-                        match unblock_dependents(&sprint_status_path, &story_key).await {
-                            Ok(unblocked) if !unblocked.is_empty() => {
-                                tracing::info!(
-                                    action = "dependents_unblocked",
-                                    story_key = %story_key,
-                                    unblocked_count = unblocked.len(),
-                                    unblocked = %unblocked.join(", "),
-                                    "Unblocked dependent stories"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    action = "unblock_dependents_failed",
-                                    story_key = %story_key,
-                                    error = %e,
-                                    "Failed to unblock dependent stories"
-                                );
-                            }
-                            _ => {}
-                        }
-
-                        // Commit & push — MUST succeed or next story's checkout discards changes
-                        let commit_msg = format!(
-                            "chore(sprint-status): mark {story_key} done, unblock dependents"
-                        );
-                        match commit_sprint_status(
-                            &self.config.bmad_paths.project_root,
-                            &sprint_status_path,
-                            &commit_msg,
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                if let Err(e) = self.push_branch(&branch).await {
-                                    tracing::warn!(
-                                        action = "sprint_status_push_failed",
-                                        story_key = %story_key,
-                                        error = %e,
-                                        "Failed to push sprint-status commit — PR may not reflect done status"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                // Cannot persist "done" status — halt pipeline to prevent
-                                // infinite loop (next checkout would discard changes, watcher
-                                // would re-select already-completed stories).
-                                tracing::error!(
-                                    action = "sprint_status_commit_failed",
-                                    story_key = %story_key,
-                                    error = %e,
-                                    "CRITICAL: sprint-status commit failed — halting pipeline to prevent infinite loop"
-                                );
-                                self.notify_story_result(&PipelineResult {
-                                    story_key: story_key.clone(),
-                                    status: StoryStatus::Error,
-                                    pr_url: Some(pr_info.url.clone()),
-                                    error_detail: Some(format!(
-                                        "Story completed and PR created, but sprint-status commit failed: {e}. \
-                                         Pipeline halted to prevent infinite loop. Fix git config and restart."
-                                    )),
-                                    fatal: true,
-                                }).await;
-                                return PipelineResult {
-                                    story_key: story_key.clone(),
-                                    status: StoryStatus::Error,
-                                    pr_url: Some(pr_info.url.clone()),
-                                    error_detail: Some(format!("sprint-status commit failed: {e}")),
-                                    fatal: true,
-                                };
-                            }
-                        }
-                    }
+                if sprint_status_path.exists()
+                    && let Err(e) =
+                        update_story_status(&sprint_status_path, &story_key, "review").await
+                {
+                    tracing::warn!(
+                        action = "sprint_status_update_failed",
+                        story_key = %story_key,
+                        error = %e,
+                        "Failed to mark story as review in sprint-status.yaml"
+                    );
                 }
 
-                // Phase 8 — Notify
-                self.ui.phase_start("Notification");
-                let notify_start = std::time::Instant::now();
-                let result = PipelineResult {
-                    story_key: story_key.clone(),
-                    status: StoryStatus::Completed,
-                    pr_url: Some(pr_info.url.clone()),
-                    error_detail: None,
-                    fatal: false,
+                // Re-read story info with updated status (same pattern as create→dev in 13.4)
+                let updated_story = match self.reload_story_info(&story.story_key) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            action = "dev_phase_reload_failed",
+                            error = %e,
+                            "Failed to re-read story info — using original with updated status"
+                        );
+                        let mut fallback = story.clone();
+                        fallback.status = "review".to_string();
+                        fallback
+                    }
                 };
-                self.notify_story_result(&result).await;
-                self.ui
-                    .phase_complete("Notification", notify_start.elapsed());
-                self.ui.story_complete(&story_key, Some(&pr_info.url));
-                result
+
+                // Chain to review phase
+                self.run_review_pipeline(&updated_story, story_title, Some(&branch), Some(pr_info))
+                    .await
             }
 
             SessionOutcome::Escalated { report, decisions } => {
@@ -1230,35 +1106,277 @@ impl StoryPipeline {
         }
     }
 
-    /// Placeholder for the code-review pipeline phase.
+    /// Run the review pipeline phase: code review → push review commits → post comment → mark done → notify.
     ///
-    /// Story 13.6 will implement: code-review session → optional critic consultation →
-    /// push → PR → notify. Handles `review` status stories (resumed after crash or
-    /// entering directly from watcher).
+    /// Two entry points:
+    /// - **Chained from dev:** `pr_info_override` is `Some` — PR already exists, skip push/PR creation.
+    /// - **Direct from watcher:** `pr_info_override` is `None` — push branch, create PR, then review.
     async fn run_review_pipeline(
         &self,
         story: &StoryInfo,
-        _story_title: &str,
+        story_title: &str,
+        branch_override: Option<&str>,
+        pr_info_override: Option<PrInfo>,
     ) -> PipelineResult {
-        tracing::warn!(
-            action = "review_phase_not_implemented",
-            story_key = %story.story_key,
-            "Code-review phase not yet implemented (Story 13.6) — skipping story"
-        );
-        self.ui.story_error(
-            &story.story_key,
-            "Code-review phase not yet implemented (Story 13.6)",
-        );
+        let story_key = &story.story_key;
+        let branch = branch_override
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| story.branch_name.clone());
+
+        // Resolve or create PR
+        let pr_info = if let Some(info) = pr_info_override {
+            info
+        } else {
+            // Direct from watcher — push branch and create PR
+            self.ui.phase_start("Push Branch");
+            let push_start = std::time::Instant::now();
+            if let Err(e) = self.push_branch(&branch).await {
+                self.ui.phase_error("Push Branch", &e.to_string());
+                tracing::error!(
+                    action = "review_push_failed",
+                    story_key = %story_key,
+                    branch = %branch,
+                    error = %e,
+                    "Git push failed in review pipeline — cannot create PR"
+                );
+                self.ui
+                    .story_error(story_key, &format!("Push failed in review pipeline: {e}"));
+                let result = PipelineResult {
+                    story_key: story_key.clone(),
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(format!(
+                        "Git push failed in review pipeline: {e}. Branch: {branch}"
+                    )),
+                    fatal: false,
+                };
+                self.notify_story_result(&result).await;
+                return result;
+            }
+            self.ui.phase_complete("Push Branch", push_start.elapsed());
+
+            let pr_title = build_pr_title(story_key, story_title, false);
+            let pr_body = build_pr_description(&PrDescriptionParams {
+                story_key: story_key.clone(),
+                story_title: story_title.to_string(),
+                outcome_summary: "resuming from review status".to_string(),
+                decisions_section: String::new(),
+                failure_details: None,
+                pr_summary: None,
+            });
+            let pr_params = CreatePrParams {
+                title: pr_title,
+                body: pr_body,
+                source_branch: branch.clone(),
+                target_branch: self.config.git_provider.target_branch.clone(),
+            };
+
+            self.ui.phase_start("Create PR");
+            let pr_start = std::time::Instant::now();
+            match self.git_provider.create_pr(pr_params).await {
+                Ok(info) => {
+                    self.ui.phase_complete("Create PR", pr_start.elapsed());
+                    info
+                }
+                Err(e) => {
+                    self.ui.phase_error("Create PR", &e.to_string());
+                    tracing::error!(
+                        action = "review_pr_creation_failed",
+                        story_key = %story_key,
+                        branch = %branch,
+                        error = %e,
+                        "PR creation failed in review pipeline"
+                    );
+                    self.ui
+                        .story_error(story_key, &format!("PR creation failed in review pipeline: {e}"));
+                    let result = PipelineResult {
+                        story_key: story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!(
+                            "PR creation failed in review pipeline: {e}. Branch: {branch}"
+                        )),
+                        fatal: false,
+                    };
+                    self.notify_story_result(&result).await;
+                    return result;
+                }
+            }
+        };
+
+        // Phase 4 — Code Review (optional, on existing PR)
+        let review_report = if self.config.code_review_enabled {
+            self.ui.phase_start("Code Review");
+            let review_start = std::time::Instant::now();
+            match self.review_runner.run(story).await {
+                ReviewOutcome::Completed { report, .. } => {
+                    self.ui
+                        .phase_complete("Code Review", review_start.elapsed());
+                    Some(report)
+                }
+                ReviewOutcome::Failed {
+                    story_key: rk,
+                    error,
+                } => {
+                    self.ui.phase_error("Code Review", &error);
+                    tracing::warn!(
+                        action = "review_failed",
+                        story_key = %rk,
+                        error = %error,
+                        "Code review failed — PR already exists"
+                    );
+                    None
+                }
+                ReviewOutcome::Skipped { reason } => {
+                    self.ui
+                        .phase_complete("Code Review", review_start.elapsed());
+                    tracing::info!(
+                        action = "review_skipped",
+                        reason = %reason,
+                        "Code review skipped — PR already exists"
+                    );
+                    None
+                }
+            }
+        } else {
+            self.ui
+                .phase_complete("Code Review", std::time::Duration::ZERO);
+            None
+        };
+
+        // Phase 5 — Push review fix commits to update PR (if review ran)
+        if review_report.is_some()
+            && let Err(e) = self.push_branch(&branch).await
+        {
+            tracing::warn!(
+                action = "review_push_failed",
+                story_key = %story_key,
+                branch = %branch,
+                error = %e,
+                "Failed to push review fix commits — PR still exists with dev commits"
+            );
+        }
+
+        // Phase 6 — Post review comment on PR (non-blocking)
+        // Report is already formatted by build_review_comment() — no stripping needed.
+        if let Some(ref report) = review_report {
+            match self.git_provider.add_comment(&pr_info.id, report).await {
+                Ok(()) => {
+                    self.ui.tool_result("pr_comment", "Review posted");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        action = "pr_comment_failed",
+                        pr_id = %pr_info.id,
+                        error = %e,
+                        "Failed to post review comment — PR created successfully"
+                    );
+                    self.ui.tool_result("pr_comment", &format!("Failed: {e}"));
+                }
+            }
+        }
+
+        // Phase 7 — Mark story done in sprint-status.yaml, commit & push
+        let sprint_status_path =
+            Path::new(&self.config.bmad_paths.implementation_artifacts)
+                .join("sprint-status.yaml");
+        if sprint_status_path.exists() {
+            if let Err(e) =
+                update_story_status(&sprint_status_path, story_key, "done").await
+            {
+                tracing::warn!(
+                    action = "sprint_status_update_failed",
+                    story_key = %story_key,
+                    error = %e,
+                    "Failed to mark story as done in sprint-status.yaml"
+                );
+            } else {
+                // Unblock dependent stories (blocked → ready-for-dev)
+                match unblock_dependents(&sprint_status_path, story_key).await {
+                    Ok(unblocked) if !unblocked.is_empty() => {
+                        tracing::info!(
+                            action = "dependents_unblocked",
+                            story_key = %story_key,
+                            unblocked_count = unblocked.len(),
+                            unblocked = %unblocked.join(", "),
+                            "Unblocked dependent stories"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            action = "unblock_dependents_failed",
+                            story_key = %story_key,
+                            error = %e,
+                            "Failed to unblock dependent stories"
+                        );
+                    }
+                    _ => {}
+                }
+
+                // Commit & push — MUST succeed or next story's checkout discards changes
+                let commit_msg = format!(
+                    "chore(sprint-status): mark {story_key} done, unblock dependents"
+                );
+                match commit_sprint_status(
+                    &self.config.bmad_paths.project_root,
+                    &sprint_status_path,
+                    &commit_msg,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        if let Err(e) = self.push_branch(&branch).await {
+                            tracing::warn!(
+                                action = "sprint_status_push_failed",
+                                story_key = %story_key,
+                                error = %e,
+                                "Failed to push sprint-status commit — PR may not reflect done status"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            action = "sprint_status_commit_failed",
+                            story_key = %story_key,
+                            error = %e,
+                            "CRITICAL: sprint-status commit failed — halting pipeline to prevent infinite loop"
+                        );
+                        self.notify_story_result(&PipelineResult {
+                            story_key: story_key.clone(),
+                            status: StoryStatus::Error,
+                            pr_url: Some(pr_info.url.clone()),
+                            error_detail: Some(format!(
+                                "Story completed and PR created, but sprint-status commit failed: {e}. \
+                                 Pipeline halted to prevent infinite loop. Fix git config and restart."
+                            )),
+                            fatal: true,
+                        }).await;
+                        return PipelineResult {
+                            story_key: story_key.clone(),
+                            status: StoryStatus::Error,
+                            pr_url: Some(pr_info.url.clone()),
+                            error_detail: Some(format!("sprint-status commit failed: {e}")),
+                            fatal: true,
+                        };
+                    }
+                }
+            }
+        }
+
+        // Phase 8 — Notify
+        self.ui.phase_start("Notification");
+        let notify_start = std::time::Instant::now();
         let result = PipelineResult {
-            story_key: story.story_key.clone(),
-            status: StoryStatus::Error,
-            pr_url: None,
-            error_detail: Some(
-                "Code-review phase not yet implemented (Story 13.6)".to_string(),
-            ),
+            story_key: story_key.clone(),
+            status: StoryStatus::Completed,
+            pr_url: Some(pr_info.url.clone()),
+            error_detail: None,
             fatal: false,
         };
         self.notify_story_result(&result).await;
+        self.ui
+            .phase_complete("Notification", notify_start.elapsed());
+        self.ui.story_complete(story_key, Some(&pr_info.url));
         result
     }
 
@@ -2286,7 +2404,8 @@ impl StoryPipeline {
 
     /// Process the outcome of a recovered session through the post-session pipeline.
     ///
-    /// Reuses the same post-session logic as [`process_story()`]: code review → PR → notification.
+    /// On `Completed`: push → PR → mark review → chain to `run_review_pipeline()`.
+    /// On `Escalated`/`Failed`: same as `run_dev_pipeline()` (push, PR, notify).
     async fn process_recovered_session(
         &self,
         story: &StoryInfo,
@@ -2304,44 +2423,6 @@ impl StoryPipeline {
                 pr_how_to_test,
                 pr_additional_info,
             } => {
-                // Optional code review
-                let review_report = if self.config.code_review_enabled {
-                    self.ui.phase_start("Code Review");
-                    let review_start = std::time::Instant::now();
-                    match self.review_runner.run(story).await {
-                        ReviewOutcome::Completed { report, .. } => {
-                            self.ui
-                                .phase_complete("Code Review", review_start.elapsed());
-                            Some(report)
-                        }
-                        ReviewOutcome::Failed {
-                            story_key: rk,
-                            error,
-                        } => {
-                            self.ui.phase_error("Code Review", &error);
-                            tracing::warn!(
-                                action = "recovery_review_failed",
-                                story_key = %rk,
-                                error = %error,
-                                "Code review failed after recovery — continuing to PR creation"
-                            );
-                            None
-                        }
-                        ReviewOutcome::Skipped { reason } => {
-                            self.ui
-                                .phase_complete("Code Review", review_start.elapsed());
-                            tracing::info!(
-                                action = "recovery_review_skipped",
-                                reason = %reason,
-                                "Code review skipped after recovery — continuing to PR creation"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
                 // Push branch before PR creation
                 self.ui.phase_start("Push Branch");
                 let push_start = std::time::Instant::now();
@@ -2396,36 +2477,47 @@ impl StoryPipeline {
                 match self.git_provider.create_pr(pr_params).await {
                     Ok(pr_info) => {
                         self.ui.phase_complete("Create PR", pr_start.elapsed());
-                        if let Some(ref report) = review_report {
-                            match self
-                                .git_provider
-                                .add_comment(&pr_info.id, &strip_agent_artifacts(report))
-                                .await
-                            {
-                                Ok(()) => {
-                                    self.ui.tool_result("pr_comment", "Review posted");
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        action = "recovery_pr_comment_failed",
-                                        pr_id = %pr_info.id,
-                                        error = %e,
-                                        "Failed to post review comment after recovery"
-                                    );
-                                    self.ui.tool_result("pr_comment", &format!("Failed: {e}"));
-                                }
-                            }
+
+                        // Mark story as "review" in sprint-status.yaml
+                        let sprint_status_path =
+                            Path::new(&self.config.bmad_paths.implementation_artifacts)
+                                .join("sprint-status.yaml");
+                        if sprint_status_path.exists()
+                            && let Err(e) =
+                                update_story_status(&sprint_status_path, &story_key, "review")
+                                    .await
+                        {
+                            tracing::warn!(
+                                action = "sprint_status_update_failed",
+                                story_key = %story_key,
+                                error = %e,
+                                "Failed to mark story as review in sprint-status.yaml after recovery"
+                            );
                         }
 
-                        let result = PipelineResult {
-                            story_key: story_key.clone(),
-                            status: StoryStatus::Completed,
-                            pr_url: Some(pr_info.url.clone()),
-                            error_detail: None,
-                            fatal: false,
+                        // Re-read story info with updated status
+                        let updated_story = match self.reload_story_info(&story.story_key) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!(
+                                    action = "recovery_reload_failed",
+                                    error = %e,
+                                    "Failed to re-read story info — using original with updated status"
+                                );
+                                let mut fallback = story.clone();
+                                fallback.status = "review".to_string();
+                                fallback
+                            }
                         };
-                        self.ui.story_complete(&story_key, Some(&pr_info.url));
-                        result
+
+                        // Chain to review phase
+                        self.run_review_pipeline(
+                            &updated_story,
+                            &story_title,
+                            Some(&branch),
+                            Some(pr_info),
+                        )
+                        .await
                     }
                     Err(e) => {
                         self.ui.phase_error("Create PR", &e.to_string());
@@ -4290,11 +4382,12 @@ development_status:
     }
 
     #[tokio::test]
-    async fn test_process_story_routes_review_returns_placeholder() {
+    async fn test_process_story_routes_review_runs_pipeline() {
         let pipeline = make_test_pipeline();
         let story =
             StoryInfo::from_key_and_status("2-1-bar", "review", Path::new("/tmp")).unwrap();
         let result = pipeline.process_story(&story, None).await;
+        // Review pipeline runs but fails (no git repo at /tmp/test-pipeline — push fails)
         assert_eq!(result.status, StoryStatus::Error);
         assert!(!result.fatal);
         assert!(
@@ -4302,7 +4395,7 @@ development_status:
                 .error_detail
                 .as_deref()
                 .unwrap()
-                .contains("Story 13.6")
+                .contains("Git push failed")
         );
     }
 
@@ -4400,7 +4493,7 @@ development_status:
     #[test]
     fn test_create_story_initial_message_format() {
         let create_skill = ".claude/skills/bmad-create-story/SKILL.md";
-        let dev_skill = ".github/skills/bmad-dev-story/SKILL.md";
+        let dev_skill = ".claude/skills/bmad-dev-story/SKILL.md";
 
         let story =
             StoryInfo::from_key_and_status("13-4-test-story", "backlog", Path::new("/tmp"))

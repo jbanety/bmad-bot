@@ -9,7 +9,7 @@
 //! 2. Create the standard tool set via [`create_base_tools()`] or [`create_tools_with_supervisor()`]
 //! 3. Send the agent file as a user message (Zed-style XML context) to trigger BMAD activation
 //! 4. Dual-mode activation depending on the file provided:
-//!    - **Skill mode** (e.g., `.github/skills/bmad-dev-story/SKILL.md`): the agent
+//!    - **Skill mode** (e.g., `.claude/skills/bmad-dev-story/SKILL.md`): the agent
 //!      follows the skill's instructions autonomously — no follow-up command needed.
 //!    - **Persona mode** (e.g., `_bmad/bmm/agents/architect.md`): the agent loads
 //!      `config.yaml`, greets the user, displays the menu, and waits for input.
@@ -820,7 +820,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 
 /// The LLM receives the full agent file content as a Zed-style XML context user
 /// message. Dual-mode behavior depending on the file provided:
-/// - **Skill mode** (e.g., `.github/skills/bmad-dev-story/SKILL.md`): the agent
+/// - **Skill mode** (e.g., `.claude/skills/bmad-dev-story/SKILL.md`): the agent
 ///   follows the skill's instructions autonomously — no follow-up command needed.
 /// - **Persona mode** (e.g., `_bmad/bmm/agents/architect.md`): the agent loads
 ///   `config.yaml`, greets the user, shows the greeting and menu, and awaits a command.
@@ -832,7 +832,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 /// - `agent` — the built rig agent (with preamble and tools already attached)
 /// - `project_root` — path to the project root
 /// - `agent_relative_path` — relative path from project root to the agent/skill file
-///   (e.g. `.github/skills/bmad-dev-story/SKILL.md` or `_bmad/bmm/agents/architect.md`)
+///   (e.g. `.claude/skills/bmad-dev-story/SKILL.md` or `_bmad/bmm/agents/architect.md`)
 /// - `label` — logging label (e.g. `"dev"`, `"review"`, `"supervisor"`)
 /// - `shutdown` — optional shutdown flag for cooperative cancellation
 /// - `ui` — optional UI handle for emitting tool call events during activation

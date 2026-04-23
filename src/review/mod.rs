@@ -572,7 +572,7 @@ impl ReviewRunner {
         let (activation_rig_history, _activation_chat_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
-                ".github/skills/bmad-code-review/SKILL.md",
+                ".claude/skills/bmad-code-review/SKILL.md",
                 "review",
                 Some(&self.shutdown),
                 Some(&self.ui),

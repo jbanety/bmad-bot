@@ -113,7 +113,7 @@ impl BuiltAgent {
     /// # Arguments
     /// - `project_root` — path to the project root
     /// - `agent_relative_path` — relative path from project root to the agent/skill file
-    ///   (e.g. `.github/skills/bmad-dev-story/SKILL.md` for dev sessions, or
+    ///   (e.g. `.claude/skills/bmad-dev-story/SKILL.md` for dev sessions, or
     ///   `_bmad/bmm/agents/architect.md` for persona-based sessions — both remain valid)
     /// - `label` — logging label (e.g. `"dev"`, `"review"`, `"supervisor"`)
     /// - `shutdown` — optional cooperative shutdown flag

@@ -76,6 +76,14 @@
 - **`unwrap_or("")` on non-UTF-8 `project_root` in `ConsultationRunner::execute()`:** `self.project_root.to_str().unwrap_or("")` at `src/session/consultation.rs:240` silently degrades to empty string if the path contains non-UTF-8 bytes, causing cryptic `activate_agent` failures. Pre-existing pattern used in `session/agent.rs` and `tools/spawn_agent.rs`.
 
 
+## Deferred from: code review of story 13.5 (2026-04-23)
+
+- **Watcher entry path does not detect pre-existing PRs on GitLab:** GitLab provider maps HTTP 422 to `BranchNotFound` instead of `DuplicatePr`. When a `review` story re-enters via watcher and a PR already exists, GitLab fails instead of fetching the existing MR. Pre-existing GitLab provider limitation. [src/git_provider/gitlab.rs:214-230]
+- **Watcher retry re-runs code review and may post duplicate PR comments:** No tracking of whether code review already completed in a previous pipeline iteration. If daemon crashes post-review but pre-done, the retry re-runs the entire review. Addressed by Story 13.10 (WAL phase tracking).
+- **Recovery path (`process_recovered_session`) does not mark `review` on push failure:** Unlike `run_dev_pipeline()` which now marks `review` for retry, the recovery push-failure path at `src/pipeline.rs:2419-2441` leaves the story in `in-progress` limbo until daemon restart. Pre-existing gap not addressed by this story.
+- **`update_story_status` regex replaces only first match:** `re.replace()` (not `replace_all()`) updates only the first occurrence of a story key in sprint-status.yaml. Duplicate keys in manually-edited files leave inconsistent state. [src/session/cleanup.rs:288]
+
+
 ## Deferred from: code review of story 12.4 (2026-04-20)
 
 - **`build_agent_for_role` hardcodes `LlmRole::Dev` for `SpawnAgentTool`:** `src/session/runner.rs:844` always passes `LlmRole::Dev` to `create_spawn_agent_tool` even though the enclosing function accepts a `role: LlmRole` parameter. All current call sites pass `LlmRole::Dev` so no bug today, but if a future caller passes a different role, sub-agents would use the wrong provider/model pairing.
