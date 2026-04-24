@@ -639,6 +639,7 @@ impl SessionRunner {
                 &mut [],
                 &effective_skill_path,
                 &dev_preamble,
+                LlmRole::Dev,
             )
             .await
         } else {
@@ -673,6 +674,7 @@ impl SessionRunner {
                     0, // recovery_depth: first attempt (not a recursive context-limit recovery)
                     &effective_skill_path,
                     &dev_preamble,
+                    LlmRole::Dev,
                 )
                 .await
             {
@@ -707,7 +709,7 @@ impl SessionRunner {
         story: &StoryInfo,
         base_branch_override: Option<&str>,
     ) -> SessionOutcome {
-        self.run_with_consultations(story, base_branch_override, vec![], None, None)
+        self.run_with_consultations(story, base_branch_override, vec![], None, None, LlmRole::Dev)
             .await
     }
 
@@ -726,6 +728,7 @@ impl SessionRunner {
         consultations: Vec<ConsultationConfig>,
         skill_path_override: Option<&str>,
         preamble_override: Option<String>,
+        role: LlmRole,
     ) -> SessionOutcome {
         let span = tracing::info_span!(
             "story_session",
@@ -822,8 +825,20 @@ impl SessionRunner {
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));
         let decision_log = DecisionLog::new();
 
-        let provider = &self.config.llm.dev.provider;
-        let model = &self.config.llm.dev.model;
+        let role_config = match role {
+            LlmRole::Dev => &self.config.llm.dev,
+            LlmRole::Review => &self.config.llm.review,
+            LlmRole::Supervisor => &self.config.llm.supervisor,
+            LlmRole::EpicReview => {
+                if self.config.llm.epic_review.provider.is_empty() {
+                    &self.config.llm.review
+                } else {
+                    &self.config.llm.epic_review
+                }
+            }
+        };
+        let provider = &role_config.provider;
+        let model = &role_config.model;
 
         // Resolve effective skill path and preamble — create-story phase
         // passes overrides; dev sessions get defaults from SessionRunner.
@@ -852,7 +867,7 @@ impl SessionRunner {
         // Build agent via AgentFactory — single call replaces 3-arm provider match
         let agent = match self
             .build_agent_for_role(
-                LlmRole::Dev,
+                role,
                 story,
                 escalation_slot.clone(),
                 decision_log.clone(),
@@ -889,6 +904,7 @@ impl SessionRunner {
                 &mut consultation_states,
                 &effective_skill_path,
                 &effective_preamble,
+                role,
             )
             .await;
 
@@ -1114,6 +1130,7 @@ impl SessionRunner {
         recovery_depth: usize,
         skill_path: &str,
         preamble: &str,
+        role: LlmRole,
     ) -> SessionOutcome {
         // Step 0 — Check recovery depth
         if recovery_depth >= MAX_RECOVERY_DEPTH {
@@ -1145,7 +1162,7 @@ impl SessionRunner {
         // Step 2 — Build fresh agent via AgentFactory (single call, no provider match)
         let mut agent = match self
             .build_agent_for_role(
-                LlmRole::Dev,
+                role,
                 story,
                 escalation_slot.clone(),
                 decision_log.clone(),
@@ -1182,6 +1199,7 @@ impl SessionRunner {
                 recovery_depth,
                 skill_path,
                 preamble,
+                role,
             )
             .await
         {
@@ -1212,6 +1230,7 @@ impl SessionRunner {
         recovery_depth: usize,
         skill_path: &str,
         preamble: &str,
+        role: LlmRole,
     ) -> Result<SessionOutcome, SessionOutcome> {
         // Step 4a — Activate agent: send SKILL.md as user message (Story 12.1)
         self.ui.activation_start();
@@ -1389,6 +1408,7 @@ impl SessionRunner {
             &mut [],
             skill_path,
             preamble,
+            role,
         ))
         .await;
 
@@ -1428,6 +1448,7 @@ impl SessionRunner {
         consultation_states: &mut [ConsultationState],
         skill_path: &str,
         preamble: &str,
+        role: LlmRole,
     ) -> SessionOutcome {
         let mut retries: usize = 0;
         const MAX_RETRIES: usize = 3;
@@ -1543,6 +1564,24 @@ impl SessionRunner {
                         story.branch_name,
                         story.story_key
                     )
+                } else if skill_path.contains("bmad-code-review") {
+                    format!(
+                        "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+                         BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
+                         AUTONOMOUS CODE REVIEW: Review the changes on this branch.\n\
+                         Diff source: branch diff against `{}`\n\
+                         Story file: {}\n\
+                         AUTONOMOUS MODE RULES:\n\
+                         - Do NOT wait for human input at any HALT or checkpoint — proceed automatically.\n\
+                         - For checkpoints: confirm and proceed without waiting.\n\
+                         - For patch findings: auto-apply all fixes (batch-apply).\n\
+                         - For findings tagged [Review][Decision]: present them clearly with your analysis, then HALT. An external reviewer will provide decisions.\n\
+                         - For defer findings: leave as action items.\n\
+                         - After all findings are resolved, commit all review fixes and signal completion.",
+                        story.branch_name,
+                        self.config.git_provider.target_branch,
+                        story.specs_path.display()
+                    )
                 } else {
                     format!(
                         "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
@@ -1612,6 +1651,7 @@ impl SessionRunner {
                                         0,
                                         skill_path,
                                         preamble,
+                                        role,
                                     )
                                     .await;
                                 self.write_decisions(story, &decision_log).await;
@@ -2356,6 +2396,7 @@ impl SessionRunner {
                                         0, // recovery_depth: first recovery attempt
                                         skill_path,
                                         preamble,
+                                        role,
                                     )
                                     .await;
 

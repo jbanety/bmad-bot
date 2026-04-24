@@ -24,8 +24,6 @@ use crate::llm::agent_factory::LlmRole;
 use crate::notifier::{
     EpicGateNotification, Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier,
 };
-use crate::review::ReviewOutcome;
-use crate::review::ReviewRunner;
 use crate::review::epic::{
     EpicReviewOutcome, EpicReviewRunner, extract_epic_recap, generate_failure_report,
 };
@@ -142,8 +140,6 @@ pub struct StoryPipeline {
     notifier: Box<dyn Notifier>,
     /// Development session runner.
     session_runner: SessionRunner,
-    /// Code review session runner.
-    review_runner: ReviewRunner,
     /// Epic review session runner (autonomous post-epic retrospective).
     epic_review_runner: EpicReviewRunner,
     /// Shared sub-agent sessions map — cleared between stories via
@@ -257,16 +253,6 @@ impl StoryPipeline {
             Arc::clone(&sub_agent_in_flight),
             ui.clone(),
         );
-        let review_runner = ReviewRunner::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-            Arc::clone(&agent_factory),
-            Arc::clone(&shutdown),
-            Arc::clone(&mcp_manager),
-            Arc::clone(&sub_agent_sessions),
-            Arc::clone(&sub_agent_in_flight),
-            ui.clone(),
-        );
         let epic_review_runner = EpicReviewRunner::new(
             Arc::clone(&config),
             Arc::clone(&secrets),
@@ -281,7 +267,6 @@ impl StoryPipeline {
             git_provider,
             notifier,
             session_runner,
-            review_runner,
             epic_review_runner,
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -408,6 +393,7 @@ impl StoryPipeline {
                 consultations,
                 Some(".claude/skills/bmad-create-story/SKILL.md"),
                 Some(create_preamble),
+                LlmRole::Dev,
             )
             .await;
 
@@ -1208,32 +1194,57 @@ impl StoryPipeline {
         let review_report = if self.config.code_review_enabled {
             self.ui.phase_start("Code Review");
             let review_start = std::time::Instant::now();
-            match self.review_runner.run(story).await {
-                ReviewOutcome::Completed { report, .. } => {
+
+            let consultations = self.build_review_consultations(story);
+            let review_preamble = crate::session::agent::build_review_preamble();
+
+            let session_outcome = self
+                .session_runner
+                .run_with_consultations(
+                    story,
+                    Some(&branch),
+                    consultations,
+                    Some(".claude/skills/bmad-code-review/SKILL.md"),
+                    Some(review_preamble),
+                    LlmRole::Review,
+                )
+                .await;
+
+            match session_outcome {
+                SessionOutcome::Completed { .. } => {
                     self.ui
                         .phase_complete("Code Review", review_start.elapsed());
-                    Some(report)
+                    let report = extract_review_report_from_story(
+                        story,
+                        Path::new(&self.config.bmad_paths.project_root),
+                    );
+                    if report.is_none() {
+                        tracing::info!(
+                            action = "review_clean",
+                            story_key = %story_key,
+                            "No '### Review Findings' section in story file — clean review or skill did not write findings"
+                        );
+                    }
+                    report
                 }
-                ReviewOutcome::Failed {
-                    story_key: rk,
-                    error,
-                } => {
-                    self.ui.phase_error("Code Review", &error);
+                SessionOutcome::Escalated { report, .. } => {
+                    self.ui
+                        .phase_error("Code Review", &format!("Escalated: {}", report.reason));
                     tracing::warn!(
-                        action = "review_failed",
-                        story_key = %rk,
-                        error = %error,
-                        "Code review failed — PR already exists"
+                        action = "review_escalated",
+                        story_key = %story_key,
+                        reason = %report.reason,
+                        "Code review session escalated — continuing without review report"
                     );
                     None
                 }
-                ReviewOutcome::Skipped { reason } => {
-                    self.ui
-                        .phase_complete("Code Review", review_start.elapsed());
-                    tracing::info!(
-                        action = "review_skipped",
-                        reason = %reason,
-                        "Code review skipped — PR already exists"
+                SessionOutcome::Failed { error, .. } => {
+                    self.ui.phase_error("Code Review", &error);
+                    tracing::warn!(
+                        action = "review_failed",
+                        story_key = %story_key,
+                        error = %error,
+                        "Code review session failed — continuing without review report"
                     );
                     None
                 }
@@ -1420,6 +1431,37 @@ impl StoryPipeline {
                 resume_message_template: "An external product/technical vision reviewer has analyzed this story:\n\n{findings}\n\nPlease apply the relevant corrections to the story file.".to_string(),
             },
         ]
+    }
+
+    /// Build consultation configs for the code-review phase.
+    ///
+    /// Returns one consultation:
+    /// 1. Review critic — triggered when `- [ ] [Review][Decision]` findings appear
+    fn build_review_consultations(&self, story: &StoryInfo) -> Vec<ConsultationConfig> {
+        let story_file_path = PathBuf::from(&self.config.bmad_paths.project_root)
+            .join(&story.specs_path)
+            .to_string_lossy()
+            .to_string();
+
+        vec![ConsultationConfig {
+            label: "review-critic".to_string(),
+            skill_path: None,
+            preamble_override: Some(build_review_critic_preamble()),
+            role: LlmRole::Review,
+            tool_set: ConsultationToolSet::Restricted,
+            context_files: vec![story_file_path],
+            trigger_pattern: r"- \[ \] \[Review\]\[Decision\]".to_string(),
+            prompt_template: "The following code review findings need decisions. For each \
+                decision-needed finding, decide: patch (the fix is clear and unambiguous), \
+                defer (real issue but not actionable now), or dismiss (noise/false positive). \
+                Provide clear rationale for each decision.\n\n{context}"
+                .to_string(),
+            resume_message_template: "An external vision reviewer has resolved the following \
+                flagged findings:\n\n{findings}\n\nPlease apply these decisions accordingly: \
+                apply patches for 'patch' decisions, leave 'defer' items as deferred, and \
+                remove 'dismiss' items. Then continue with the remaining workflow steps."
+                .to_string(),
+        }]
     }
 
     /// Re-read sprint-status.yaml and return an updated `StoryInfo` for the given key.
@@ -2869,14 +2911,31 @@ async fn commit_sprint_status(
 // Helper Functions
 // ---------------------------------------------------------------------------
 
-/// Detect infrastructure errors where the session never started.
+/// Extract the `### Review Findings` section from a story file for use as PR comment.
 ///
-/// These errors mean no partial work exists on the branch — creating a failure
-/// PR would be pointless noise. Covers auth failures, config errors, branch setup
-/// failures, and provider setup issues.
-///
-/// **Exception:** "token expired" is NOT an infra error — it's a transient
-/// token expiry/auth error that the session runner retries with backoff.
+/// Returns `None` if the section is missing or empty (clean review).
+/// Terminates at the next `## ` heading (same level or higher) but includes
+/// `### ` sub-sections within the findings.
+fn extract_review_report_from_story(
+    story: &StoryInfo,
+    project_root: &Path,
+) -> Option<String> {
+    let full_path = project_root.join(&story.specs_path);
+    let content = std::fs::read_to_string(&full_path).ok()?;
+    let start_marker = "### Review Findings";
+    let start_idx = content.find(start_marker)?;
+    let section = &content[start_idx..];
+    let end_idx = section[start_marker.len()..]
+        .find("\n## ")
+        .map(|i| i + start_marker.len())
+        .unwrap_or(section.len());
+    let findings = section[..end_idx].trim();
+    if findings.is_empty() || findings == start_marker {
+        return None;
+    }
+    Some(format!("## Code Review\n\n{findings}"))
+}
+
 fn build_adversarial_consultation_preamble() -> String {
     "You are a cynical, jaded adversarial reviewer. Your job is to find every \
      weakness, missing detail, and potential disaster in the content provided.\n\n\
@@ -2889,6 +2948,25 @@ fn build_adversarial_consultation_preamble() -> String {
      ## Communication\n\
      - Respond in English\n\
      - Descriptions only — no code fixes, just identify problems"
+        .to_string()
+}
+
+fn build_review_critic_preamble() -> String {
+    "You are a Code Review Critic — an independent judge for ambiguous code review findings.\n\n\
+     Your role is to evaluate flagged [Review][Decision] findings and decide each one:\n\
+     - **patch**: the fix is clear, unambiguous, and should be applied\n\
+     - **defer**: real issue but not actionable now — leave as action item\n\
+     - **dismiss**: noise, false positive, or not a real issue — remove\n\n\
+     ## Rules\n\
+     - Read the story file and findings carefully before deciding\n\
+     - Provide clear rationale for each decision\n\
+     - Do NOT use edit_file — you are a judge, not an editor\n\
+     - Do NOT modify any source code files\n\
+     - Output all decisions in a single response\n\
+     - Signal completion with <<BMAD_JOB_DONE>> when finished\n\n\
+     ## Communication\n\
+     - Respond in English\n\
+     - Be direct and specific"
         .to_string()
 }
 
@@ -2909,6 +2987,14 @@ fn build_placeholder_critic_preamble() -> String {
         .to_string()
 }
 
+/// Detect infrastructure errors where the session never started.
+///
+/// These errors mean no partial work exists on the branch — creating a failure
+/// PR would be pointless noise. Covers auth failures, config errors, branch setup
+/// failures, and provider setup issues.
+///
+/// **Exception:** "token expired" is NOT an infra error — it's a transient
+/// token expiry/auth error that the session runner retries with backoff.
 fn is_infra_error(error: &str) -> bool {
     let lower = error.to_lowercase();
 
@@ -4346,16 +4432,6 @@ development_status:
                 Arc::clone(&sub_agent_in_flight),
                 ui.clone(),
             ),
-            review_runner: ReviewRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&secrets),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -4524,5 +4600,166 @@ development_status:
         );
         assert!(dev_msg.contains("Story file:"));
         assert!(!dev_msg.contains("Create story:"));
+    }
+
+    // --- Code-review consultation tests (Story 13.6) ---
+
+    #[test]
+    fn test_build_review_consultations() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("13-6-test", "review", Path::new("/tmp")).unwrap();
+        let consultations = pipeline.build_review_consultations(&story);
+        assert_eq!(consultations.len(), 1);
+
+        let critic = &consultations[0];
+        assert_eq!(critic.label, "review-critic");
+        assert_eq!(critic.role, LlmRole::Review);
+        assert_eq!(critic.tool_set, ConsultationToolSet::Restricted);
+        assert!(critic.skill_path.is_none());
+        assert!(critic.preamble_override.is_some());
+
+        let re = regex::Regex::new(&critic.trigger_pattern).expect("trigger regex must compile");
+
+        // Should match the structured checklist format
+        assert!(re.is_match("- [ ] [Review][Decision] Some Finding"));
+        assert!(re.is_match("- [ ] [Review][Decision] Missing null check — src/main.rs:42"));
+
+        // Should NOT match natural language
+        assert!(!re.is_match("For findings tagged [Review][Decision]"));
+        assert!(!re.is_match("decision-needed"));
+        // Should NOT match checked items
+        assert!(!re.is_match("- [x] [Review][Decision] Already resolved"));
+
+        assert!(critic.resume_message_template.contains("{findings}"));
+        assert!(!critic.resume_message_template.contains("decision-needed"));
+        assert!(critic.prompt_template.contains("{context}"));
+    }
+
+    #[test]
+    fn test_review_initial_message_format() {
+        let review_skill = ".claude/skills/bmad-code-review/SKILL.md";
+        assert!(review_skill.contains("bmad-code-review"));
+
+        let story =
+            StoryInfo::from_key_and_status("13-6-test-review", "review", Path::new("/tmp"))
+                .unwrap();
+
+        let target_branch = "main";
+        let msg = format!(
+            "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
+             BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
+             AUTONOMOUS CODE REVIEW: Review the changes on this branch.\n\
+             Diff source: branch diff against `{}`\n\
+             Story file: {}\n\
+             AUTONOMOUS MODE RULES:\n\
+             - Do NOT wait for human input at any HALT or checkpoint — proceed automatically.\n\
+             - For checkpoints: confirm and proceed without waiting.\n\
+             - For patch findings: auto-apply all fixes (batch-apply).\n\
+             - For findings tagged [Review][Decision]: present them clearly with your analysis, then HALT. An external reviewer will provide decisions.\n\
+             - For defer findings: leave as action items.\n\
+             - After all findings are resolved, commit all review fixes and signal completion.",
+            story.branch_name,
+            target_branch,
+            story.specs_path.display()
+        );
+
+        // English override
+        assert!(msg.contains("ALL communication MUST be in English"));
+        // Branch reminder
+        assert!(msg.contains(&format!("on branch `{}`", story.branch_name)));
+        // Autonomous mode directives
+        assert!(msg.contains("AUTONOMOUS CODE REVIEW"));
+        assert!(msg.contains("Do NOT wait for human input"));
+        // Story file path reference
+        assert!(msg.contains(&story.specs_path.display().to_string()));
+        // Diff source with target branch
+        assert!(msg.contains(&format!("branch diff against `{target_branch}`")));
+    }
+
+    #[test]
+    fn test_extract_review_report_from_story() {
+        use std::io::Write;
+
+        // (a) Story with Review Findings section containing findings → Some
+        let dir = tempfile::tempdir().unwrap();
+        let story_path = dir.path().join("test-story.md");
+        {
+            let mut f = std::fs::File::create(&story_path).unwrap();
+            writeln!(
+                f,
+                "# Story\n\nSome content\n\n### Review Findings\n\n- Finding 1\n- Finding 2\n\n## Next Section\n\nMore content"
+            )
+            .unwrap();
+        }
+        let mut story =
+            StoryInfo::from_key_and_status("1-1-test", "review", Path::new("/tmp")).unwrap();
+        story.specs_path = PathBuf::from("test-story.md");
+        let project_root = dir.path();
+
+        let report = extract_review_report_from_story(&story, project_root);
+        assert!(report.is_some());
+        let report_text = report.unwrap();
+        assert!(report_text.starts_with("## Code Review"));
+        assert!(report_text.contains("Finding 1"));
+        assert!(report_text.contains("Finding 2"));
+        assert!(!report_text.contains("Next Section"));
+
+        // (b) Story without the section → None
+        {
+            let mut f = std::fs::File::create(&story_path).unwrap();
+            writeln!(f, "# Story\n\nSome content\n\n## Status\n\nreview").unwrap();
+        }
+        assert!(extract_review_report_from_story(&story, project_root).is_none());
+
+        // (c) Story with empty Review Findings (heading only) → None
+        {
+            let mut f = std::fs::File::create(&story_path).unwrap();
+            writeln!(f, "# Story\n\n### Review Findings\n\n## Next Section").unwrap();
+        }
+        assert!(extract_review_report_from_story(&story, project_root).is_none());
+
+        // (d) Story with Review Findings followed by ### Sub-Section → includes both
+        {
+            let mut f = std::fs::File::create(&story_path).unwrap();
+            writeln!(
+                f,
+                "# Story\n\n### Review Findings\n\n- Finding A\n\n### Sub-Section\n\n- Finding B\n\n## Next"
+            )
+            .unwrap();
+        }
+        let report = extract_review_report_from_story(&story, project_root);
+        assert!(report.is_some());
+        let report_text = report.unwrap();
+        assert!(report_text.contains("Finding A"));
+        assert!(report_text.contains("Sub-Section"));
+        assert!(report_text.contains("Finding B"));
+        assert!(!report_text.contains("## Next"));
+
+        // (e) Story with Review Findings at end of file (no subsequent ##) → includes all
+        {
+            let mut f = std::fs::File::create(&story_path).unwrap();
+            writeln!(
+                f,
+                "# Story\n\n### Review Findings\n\n- Finding X\n- Finding Y"
+            )
+            .unwrap();
+        }
+        let report = extract_review_report_from_story(&story, project_root);
+        assert!(report.is_some());
+        let report_text = report.unwrap();
+        assert!(report_text.contains("Finding X"));
+        assert!(report_text.contains("Finding Y"));
+    }
+
+    #[test]
+    fn test_review_preamble_contains_key_directives() {
+        let preamble = crate::session::agent::build_review_preamble();
+        assert!(preamble.contains("NEXT response"));
+        assert!(preamble.contains("<<BMAD_JOB_DONE>>"));
+        assert!(preamble.contains("SEPARATE turns"));
+        assert!(preamble.contains("Autonomous Review Mode"));
+        assert!(preamble.contains("[Review][Decision]"));
+        assert!(preamble.contains("communication_language = English"));
     }
 }

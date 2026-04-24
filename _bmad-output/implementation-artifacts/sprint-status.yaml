@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-23 (13-5 done)
+# last_updated: 2026-04-24 (13-6 done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -151,7 +151,7 @@ development_status:
   13-3-daemon-orchestrated-consultation-mechanism: done # depends-on: 13-2
   13-4-create-story-phase-with-consultations: done # depends-on: 13-3
   13-5-dev-story-phase: done # depends-on: 13-3
-  13-6-code-review-phase-with-critic: backlog # depends-on: 13-3
+  13-6-code-review-phase-with-critic: done # depends-on: 13-3
   13-7-config-init-project-brief: backlog
   13-8-critic-memory-system: backlog # depends-on: 13-7
   13-9-critic-agent-prompt-engineering: backlog # depends-on: 13-8

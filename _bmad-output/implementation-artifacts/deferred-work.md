@@ -84,6 +84,15 @@
 - **`update_story_status` regex replaces only first match:** `re.replace()` (not `replace_all()`) updates only the first occurrence of a story key in sprint-status.yaml. Duplicate keys in manually-edited files leave inconsistent state. [src/session/cleanup.rs:288]
 
 
+## Deferred from: code review of story 13.6 (2026-04-24)
+
+- **Dead code in `review/mod.rs` suppressed with `#[allow(dead_code)]`:** `ReviewRunner`, `ReviewOutcome`, `ReviewError`, `ParsedReviewReport`, and related functions are now dead code after Story 13.6 replaced `ReviewRunner` with `SessionRunner` in the pipeline. Module kept for `EpicReviewRunner` — clean removal deferred to a future cleanup story.
+- **Crash recovery always uses `LlmRole::Dev`:** `resume_session()` at `src/session/runner.rs:589` builds the recovery agent with hardcoded `LlmRole::Dev` and the dev preamble, regardless of whether the crashed session was a code review. Story 13.10 (WAL Pipeline Phase Tracking) will add `pipeline_phase` to the WAL for correct role resolution during recovery.
+- **`SpawnAgentTool` hardcodes `LlmRole::Dev`:** `build_agent_for_role()` at `src/session/runner.rs:954` always passes `LlmRole::Dev` to `create_spawn_agent_tool`. Sub-agents spawned from non-dev sessions use the wrong provider/model pairing. Pre-existing from Story 12.4.
+- **Logging/UI calls hardcode `"dev"` label for all roles:** `run_session()` uses `"dev"` as the label in all `log_llm_request`, `log_llm_response`, and `self.ui.llm_request` calls regardless of actual role. Makes it impossible to distinguish dev vs. review session activity in logs. Story 13.11 (UI events for new phases) is the right place.
+- **Stringly-typed skill path dispatch:** `run_session()` branches initial message via `skill_path.contains("bmad-create-story")` / `skill_path.contains("bmad-code-review")`. Should become a typed enum when more skill types are added. Pre-existing pattern extended by this story.
+- **Critic preamble prohibits `edit_file` but `ConsultationToolSet::Restricted` still includes it:** Enforcement is prompt-only. Story 13.9 may introduce a `ReadOnly` tool set variant for stricter enforcement.
+
 ## Deferred from: code review of story 12.4 (2026-04-20)
 
 - **`build_agent_for_role` hardcodes `LlmRole::Dev` for `SpawnAgentTool`:** `src/session/runner.rs:844` always passes `LlmRole::Dev` to `create_spawn_agent_tool` even though the enclosing function accepts a `role: LlmRole` parameter. All current call sites pass `LlmRole::Dev` so no bug today, but if a future caller passes a different role, sub-agents would use the wrong provider/model pairing.

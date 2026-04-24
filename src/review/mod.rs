@@ -44,6 +44,7 @@ use crate::tools::SubAgentState;
 use crate::watcher::StoryInfo;
 
 /// Maximum chat turns for a review session (safety net).
+#[allow(dead_code)]
 const MAX_REVIEW_TURNS: usize = 100;
 
 /// Maximum number of full session retries for transient errors (e.g. malformed tool calls).
@@ -65,6 +66,7 @@ pub(super) const MAX_SESSION_RETRIES: usize = 2;
 ///
 /// Includes the project name and story key to anchor the agent's context and
 /// prevent hallucinated project names after long review sessions.
+#[allow(dead_code)]
 fn build_post_review_message(project_name: &str, story_key: &str) -> String {
     format!(
         "Commit all your review fixes with descriptive commit messages \
@@ -92,6 +94,7 @@ fn build_post_review_message(project_name: &str, story_key: &str) -> String {
 
 /// Parsed review report — extracted from the agent's XML-structured response.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub struct ParsedReviewReport {
     /// Numbered list of findings with severity.
     pub findings: String,
@@ -112,6 +115,7 @@ pub struct ParsedReviewReport {
 /// missing, the raw content is used as `findings` with defaults for the rest.
 ///
 /// Returns `None` only if `<review-report>` itself is absent.
+#[allow(dead_code)]
 pub fn parse_review_report(response: &str) -> Option<ParsedReviewReport> {
     use regex::Regex;
     use std::sync::LazyLock;
@@ -173,6 +177,7 @@ pub fn parse_review_report(response: &str) -> Option<ParsedReviewReport> {
 ///
 /// Produces a clean, structured PR comment with consistent formatting.
 /// This is the review equivalent of `build_pr_description()` for dev sessions.
+#[allow(dead_code)]
 pub fn build_review_comment(story_key: &str, report: &ParsedReviewReport) -> String {
     let mut body = String::new();
 
@@ -211,6 +216,7 @@ pub fn build_review_comment(story_key: &str, report: &ParsedReviewReport) -> Str
 /// Fallback review comment when the agent's response could not be parsed.
 ///
 /// Uses `strip_agent_artifacts()` to clean the raw response as best-effort.
+#[allow(dead_code)]
 fn build_fallback_review_comment(story_key: &str, raw_response: &str) -> String {
     use crate::session::analyzer::strip_agent_artifacts;
     let cleaned = strip_agent_artifacts(raw_response);
@@ -226,6 +232,7 @@ fn build_fallback_review_comment(story_key: &str, raw_response: &str) -> String 
 /// Each variant carries structured context for logging and error handling.
 /// Uses `thiserror` for `Display` and `Error` derive — no `anyhow` in this module.
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum ReviewError {
     /// LLM client construction failed.
     #[error("Provider initialization failed: {reason}")]
@@ -274,6 +281,7 @@ pub enum ReviewError {
 /// - [`Failed`](ReviewOutcome::Failed) → log error, proceed to PR creation anyway
 /// - [`Skipped`](ReviewOutcome::Skipped) → proceed to PR creation, note skip in description
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ReviewOutcome {
     /// CR workflow finished successfully — review report captured for PR comment.
     Completed {
@@ -308,6 +316,7 @@ pub enum ReviewOutcome {
 /// [`ReviewOutcome::Skipped`] or [`ReviewOutcome::Failed`].
 /// Manages code review lifecycle: build agent, run CR workflow, capture report.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ReviewRunner {
     /// Shared bot configuration.
     config: Arc<BotConfig>,
