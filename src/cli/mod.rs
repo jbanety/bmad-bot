@@ -646,6 +646,35 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             reason: e.to_string(),
         })?;
 
+    // --- Story Critic ---
+    println!("\n\u{2500}\u{2500} Story Critic \u{2500}\u{2500}");
+    let project_brief = loop {
+        let project_brief_raw: String = dialoguer::Input::new()
+            .with_prompt("Path to project brief file (optional, press Enter to skip)")
+            .default(String::new())
+            .interact_text()
+            .map_err(|e| CliError::Init {
+                reason: e.to_string(),
+            })?;
+        let trimmed = project_brief_raw.trim();
+        if trimmed.is_empty() {
+            break None;
+        } else if std::path::Path::new(trimmed).is_absolute() {
+            println!("  \u{26a0} Path must be relative to the project root — absolute paths are not accepted.");
+            continue;
+        } else if trimmed.contains("..") {
+            println!("  \u{26a0} Path must not contain '..' components — path traversal is not accepted.");
+            continue;
+        } else {
+            let path = trimmed.to_string();
+            let resolved = std::path::Path::new(&project_root).join(&path);
+            if !resolved.exists() {
+                println!("  \u{26a0} File not found at '{path}' — you can create it later. The Critic will use PRD as fallback until then.");
+            }
+            break Some(path);
+        }
+    };
+
     // Derive BMAD paths from project root
     let output_folder = format!("{project_root}/_bmad-output");
     let planning_artifacts = format!("{output_folder}/planning-artifacts");
@@ -655,6 +684,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
     Ok(BotConfig {
         polling_interval_secs,
         code_review_enabled: true,
+        project_brief,
         git_provider: GitProviderConfig {
             provider: git_provider_name,
             repo_owner,
@@ -1215,6 +1245,8 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     // Init tracing FIRST — conditionally omit stdout layer if UI is active
     init_tracing(&config, ui_active)?;
 
+    config.check_project_brief();
+
     // Create UiHandle AFTER tracing (so ConsoleRenderer doesn't fight with tracing stdout)
     let ui = if ui_active {
         if config.ui_mode == "plain" {
@@ -1567,6 +1599,7 @@ mod tests {
             log_format: "pretty".to_string(),
             log_level: "info".to_string(),
             log_file: "bmad-bot.log".to_string(),
+            project_brief: None,
             mcp_servers: vec![],
         }
     }

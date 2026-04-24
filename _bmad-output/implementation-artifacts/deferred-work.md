@@ -93,6 +93,11 @@
 - **Stringly-typed skill path dispatch:** `run_session()` branches initial message via `skill_path.contains("bmad-create-story")` / `skill_path.contains("bmad-code-review")`. Should become a typed enum when more skill types are added. Pre-existing pattern extended by this story.
 - **Critic preamble prohibits `edit_file` but `ConsultationToolSet::Restricted` still includes it:** Enforcement is prompt-only. Story 13.9 may introduce a `ReadOnly` tool set variant for stricter enforcement.
 
+## Deferred from: code review of story 13.7 (2026-04-24)
+
+- **Config nesting for critic settings:** `project_brief` is a top-level field in `BotConfig`. As Stories 13.8 and 13.9 add more critic-related settings (critic memory path, critic LLM role), the top-level placement will become organizational debt. Consider grouping under a `[critic]` config section when the next critic field is added.
+
+
 ## Deferred from: code review of story 12.4 (2026-04-20)
 
 - **`build_agent_for_role` hardcodes `LlmRole::Dev` for `SpawnAgentTool`:** `src/session/runner.rs:844` always passes `LlmRole::Dev` to `create_spawn_agent_tool` even though the enclosing function accepts a `role: LlmRole` parameter. All current call sites pass `LlmRole::Dev` so no bug today, but if a future caller passes a different role, sub-agents would use the wrong provider/model pairing.

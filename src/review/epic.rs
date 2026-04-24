@@ -1111,6 +1111,7 @@ mod tests {
                 },
             },
             code_review_enabled: true,
+            project_brief: None,
             bmad_paths: BmadPathsConfig {
                 project_root: "/tmp/test-project".to_string(),
                 output_folder: "/tmp/test-project/_bmad-output".to_string(),

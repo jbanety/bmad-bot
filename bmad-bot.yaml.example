@@ -57,6 +57,11 @@ notifications:
 # When enabled, a separate LLM runs the BMAD CR workflow to review code before PR creation.
 code_review_enabled: true
 
+# Project brief file for the Story Critic's vision anchor (optional).
+# The Critic uses this to evaluate stories against the original project vision.
+# If absent, the Critic falls back to the PRD.
+# project_brief: "PROJECT_BRIEF.md"
+
 # BMAD project paths — adjust to match your project layout
 bmad_paths:
   project_root: "."

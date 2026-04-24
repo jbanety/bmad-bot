@@ -119,6 +119,12 @@ pub struct BotConfig {
     #[serde(default = "default_code_review_enabled")]
     pub code_review_enabled: bool,
 
+    /// Optional path to a project brief file for the Story Critic's vision anchor.
+    /// Relative to `bmad_paths.project_root`. When absent, the Critic falls back
+    /// to the PRD as its vision context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_brief: Option<String>,
+
     /// External MCP server configurations.
     /// Defaults to empty vec when absent — daemon operates identically to before.
     #[serde(default)]
@@ -472,6 +478,44 @@ impl BotConfig {
         Ok(())
     }
 
+    /// Log a warning if `project_brief` is configured but the file doesn't exist.
+    /// Resolves path relative to `bmad_paths.project_root`. Non-fatal — the Critic
+    /// falls back to PRD.
+    pub fn check_project_brief(&self) {
+        if let Some(ref path) = self.project_brief {
+            if path.trim().is_empty() {
+                tracing::warn!("project_brief is set to an empty string — ignoring");
+                return;
+            }
+            if std::path::Path::new(path).is_absolute() {
+                tracing::warn!(
+                    path = %path,
+                    "project_brief must be a relative path — absolute paths are not accepted"
+                );
+                return;
+            }
+            if path.contains("..") {
+                tracing::warn!(
+                    path = %path,
+                    "project_brief must not contain '..' components — path traversal is not accepted"
+                );
+                return;
+            }
+            let resolved = std::path::Path::new(&self.bmad_paths.project_root).join(path);
+            if resolved.exists() {
+                tracing::info!(
+                    path = %resolved.display(),
+                    "Project brief file found"
+                );
+            } else {
+                tracing::warn!(
+                    path = %resolved.display(),
+                    "Project brief file not found — Critic will use PRD as fallback"
+                );
+            }
+        }
+    }
+
     /// Creates a minimal `BotConfig` for CLI/tracing tests.
     /// Not public API — only used by `cli::tests`.
     #[doc(hidden)]
@@ -523,6 +567,7 @@ impl BotConfig {
             log_format: log_format.to_string(),
             log_level: log_level.to_string(),
             log_file: "bmad-bot.log".to_string(),
+            project_brief: None,
             mcp_servers: vec![],
         }
     }
@@ -1590,5 +1635,61 @@ bmad_paths:
         assert!(result.is_err());
         let msg = format!("{:?}", result.unwrap_err());
         assert!(msg.contains("base_url"));
+    }
+
+    // -----------------------------------------------------------------------
+    // project_brief tests (Story 13.7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_project_brief_none_by_default() {
+        let config = config_from_str(VALID_YAML).unwrap();
+        assert!(config.project_brief.is_none());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_project_brief_some_accepted() {
+        let yaml = format!("{VALID_YAML}\nproject_brief: \"brief.md\"\n");
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        assert_eq!(config.project_brief, Some("brief.md".to_string()));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_project_brief_not_serialized_when_none() {
+        let config = valid_config();
+        assert!(config.project_brief.is_none());
+        let yaml = serde_yml::to_string(&config).unwrap();
+        assert!(
+            !yaml.contains("project_brief"),
+            "project_brief should not appear in serialized YAML when None"
+        );
+    }
+
+    #[test]
+    fn test_check_project_brief_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let brief_path = dir.path().join("brief.md");
+        std::fs::write(&brief_path, "# Brief").unwrap();
+
+        let mut config = valid_config();
+        config.project_brief = Some("brief.md".to_string());
+        config.bmad_paths.project_root = dir.path().to_str().unwrap().to_string();
+        config.check_project_brief();
+    }
+
+    #[test]
+    fn test_check_project_brief_missing_file() {
+        let mut config = valid_config();
+        config.project_brief = Some("does-not-exist.md".to_string());
+        config.check_project_brief();
+    }
+
+    #[test]
+    fn test_check_project_brief_none_is_noop() {
+        let mut config = valid_config();
+        config.project_brief = None;
+        config.check_project_brief();
     }
 }

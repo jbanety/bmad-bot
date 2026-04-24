@@ -982,6 +982,7 @@ development_status:
             ui_mode: "fancy".to_string(),
             ui_verbosity: "normal".to_string(),
             code_review_enabled: true,
+            project_brief: None,
             mcp_servers: vec![],
         }
     }
