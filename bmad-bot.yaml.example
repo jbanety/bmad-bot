@@ -62,6 +62,8 @@ code_review_enabled: true
 # If absent, the Critic falls back to the PRD.
 # project_brief: "PROJECT_BRIEF.md"
 
+# critic_memory_threshold_kb: 50  # Size threshold (KB) before warning about Critic memory file growth
+
 # BMAD project paths — adjust to match your project layout
 bmad_paths:
   project_root: "."

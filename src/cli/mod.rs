@@ -729,6 +729,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
         log_file: "bmad-bot.log".to_string(),
         ui_mode: "fancy".to_string(),
         ui_verbosity: "normal".to_string(),
+        critic_memory_threshold_kb: None,
         mcp_servers: vec![],
     })
 }
@@ -1600,6 +1601,7 @@ mod tests {
             log_level: "info".to_string(),
             log_file: "bmad-bot.log".to_string(),
             project_brief: None,
+            critic_memory_threshold_kb: None,
             mcp_servers: vec![],
         }
     }

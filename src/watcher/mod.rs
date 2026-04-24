@@ -983,6 +983,7 @@ development_status:
             ui_verbosity: "normal".to_string(),
             code_review_enabled: true,
             project_brief: None,
+            critic_memory_threshold_kb: None,
             mcp_servers: vec![],
         }
     }

@@ -125,6 +125,11 @@ pub struct BotConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_brief: Option<String>,
 
+    /// Size threshold in KB for the Critic memory file before emitting a warning.
+    /// Default: 50 (applied at usage time, not via serde).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub critic_memory_threshold_kb: Option<u64>,
+
     /// External MCP server configurations.
     /// Defaults to empty vec when absent — daemon operates identically to before.
     #[serde(default)]
@@ -406,6 +411,16 @@ impl BotConfig {
             &self.bmad_paths.implementation_artifacts,
         )?;
 
+        // critic_memory_threshold_kb must be > 0 when set
+        if let Some(threshold) = self.critic_memory_threshold_kb
+            && threshold == 0
+        {
+            return Err(ConfigError::InvalidField {
+                field: "critic_memory_threshold_kb".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+
         // log_file must be non-empty
         if self.log_file.trim().is_empty() {
             return Err(ConfigError::InvalidField {
@@ -568,6 +583,7 @@ impl BotConfig {
             log_level: log_level.to_string(),
             log_file: "bmad-bot.log".to_string(),
             project_brief: None,
+            critic_memory_threshold_kb: None,
             mcp_servers: vec![],
         }
     }
@@ -1691,5 +1707,33 @@ bmad_paths:
         let mut config = valid_config();
         config.project_brief = None;
         config.check_project_brief();
+    }
+
+    // -----------------------------------------------------------------------
+    // critic_memory_threshold_kb tests (Story 13.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_config_critic_memory_threshold_none_by_default() {
+        let config = config_from_str(VALID_YAML).unwrap();
+        assert!(config.critic_memory_threshold_kb.is_none());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_critic_memory_threshold_accepted() {
+        let yaml = format!("{VALID_YAML}\ncritic_memory_threshold_kb: 100\n");
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        assert_eq!(config.critic_memory_threshold_kb, Some(100));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_critic_memory_threshold_zero_rejected() {
+        let yaml = format!("{VALID_YAML}\ncritic_memory_threshold_kb: 0\n");
+        let config: BotConfig = serde_yml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("critic_memory_threshold_kb"));
     }
 }

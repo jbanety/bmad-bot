@@ -8,4 +8,5 @@
 #![warn(dead_code)]
 
 pub mod config;
+pub mod critic;
 pub mod mcp;

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::config::{BotConfig, BotSecrets};
+use crate::critic::CriticMemory;
 use crate::git_provider::{
     CreatePrParams, GitProvider, PrDescriptionParams, PrInfo, PrSummary, build_pr_description,
     build_pr_title, create_provider,
@@ -150,6 +151,8 @@ pub struct StoryPipeline {
     sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
     /// UI handle for rendering terminal output (fire-and-forget).
     ui: UiHandle,
+    /// Persistent memory file for the Story Critic.
+    critic_memory: CriticMemory,
 }
 
 /// RAII guard that clears the sub-agent sessions map and in-flight set on drop.
@@ -262,6 +265,12 @@ impl StoryPipeline {
             ui.clone(),
         );
 
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            config.critic_memory_threshold_kb.unwrap_or(50),
+        );
+
         Ok(Self {
             config,
             git_provider,
@@ -271,6 +280,7 @@ impl StoryPipeline {
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            critic_memory,
         })
     }
 
@@ -382,7 +392,8 @@ impl StoryPipeline {
         self.ui.phase_start("Create Story");
         let session_start = std::time::Instant::now();
 
-        let consultations = self.build_create_story_consultations(story);
+        let critic_memory_path = self.critic_memory.prepare_context_path();
+        let consultations = self.build_create_story_consultations(story, critic_memory_path);
         let create_preamble = crate::session::agent::build_create_preamble();
 
         let session_outcome = self
@@ -397,6 +408,7 @@ impl StoryPipeline {
             )
             .await;
 
+        self.critic_memory.check_size_threshold();
         let session_elapsed = session_start.elapsed();
 
         match session_outcome {
@@ -1195,7 +1207,8 @@ impl StoryPipeline {
             self.ui.phase_start("Code Review");
             let review_start = std::time::Instant::now();
 
-            let consultations = self.build_review_consultations(story);
+            let critic_memory_path = self.critic_memory.prepare_context_path();
+            let consultations = self.build_review_consultations(story, critic_memory_path);
             let review_preamble = crate::session::agent::build_review_preamble();
 
             let session_outcome = self
@@ -1209,6 +1222,8 @@ impl StoryPipeline {
                     LlmRole::Review,
                 )
                 .await;
+
+            self.critic_memory.check_size_threshold();
 
             match session_outcome {
                 SessionOutcome::Completed { .. } => {
@@ -1399,11 +1414,18 @@ impl StoryPipeline {
     fn build_create_story_consultations(
         &self,
         story: &StoryInfo,
+        critic_memory_path: Option<String>,
     ) -> Vec<ConsultationConfig> {
         let story_file_path = PathBuf::from(&self.config.bmad_paths.project_root)
             .join(&story.specs_path)
             .to_string_lossy()
             .to_string();
+
+        let mut critic_context_files = Vec::new();
+        if let Some(memory_path) = critic_memory_path {
+            critic_context_files.push(memory_path);
+        }
+        critic_context_files.push(story_file_path.clone());
 
         vec![
             // Consultation 1 — Adversarial Review
@@ -1413,7 +1435,7 @@ impl StoryPipeline {
                 preamble_override: Some(build_adversarial_consultation_preamble()),
                 role: LlmRole::Review,
                 tool_set: ConsultationToolSet::Full,
-                context_files: vec![story_file_path.clone()],
+                context_files: vec![story_file_path],
                 trigger_pattern: r"(?i)(STORY\s+CONTEXT\s+CREATED|story\s+file\s+(?:created|saved|written)|Status:\s*ready-for-dev)".to_string(),
                 prompt_template: "Review the following story file for completeness, correctness, and potential issues. Be adversarial — find every weakness, missing detail, and potential disaster.\n\n{context}".to_string(),
                 resume_message_template: "An external adversarial reviewer has analyzed this story and found the following issues:\n\n{findings}\n\nPlease fix all these issues and update the story file.".to_string(),
@@ -1425,7 +1447,7 @@ impl StoryPipeline {
                 preamble_override: Some(build_placeholder_critic_preamble()),
                 role: LlmRole::Review,
                 tool_set: ConsultationToolSet::Restricted,
-                context_files: vec![story_file_path],
+                context_files: critic_context_files,
                 trigger_pattern: r"(?i)(corrections?\s+(applied|made|done|implemented)|issues?\s+(fixed|resolved|addressed)|changes?\s+(applied|made|done))".to_string(),
                 prompt_template: "Review the following story for alignment with product vision and technical coherence. Identify any deviations from the project's goals or architectural principles.\n\n{context}".to_string(),
                 resume_message_template: "An external product/technical vision reviewer has analyzed this story:\n\n{findings}\n\nPlease apply the relevant corrections to the story file.".to_string(),
@@ -1437,11 +1459,21 @@ impl StoryPipeline {
     ///
     /// Returns one consultation:
     /// 1. Review critic — triggered when `- [ ] [Review][Decision]` findings appear
-    fn build_review_consultations(&self, story: &StoryInfo) -> Vec<ConsultationConfig> {
+    fn build_review_consultations(
+        &self,
+        story: &StoryInfo,
+        critic_memory_path: Option<String>,
+    ) -> Vec<ConsultationConfig> {
         let story_file_path = PathBuf::from(&self.config.bmad_paths.project_root)
             .join(&story.specs_path)
             .to_string_lossy()
             .to_string();
+
+        let mut context_files = Vec::new();
+        if let Some(memory_path) = critic_memory_path {
+            context_files.push(memory_path);
+        }
+        context_files.push(story_file_path);
 
         vec![ConsultationConfig {
             label: "review-critic".to_string(),
@@ -1449,7 +1481,7 @@ impl StoryPipeline {
             preamble_override: Some(build_review_critic_preamble()),
             role: LlmRole::Review,
             tool_set: ConsultationToolSet::Restricted,
-            context_files: vec![story_file_path],
+            context_files,
             trigger_pattern: r"- \[ \] \[Review\]\[Decision\]".to_string(),
             prompt_template: "The following code review findings need decisions. For each \
                 decision-needed finding, decide: patch (the fix is clear and unambiguous), \
@@ -2960,10 +2992,20 @@ fn build_review_critic_preamble() -> String {
      ## Rules\n\
      - Read the story file and findings carefully before deciding\n\
      - Provide clear rationale for each decision\n\
-     - Do NOT use edit_file — you are a judge, not an editor\n\
      - Do NOT modify any source code files\n\
      - Output all decisions in a single response\n\
      - Signal completion with <<BMAD_JOB_DONE>> when finished\n\n\
+     ## Memory\n\
+     You have a persistent memory file (critic-memory.md) loaded in your context. \
+     It may be empty on your first invocation — this is normal.\n\n\
+     After completing your review, update your memory file using the edit_file tool:\n\
+     1. Use read_file to read the current content of critic-memory.md\n\
+     2. Use edit_file in overwrite mode to write the complete content: all existing \
+     content plus your new observation section appended at the end\n\n\
+     Include in your new section: date, story key, review type (Decision Resolution), \
+     decisions made with rationale, and references to prior decisions if relevant.\n\n\
+     NEVER use edit_file in create mode on critic-memory.md — it already exists. \
+     Use overwrite mode to preserve and extend the full content.\n\n\
      ## Communication\n\
      - Respond in English\n\
      - Be direct and specific"
@@ -2981,6 +3023,17 @@ fn build_placeholder_critic_preamble() -> String {
      - Identify scope creep, missing requirements, and architectural concerns\n\
      - Output all findings in a single response\n\
      - Signal completion with <<BMAD_JOB_DONE>> when finished\n\n\
+     ## Memory\n\
+     You have a persistent memory file (critic-memory.md) loaded in your context. \
+     It may be empty on your first invocation — this is normal.\n\n\
+     After completing your review, update your memory file using the edit_file tool:\n\
+     1. Use read_file to read the current content of critic-memory.md\n\
+     2. Use edit_file in overwrite mode to write the complete content: all existing \
+     content plus your new observation section appended at the end\n\n\
+     Include in your new section: date, story key, review type (Story Review), key \
+     observations, and any cross-story patterns you notice.\n\n\
+     NEVER use edit_file in create mode on critic-memory.md — it already exists. \
+     Use overwrite mode to preserve and extend the full content.\n\n\
      ## Communication\n\
      - Respond in English\n\
      - Be constructive but honest"
@@ -4393,6 +4446,7 @@ development_status:
             ui_verbosity: "normal".to_string(),
             code_review_enabled: false,
             project_brief: None,
+            critic_memory_threshold_kb: None,
             mcp_servers: vec![],
         }
     }
@@ -4420,6 +4474,12 @@ development_status:
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
 
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            config.critic_memory_threshold_kb.unwrap_or(50),
+        );
+
         StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -4444,6 +4504,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            critic_memory,
         }
     }
 
@@ -4521,7 +4582,7 @@ development_status:
         let pipeline = make_test_pipeline();
         let story =
             StoryInfo::from_key_and_status("13-4-test", "backlog", Path::new("/tmp")).unwrap();
-        let consultations = pipeline.build_create_story_consultations(&story);
+        let consultations = pipeline.build_create_story_consultations(&story, None);
         assert_eq!(consultations.len(), 2);
 
         let adversarial = &consultations[0];
@@ -4610,7 +4671,7 @@ development_status:
         let pipeline = make_test_pipeline();
         let story =
             StoryInfo::from_key_and_status("13-6-test", "review", Path::new("/tmp")).unwrap();
-        let consultations = pipeline.build_review_consultations(&story);
+        let consultations = pipeline.build_review_consultations(&story, None);
         assert_eq!(consultations.len(), 1);
 
         let critic = &consultations[0];
@@ -4762,5 +4823,167 @@ development_status:
         assert!(preamble.contains("Autonomous Review Mode"));
         assert!(preamble.contains("[Review][Decision]"));
         assert!(preamble.contains("communication_language = English"));
+    }
+
+    // --- Critic memory integration tests (Story 13.8) ---
+
+    #[test]
+    fn test_pipeline_create_story_consultations_include_memory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let impl_dir = dir.path().join("impl-artifacts");
+        std::fs::create_dir_all(&impl_dir).unwrap();
+
+        let mut config = make_pipeline_test_config();
+        config.bmad_paths.project_root = root.to_string();
+        config.bmad_paths.implementation_artifacts = "impl-artifacts".to_string();
+
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            50,
+        );
+
+        let pipeline = StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+            critic_memory,
+        };
+
+        let story =
+            StoryInfo::from_key_and_status("13-8-test", "backlog", Path::new("/tmp")).unwrap();
+        let critic_memory_path = pipeline.critic_memory.prepare_context_path();
+        let consultations = pipeline.build_create_story_consultations(&story, critic_memory_path);
+
+        let critic = &consultations[1];
+        assert!(
+            critic.context_files.len() >= 2,
+            "critic consultation should have memory + story file in context_files"
+        );
+        assert!(
+            critic.context_files[0].contains("critic-memory.md"),
+            "memory file should be first in context_files"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_review_consultations_include_memory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let impl_dir = dir.path().join("impl-artifacts");
+        std::fs::create_dir_all(&impl_dir).unwrap();
+
+        let mut config = make_pipeline_test_config();
+        config.bmad_paths.project_root = root.to_string();
+        config.bmad_paths.implementation_artifacts = "impl-artifacts".to_string();
+
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            50,
+        );
+
+        let pipeline = StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+            critic_memory,
+        };
+
+        let story =
+            StoryInfo::from_key_and_status("13-8-test", "review", Path::new("/tmp")).unwrap();
+        let critic_memory_path = pipeline.critic_memory.prepare_context_path();
+        let consultations = pipeline.build_review_consultations(&story, critic_memory_path);
+
+        let critic = &consultations[0];
+        assert!(
+            critic.context_files.len() >= 2,
+            "review-critic consultation should have memory + story file in context_files"
+        );
+        assert!(
+            critic.context_files[0].contains("critic-memory.md"),
+            "memory file should be first in context_files"
+        );
+    }
+
+    #[test]
+    fn test_critic_preamble_contains_memory_instructions() {
+        let preamble = build_placeholder_critic_preamble();
+        assert!(preamble.contains("## Memory"));
+        assert!(preamble.contains("critic-memory.md"));
+        assert!(preamble.contains("overwrite mode"));
+        assert!(preamble.contains("read_file"));
+    }
+
+    #[test]
+    fn test_review_critic_preamble_contains_memory_instructions() {
+        let preamble = build_review_critic_preamble();
+        assert!(preamble.contains("## Memory"));
+        assert!(preamble.contains("critic-memory.md"));
+        assert!(preamble.contains("overwrite mode"));
+        assert!(preamble.contains("Decision Resolution"));
     }
 }

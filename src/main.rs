@@ -3,6 +3,7 @@
 
 mod cli;
 mod config;
+mod critic;
 mod git_provider;
 mod llm;
 mod mcp;

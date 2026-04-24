@@ -98,6 +98,13 @@
 - **Config nesting for critic settings:** `project_brief` is a top-level field in `BotConfig`. As Stories 13.8 and 13.9 add more critic-related settings (critic memory path, critic LLM role), the top-level placement will become organizational debt. Consider grouping under a `[critic]` config section when the next critic field is added.
 
 
+## Deferred from: code review of story 13.8 (2026-04-24)
+
+- Tests don't verify `tracing::warn` output in `CriticMemory` — project has no `tracing-test` pattern established. Consistent with existing test approach across all modules.
+- `to_string_lossy()` on non-UTF-8 paths in `prepare_context_path()` — pre-existing codebase-wide pattern (also in `consultation.rs`, `session/agent.rs`, `tools/spawn_agent.rs`).
+- `recover_and_process` WAL recovery path skips `check_size_threshold()` when code review is disabled — WAL being reworked in Story 13.10.
+
+
 ## Deferred from: code review of story 12.4 (2026-04-20)
 
 - **`build_agent_for_role` hardcodes `LlmRole::Dev` for `SpawnAgentTool`:** `src/session/runner.rs:844` always passes `LlmRole::Dev` to `create_spawn_agent_tool` even though the enclosing function accepts a `role: LlmRole` parameter. All current call sites pass `LlmRole::Dev` so no bug today, but if a future caller passes a different role, sub-agents would use the wrong provider/model pairing.
