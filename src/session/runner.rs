@@ -22,16 +22,14 @@ use crate::session::agent;
 /// Re-export [`ShutdownFlag`] so existing callers (`pipeline.rs`, `cli/mod.rs`) keep working.
 pub use crate::session::agent::ShutdownFlag;
 use crate::session::analyzer::{ResponseAction, ResponseAnalyzer};
-use crate::session::consultation::{
-    ConsultationConfig, ConsultationRunner, ConsultationState,
-};
 use crate::session::branch::{BranchAction, determine_base_branch, ensure_story_branch};
 use crate::session::cleanup::{
     get_dirty_files, mark_story_needs_clarification, preserve_partial_work,
 };
+use crate::session::consultation::{ConsultationConfig, ConsultationRunner, ConsultationState};
 use crate::session::escalation::EscalationReport;
 use crate::session::provider::ProviderError;
-use crate::session::state::{ChatMessage, SessionState};
+use crate::session::state::{ChatMessage, PHASE_DEV, SessionState};
 use crate::supervisor::EscalationSlot;
 use crate::supervisor::decisions::{DecisionLog, write_decisions_file};
 use crate::tools::SubAgentState;
@@ -386,6 +384,11 @@ impl SessionRunner {
         }
     }
 
+    /// Path to the WAL state file on disk.
+    pub fn state_file_path(&self) -> PathBuf {
+        self.state_file_path.clone()
+    }
+
     /// Check for an interrupted session WAL file and prepare recovery data.
     ///
     /// Returns `Some(RecoveryInfo)` if a valid WAL file exists (crash recovery needed),
@@ -640,6 +643,7 @@ impl SessionRunner {
                 &effective_skill_path,
                 &dev_preamble,
                 LlmRole::Dev,
+                &state.pipeline_phase,
             )
             .await
         } else {
@@ -709,8 +713,16 @@ impl SessionRunner {
         story: &StoryInfo,
         base_branch_override: Option<&str>,
     ) -> SessionOutcome {
-        self.run_with_consultations(story, base_branch_override, vec![], None, None, LlmRole::Dev)
-            .await
+        self.run_with_consultations(
+            story,
+            base_branch_override,
+            vec![],
+            None,
+            None,
+            LlmRole::Dev,
+            PHASE_DEV,
+        )
+        .await
     }
 
     /// Run a development session with optional daemon-orchestrated consultations.
@@ -721,6 +733,7 @@ impl SessionRunner {
     /// agent response and matching consultations are executed inline.
     ///
     /// Returns a [`SessionOutcome`] indicating success, escalation, or failure.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_with_consultations(
         &self,
         story: &StoryInfo,
@@ -729,6 +742,7 @@ impl SessionRunner {
         skill_path_override: Option<&str>,
         preamble_override: Option<String>,
         role: LlmRole,
+        initial_phase: &str,
     ) -> SessionOutcome {
         let span = tracing::info_span!(
             "story_session",
@@ -912,6 +926,7 @@ impl SessionRunner {
                 &effective_skill_path,
                 &effective_preamble,
                 role,
+                initial_phase,
             )
             .await;
 
@@ -1397,6 +1412,7 @@ impl SessionRunner {
             branch_name: original_state.branch_name.clone(),
             base_branch: original_state.base_branch.clone(),
             skill_path: original_state.skill_path.clone(),
+            pipeline_phase: original_state.pipeline_phase.clone(),
             chat_history: compressed_history,
         };
 
@@ -1416,6 +1432,7 @@ impl SessionRunner {
             skill_path,
             preamble,
             role,
+            &original_state.pipeline_phase,
         ))
         .await;
 
@@ -1456,6 +1473,7 @@ impl SessionRunner {
         skill_path: &str,
         preamble: &str,
         role: LlmRole,
+        initial_phase: &str,
     ) -> SessionOutcome {
         let mut retries: usize = 0;
         const MAX_RETRIES: usize = 3;
@@ -1470,6 +1488,7 @@ impl SessionRunner {
                 let mut state = SessionState::new(story, provider, model);
                 state.set_branch_info(&story.branch_name, base_branch);
                 state.skill_path = skill_path.to_string();
+                state.set_pipeline_phase(initial_phase);
 
                 if let Err(e) = state.save(&self.state_file_path).await {
                     tracing::error!(action = "wal_write_failed", error = %e, "Failed to create initial WAL");
@@ -1568,8 +1587,7 @@ impl SessionRunner {
                         "IMPORTANT: ALL communication MUST be in English regardless of config file settings.\n\
                          BRANCH REMINDER: You are already on branch `{}`. Do NOT create, checkout, or switch branches — the daemon manages branch lifecycle. Just commit your work on the current branch.\n\
                          Create story: {}",
-                        story.branch_name,
-                        story.story_key
+                        story.branch_name, story.story_key
                     )
                 } else if skill_path.contains("bmad-code-review") {
                     format!(
@@ -1961,7 +1979,7 @@ impl SessionRunner {
                 && !consultation_states.is_empty()
             {
                 match self
-                    .check_consultation_triggers(&current_response, consultation_states)
+                    .check_consultation_triggers(&current_response, consultation_states, &mut state)
                     .await
                 {
                     Some(override_action) => override_action,
@@ -2335,6 +2353,7 @@ impl SessionRunner {
                                 .check_consultation_triggers(
                                     &current_response,
                                     consultation_states,
+                                    &mut state,
                                 )
                                 .await
                             {
@@ -2474,11 +2493,12 @@ impl SessionRunner {
         let _ = preserve_partial_work(&project_root, &story.story_key, "Session failed").await;
     }
 
-    /// Write decisions file at session end (best-effort).
+    /// Check consultation triggers and update WAL phase before executing.
     async fn check_consultation_triggers(
         &self,
         response: &str,
         consultation_states: &mut [ConsultationState],
+        session_state: &mut SessionState,
     ) -> Option<ResponseAction> {
         for state in consultation_states.iter_mut() {
             if state.triggered {
@@ -2489,6 +2509,26 @@ impl SessionRunner {
             }
 
             state.triggered = true;
+
+            if let Some(ref phase) = state.config.pipeline_phase {
+                session_state.set_pipeline_phase(phase);
+                if let Err(e) = session_state.save(&self.state_file_path).await {
+                    tracing::warn!(
+                        action = "wal_phase_update_failed",
+                        label = %state.config.label,
+                        phase = %phase,
+                        error = %e,
+                        "Failed to persist pipeline phase update — continuing anyway"
+                    );
+                }
+                tracing::debug!(
+                    action = "pipeline_phase_updated",
+                    label = %state.config.label,
+                    phase = %phase,
+                    "WAL pipeline phase updated before consultation"
+                );
+            }
+
             tracing::info!(
                 action = "consultation_triggered",
                 label = %state.config.label,
@@ -2782,6 +2822,7 @@ mod tests {
             branch_name: "story/6-3-crash-recovery-via-session-wal".to_string(),
             base_branch: "main".to_string(),
             skill_path: String::new(),
+            pipeline_phase: String::new(),
             chat_history: vec![],
         }
     }
@@ -2799,6 +2840,7 @@ mod tests {
             branch_name: String::new(), // Empty — pre-4.3 WAL
             base_branch: String::new(),
             skill_path: String::new(),
+            pipeline_phase: String::new(),
             chat_history: vec![],
         }
     }
@@ -3873,6 +3915,7 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
             branch_name: "story/6-4-context-window-limit-recovery".to_string(),
             base_branch: "main".to_string(),
             skill_path: String::new(),
+            pipeline_phase: String::new(),
             chat_history: vec![],
         };
 
@@ -3888,6 +3931,7 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
             branch_name: original.branch_name.clone(),
             base_branch: original.base_branch.clone(),
             skill_path: original.skill_path.clone(),
+            pipeline_phase: original.pipeline_phase.clone(),
             chat_history: vec![],
         };
 
@@ -4093,5 +4137,104 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
         );
         assert_eq!(result.chars().count(), 6, "5 emojis + 1 ellipsis = 6 chars");
         assert!(result.starts_with("🎉🎊🎈🎁🎂"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline phase consultation tracking tests (Story 13.10)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_consultation_trigger_updates_wal_phase() {
+        use crate::session::consultation::{
+            ConsultationConfig, ConsultationState, ConsultationToolSet,
+        };
+        use crate::session::state::PHASE_CREATE_ADVERSARIAL_CONSULT;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let runner = make_test_runner_with_dir(dir.path());
+        let story = make_test_story_info();
+
+        let mut state = SessionState::new(&story, "anthropic", "test-model");
+        state.set_pipeline_phase("create");
+        state.save(&runner.state_file_path()).await.expect("save");
+
+        let config = ConsultationConfig {
+            label: "adversarial".to_string(),
+            skill_path: None,
+            preamble_override: Some("You are a reviewer".to_string()),
+            role: crate::llm::agent_factory::LlmRole::Review,
+            tool_set: ConsultationToolSet::Full,
+            context_files: vec![],
+            trigger_pattern: r"story file created".to_string(),
+            prompt_template: "{context}".to_string(),
+            resume_message_template: "{findings}".to_string(),
+            pipeline_phase: Some(PHASE_CREATE_ADVERSARIAL_CONSULT.to_string()),
+        };
+        let mut consultation_states = ConsultationState::from_configs(vec![config]);
+
+        // Trigger consultation — will fail (no real LLM) but phase should be updated first
+        let _result = runner
+            .check_consultation_triggers(
+                "story file created successfully",
+                &mut consultation_states,
+                &mut state,
+            )
+            .await;
+
+        assert_eq!(
+            state.pipeline_phase, "create-adversarial-consult",
+            "pipeline_phase should be updated after consultation trigger"
+        );
+
+        // Verify WAL on disk also has the updated phase
+        let loaded = SessionState::load(&runner.state_file_path())
+            .await
+            .expect("load WAL");
+        assert_eq!(
+            loaded.pipeline_phase, "create-adversarial-consult",
+            "WAL on disk should have the updated phase (write-ahead guarantee)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_consultation_without_pipeline_phase_does_not_change_wal() {
+        use crate::session::consultation::{
+            ConsultationConfig, ConsultationState, ConsultationToolSet,
+        };
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let runner = make_test_runner_with_dir(dir.path());
+        let story = make_test_story_info();
+
+        let mut state = SessionState::new(&story, "anthropic", "test-model");
+        state.set_pipeline_phase("create");
+        state.save(&runner.state_file_path()).await.expect("save");
+
+        let config = ConsultationConfig {
+            label: "no-phase".to_string(),
+            skill_path: None,
+            preamble_override: Some("You are a reviewer".to_string()),
+            role: crate::llm::agent_factory::LlmRole::Review,
+            tool_set: ConsultationToolSet::Full,
+            context_files: vec![],
+            trigger_pattern: r"trigger this".to_string(),
+            prompt_template: "{context}".to_string(),
+            resume_message_template: "{findings}".to_string(),
+            pipeline_phase: None,
+        };
+        let mut consultation_states = ConsultationState::from_configs(vec![config]);
+
+        let _result = runner
+            .check_consultation_triggers(
+                "trigger this response",
+                &mut consultation_states,
+                &mut state,
+            )
+            .await;
+
+        assert_eq!(
+            state.pipeline_phase, "create",
+            "pipeline_phase should NOT change when consultation has pipeline_phase: None"
+        );
     }
 }

@@ -660,16 +660,22 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
         if trimmed.is_empty() {
             break None;
         } else if std::path::Path::new(trimmed).is_absolute() {
-            println!("  \u{26a0} Path must be relative to the project root — absolute paths are not accepted.");
+            println!(
+                "  \u{26a0} Path must be relative to the project root — absolute paths are not accepted."
+            );
             continue;
         } else if trimmed.contains("..") {
-            println!("  \u{26a0} Path must not contain '..' components — path traversal is not accepted.");
+            println!(
+                "  \u{26a0} Path must not contain '..' components — path traversal is not accepted."
+            );
             continue;
         } else {
             let path = trimmed.to_string();
             let resolved = std::path::Path::new(&project_root).join(&path);
             if !resolved.exists() {
-                println!("  \u{26a0} File not found at '{path}' — you can create it later. The Critic will use PRD as fallback until then.");
+                println!(
+                    "  \u{26a0} File not found at '{path}' — you can create it later. The Critic will use PRD as fallback until then."
+                );
             }
             break Some(path);
         }

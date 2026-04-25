@@ -429,7 +429,10 @@ impl Watcher {
             post_filter_eligible = filtered.len(),
             cascade_blocked = cascade_count,
             backlog = filtered.iter().filter(|s| s.status == "backlog").count(),
-            ready_for_dev = filtered.iter().filter(|s| s.status == "ready-for-dev").count(),
+            ready_for_dev = filtered
+                .iter()
+                .filter(|s| s.status == "ready-for-dev")
+                .count(),
             review = filtered.iter().filter(|s| s.status == "review").count(),
             "Sprint status polled"
         );
@@ -550,15 +553,16 @@ pub(crate) mod tests {
 
     #[test]
     fn test_story_info_is_not_eligible_in_progress() {
-        let info = StoryInfo::from_key_and_status("1-1-scaffolding", "in-progress", Path::new("/tmp"))
-            .unwrap();
+        let info =
+            StoryInfo::from_key_and_status("1-1-scaffolding", "in-progress", Path::new("/tmp"))
+                .unwrap();
         assert!(!info.is_eligible());
     }
 
     #[test]
     fn test_story_info_is_not_eligible_blocked() {
-        let info =
-            StoryInfo::from_key_and_status("1-1-scaffolding", "blocked", Path::new("/tmp")).unwrap();
+        let info = StoryInfo::from_key_and_status("1-1-scaffolding", "blocked", Path::new("/tmp"))
+            .unwrap();
         assert!(!info.is_eligible());
     }
 

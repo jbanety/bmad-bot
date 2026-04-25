@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-25 (13-9 done)
+# last_updated: 2026-04-25 (13-10 done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -155,7 +155,7 @@ development_status:
   13-7-config-init-project-brief: done
   13-8-critic-memory-system: done # depends-on: 13-7
   13-9-critic-agent-prompt-engineering: done # depends-on: 13-8
-  13-10-wal-pipeline-phase-tracking: backlog # depends-on: 13-2
+  13-10-wal-pipeline-phase-tracking: done # depends-on: 13-2
   13-11-ui-events-new-phases: backlog # depends-on: 13-2
   epic-13-retrospective: optional
 

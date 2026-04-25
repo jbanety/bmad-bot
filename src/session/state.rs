@@ -14,6 +14,19 @@ use rig::completion::Message;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Pipeline phase: create-story session.
+pub const PHASE_CREATE: &str = "create";
+/// Pipeline phase: adversarial consultation during create-story.
+pub const PHASE_CREATE_ADVERSARIAL_CONSULT: &str = "create-adversarial-consult";
+/// Pipeline phase: critic consultation during create-story.
+pub const PHASE_CREATE_CRITIC_CONSULT: &str = "create-critic-consult";
+/// Pipeline phase: dev-story session.
+pub const PHASE_DEV: &str = "dev";
+/// Pipeline phase: code-review session.
+pub const PHASE_REVIEW: &str = "review";
+/// Pipeline phase: critic consultation during code-review.
+pub const PHASE_REVIEW_CRITIC_CONSULT: &str = "review-critic-consult";
+
 /// A single message in the chat history.
 ///
 /// Stores the role (`"user"` or `"assistant"`) and content of each message
@@ -112,6 +125,13 @@ pub struct SessionState {
     /// for the session phase (create-story vs dev-story).
     #[serde(default)]
     pub skill_path: String,
+    /// The active pipeline phase for crash recovery routing.
+    ///
+    /// Updated at each phase transition BEFORE the phase starts (write-ahead).
+    /// Recovery uses this to determine whether to restart from scratch (create/review)
+    /// or attempt mid-session recovery (dev).
+    #[serde(default)]
+    pub pipeline_phase: String,
     /// Complete serialized chat history.
     pub chat_history: Vec<ChatMessage>,
 }
@@ -134,8 +154,17 @@ impl SessionState {
             branch_name: String::new(),
             base_branch: String::new(),
             skill_path: String::new(),
+            pipeline_phase: String::new(),
             chat_history: Vec::new(),
         }
+    }
+
+    /// Set the pipeline phase (structural metadata, not chat activity).
+    ///
+    /// Updates `pipeline_phase` without touching `last_activity` — phase
+    /// transitions are WAL bookkeeping, not user/assistant interactions.
+    pub fn set_pipeline_phase(&mut self, phase: &str) {
+        self.pipeline_phase = phase.to_string();
     }
 
     /// Set the branch info after successful branch setup.
@@ -474,6 +503,70 @@ chat_history: []
         assert!(
             state.base_branch.is_empty(),
             "base_branch should default to empty"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline phase tests (Story 13.10)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_state_pipeline_phase_serialization_roundtrip() {
+        let story = make_test_story();
+        let mut state = SessionState::new(&story, "anthropic", "test-model");
+        state.set_pipeline_phase(super::PHASE_CREATE);
+
+        let yaml = serde_yml::to_string(&state).expect("serialize");
+        let loaded: SessionState = serde_yml::from_str(&yaml).expect("deserialize");
+
+        assert_eq!(loaded.pipeline_phase, "create");
+        assert_eq!(loaded.story_id, state.story_id);
+        assert_eq!(loaded.story_key, state.story_key);
+    }
+
+    #[test]
+    fn test_session_state_legacy_wal_without_pipeline_phase() {
+        let yaml = r#"
+story_id: "4.2"
+story_key: "4-2-agent-session-setup-chat-loop"
+branch: "story/4-2-agent-session-setup-chat-loop"
+started_at: "2026-02-07T00:00:00Z"
+last_activity: "2026-02-07T00:00:00Z"
+provider: "anthropic"
+model: "claude-sonnet-4-20250514"
+chat_history: []
+"#;
+        let state: SessionState = serde_yml::from_str(yaml).expect("deserialize legacy WAL");
+        assert!(
+            state.pipeline_phase.is_empty(),
+            "pipeline_phase should default to empty string for legacy WAL"
+        );
+    }
+
+    #[test]
+    fn test_set_pipeline_phase_does_not_update_last_activity() {
+        let story = make_test_story();
+        let state = SessionState::new(&story, "anthropic", "test-model");
+        let original_last_activity = state.last_activity.clone();
+
+        let mut state = state;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        state.set_pipeline_phase(super::PHASE_DEV);
+
+        assert_eq!(state.pipeline_phase, "dev");
+        assert_eq!(
+            state.last_activity, original_last_activity,
+            "set_pipeline_phase must NOT update last_activity"
+        );
+    }
+
+    #[test]
+    fn test_session_state_new_has_empty_pipeline_phase() {
+        let story = make_test_story();
+        let state = SessionState::new(&story, "anthropic", "test-model");
+        assert!(
+            state.pipeline_phase.is_empty(),
+            "new() should initialize pipeline_phase as empty string"
         );
     }
 

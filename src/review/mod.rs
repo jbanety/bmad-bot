@@ -1042,8 +1042,7 @@ mod tests {
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> =
-            Arc::new(Mutex::new(HashSet::new()));
+        let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let runner = ReviewRunner::new(
             config.clone(),
             secrets,

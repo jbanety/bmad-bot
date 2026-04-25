@@ -114,6 +114,13 @@
 - **Empty model string with valid provider passes `validate_llm_role()`:** Setting `critic.provider = "anthropic"` with `critic.model = ""` passes validation but will fail at runtime. Pre-existing gap affecting all LLM roles. [src/config/mod.rs:407]
 
 
+## Deferred from: code review of story 13.10 (2026-04-25)
+
+- **`resume_session` hardcodes `LlmRole::Dev` for all recovery:** `resume_session()` at `src/session/runner.rs:590` always builds the recovery agent with `LlmRole::Dev`, regardless of whether the crashed session was a code review or create-story session. Pre-existing — also noted in 13.6 review.
+- **`state_file_path()` returns `PathBuf` clone instead of `&Path` reference:** `pub fn state_file_path(&self) -> PathBuf { self.state_file_path.clone() }` at `src/session/runner.rs:388` clones on every call. Returning `&Path` would be zero-cost. Minor optimization opportunity.
+- **`#[allow(clippy::too_many_arguments)]` lint suppression on `run_with_consultations`:** `run_with_consultations` now takes 8 parameters. Consider refactoring into an options/config struct to reduce positional argument risk.
+
+
 ## Deferred from: code review of story 12.4 (2026-04-20)
 
 - **`build_agent_for_role` hardcodes `LlmRole::Dev` for `SpawnAgentTool`:** `src/session/runner.rs:844` always passes `LlmRole::Dev` to `create_spawn_agent_tool` even though the enclosing function accepts a `role: LlmRole` parameter. All current call sites pass `LlmRole::Dev` so no bug today, but if a future caller passes a different role, sub-agents would use the wrong provider/model pairing.

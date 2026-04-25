@@ -31,11 +31,11 @@ use crate::tools::{
 
 use crate::llm::agent_factory::LlmRole;
 use futures::StreamExt;
-use std::collections::{HashMap, HashSet};
 use rig::agent::{MultiTurnStreamItem, PromptHook};
 use rig::completion::{Chat, CompletionModel, GetTokenUsage, Message};
 use rig::message::Text;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
+use std::collections::{HashMap, HashSet};
 
 use crate::ui::UiHandle;
 use std::path::Path;
@@ -1377,7 +1377,9 @@ mod tests {
             gitlab_token: None,
             telegram_bot_token: None,
         });
-        Arc::new(crate::llm::agent_factory::AgentFactory::new(config, secrets))
+        Arc::new(crate::llm::agent_factory::AgentFactory::new(
+            config, secrets,
+        ))
     }
 
     #[test]
@@ -1388,14 +1390,8 @@ mod tests {
         let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let root = Path::new("/tmp/bmad-bot-test");
 
-        let tool = create_spawn_agent_tool(
-            &factory,
-            LlmRole::Review,
-            root,
-            &sessions,
-            &in_flight,
-            None,
-        );
+        let tool =
+            create_spawn_agent_tool(&factory, LlmRole::Review, root, &sessions, &in_flight, None);
         assert_eq!(tool.role_for_tests(), LlmRole::Review);
     }
 
@@ -1409,14 +1405,8 @@ mod tests {
         assert_eq!(Arc::strong_count(&in_flight), 1);
         let root = Path::new("/tmp/bmad-bot-test");
 
-        let tool = create_spawn_agent_tool(
-            &factory,
-            LlmRole::Dev,
-            root,
-            &sessions,
-            &in_flight,
-            None,
-        );
+        let tool =
+            create_spawn_agent_tool(&factory, LlmRole::Dev, root, &sessions, &in_flight, None);
 
         // >= 2, not == 2: internal Arc cloning is an implementation detail.
         assert!(Arc::strong_count(&sessions) >= 2);

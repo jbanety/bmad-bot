@@ -415,11 +415,7 @@ impl Tool for SpawnAgentTool {
 impl SpawnAgentTool {
     /// New-session path — build a fresh sub-agent and run the message once. (AC-2)
     async fn spawn_new(&self, args: SpawnAgentArgs) -> Result<String, SpawnAgentError> {
-        let model = self
-            .agent_factory
-            .config_for_role(self.role)
-            .model
-            .clone();
+        let model = self.agent_factory.config_for_role(self.role).model.clone();
         let preamble = build_sub_agent_preamble(&model);
         let (git, read_file, edit_file, grep, find_path, list_dir, terminal) =
             create_base_tools(&self.project_root);
@@ -521,9 +517,7 @@ impl SpawnAgentTool {
         let _in_flight_guard = {
             let mut set = self.lock_in_flight();
             if !set.insert(id.clone()) {
-                return Err(SpawnAgentError::SessionBusy {
-                    session_id: id,
-                });
+                return Err(SpawnAgentError::SessionBusy { session_id: id });
             }
             InFlightGuard {
                 tool: self,
@@ -675,8 +669,14 @@ mod tests {
         );
 
         // Guideline 1
-        assert!(desc.contains("include all relevant context"), "missing: include all relevant context");
-        assert!(desc.contains("sub-agents do not see"), "missing: sub-agents do not see");
+        assert!(
+            desc.contains("include all relevant context"),
+            "missing: include all relevant context"
+        );
+        assert!(
+            desc.contains("sub-agents do not see"),
+            "missing: sub-agents do not see"
+        );
         // Guideline 2
         assert!(desc.contains("self-contained"), "missing: self-contained");
         assert!(desc.contains("concrete"), "missing: concrete");
@@ -695,7 +695,10 @@ mod tests {
         assert!(desc.contains("\"output\""), "missing: \"output\"");
         assert!(desc.contains("\"error\""), "missing: \"error\"");
         // label purpose
-        assert!(desc.contains("structured logging"), "missing: structured logging");
+        assert!(
+            desc.contains("structured logging"),
+            "missing: structured logging"
+        );
     }
 
     // -- AC-8.3 --------------------------------------------------------------
@@ -710,17 +713,26 @@ mod tests {
             .expect("parameters must have a properties object");
 
         assert_eq!(
-            props.get("label").and_then(|v| v.get("type")).and_then(|v| v.as_str()),
+            props
+                .get("label")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
             Some("string"),
             "label must be a string"
         );
         assert_eq!(
-            props.get("message").and_then(|v| v.get("type")).and_then(|v| v.as_str()),
+            props
+                .get("message")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
             Some("string"),
             "message must be a string"
         );
         assert_eq!(
-            props.get("session_id").and_then(|v| v.get("type")).and_then(|v| v.as_str()),
+            props
+                .get("session_id")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
             Some("string"),
             "session_id must be a string"
         );
@@ -731,7 +743,10 @@ mod tests {
             .expect("required must be a JSON array");
         let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"label"), "label must be required");
-        assert!(required_strs.contains(&"message"), "message must be required");
+        assert!(
+            required_strs.contains(&"message"),
+            "message must be required"
+        );
         assert!(
             !required_strs.contains(&"session_id"),
             "session_id must NOT be required"
@@ -928,15 +943,15 @@ mod tests {
         let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let test_session_id = "test-follow-up-session-001".to_string();
-        sessions
-            .lock()
-            .unwrap()
-            .insert(test_session_id.clone(), SubAgentState {
+        sessions.lock().unwrap().insert(
+            test_session_id.clone(),
+            SubAgentState {
                 agent,
                 history: vec![],
                 role: LlmRole::Dev,
                 model: "test-model".to_string(),
-            });
+            },
+        );
 
         let tool = SpawnAgentTool::new(
             factory,

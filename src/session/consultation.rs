@@ -46,6 +46,10 @@ pub struct ConsultationConfig {
     pub trigger_pattern: String,
     pub prompt_template: String,
     pub resume_message_template: String,
+    /// WAL pipeline phase to set when this consultation triggers.
+    /// When `Some`, `check_consultation_triggers()` updates the WAL phase
+    /// before executing. When `None`, the WAL phase is unchanged.
+    pub pipeline_phase: Option<String>,
 }
 
 impl ConsultationConfig {
@@ -172,10 +176,7 @@ impl ConsultationRunner {
         }
     }
 
-    pub async fn execute(
-        &self,
-        config: &ConsultationConfig,
-    ) -> Result<String, ConsultationError> {
+    pub async fn execute(&self, config: &ConsultationConfig) -> Result<String, ConsultationError> {
         // 1. Validate & build preamble
         let preamble = if config.skill_path.is_some() {
             if config.preamble_override.is_some() {
@@ -266,10 +267,7 @@ impl ConsultationRunner {
                 "Continue.".to_string()
             };
 
-            if self
-                .shutdown
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
+            if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(ConsultationError::ShutdownRequested {
                     label: config.label.clone(),
                 });
@@ -360,6 +358,7 @@ mod tests {
             trigger_pattern: r"(?i)story\s+file\s+created".to_string(),
             prompt_template: "Review this: {context}".to_string(),
             resume_message_template: "Findings:\n{findings}\nPlease fix.".to_string(),
+            pipeline_phase: None,
         }
     }
 
@@ -395,8 +394,8 @@ mod tests {
     #[test]
     fn test_consultation_config_format_findings() {
         let config = ConsultationConfig {
-            resume_message_template:
-                "An external reviewer found:\n\n{findings}\n\nPlease fix.".to_string(),
+            resume_message_template: "An external reviewer found:\n\n{findings}\n\nPlease fix."
+                .to_string(),
             ..default_config()
         };
         let result = config.format_findings("Issue 1: Missing AC\nIssue 2: Wrong lib");

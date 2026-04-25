@@ -29,10 +29,14 @@ use crate::review::epic::{
     EpicReviewOutcome, EpicReviewRunner, extract_epic_recap, generate_failure_report,
 };
 use crate::session::SessionOutcome;
-use crate::session::consultation::{ConsultationConfig, ConsultationToolSet};
 use crate::session::cleanup::{unblock_dependents, update_story_status};
+use crate::session::consultation::{ConsultationConfig, ConsultationToolSet};
 use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
+use crate::session::state::{
+    PHASE_CREATE, PHASE_CREATE_ADVERSARIAL_CONSULT, PHASE_CREATE_CRITIC_CONSULT, PHASE_DEV,
+    PHASE_REVIEW, PHASE_REVIEW_CRITIC_CONSULT, SessionState,
+};
 use crate::supervisor::decisions::format_pr_decisions_section;
 use crate::tools::SubAgentState;
 use crate::ui::UiHandle;
@@ -167,18 +171,12 @@ struct StorySubAgentCleanup<'a> {
 
 impl<'a> Drop for StorySubAgentCleanup<'a> {
     fn drop(&mut self) {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
         let cleared_sessions = sessions.len();
         sessions.clear();
         drop(sessions);
 
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
         let cleared_in_flight = in_flight.len();
         in_flight.clear();
         drop(in_flight);
@@ -244,8 +242,7 @@ impl StoryPipeline {
         // Created once per daemon run; cleared between stories by StorySubAgentCleanup.
         let sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> =
-            Arc::new(Mutex::new(HashSet::new()));
+        let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let session_runner = SessionRunner::new(
             Arc::clone(&config),
@@ -407,6 +404,7 @@ impl StoryPipeline {
                 Some(".claude/skills/bmad-create-story/SKILL.md"),
                 Some(create_preamble),
                 LlmRole::Dev,
+                PHASE_CREATE,
             )
             .await;
 
@@ -415,9 +413,7 @@ impl StoryPipeline {
 
         match session_outcome {
             SessionOutcome::Completed {
-                story_key,
-                branch,
-                ..
+                story_key, branch, ..
             } => {
                 self.ui.phase_complete("Create Story", session_elapsed);
                 tracing::info!(
@@ -1187,8 +1183,10 @@ impl StoryPipeline {
                         error = %e,
                         "PR creation failed in review pipeline"
                     );
-                    self.ui
-                        .story_error(story_key, &format!("PR creation failed in review pipeline: {e}"));
+                    self.ui.story_error(
+                        story_key,
+                        &format!("PR creation failed in review pipeline: {e}"),
+                    );
                     let result = PipelineResult {
                         story_key: story_key.clone(),
                         status: StoryStatus::Error,
@@ -1224,6 +1222,7 @@ impl StoryPipeline {
                     Some(".claude/skills/bmad-code-review/SKILL.md"),
                     Some(review_preamble),
                     LlmRole::Review,
+                    PHASE_REVIEW,
                 )
                 .await;
 
@@ -1308,12 +1307,9 @@ impl StoryPipeline {
 
         // Phase 7 — Mark story done in sprint-status.yaml, commit & push
         let sprint_status_path =
-            Path::new(&self.config.bmad_paths.implementation_artifacts)
-                .join("sprint-status.yaml");
+            Path::new(&self.config.bmad_paths.implementation_artifacts).join("sprint-status.yaml");
         if sprint_status_path.exists() {
-            if let Err(e) =
-                update_story_status(&sprint_status_path, story_key, "done").await
-            {
+            if let Err(e) = update_story_status(&sprint_status_path, story_key, "done").await {
                 tracing::warn!(
                     action = "sprint_status_update_failed",
                     story_key = %story_key,
@@ -1344,9 +1340,8 @@ impl StoryPipeline {
                 }
 
                 // Commit & push — MUST succeed or next story's checkout discards changes
-                let commit_msg = format!(
-                    "chore(sprint-status): mark {story_key} done, unblock dependents"
-                );
+                let commit_msg =
+                    format!("chore(sprint-status): mark {story_key} done, unblock dependents");
                 match commit_sprint_status(
                     &self.config.bmad_paths.project_root,
                     &sprint_status_path,
@@ -1462,7 +1457,10 @@ impl StoryPipeline {
             prd_matches.sort_by(|a, b| {
                 let a_name = a.file_name().unwrap_or_default();
                 let b_name = b.file_name().unwrap_or_default();
-                a_name.len().cmp(&b_name.len()).then_with(|| a_name.cmp(b_name))
+                a_name
+                    .len()
+                    .cmp(&b_name.len())
+                    .then_with(|| a_name.cmp(b_name))
             });
             if let Some(prd_path) = prd_matches.into_iter().next() {
                 tracing::info!("No project brief configured, using PRD as Critic vision anchor");
@@ -1512,6 +1510,7 @@ impl StoryPipeline {
                 trigger_pattern: r"(?i)(STORY\s+CONTEXT\s+CREATED|story\s+file\s+(?:created|saved|written)|Status:\s*ready-for-dev)".to_string(),
                 prompt_template: "Review the following story file for completeness, correctness, and potential issues. Be adversarial — find every weakness, missing detail, and potential disaster.\n\n{context}".to_string(),
                 resume_message_template: "An external adversarial reviewer has analyzed this story and found the following issues:\n\n{findings}\n\nPlease fix all these issues and update the story file.".to_string(),
+                pipeline_phase: Some(PHASE_CREATE_ADVERSARIAL_CONSULT.into()),
             },
             // Consultation 2 — Story Critic (independent vision guardian)
             ConsultationConfig {
@@ -1524,6 +1523,7 @@ impl StoryPipeline {
                 trigger_pattern: r"(?i)(corrections?\s+(applied|made|done|implemented)|issues?\s+(fixed|resolved|addressed)|changes?\s+(applied|made|done))".to_string(),
                 prompt_template: "Review the following story for alignment with product vision and technical coherence. Identify any deviations from the project's goals or architectural principles.\n\n{context}".to_string(),
                 resume_message_template: "An external product/technical vision reviewer has analyzed this story:\n\n{findings}\n\nPlease apply the relevant corrections to the story file.".to_string(),
+                pipeline_phase: Some(PHASE_CREATE_CRITIC_CONSULT.into()),
             },
         ]
     }
@@ -1571,14 +1571,14 @@ impl StoryPipeline {
                 apply patches for 'patch' decisions, leave 'defer' items as deferred, and \
                 remove 'dismiss' items. Then continue with the remaining workflow steps."
                 .to_string(),
+            pipeline_phase: Some(PHASE_REVIEW_CRITIC_CONSULT.into()),
         }]
     }
 
     /// Re-read sprint-status.yaml and return an updated `StoryInfo` for the given key.
     fn reload_story_info(&self, story_key: &str) -> Result<StoryInfo, String> {
-        let sprint_status_path =
-            PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
-                .join("sprint-status.yaml");
+        let sprint_status_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
+            .join("sprint-status.yaml");
         let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
 
         let sprint_status = SprintStatusFile::load(&sprint_status_path, &story_dir)
@@ -1591,7 +1591,9 @@ impl StoryPipeline {
             }
         }
 
-        Err(format!("Story key {story_key} not found in sprint-status.yaml"))
+        Err(format!(
+            "Story key {story_key} not found in sprint-status.yaml"
+        ))
     }
 
     /// Process eligible stories sequentially with re-polling between each story.
@@ -2377,6 +2379,54 @@ fn route_story_status(status: &str) -> StoryPhase {
     }
 }
 
+/// Map a WAL `pipeline_phase` value to the coarse pipeline phase for recovery routing.
+fn recovery_phase_to_story_phase(phase: &str) -> StoryPhase {
+    match phase {
+        PHASE_CREATE | PHASE_CREATE_ADVERSARIAL_CONSULT | PHASE_CREATE_CRITIC_CONSULT => {
+            StoryPhase::Create
+        }
+        PHASE_DEV | "" => StoryPhase::Dev,
+        PHASE_REVIEW | PHASE_REVIEW_CRITIC_CONSULT => StoryPhase::Review,
+        _ => {
+            tracing::warn!(
+                action = "unknown_pipeline_phase",
+                phase = %phase,
+                "Unknown pipeline_phase '{}' in WAL — falling back to dev recovery",
+                phase
+            );
+            StoryPhase::Unknown
+        }
+    }
+}
+
+/// Delete a WAL file with retries. Returns `Ok(())` on success or if the file
+/// does not exist. Returns `Err` with a description after exhausting all attempts.
+async fn delete_wal_with_retry(path: &Path, max_attempts: usize) -> Result<(), String> {
+    for attempt in 1..=max_attempts {
+        match SessionState::delete(path).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt == max_attempts {
+                    return Err(format!(
+                        "WAL delete failed after {max_attempts} attempts: {e}"
+                    ));
+                }
+                tracing::warn!(
+                    action = "recovery_wal_delete_retry",
+                    attempt = attempt,
+                    max_attempts = max_attempts,
+                    error = %e,
+                    "WAL delete attempt {}/{} failed, retrying",
+                    attempt,
+                    max_attempts
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+            }
+        }
+    }
+    unreachable!()
+}
+
 fn re_poll_eligible(sprint_status_path: &Path, story_dir: &Path) -> Result<Vec<StoryInfo>, String> {
     let sprint_status = SprintStatusFile::load(sprint_status_path, story_dir)
         .map_err(|e| format!("sprint-status load failed: {e}"))?;
@@ -2532,8 +2582,22 @@ impl StoryPipeline {
         self.ui.crash_recovery_start();
         let recovery = self.session_runner.check_and_recover_wal().await?;
 
-        // Clone StoryInfo fields BEFORE consuming recovery (SessionState has no Clone)
-        let story_for_pipeline = StoryInfo {
+        // Extract pipeline_phase BEFORE consuming recovery (RecoveryInfo is consumed by ownership)
+        let pipeline_phase = recovery.state.pipeline_phase.clone();
+        let recovery_route = recovery_phase_to_story_phase(&pipeline_phase);
+
+        tracing::info!(
+            action = "recovery_phase_routing",
+            story_key = %recovery.story_info.story_key,
+            pipeline_phase = %pipeline_phase,
+            route = ?recovery_route,
+            "Recovering story {} from pipeline phase: {}",
+            recovery.story_info.story_key,
+            pipeline_phase
+        );
+
+        // Clone StoryInfo fields BEFORE consuming recovery
+        let mut story_for_pipeline = StoryInfo {
             story_id: recovery.story_info.story_id.clone(),
             story_key: recovery.story_info.story_key.clone(),
             epic_num: recovery.story_info.epic_num,
@@ -2545,10 +2609,102 @@ impl StoryPipeline {
             status: "in-progress".to_string(),
         };
 
-        let outcome = self.session_runner.resume_session(recovery).await;
-        let result = self
-            .process_recovered_session(&story_for_pipeline, outcome)
-            .await;
+        let story_title = story_title_from_label(&story_for_pipeline.label);
+
+        let result = match recovery_route {
+            StoryPhase::Dev => {
+                // Dev recovery: unchanged — attempt mid-session WAL replay
+                story_for_pipeline.status = "in-progress".to_string();
+                let outcome = self.session_runner.resume_session(recovery).await;
+                self.process_recovered_session(&story_for_pipeline, outcome)
+                    .await
+            }
+            StoryPhase::Create => {
+                // Create recovery: delete stale WAL, restart from scratch
+                let wal_path = self.session_runner.state_file_path();
+                if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
+                    tracing::error!(
+                        action = "recovery_wal_delete_fatal",
+                        error = %e,
+                        "Cannot delete stale WAL for create-phase recovery — aborting"
+                    );
+                    self.ui.story_error(
+                        &story_for_pipeline.story_key,
+                        &format!("WAL delete failed during create recovery: {e}"),
+                    );
+                    return Some(PipelineResult {
+                        story_key: story_for_pipeline.story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!("WAL delete failed during create recovery: {e}")),
+                        fatal: false,
+                    });
+                }
+                drop(recovery);
+                story_for_pipeline.status = "backlog".to_string();
+                self.ui
+                    .story_start(&story_for_pipeline.story_key, &story_title);
+                self.run_create_pipeline(&story_for_pipeline, &story_title, None)
+                    .await
+            }
+            StoryPhase::Review => {
+                // Review recovery: delete stale WAL, restart review from scratch
+                let wal_path = self.session_runner.state_file_path();
+                if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
+                    tracing::error!(
+                        action = "recovery_wal_delete_fatal",
+                        error = %e,
+                        "Cannot delete stale WAL for review-phase recovery — aborting"
+                    );
+                    self.ui.story_error(
+                        &story_for_pipeline.story_key,
+                        &format!("WAL delete failed during review recovery: {e}"),
+                    );
+                    return Some(PipelineResult {
+                        story_key: story_for_pipeline.story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!("WAL delete failed during review recovery: {e}")),
+                        fatal: false,
+                    });
+                }
+                drop(recovery);
+                story_for_pipeline.status = "review".to_string();
+                self.ui
+                    .story_start(&story_for_pipeline.story_key, &story_title);
+                self.run_review_pipeline(&story_for_pipeline, &story_title, None, None)
+                    .await
+            }
+            StoryPhase::Unknown => {
+                // Unrecognized phase — delete corrupt WAL, fall back to dev recovery
+                let wal_path = self.session_runner.state_file_path();
+                if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
+                    tracing::error!(
+                        action = "recovery_wal_delete_fatal",
+                        error = %e,
+                        "Cannot delete corrupt WAL — aborting recovery"
+                    );
+                    self.ui.story_error(
+                        &story_for_pipeline.story_key,
+                        &format!("WAL delete failed during unknown-phase recovery: {e}"),
+                    );
+                    return Some(PipelineResult {
+                        story_key: story_for_pipeline.story_key.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!(
+                            "WAL delete failed during unknown-phase recovery: {e}"
+                        )),
+                        fatal: false,
+                    });
+                }
+                story_for_pipeline.status = "in-progress".to_string();
+                let outcome = self.session_runner.resume_session(recovery).await;
+                self.process_recovered_session(&story_for_pipeline, outcome)
+                    .await
+            }
+        };
+
         self.notify_story_result(&result).await;
         self.ui.crash_recovery_complete(&result.story_key);
         Some(result)
@@ -2636,8 +2792,7 @@ impl StoryPipeline {
                                 .join("sprint-status.yaml");
                         if sprint_status_path.exists()
                             && let Err(e) =
-                                update_story_status(&sprint_status_path, &story_key, "review")
-                                    .await
+                                update_story_status(&sprint_status_path, &story_key, "review").await
                         {
                             tracing::warn!(
                                 action = "sprint_status_update_failed",
@@ -3026,10 +3181,7 @@ async fn commit_sprint_status(
 /// Returns `None` if the section is missing or empty (clean review).
 /// Terminates at the next `## ` heading (same level or higher) but includes
 /// `### ` sub-sections within the findings.
-fn extract_review_report_from_story(
-    story: &StoryInfo,
-    project_root: &Path,
-) -> Option<String> {
+fn extract_review_report_from_story(story: &StoryInfo, project_root: &Path) -> Option<String> {
     let full_path = project_root.join(&story.specs_path);
     let content = std::fs::read_to_string(&full_path).ok()?;
     let start_marker = "### Review Findings";
@@ -3069,7 +3221,8 @@ fn build_review_critic_preamble(has_vision_document: bool) -> String {
         "No project brief or PRD was available for this review. Rely on your accumulated memory and \
          general engineering judgment to evaluate findings.\n"
     };
-    format!("You are the Code Review Critic — an independent decision authority for ambiguous code review findings.\n\
+    format!(
+        "You are the Code Review Critic — an independent decision authority for ambiguous code review findings.\n\
      \n\
      You are NOT part of the BMAD methodology. You are an external judge brought in to resolve \
      findings that the code reviewer couldn't classify with confidence.\n\
@@ -3148,7 +3301,8 @@ fn build_review_critic_preamble(has_vision_document: bool) -> String {
      - Be decisive — every finding must get a clear verdict\n\
      - Reference the project brief or your memory to justify decisions\n\
      - When in doubt between defer and dismiss, prefer defer — real issues shouldn't be silenced",
-        vision_section = vision_section)
+        vision_section = vision_section
+    )
 }
 
 fn build_story_critic_preamble(has_vision_document: bool) -> String {
@@ -3160,7 +3314,8 @@ fn build_story_critic_preamble(has_vision_document: bool) -> String {
         "No project brief or PRD was available for this review. Rely on your accumulated memory and \
          general engineering judgment to evaluate the story.\n"
     };
-    format!("You are the Story Critic — an independent product and technical vision guardian.\n\
+    format!(
+        "You are the Story Critic — an independent product and technical vision guardian.\n\
      \n\
      You are NOT part of the BMAD methodology. You are an external advisor brought in to ensure \
      that what is being built aligns with the original project vision.\n\
@@ -3252,7 +3407,8 @@ fn build_story_critic_preamble(has_vision_document: bool) -> String {
      - Be constructive but direct — flag real concerns, not theoretical ones\n\
      - Every observation must reference either the project brief or your accumulated memory\n\
      - Quality over quantity — 3 incisive observations are better than 10 shallow ones",
-        vision_section = vision_section)
+        vision_section = vision_section
+    )
 }
 
 /// Detect infrastructure errors where the session never started.
@@ -4683,10 +4839,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
 
@@ -4738,8 +4891,7 @@ development_status:
     #[tokio::test]
     async fn test_process_story_routes_review_runs_pipeline() {
         let pipeline = make_test_pipeline();
-        let story =
-            StoryInfo::from_key_and_status("2-1-bar", "review", Path::new("/tmp")).unwrap();
+        let story = StoryInfo::from_key_and_status("2-1-bar", "review", Path::new("/tmp")).unwrap();
         let result = pipeline.process_story(&story, None).await;
         // Review pipeline runs but fails (no git repo at /tmp/test-pipeline — push fails)
         assert_eq!(result.status, StoryStatus::Error);
@@ -4756,8 +4908,7 @@ development_status:
     #[tokio::test]
     async fn test_process_story_routes_unexpected_status() {
         let pipeline = make_test_pipeline();
-        let story =
-            StoryInfo::from_key_and_status("3-1-baz", "done", Path::new("/tmp")).unwrap();
+        let story = StoryInfo::from_key_and_status("3-1-baz", "done", Path::new("/tmp")).unwrap();
         let result = pipeline.process_story(&story, None).await;
         assert_eq!(result.status, StoryStatus::Error);
         assert!(!result.fatal);
@@ -4788,7 +4939,10 @@ development_status:
 
     #[test]
     fn test_route_story_status_unexpected_maps_to_unknown() {
-        assert_eq!(route_story_status("some-random-status"), StoryPhase::Unknown);
+        assert_eq!(
+            route_story_status("some-random-status"),
+            StoryPhase::Unknown
+        );
     }
 
     // --- Create-story consultation tests (Story 13.4) ---
@@ -4849,9 +5003,8 @@ development_status:
         let create_skill = ".claude/skills/bmad-create-story/SKILL.md";
         let dev_skill = ".claude/skills/bmad-dev-story/SKILL.md";
 
-        let story =
-            StoryInfo::from_key_and_status("13-4-test-story", "backlog", Path::new("/tmp"))
-                .unwrap();
+        let story = StoryInfo::from_key_and_status("13-4-test-story", "backlog", Path::new("/tmp"))
+            .unwrap();
 
         // Create-story skill → message should contain story_key, not file path
         let is_create = create_skill.contains("bmad-create-story");
@@ -4919,9 +5072,8 @@ development_status:
         let review_skill = ".claude/skills/bmad-code-review/SKILL.md";
         assert!(review_skill.contains("bmad-code-review"));
 
-        let story =
-            StoryInfo::from_key_and_status("13-6-test-review", "review", Path::new("/tmp"))
-                .unwrap();
+        let story = StoryInfo::from_key_and_status("13-6-test-review", "review", Path::new("/tmp"))
+            .unwrap();
 
         let target_branch = "main";
         let msg = format!(
@@ -5059,10 +5211,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
         let critic_memory = CriticMemory::new(
@@ -5131,10 +5280,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
         let critic_memory = CriticMemory::new(
@@ -5173,8 +5319,7 @@ development_status:
         let story =
             StoryInfo::from_key_and_status("13-8-test", "review", Path::new("/tmp")).unwrap();
         let critic_memory_path = pipeline.critic_memory.prepare_context_path();
-        let consultations =
-            pipeline.build_review_consultations(&story, critic_memory_path, None);
+        let consultations = pipeline.build_review_consultations(&story, critic_memory_path, None);
 
         let critic = &consultations[0];
         assert!(
@@ -5238,8 +5383,7 @@ development_status:
         let pipeline = make_test_pipeline();
         let story =
             StoryInfo::from_key_and_status("13-9-test", "backlog", Path::new("/tmp")).unwrap();
-        let consultations =
-            pipeline.build_create_story_consultations(&story, None, None);
+        let consultations = pipeline.build_create_story_consultations(&story, None, None);
         let critic = &consultations[1];
         assert_eq!(critic.label, "critic");
         assert_eq!(critic.role, LlmRole::Critic);
@@ -5250,8 +5394,7 @@ development_status:
         let pipeline = make_test_pipeline();
         let story =
             StoryInfo::from_key_and_status("13-9-test", "review", Path::new("/tmp")).unwrap();
-        let consultations =
-            pipeline.build_review_consultations(&story, None, None);
+        let consultations = pipeline.build_review_consultations(&story, None, None);
         let critic = &consultations[0];
         assert_eq!(critic.label, "review-critic");
         assert_eq!(critic.role, LlmRole::Critic);
@@ -5263,8 +5406,7 @@ development_status:
         let story =
             StoryInfo::from_key_and_status("13-9-test", "backlog", Path::new("/tmp")).unwrap();
         let brief = Some("/tmp/project-brief.md".to_string());
-        let consultations =
-            pipeline.build_create_story_consultations(&story, None, brief);
+        let consultations = pipeline.build_create_story_consultations(&story, None, brief);
         let critic = &consultations[1];
         assert_eq!(
             critic.context_files[0], "/tmp/project-brief.md",
@@ -5278,8 +5420,7 @@ development_status:
         let story =
             StoryInfo::from_key_and_status("13-9-test", "review", Path::new("/tmp")).unwrap();
         let brief = Some("/tmp/project-brief.md".to_string());
-        let consultations =
-            pipeline.build_review_consultations(&story, None, brief);
+        let consultations = pipeline.build_review_consultations(&story, None, brief);
         let critic = &consultations[0];
         assert_eq!(
             critic.context_files[0], "/tmp/project-brief.md",
@@ -5303,10 +5444,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
         let critic_memory = CriticMemory::new(
@@ -5365,10 +5503,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
         let critic_memory = CriticMemory::new(
@@ -5427,10 +5562,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
         let critic_memory = CriticMemory::new(
@@ -5488,10 +5620,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
         let critic_memory = CriticMemory::new(
@@ -5528,7 +5657,10 @@ development_status:
         };
 
         let result = pipeline.prepare_project_brief_path();
-        assert!(result.is_some(), "absolute path rejected, should fall through to PRD");
+        assert!(
+            result.is_some(),
+            "absolute path rejected, should fall through to PRD"
+        );
         assert!(
             result.unwrap().contains("prd.md"),
             "should return PRD fallback after rejecting absolute path"
@@ -5553,10 +5685,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
         let critic_memory = CriticMemory::new(
@@ -5593,7 +5722,10 @@ development_status:
         };
 
         let result = pipeline.prepare_project_brief_path();
-        assert!(result.is_some(), "traversal path rejected, should fall through to PRD");
+        assert!(
+            result.is_some(),
+            "traversal path rejected, should fall through to PRD"
+        );
         assert!(
             result.unwrap().contains("prd.md"),
             "should return PRD fallback after rejecting traversal path"
@@ -5620,10 +5752,7 @@ development_status:
         let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
         let ui = UiHandle::null();
-        let agent_factory = Arc::new(AgentFactory::new(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
-        ));
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
         let critic_memory = CriticMemory::new(
@@ -5670,5 +5799,103 @@ development_status:
         );
         // Should NOT match the .txt file
         assert!(!path.ends_with(".txt"));
+    }
+
+    // --- Pipeline phase recovery routing tests (Story 13.10) ---
+
+    #[test]
+    fn test_recovery_phase_to_story_phase_all_constants() {
+        use crate::session::state::*;
+        assert_eq!(
+            recovery_phase_to_story_phase(PHASE_CREATE),
+            StoryPhase::Create
+        );
+        assert_eq!(
+            recovery_phase_to_story_phase(PHASE_CREATE_ADVERSARIAL_CONSULT),
+            StoryPhase::Create
+        );
+        assert_eq!(
+            recovery_phase_to_story_phase(PHASE_CREATE_CRITIC_CONSULT),
+            StoryPhase::Create
+        );
+        assert_eq!(recovery_phase_to_story_phase(PHASE_DEV), StoryPhase::Dev);
+        assert_eq!(
+            recovery_phase_to_story_phase(PHASE_REVIEW),
+            StoryPhase::Review
+        );
+        assert_eq!(
+            recovery_phase_to_story_phase(PHASE_REVIEW_CRITIC_CONSULT),
+            StoryPhase::Review
+        );
+    }
+
+    #[test]
+    fn test_recovery_phase_empty_string_falls_back_to_dev() {
+        assert_eq!(recovery_phase_to_story_phase(""), StoryPhase::Dev);
+    }
+
+    #[test]
+    fn test_recovery_phase_unknown_value_returns_unknown() {
+        assert_eq!(
+            recovery_phase_to_story_phase("garbage-value"),
+            StoryPhase::Unknown
+        );
+    }
+
+    #[test]
+    fn test_recovery_phase_create_routes_to_create() {
+        assert_eq!(recovery_phase_to_story_phase("create"), StoryPhase::Create);
+    }
+
+    #[test]
+    fn test_recovery_phase_dev_routes_to_dev() {
+        assert_eq!(recovery_phase_to_story_phase("dev"), StoryPhase::Dev);
+    }
+
+    #[test]
+    fn test_recovery_phase_review_routes_to_review() {
+        assert_eq!(recovery_phase_to_story_phase("review"), StoryPhase::Review);
+    }
+
+    #[test]
+    fn test_recovery_phase_create_adversarial_consult_routes_to_create() {
+        assert_eq!(
+            recovery_phase_to_story_phase("create-adversarial-consult"),
+            StoryPhase::Create
+        );
+    }
+
+    #[test]
+    fn test_create_consultation_has_pipeline_phase() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("13-10-test", "backlog", Path::new("/tmp")).unwrap();
+        let consultations = pipeline.build_create_story_consultations(&story, None, None);
+
+        let adversarial = &consultations[0];
+        assert_eq!(
+            adversarial.pipeline_phase,
+            Some("create-adversarial-consult".to_string())
+        );
+
+        let critic = &consultations[1];
+        assert_eq!(
+            critic.pipeline_phase,
+            Some("create-critic-consult".to_string())
+        );
+    }
+
+    #[test]
+    fn test_review_consultation_has_pipeline_phase() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("13-10-test", "review", Path::new("/tmp")).unwrap();
+        let consultations = pipeline.build_review_consultations(&story, None, None);
+
+        let critic = &consultations[0];
+        assert_eq!(
+            critic.pipeline_phase,
+            Some("review-critic-consult".to_string())
+        );
     }
 }
