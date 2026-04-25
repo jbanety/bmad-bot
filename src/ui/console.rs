@@ -286,6 +286,22 @@ impl ConsoleRenderer {
     }
 }
 
+fn consultation_display_name(consultation_type: &str) -> (String, &'static str) {
+    match consultation_type {
+        "adversarial" => ("Adversarial review".to_string(), "finding"),
+        "critic" => ("Story critic".to_string(), "observation"),
+        "review-critic" => ("Review critic".to_string(), "observation"),
+        other => {
+            let mut chars = other.chars();
+            let display = match chars.next() {
+                Some(c) => format!("{}{}", c.to_uppercase(), chars.as_str()),
+                None => other.to_string(),
+            };
+            (display, "finding")
+        }
+    }
+}
+
 impl UiRenderer for ConsoleRenderer {
     // ── Pipeline events ─────────────────────────────────────────────
 
@@ -521,6 +537,105 @@ impl UiRenderer for ConsoleRenderer {
         for line in self.format_content_preview(preview) {
             self.println(&line);
         }
+    }
+
+    // ── Consultation events ───────────────────────────────────────────
+
+    fn consultation_start(&self, consultation_type: &str, _story_key: &str, detail: Option<&str>) {
+        let spinner_name = match consultation_type {
+            "adversarial" => "adversarial reviewer",
+            "critic" => "story critic",
+            "review-critic" => "review critic",
+            _ => consultation_type,
+        };
+        let msg = if self.plain_mode {
+            match detail {
+                Some(d) => format!("Consulting {spinner_name} for {d}..."),
+                None => format!("Consulting {spinner_name}..."),
+            }
+        } else {
+            let emoji = if consultation_type == "adversarial" {
+                "\u{1f50d}" // 🔍
+            } else if consultation_type.contains("critic") {
+                "\u{1f9e0}" // 🧠
+            } else {
+                "\u{1f4cb}" // 📋
+            };
+            match detail {
+                Some(d) => format!("{emoji} Consulting {spinner_name} for {d}..."),
+                None => format!("{emoji} Consulting {spinner_name}..."),
+            }
+        };
+        let pb = self.create_spinner(msg, true);
+        self.store_spinner(format!("consult:{consultation_type}"), pb, true);
+    }
+
+    fn consultation_complete(
+        &self,
+        consultation_type: &str,
+        findings_count: usize,
+        duration: Duration,
+    ) {
+        let (display_name, noun_singular) = consultation_display_name(consultation_type);
+        let noun_plural = format!("{noun_singular}s");
+
+        let count_text = match findings_count {
+            0 => format!("no {noun_plural}"),
+            1 => format!("1 {noun_singular}"),
+            n => format!("{n} {noun_plural}"),
+        };
+
+        let critic_suffix = if consultation_type.contains("critic") {
+            ", memory updated"
+        } else {
+            ""
+        };
+
+        let indent = match self.take_spinner(&format!("consult:{consultation_type}")) {
+            Some((pb, _)) => {
+                pb.finish_and_clear();
+                "    "
+            }
+            None => "    ",
+        };
+
+        self.println(&format!(
+            "{}{} {}: {}{} [{}]",
+            indent,
+            self.glyph_ok(),
+            display_name,
+            count_text,
+            critic_suffix,
+            format_duration(duration),
+        ));
+    }
+
+    fn consultation_error(&self, consultation_type: &str, error: &str) {
+        let (display_name, _) = consultation_display_name(consultation_type);
+
+        let indent = match self.take_spinner(&format!("consult:{consultation_type}")) {
+            Some((pb, _)) => {
+                pb.finish_and_clear();
+                "    "
+            }
+            None => "    ",
+        };
+
+        self.println(&format!(
+            "{}{} {} — {}",
+            indent,
+            self.glyph_err(),
+            display_name,
+            error,
+        ));
+    }
+
+    fn critic_memory_update(&self, story_key: &str) {
+        tracing::debug!(
+            action = "critic_memory_update",
+            story_key = %story_key,
+            "Critic memory update event received"
+        );
     }
 
     // ── System events ───────────────────────────────────────────────
@@ -853,5 +968,77 @@ mod tests {
             "plain mode should NOT use Unicode pipe, got: {}",
             lines[0]
         );
+    }
+
+    // ── Consultation event tests (Story 13.11, Task 6) ──────────────
+
+    #[test]
+    fn test_console_consultation_start_complete_lifecycle() {
+        let r = ConsoleRenderer::new(true, false);
+        r.consultation_start("adversarial", "13-11", None);
+        assert!(
+            r.has_active_spinners(),
+            "spinner should be active after consultation_start"
+        );
+        r.consultation_complete("adversarial", 5, Duration::from_secs(30));
+        assert!(
+            !r.has_active_spinners(),
+            "spinner should be cleaned up after consultation_complete"
+        );
+    }
+
+    #[test]
+    fn test_console_consultation_complete_without_start() {
+        let r = ConsoleRenderer::new(true, false);
+        r.consultation_complete("unknown", 3, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_console_consultation_error_resolves_spinner() {
+        let r = ConsoleRenderer::new(true, false);
+        r.consultation_start("critic", "13-11", None);
+        assert!(r.has_active_spinners());
+        r.consultation_error("critic", "LLM timeout");
+        assert!(
+            !r.has_active_spinners(),
+            "spinner should be cleaned up after consultation_error"
+        );
+    }
+
+    #[test]
+    fn test_console_sequential_consultations_no_orphaned_spinners() {
+        let r = ConsoleRenderer::new(true, false);
+        r.consultation_start("adversarial", "13-11", None);
+        r.consultation_complete("adversarial", 7, Duration::from_secs(72));
+        r.consultation_start("critic", "13-11", None);
+        r.consultation_complete("critic", 3, Duration::from_secs(45));
+        r.critic_memory_update("13-11");
+        assert!(
+            !r.has_active_spinners(),
+            "no orphaned spinners after sequential consultation flow"
+        );
+    }
+
+    #[test]
+    fn test_console_consultation_start_with_detail() {
+        let r = ConsoleRenderer::new(true, false);
+        r.consultation_start("review-critic", "13-11", Some("2 decision-needed findings"));
+        assert!(r.has_active_spinners());
+        r.consultation_complete("review-critic", 1, Duration::from_secs(20));
+        assert!(
+            !r.has_active_spinners(),
+            "spinner should be cleaned up after consultation_complete with detail"
+        );
+    }
+
+    #[test]
+    fn test_console_critic_memory_update_is_noop() {
+        let plain = ConsoleRenderer::new(true, false);
+        plain.critic_memory_update("13-11");
+        assert!(!plain.has_active_spinners());
+
+        let fancy = ConsoleRenderer::new(false, false);
+        fancy.critic_memory_update("13-11");
+        assert!(!fancy.has_active_spinners());
     }
 }

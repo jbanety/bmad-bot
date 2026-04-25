@@ -2636,7 +2636,9 @@ impl StoryPipeline {
                         story_key: story_for_pipeline.story_key.clone(),
                         status: StoryStatus::Error,
                         pr_url: None,
-                        error_detail: Some(format!("WAL delete failed during create recovery: {e}")),
+                        error_detail: Some(format!(
+                            "WAL delete failed during create recovery: {e}"
+                        )),
                         fatal: false,
                     });
                 }
@@ -2664,7 +2666,9 @@ impl StoryPipeline {
                         story_key: story_for_pipeline.story_key.clone(),
                         status: StoryStatus::Error,
                         pr_url: None,
-                        error_detail: Some(format!("WAL delete failed during review recovery: {e}")),
+                        error_detail: Some(format!(
+                            "WAL delete failed during review recovery: {e}"
+                        )),
                         fatal: false,
                     });
                 }

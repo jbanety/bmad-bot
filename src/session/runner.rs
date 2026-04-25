@@ -2535,8 +2535,31 @@ impl SessionRunner {
                 "Consultation trigger matched — executing"
             );
 
+            let detail: Option<String> = if state.config.label == "review-critic" {
+                let match_count = state.compiled_regex.find_iter(response).count();
+                Some(format!("{match_count} decision-needed findings"))
+            } else {
+                None
+            };
+            let consultation_start_time = std::time::Instant::now();
+            self.ui.consultation_start(
+                &state.config.label,
+                &session_state.story_key,
+                detail.as_deref(),
+            );
+
             match self.consultation_runner.execute(&state.config).await {
                 Ok(findings) => {
+                    let consultation_duration = consultation_start_time.elapsed();
+                    let findings_count = findings.lines().filter(|l| !l.trim().is_empty()).count();
+                    self.ui.consultation_complete(
+                        &state.config.label,
+                        findings_count,
+                        consultation_duration,
+                    );
+                    if state.config.label.contains("critic") {
+                        self.ui.critic_memory_update(&session_state.story_key);
+                    }
                     let formatted = state.config.format_findings(&findings);
                     tracing::info!(
                         action = "consultation_complete",
@@ -2547,6 +2570,8 @@ impl SessionRunner {
                     return Some(ResponseAction::Continue { reply: formatted });
                 }
                 Err(e) => {
+                    self.ui
+                        .consultation_error(&state.config.label, &e.to_string());
                     tracing::warn!(
                         action = "consultation_failed",
                         label = %state.config.label,

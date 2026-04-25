@@ -39,6 +39,25 @@ impl super::renderer::UiRenderer for NullRenderer {
     fn llm_error(&self, _label: &str, _turn: u32, _error: &str) {}
     fn llm_retry(&self, _label: &str, _turn: u32, _retry_count: u32, _delay_secs: f64) {}
 
+    // ── Consultation events ───────────────────────────────────────────
+
+    fn consultation_start(
+        &self,
+        _consultation_type: &str,
+        _story_key: &str,
+        _detail: Option<&str>,
+    ) {
+    }
+    fn consultation_complete(
+        &self,
+        _consultation_type: &str,
+        _findings_count: usize,
+        _duration: std::time::Duration,
+    ) {
+    }
+    fn consultation_error(&self, _consultation_type: &str, _error: &str) {}
+    fn critic_memory_update(&self, _story_key: &str) {}
+
     // ── System events ───────────────────────────────────────────────
 
     fn daemon_start(&self, _config_summary: &str) {}
@@ -105,6 +124,12 @@ mod tests {
         r.llm_response("dev", 1, 1024);
         r.llm_error("dev", 2, "rate limited");
         r.llm_retry("dev", 2, 1, 1.5);
+
+        // Consultation
+        r.consultation_start("adversarial", "13-11", None);
+        r.consultation_complete("adversarial", 5, Duration::from_secs(30));
+        r.consultation_error("critic", "LLM timeout");
+        r.critic_memory_update("13-11");
 
         // System
         r.daemon_start("poll=5m");

@@ -160,6 +160,40 @@ impl UiHandle {
         self.0.llm_response_content(label, turn, preview);
     }
 
+    // ── Consultation events ───────────────────────────────────────────
+
+    /// A consultation agent has started (sub-phase of an active session).
+    pub(crate) fn consultation_start(
+        &self,
+        consultation_type: &str,
+        story_key: &str,
+        detail: Option<&str>,
+    ) {
+        self.0
+            .consultation_start(consultation_type, story_key, detail);
+    }
+
+    /// A consultation agent completed and produced findings.
+    pub(crate) fn consultation_complete(
+        &self,
+        consultation_type: &str,
+        findings_count: usize,
+        duration: Duration,
+    ) {
+        self.0
+            .consultation_complete(consultation_type, findings_count, duration);
+    }
+
+    /// A consultation agent failed.
+    pub(crate) fn consultation_error(&self, consultation_type: &str, error: &str) {
+        self.0.consultation_error(consultation_type, error);
+    }
+
+    /// The Story Critic updated its persistent memory file.
+    pub(crate) fn critic_memory_update(&self, story_key: &str) {
+        self.0.critic_memory_update(story_key);
+    }
+
     // ── System events ───────────────────────────────────────────────
 
     /// The daemon has started.
@@ -251,6 +285,12 @@ mod tests {
         ui.llm_request_content("dev", 1, "preview of request");
         ui.llm_response_content("dev", 1, "preview of response");
 
+        // Consultation events
+        ui.consultation_start("adversarial", "13-11", None);
+        ui.consultation_complete("adversarial", 5, Duration::from_secs(30));
+        ui.consultation_error("critic", "LLM timeout");
+        ui.critic_memory_update("13-11");
+
         // System events
         ui.daemon_start("poll=5m, provider=copilot");
         ui.poll_cycle(1);
@@ -270,6 +310,17 @@ mod tests {
     fn test_console_renderer_implements_ui_renderer_trait_object() {
         // Object safety: can be wrapped in Arc<dyn UiRenderer>
         let _obj: Arc<dyn UiRenderer> = Arc::new(console::ConsoleRenderer::new(false, false));
+    }
+
+    #[test]
+    fn test_ui_handle_consultation_events_compile() {
+        let ui = UiHandle::null();
+        ui.consultation_start("adversarial", "13-11", None);
+        ui.consultation_start("review-critic", "13-11", Some("2 decision-needed findings"));
+        ui.consultation_complete("adversarial", 5, Duration::from_secs(30));
+        ui.consultation_complete("critic", 0, Duration::from_secs(0));
+        ui.consultation_error("critic", "LLM timeout");
+        ui.critic_memory_update("13-11");
     }
 
     #[test]
