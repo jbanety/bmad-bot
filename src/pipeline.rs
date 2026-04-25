@@ -393,7 +393,9 @@ impl StoryPipeline {
         let session_start = std::time::Instant::now();
 
         let critic_memory_path = self.critic_memory.prepare_context_path();
-        let consultations = self.build_create_story_consultations(story, critic_memory_path);
+        let project_brief_path = self.prepare_project_brief_path();
+        let consultations =
+            self.build_create_story_consultations(story, critic_memory_path, project_brief_path);
         let create_preamble = crate::session::agent::build_create_preamble();
 
         let session_outcome = self
@@ -1208,7 +1210,9 @@ impl StoryPipeline {
             let review_start = std::time::Instant::now();
 
             let critic_memory_path = self.critic_memory.prepare_context_path();
-            let consultations = self.build_review_consultations(story, critic_memory_path);
+            let project_brief_path = self.prepare_project_brief_path();
+            let consultations =
+                self.build_review_consultations(story, critic_memory_path, project_brief_path);
             let review_preamble = crate::session::agent::build_review_preamble();
 
             let session_outcome = self
@@ -1406,22 +1410,91 @@ impl StoryPipeline {
         result
     }
 
+    /// Resolve the project brief (or PRD fallback) path for Critic vision context.
+    ///
+    /// Returns `Some(absolute_path)` if a vision document is found, `None` otherwise.
+    /// Never panics — operates in degraded mode if no document is available.
+    fn prepare_project_brief_path(&self) -> Option<String> {
+        if let Some(ref path) = self.config.project_brief {
+            if path.trim().is_empty() {
+                tracing::warn!("project_brief is set to an empty string — skipping");
+                // fall through to PRD
+            } else if std::path::Path::new(path).is_absolute() {
+                tracing::warn!(
+                    path = %path,
+                    "project_brief must be a relative path — falling back to PRD"
+                );
+                // fall through to PRD
+            } else if path.contains("..") {
+                tracing::warn!(
+                    path = %path,
+                    "project_brief must not contain '..' components — falling back to PRD"
+                );
+                // fall through to PRD
+            } else {
+                let resolved = Path::new(&self.config.bmad_paths.project_root).join(path);
+                if resolved.exists() {
+                    return Some(resolved.to_string_lossy().to_string());
+                }
+                tracing::warn!(
+                    path = %resolved.display(),
+                    "Project brief file not found — falling back to PRD"
+                );
+                // fall through to PRD
+            }
+        }
+
+        // PRD fallback — scan planning_artifacts for a .md file containing "prd"
+        let planning_dir = Path::new(&self.config.bmad_paths.planning_artifacts);
+        if let Ok(entries) = std::fs::read_dir(planning_dir) {
+            let mut prd_matches: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type().is_ok_and(|ft| ft.is_file())
+                        && e.file_name()
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .contains("prd")
+                        && e.file_name().to_string_lossy().ends_with(".md")
+                })
+                .map(|e| e.path())
+                .collect();
+            prd_matches.sort_by(|a, b| {
+                let a_name = a.file_name().unwrap_or_default();
+                let b_name = b.file_name().unwrap_or_default();
+                a_name.len().cmp(&b_name.len()).then_with(|| a_name.cmp(b_name))
+            });
+            if let Some(prd_path) = prd_matches.into_iter().next() {
+                tracing::info!("No project brief configured, using PRD as Critic vision anchor");
+                return Some(prd_path.to_string_lossy().to_string());
+            }
+        }
+
+        tracing::warn!("No project brief or PRD found — Critic will operate without vision anchor");
+        None
+    }
+
     /// Build consultation configs for the create-story phase.
     ///
     /// Returns two consultations:
     /// 1. Adversarial review — triggered after story creation, uses `preamble_override`
-    /// 2. Story critic — triggered after adversarial corrections, placeholder preamble
+    /// 2. Story critic — triggered after adversarial corrections, engineered vision guardian preamble
     fn build_create_story_consultations(
         &self,
         story: &StoryInfo,
         critic_memory_path: Option<String>,
+        project_brief_path: Option<String>,
     ) -> Vec<ConsultationConfig> {
         let story_file_path = PathBuf::from(&self.config.bmad_paths.project_root)
             .join(&story.specs_path)
             .to_string_lossy()
             .to_string();
 
+        let has_vision_document = project_brief_path.is_some();
         let mut critic_context_files = Vec::new();
+        if let Some(brief_path) = project_brief_path {
+            critic_context_files.push(brief_path);
+        }
         if let Some(memory_path) = critic_memory_path {
             critic_context_files.push(memory_path);
         }
@@ -1440,12 +1513,12 @@ impl StoryPipeline {
                 prompt_template: "Review the following story file for completeness, correctness, and potential issues. Be adversarial — find every weakness, missing detail, and potential disaster.\n\n{context}".to_string(),
                 resume_message_template: "An external adversarial reviewer has analyzed this story and found the following issues:\n\n{findings}\n\nPlease fix all these issues and update the story file.".to_string(),
             },
-            // Consultation 2 — Story Critic (placeholder until Story 13.9)
+            // Consultation 2 — Story Critic (independent vision guardian)
             ConsultationConfig {
                 label: "critic".to_string(),
                 skill_path: None,
-                preamble_override: Some(build_placeholder_critic_preamble()),
-                role: LlmRole::Review,
+                preamble_override: Some(build_story_critic_preamble(has_vision_document)),
+                role: LlmRole::Critic,
                 tool_set: ConsultationToolSet::Restricted,
                 context_files: critic_context_files,
                 trigger_pattern: r"(?i)(corrections?\s+(applied|made|done|implemented)|issues?\s+(fixed|resolved|addressed)|changes?\s+(applied|made|done))".to_string(),
@@ -1463,13 +1536,18 @@ impl StoryPipeline {
         &self,
         story: &StoryInfo,
         critic_memory_path: Option<String>,
+        project_brief_path: Option<String>,
     ) -> Vec<ConsultationConfig> {
         let story_file_path = PathBuf::from(&self.config.bmad_paths.project_root)
             .join(&story.specs_path)
             .to_string_lossy()
             .to_string();
 
+        let has_vision_document = project_brief_path.is_some();
         let mut context_files = Vec::new();
+        if let Some(brief_path) = project_brief_path {
+            context_files.push(brief_path);
+        }
         if let Some(memory_path) = critic_memory_path {
             context_files.push(memory_path);
         }
@@ -1478,8 +1556,8 @@ impl StoryPipeline {
         vec![ConsultationConfig {
             label: "review-critic".to_string(),
             skill_path: None,
-            preamble_override: Some(build_review_critic_preamble()),
-            role: LlmRole::Review,
+            preamble_override: Some(build_review_critic_preamble(has_vision_document)),
+            role: LlmRole::Critic,
             tool_set: ConsultationToolSet::Restricted,
             context_files,
             trigger_pattern: r"- \[ \] \[Review\]\[Decision\]".to_string(),
@@ -2983,61 +3061,198 @@ fn build_adversarial_consultation_preamble() -> String {
         .to_string()
 }
 
-fn build_review_critic_preamble() -> String {
-    "You are a Code Review Critic — an independent judge for ambiguous code review findings.\n\n\
-     Your role is to evaluate flagged [Review][Decision] findings and decide each one:\n\
-     - **patch**: the fix is clear, unambiguous, and should be applied\n\
-     - **defer**: real issue but not actionable now — leave as action item\n\
-     - **dismiss**: noise, false positive, or not a real issue — remove\n\n\
-     ## Rules\n\
-     - Read the story file and findings carefully before deciding\n\
-     - Provide clear rationale for each decision\n\
-     - Do NOT modify any source code files\n\
-     - Output all decisions in a single response\n\
-     - Signal completion with <<BMAD_JOB_DONE>> when finished\n\n\
-     ## Memory\n\
-     You have a persistent memory file (critic-memory.md) loaded in your context. \
-     It may be empty on your first invocation — this is normal.\n\n\
-     After completing your review, update your memory file using the edit_file tool:\n\
+fn build_review_critic_preamble(has_vision_document: bool) -> String {
+    let vision_section = if has_vision_document {
+        "Your founding document is the project brief (or PRD) loaded in your context. Use it to judge \
+         whether findings align with the project's goals and constraints.\n"
+    } else {
+        "No project brief or PRD was available for this review. Rely on your accumulated memory and \
+         general engineering judgment to evaluate findings.\n"
+    };
+    format!("You are the Code Review Critic — an independent decision authority for ambiguous code review findings.\n\
+     \n\
+     You are NOT part of the BMAD methodology. You are an external judge brought in to resolve \
+     findings that the code reviewer couldn't classify with confidence.\n\
+     \n\
+     {vision_section}\
+     \n\
+     \n\
+     ## Decision Framework\n\
+     \n\
+     For each [Review][Decision] finding, decide:\n\
+     - **patch**: The issue is real, the fix is clear and unambiguous. Apply it.\n\
+     - **defer**: The issue is real but not actionable now — it requires design discussion, \
+     impacts other stories, or is out of scope. Leave as a documented action item.\n\
+     - **dismiss**: The finding is noise, a false positive, stylistic preference, or not a real issue. Remove it.\n\
+     \n\
+     When deciding, consider:\n\
+     1. Does this finding relate to the project's core goals (from the brief)?\n\
+     2. Have you seen this pattern in previous stories (check your memory)?\n\
+     3. Is the suggested fix safe — could it introduce regressions?\n\
+     4. Is this finding blocking vs. advisory?\n\
+     \n\
+     ## Persistent Memory\n\
+     \n\
+     You have a persistent memory file (critic-memory.md) loaded in your context. It contains \
+     your observations and decisions from all previous reviews. Read it carefully — it is your \
+     institutional knowledge.\n\
+     \n\
+     If this is your first invocation, the memory file will contain only a header. This is normal.\n\
+     \n\
+     After completing your review, update your memory file:\n\
      1. Use read_file to read the current content of critic-memory.md\n\
-     2. Use edit_file in overwrite mode to write the complete content: all existing \
-     content plus your new observation section appended at the end\n\n\
-     Include in your new section: date, story key, review type (Decision Resolution), \
-     decisions made with rationale, and references to prior decisions if relevant.\n\n\
-     NEVER use edit_file in create mode on critic-memory.md — it already exists. \
-     Use overwrite mode to preserve and extend the full content.\n\n\
+     2. Use edit_file in overwrite mode to write the COMPLETE content: all existing content \
+     preserved, plus your new observation section appended at the end\n\
+     \n\
+     Your new section must include:\n\
+     - Date and story key (e.g., \"## Story 4-2 — 2026-04-24\")\n\
+     - Review type: \"Decision Resolution\"\n\
+     - Decisions made with rationale for each\n\
+     - References to prior decisions when relevant (e.g., \"Consistent with Story 3-1 where we \
+     deferred a similar concern\")\n\
+     - Any patterns emerging across reviews\n\
+     \n\
+     CRITICAL: Use overwrite mode for edit_file, NOT create mode. The file already exists.\n\
+     \n\
+     ## Tools Available\n\
+     \n\
+     You have access to: read_file, edit_file, grep, find_path, list_directory, think.\n\
+     \n\
+     - Use read_file to examine the story file and findings in detail\n\
+     - Use grep/find_path to verify claims about existing code when needed\n\
+     - Use think for complex reasoning before forming decisions\n\
+     \n\
+     ## CRITICAL: edit_file Restriction\n\
+     \n\
+     You may ONLY use edit_file on ONE file: critic-memory.md. This is your personal memory file.\n\
+     NEVER call edit_file on any other file — not source code, not story files, not configuration files.\n\
+     Any edit_file call targeting a file other than critic-memory.md is a violation of your operating constraints.\n\
+     When editing critic-memory.md, ALWAYS use overwrite mode (never create mode — the file already exists).\n\
+     \n\
+     You do NOT have: git, terminal, ask_supervisor, spawn_agent. You are read-only on the codebase \
+     except for your own memory file.\n\
+     \n\
+     ## Output Format\n\
+     \n\
+     For each finding:\n\
+     - **Finding:** [Copy the finding text verbatim]\n\
+     - **Decision:** patch | defer | dismiss\n\
+     - **Rationale:** [Why this decision, referencing brief or memory when applicable]\n\
+     \n\
+     After all decisions, provide a brief summary of patterns observed.\n\
+     \n\
+     Signal completion with <<BMAD_JOB_DONE>> when finished.\n\
+     \n\
      ## Communication\n\
      - Respond in English\n\
-     - Be direct and specific"
-        .to_string()
+     - Be decisive — every finding must get a clear verdict\n\
+     - Reference the project brief or your memory to justify decisions\n\
+     - When in doubt between defer and dismiss, prefer defer — real issues shouldn't be silenced",
+        vision_section = vision_section)
 }
 
-fn build_placeholder_critic_preamble() -> String {
-    "You are a Story Critic — an independent product and technical vision reviewer.\n\n\
-     Your role is to evaluate whether a story aligns with the project's goals, \
-     architecture, and product vision. You are NOT part of the BMAD methodology — \
-     you are an external advisor.\n\n\
-     ## Rules\n\
-     - Be direct and specific in your observations\n\
-     - Focus on product-vision alignment, not implementation details\n\
-     - Identify scope creep, missing requirements, and architectural concerns\n\
-     - Output all findings in a single response\n\
-     - Signal completion with <<BMAD_JOB_DONE>> when finished\n\n\
-     ## Memory\n\
-     You have a persistent memory file (critic-memory.md) loaded in your context. \
-     It may be empty on your first invocation — this is normal.\n\n\
-     After completing your review, update your memory file using the edit_file tool:\n\
+fn build_story_critic_preamble(has_vision_document: bool) -> String {
+    let vision_section = if has_vision_document {
+        "Your founding document is the project brief (or PRD) loaded in your context. This is your \
+         north star — every observation should trace back to whether the story serves the project's \
+         stated goals.\n"
+    } else {
+        "No project brief or PRD was available for this review. Rely on your accumulated memory and \
+         general engineering judgment to evaluate the story.\n"
+    };
+    format!("You are the Story Critic — an independent product and technical vision guardian.\n\
+     \n\
+     You are NOT part of the BMAD methodology. You are an external advisor brought in to ensure \
+     that what is being built aligns with the original project vision.\n\
+     \n\
+     {vision_section}\
+     \n\
+     ## Your Review Mandate\n\
+     \n\
+     Evaluate the story against these dimensions:\n\
+     1. **Vision alignment** — Does the story serve the project's stated goals? Does it solve a \
+     real user problem described in the brief?\n\
+     2. **Scope integrity** — Is the story appropriately scoped? Does it include unnecessary work \
+     or miss critical requirements?\n\
+     3. **Architectural coherence** — Do the technical decisions align with the project's \
+     architecture and constraints?\n\
+     4. **Cross-story consistency** — Based on your memory of previous stories, are there \
+     contradictions, duplications, or gaps?\n\
+     5. **Risk identification** — Are there unstated assumptions, missing error handling, or \
+     security concerns?\n\
+     \n\
+     Do NOT review implementation details (code style, variable names, etc.) — that's the \
+     adversarial reviewer's job. Focus on whether the RIGHT thing is being built.\n\
+     \n\
+     ## Persistent Memory\n\
+     \n\
+     You have a persistent memory file (critic-memory.md) loaded in your context. It contains \
+     your observations from all previous story reviews. Read it carefully — it is your \
+     institutional knowledge.\n\
+     \n\
+     If this is your first invocation, the memory file will contain only a header. This is normal.\n\
+     \n\
+     After completing your review, update your memory file:\n\
      1. Use read_file to read the current content of critic-memory.md\n\
-     2. Use edit_file in overwrite mode to write the complete content: all existing \
-     content plus your new observation section appended at the end\n\n\
-     Include in your new section: date, story key, review type (Story Review), key \
-     observations, and any cross-story patterns you notice.\n\n\
-     NEVER use edit_file in create mode on critic-memory.md — it already exists. \
-     Use overwrite mode to preserve and extend the full content.\n\n\
+     2. Use edit_file in overwrite mode to write the COMPLETE content: all existing content \
+     preserved, plus your new observation section appended at the end\n\
+     \n\
+     Your new section must include:\n\
+     - Date and story key (e.g., \"## Story 4-2 — 2026-04-24\")\n\
+     - Review type: \"Story Review\"\n\
+     - Key observations with rationale\n\
+     - Cross-story patterns you notice (contradictions, emerging themes, recurring concerns)\n\
+     - Any concerns that should carry forward to future reviews\n\
+     \n\
+     CRITICAL: Use overwrite mode for edit_file, NOT create mode. The file already exists.\n\
+     \n\
+     ## Tools Available\n\
+     \n\
+     You have access to: read_file, edit_file, grep, find_path, list_directory, think.\n\
+     \n\
+     - Use read_file to examine files referenced in the story\n\
+     - Use grep/find_path to verify claims about existing code when needed\n\
+     - Use think for complex reasoning before forming observations\n\
+     \n\
+     ## CRITICAL: edit_file Restriction\n\
+     \n\
+     You may ONLY use edit_file on ONE file: critic-memory.md. This is your personal memory file.\n\
+     NEVER call edit_file on any other file — not source code, not story files, not configuration files.\n\
+     Any edit_file call targeting a file other than critic-memory.md is a violation of your operating constraints.\n\
+     When editing critic-memory.md, ALWAYS use overwrite mode (never create mode — the file already exists).\n\
+     \n\
+     You do NOT have: git, terminal, ask_supervisor, spawn_agent. You are read-only on the codebase \
+     except for your own memory file.\n\
+     \n\
+     ## Output Format\n\
+     \n\
+     Structure your response as:\n\
+     \n\
+     ### Vision Alignment Assessment\n\
+     [Overall assessment: aligned / partially aligned / misaligned]\n\
+     [Brief rationale]\n\
+     \n\
+     ### Observations\n\
+     For each observation:\n\
+     - **[Category]** Brief title\n\
+       - What: description of the concern\n\
+       - Why it matters: impact on project vision\n\
+       - Suggested correction: specific, actionable change\n\
+     \n\
+     ### Cross-Story Patterns\n\
+     [Any patterns from your memory that are relevant]\n\
+     \n\
+     ### Summary\n\
+     [1-2 sentence summary of findings]\n\
+     \n\
+     Signal completion with <<BMAD_JOB_DONE>> when finished.\n\
+     \n\
      ## Communication\n\
      - Respond in English\n\
-     - Be constructive but honest"
-        .to_string()
+     - Be constructive but direct — flag real concerns, not theoretical ones\n\
+     - Every observation must reference either the project brief or your accumulated memory\n\
+     - Quality over quantity — 3 incisive observations are better than 10 shallow ones",
+        vision_section = vision_section)
 }
 
 /// Detect infrastructure errors where the session never started.
@@ -4426,6 +4641,7 @@ development_status:
                     base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
+                critic: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {
@@ -4582,7 +4798,7 @@ development_status:
         let pipeline = make_test_pipeline();
         let story =
             StoryInfo::from_key_and_status("13-4-test", "backlog", Path::new("/tmp")).unwrap();
-        let consultations = pipeline.build_create_story_consultations(&story, None);
+        let consultations = pipeline.build_create_story_consultations(&story, None, None);
         assert_eq!(consultations.len(), 2);
 
         let adversarial = &consultations[0];
@@ -4671,12 +4887,12 @@ development_status:
         let pipeline = make_test_pipeline();
         let story =
             StoryInfo::from_key_and_status("13-6-test", "review", Path::new("/tmp")).unwrap();
-        let consultations = pipeline.build_review_consultations(&story, None);
+        let consultations = pipeline.build_review_consultations(&story, None, None);
         assert_eq!(consultations.len(), 1);
 
         let critic = &consultations[0];
         assert_eq!(critic.label, "review-critic");
-        assert_eq!(critic.role, LlmRole::Review);
+        assert_eq!(critic.role, LlmRole::Critic);
         assert_eq!(critic.tool_set, ConsultationToolSet::Restricted);
         assert!(critic.skill_path.is_none());
         assert!(critic.preamble_override.is_some());
@@ -4885,7 +5101,8 @@ development_status:
         let story =
             StoryInfo::from_key_and_status("13-8-test", "backlog", Path::new("/tmp")).unwrap();
         let critic_memory_path = pipeline.critic_memory.prepare_context_path();
-        let consultations = pipeline.build_create_story_consultations(&story, critic_memory_path);
+        let consultations =
+            pipeline.build_create_story_consultations(&story, critic_memory_path, None);
 
         let critic = &consultations[1];
         assert!(
@@ -4956,7 +5173,8 @@ development_status:
         let story =
             StoryInfo::from_key_and_status("13-8-test", "review", Path::new("/tmp")).unwrap();
         let critic_memory_path = pipeline.critic_memory.prepare_context_path();
-        let consultations = pipeline.build_review_consultations(&story, critic_memory_path);
+        let consultations =
+            pipeline.build_review_consultations(&story, critic_memory_path, None);
 
         let critic = &consultations[0];
         assert!(
@@ -4970,20 +5188,487 @@ development_status:
     }
 
     #[test]
-    fn test_critic_preamble_contains_memory_instructions() {
-        let preamble = build_placeholder_critic_preamble();
-        assert!(preamble.contains("## Memory"));
+    fn test_story_critic_preamble_contains_identity_and_memory() {
+        let preamble = build_story_critic_preamble(true);
+        assert!(preamble.contains("independent"));
+        assert!(preamble.contains("vision guardian"));
+        assert!(preamble.contains("NOT part of the BMAD"));
         assert!(preamble.contains("critic-memory.md"));
-        assert!(preamble.contains("overwrite mode"));
-        assert!(preamble.contains("read_file"));
+        assert!(preamble.contains("edit_file"));
+        assert!(preamble.contains("overwrite"));
+    }
+
+    #[test]
+    fn test_story_critic_preamble_contains_identity() {
+        let preamble = build_story_critic_preamble(true);
+        assert!(preamble.contains("independent"));
+        assert!(preamble.contains("vision guardian"));
+        assert!(preamble.contains("NOT part of the BMAD"));
+    }
+
+    #[test]
+    fn test_story_critic_preamble_contains_memory_instructions() {
+        let preamble = build_story_critic_preamble(true);
+        assert!(preamble.contains("critic-memory.md"));
+        assert!(preamble.contains("edit_file"));
+        assert!(preamble.contains("overwrite"));
+    }
+
+    #[test]
+    fn test_review_critic_preamble_contains_decision_vocabulary() {
+        let preamble = build_review_critic_preamble(true);
+        assert!(preamble.contains("patch"));
+        assert!(preamble.contains("defer"));
+        assert!(preamble.contains("dismiss"));
     }
 
     #[test]
     fn test_review_critic_preamble_contains_memory_instructions() {
-        let preamble = build_review_critic_preamble();
-        assert!(preamble.contains("## Memory"));
+        let preamble = build_review_critic_preamble(true);
         assert!(preamble.contains("critic-memory.md"));
-        assert!(preamble.contains("overwrite mode"));
+        assert!(preamble.contains("edit_file"));
+        assert!(preamble.contains("overwrite"));
         assert!(preamble.contains("Decision Resolution"));
+    }
+
+    // --- Critic role and project brief tests (Story 13.9) ---
+
+    #[test]
+    fn test_build_create_story_consultations_uses_critic_role() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("13-9-test", "backlog", Path::new("/tmp")).unwrap();
+        let consultations =
+            pipeline.build_create_story_consultations(&story, None, None);
+        let critic = &consultations[1];
+        assert_eq!(critic.label, "critic");
+        assert_eq!(critic.role, LlmRole::Critic);
+    }
+
+    #[test]
+    fn test_build_review_consultations_uses_critic_role() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("13-9-test", "review", Path::new("/tmp")).unwrap();
+        let consultations =
+            pipeline.build_review_consultations(&story, None, None);
+        let critic = &consultations[0];
+        assert_eq!(critic.label, "review-critic");
+        assert_eq!(critic.role, LlmRole::Critic);
+    }
+
+    #[test]
+    fn test_build_create_story_consultations_includes_project_brief() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("13-9-test", "backlog", Path::new("/tmp")).unwrap();
+        let brief = Some("/tmp/project-brief.md".to_string());
+        let consultations =
+            pipeline.build_create_story_consultations(&story, None, brief);
+        let critic = &consultations[1];
+        assert_eq!(
+            critic.context_files[0], "/tmp/project-brief.md",
+            "project brief should be first in context_files"
+        );
+    }
+
+    #[test]
+    fn test_build_review_consultations_includes_project_brief() {
+        let pipeline = make_test_pipeline();
+        let story =
+            StoryInfo::from_key_and_status("13-9-test", "review", Path::new("/tmp")).unwrap();
+        let brief = Some("/tmp/project-brief.md".to_string());
+        let consultations =
+            pipeline.build_review_consultations(&story, None, brief);
+        let critic = &consultations[0];
+        assert_eq!(
+            critic.context_files[0], "/tmp/project-brief.md",
+            "project brief should be first in context_files"
+        );
+    }
+
+    #[test]
+    fn test_prepare_project_brief_path_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let brief_file = root.join("MY_BRIEF.md");
+        std::fs::write(&brief_file, "# Brief").unwrap();
+
+        let mut config = make_pipeline_test_config();
+        config.bmad_paths.project_root = root.to_string_lossy().to_string();
+        config.project_brief = Some("MY_BRIEF.md".to_string());
+
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            50,
+        );
+
+        let pipeline = StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+            critic_memory,
+        };
+
+        let result = pipeline.prepare_project_brief_path();
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("MY_BRIEF.md"));
+    }
+
+    #[test]
+    fn test_prepare_project_brief_path_fallback_prd() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let planning_dir = root.join("planning");
+        std::fs::create_dir_all(&planning_dir).unwrap();
+        std::fs::write(planning_dir.join("prd.md"), "# PRD").unwrap();
+
+        let mut config = make_pipeline_test_config();
+        config.bmad_paths.project_root = root.to_string_lossy().to_string();
+        config.bmad_paths.planning_artifacts = planning_dir.to_string_lossy().to_string();
+        config.project_brief = None;
+
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            50,
+        );
+
+        let pipeline = StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+            critic_memory,
+        };
+
+        let result = pipeline.prepare_project_brief_path();
+        assert!(result.is_some());
+        let path = result.unwrap();
+        assert!(path.contains("prd.md"));
+    }
+
+    #[test]
+    fn test_prepare_project_brief_path_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let planning_dir = root.join("planning-empty");
+        std::fs::create_dir_all(&planning_dir).unwrap();
+
+        let mut config = make_pipeline_test_config();
+        config.bmad_paths.project_root = root.to_string_lossy().to_string();
+        config.bmad_paths.planning_artifacts = planning_dir.to_string_lossy().to_string();
+        config.project_brief = None;
+
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            50,
+        );
+
+        let pipeline = StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+            critic_memory,
+        };
+
+        let result = pipeline.prepare_project_brief_path();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_prepare_project_brief_path_rejects_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let planning_dir = root.join("planning");
+        std::fs::create_dir_all(&planning_dir).unwrap();
+        std::fs::write(planning_dir.join("prd.md"), "# PRD").unwrap();
+
+        let mut config = make_pipeline_test_config();
+        config.bmad_paths.project_root = root.to_string_lossy().to_string();
+        config.bmad_paths.planning_artifacts = planning_dir.to_string_lossy().to_string();
+        config.project_brief = Some("/etc/passwd".to_string());
+
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            50,
+        );
+
+        let pipeline = StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+            critic_memory,
+        };
+
+        let result = pipeline.prepare_project_brief_path();
+        assert!(result.is_some(), "absolute path rejected, should fall through to PRD");
+        assert!(
+            result.unwrap().contains("prd.md"),
+            "should return PRD fallback after rejecting absolute path"
+        );
+    }
+
+    #[test]
+    fn test_prepare_project_brief_path_rejects_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let planning_dir = root.join("planning");
+        std::fs::create_dir_all(&planning_dir).unwrap();
+        std::fs::write(planning_dir.join("prd.md"), "# PRD").unwrap();
+
+        let mut config = make_pipeline_test_config();
+        config.bmad_paths.project_root = root.to_string_lossy().to_string();
+        config.bmad_paths.planning_artifacts = planning_dir.to_string_lossy().to_string();
+        config.project_brief = Some("../../../etc/passwd".to_string());
+
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            50,
+        );
+
+        let pipeline = StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+            critic_memory,
+        };
+
+        let result = pipeline.prepare_project_brief_path();
+        assert!(result.is_some(), "traversal path rejected, should fall through to PRD");
+        assert!(
+            result.unwrap().contains("prd.md"),
+            "should return PRD fallback after rejecting traversal path"
+        );
+    }
+
+    #[test]
+    fn test_prepare_project_brief_path_prd_filters_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let planning_dir = root.join("planning");
+        std::fs::create_dir_all(&planning_dir).unwrap();
+        std::fs::write(planning_dir.join("prd.md"), "# PRD").unwrap();
+        std::fs::write(planning_dir.join("not-a-prd-file.txt"), "text").unwrap();
+        std::fs::write(planning_dir.join("deprecated-prd-old.md"), "old").unwrap();
+
+        let mut config = make_pipeline_test_config();
+        config.bmad_paths.project_root = root.to_string_lossy().to_string();
+        config.bmad_paths.planning_artifacts = planning_dir.to_string_lossy().to_string();
+        config.project_brief = None;
+
+        let config = Arc::new(config);
+        let secrets = Arc::new(make_pipeline_test_secrets());
+        let shutdown: ShutdownFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+        let ui = UiHandle::null();
+        let agent_factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config),
+            Arc::clone(&secrets),
+        ));
+        let sub_agent_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sub_agent_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let critic_memory = CriticMemory::new(
+            &config.bmad_paths.implementation_artifacts,
+            &config.bmad_paths.project_root,
+            50,
+        );
+
+        let pipeline = StoryPipeline {
+            config: Arc::clone(&config),
+            git_provider: Box::new(MockGitProvider),
+            notifier: Box::new(NoopNotifier),
+            session_runner: SessionRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&agent_factory),
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+            ),
+            epic_review_runner: EpicReviewRunner::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                Arc::clone(&agent_factory),
+                shutdown,
+                mcp_manager,
+                ui.clone(),
+            ),
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+            critic_memory,
+        };
+
+        let result = pipeline.prepare_project_brief_path();
+        assert!(result.is_some());
+        let path = result.unwrap();
+        // Sorted by filename length then alphabetically — prd.md (6 chars) wins
+        // over deprecated-prd-old.md (22 chars)
+        assert!(
+            path.ends_with("prd.md") && !path.contains("deprecated"),
+            "should prefer shorter prd.md over deprecated-prd-old.md, got: {path}"
+        );
+        // Should NOT match the .txt file
+        assert!(!path.ends_with(".txt"));
     }
 }

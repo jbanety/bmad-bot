@@ -105,6 +105,15 @@
 - `recover_and_process` WAL recovery path skips `check_size_threshold()` when code review is disabled — WAL being reworked in Story 13.10.
 
 
+## Deferred from: code review of story 13.9 (2026-04-25)
+
+- **Symlink escape bypasses path traversal guards:** `prepare_project_brief_path()` rejects `..` and absolute paths but doesn't canonicalize or verify the resolved path is within project root. A symlink under project_root can escape to arbitrary files. Same pattern in `check_project_brief()` (Story 13.7). Fix: canonicalize both paths and verify containment. [src/pipeline.rs:1435]
+- **`contains("..")` rejects legitimate filenames containing ".." substring:** Both `prepare_project_brief_path()` and `check_project_brief()` use `path.contains("..")` which false-positives on filenames like `my..brief.md`. Fix: split on path separators and check for `..` as a standalone component. [src/pipeline.rs:1428, src/config/mod.rs:521]
+- **Test boilerplate duplication in `prepare_project_brief_path` tests:** ~240 lines of identical `StoryPipeline` construction across 6 tests. Should use a shared helper like `make_test_pipeline_with_config()`. [src/pipeline.rs:tests ~5272-5530]
+- **No integration test for `AgentFactory::build()` with `LlmRole::Critic`:** No role has a `build()` unit test (requires API credentials). Consider adding a mock-provider integration test. [src/llm/agent_factory.rs]
+- **Empty model string with valid provider passes `validate_llm_role()`:** Setting `critic.provider = "anthropic"` with `critic.model = ""` passes validation but will fail at runtime. Pre-existing gap affecting all LLM roles. [src/config/mod.rs:407]
+
+
 ## Deferred from: code review of story 12.4 (2026-04-20)
 
 - **`build_agent_for_role` hardcodes `LlmRole::Dev` for `SpawnAgentTool`:** `src/session/runner.rs:844` always passes `LlmRole::Dev` to `create_spawn_agent_tool` even though the enclosing function accepts a `role: LlmRole` parameter. All current call sites pass `LlmRole::Dev` so no bug today, but if a future caller passes a different role, sub-agents would use the wrong provider/model pairing.

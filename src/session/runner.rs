@@ -836,6 +836,13 @@ impl SessionRunner {
                     &self.config.llm.epic_review
                 }
             }
+            LlmRole::Critic => {
+                if self.config.llm.critic.provider.is_empty() {
+                    &self.config.llm.review
+                } else {
+                    &self.config.llm.critic
+                }
+            }
         };
         let provider = &role_config.provider;
         let model = &role_config.model;
@@ -2564,6 +2571,7 @@ mod tests {
                     base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
+                critic: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

@@ -959,6 +959,7 @@ development_status:
                     base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
+                critic: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

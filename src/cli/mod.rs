@@ -711,6 +711,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
                 base_url: supervisor_base_url,
             },
             epic_review: LlmRoleConfig::default(),
+            critic: LlmRoleConfig::default(),
         },
         notifications: NotificationConfig {
             telegram: TelegramConfig {
@@ -1584,6 +1585,7 @@ mod tests {
                     base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
+                critic: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

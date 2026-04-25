@@ -186,6 +186,10 @@ pub struct LlmConfig {
     /// falls back to the `review` config when the provider is empty.
     #[serde(default)]
     pub epic_review: LlmRoleConfig,
+    /// Provider + model for the Story Critic (independent vision guardian).
+    /// Defaults to empty — at runtime, falls back to the review config.
+    #[serde(default)]
+    pub critic: LlmRoleConfig,
 }
 
 /// Provider + model pair for a single LLM role.
@@ -399,6 +403,11 @@ impl BotConfig {
             self.validate_llm_role("llm.epic_review", &self.llm.epic_review)?;
         }
 
+        // critic is optional — only validate if provider is explicitly set
+        if !self.llm.critic.provider.is_empty() {
+            self.validate_llm_role("llm.critic", &self.llm.critic)?;
+        }
+
         // Required paths must be non-empty
         self.validate_non_empty("bmad_paths.project_root", &self.bmad_paths.project_root)?;
         self.validate_non_empty("bmad_paths.output_folder", &self.bmad_paths.output_folder)?;
@@ -566,6 +575,7 @@ impl BotConfig {
                     base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
+                critic: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {
@@ -646,6 +656,10 @@ impl BotSecrets {
         // (empty provider inherits from review, which is already validated)
         if !config.llm.epic_review.provider.is_empty() {
             llm_roles.push(("epic_review", &config.llm.epic_review));
+        }
+
+        if !config.llm.critic.provider.is_empty() {
+            llm_roles.push(("critic", &config.llm.critic));
         }
 
         for (role_name, role_config) in llm_roles {
@@ -1735,5 +1749,96 @@ bmad_paths:
         let err = config.validate().unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("critic_memory_threshold_kb"));
+    }
+
+    // --- Critic LLM role config tests (Story 13.9) ---
+
+    #[test]
+    fn test_config_critic_serde_default() {
+        let config: BotConfig = serde_yml::from_str(VALID_YAML).unwrap();
+        assert!(config.llm.critic.provider.is_empty());
+        assert!(config.llm.critic.model.is_empty());
+    }
+
+    #[test]
+    fn test_config_critic_serde_explicit() {
+        let yaml = "polling_interval_secs: 60\nlog_format: pretty\nlog_level: info\nui_mode: fancy\nui_verbosity: verbose\ngit_provider:\n  provider: github\n  repo_owner: test-org\n  repo_name: test-repo\nllm:\n  dev:\n    provider: anthropic\n    model: claude-sonnet-4-20250514\n  review:\n    provider: anthropic\n    model: claude-sonnet-4-20250514\n  supervisor:\n    provider: openai\n    model: gpt-4o\n  critic:\n    provider: anthropic\n    model: claude-sonnet-4-20250514\nnotifications:\n  telegram:\n    enabled: false\n    chat_id: \"\"\nbmad_paths:\n  project_root: \".\"\n  output_folder: \"_bmad-output\"\n  planning_artifacts: \"_bmad-output/planning-artifacts\"\n  implementation_artifacts: \"_bmad-output/implementation-artifacts\"\n";
+        let config: BotConfig = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(config.llm.critic.provider, "anthropic");
+        assert_eq!(config.llm.critic.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_config_validate_critic_valid() {
+        let mut config = valid_config();
+        config.llm.critic = LlmRoleConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validate_critic_invalid_provider() {
+        let mut config = valid_config();
+        config.llm.critic = LlmRoleConfig {
+            provider: "unknown-llm".to_string(),
+            model: "some-model".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+        };
+        let err = config.validate().unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("llm.critic.provider"));
+    }
+
+    #[test]
+    fn test_config_validate_critic_empty_skipped() {
+        let config: BotConfig = serde_yml::from_str(VALID_YAML).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_secrets_validate_critic_provider_key_required() {
+        let mut config = valid_config();
+        // Make all base roles anthropic so we can test critic isolation
+        config.llm.supervisor = LlmRoleConfig {
+            provider: "anthropic".to_string(),
+            model: "test".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+        };
+        config.llm.critic = LlmRoleConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+        };
+        let secrets = BotSecrets {
+            anthropic_api_key: Some("sk-ant-test".to_string()),
+            openai_api_key: None,
+            github_token: Some("ghp_test".to_string()),
+            gitlab_token: None,
+            telegram_bot_token: None,
+        };
+        let err = secrets.validate_for_config(&config).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("OPENAI_API_KEY"));
+        assert!(msg.contains("critic"));
+    }
+
+    #[test]
+    fn test_secrets_validate_critic_empty_skipped() {
+        let config: BotConfig = serde_yml::from_str(VALID_YAML).unwrap();
+        let secrets = BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: Some("sk-test".to_string()),
+            github_token: Some("ghp_test".to_string()),
+            gitlab_token: None,
+            telegram_bot_token: None,
+        };
+        assert!(secrets.validate_for_config(&config).is_ok());
     }
 }

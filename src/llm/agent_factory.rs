@@ -43,6 +43,8 @@ pub enum LlmRole {
     Supervisor,
     /// Epic review agent — autonomous post-epic retrospective analysis.
     EpicReview,
+    /// Story Critic — independent vision guardian for story and decision review.
+    Critic,
 }
 
 impl std::fmt::Display for LlmRole {
@@ -52,6 +54,7 @@ impl std::fmt::Display for LlmRole {
             Self::Review => write!(f, "review"),
             Self::Supervisor => write!(f, "supervisor"),
             Self::EpicReview => write!(f, "epic_review"),
+            Self::Critic => write!(f, "critic"),
         }
     }
 }
@@ -217,6 +220,13 @@ impl AgentFactory {
                     &self.config.llm.review // fallback to review config
                 } else {
                     &self.config.llm.epic_review
+                }
+            }
+            LlmRole::Critic => {
+                if self.config.llm.critic.provider.is_empty() {
+                    &self.config.llm.review // fallback to review config
+                } else {
+                    &self.config.llm.critic
                 }
             }
         }
@@ -587,6 +597,7 @@ pub(crate) mod tests {
         assert_eq!(LlmRole::Review.to_string(), "review");
         assert_eq!(LlmRole::Supervisor.to_string(), "supervisor");
         assert_eq!(LlmRole::EpicReview.to_string(), "epic_review");
+        assert_eq!(LlmRole::Critic.to_string(), "critic");
     }
 
     #[test]
@@ -602,6 +613,8 @@ pub(crate) mod tests {
         assert_eq!(debug, "Dev");
         let debug_epic = format!("{:?}", LlmRole::EpicReview);
         assert_eq!(debug_epic, "EpicReview");
+        let debug_critic = format!("{:?}", LlmRole::Critic);
+        assert!(debug_critic.contains("Critic"));
     }
 
     #[test]
@@ -611,6 +624,8 @@ pub(crate) mod tests {
         assert_ne!(LlmRole::Review, LlmRole::Supervisor);
         assert_ne!(LlmRole::Supervisor, LlmRole::EpicReview);
         assert_eq!(LlmRole::EpicReview, LlmRole::EpicReview);
+        assert_eq!(LlmRole::Critic, LlmRole::Critic);
+        assert_ne!(LlmRole::Critic, LlmRole::Review);
     }
 
     // -- AgentFactory tests --
@@ -648,6 +663,7 @@ pub(crate) mod tests {
                     base_url: None,
                 },
                 epic_review: LlmRoleConfig::default(),
+                critic: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {
@@ -768,6 +784,53 @@ pub(crate) mod tests {
         assert_eq!(role_config.provider, "anthropic");
         assert_eq!(role_config.model, "claude-sonnet-4-20250514");
         assert_eq!(role_config.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn test_config_for_role_critic_fallback_to_review() {
+        let config = Arc::new(make_test_config());
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        let role_config = factory.config_for_role(LlmRole::Critic);
+        assert_eq!(role_config.provider, "openai");
+        assert_eq!(role_config.model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_config_for_role_critic_explicit() {
+        use crate::config::LlmRoleConfig;
+        let mut cfg = make_test_config();
+        cfg.llm.critic = LlmRoleConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+        };
+        let config = Arc::new(cfg);
+        let secrets = Arc::new(make_test_secrets());
+        let factory = AgentFactory::new(config, secrets);
+
+        let role_config = factory.config_for_role(LlmRole::Critic);
+        assert_eq!(role_config.provider, "anthropic");
+        assert_eq!(role_config.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_llm_role_critic_display() {
+        assert_eq!(LlmRole::Critic.to_string(), "critic");
+    }
+
+    #[test]
+    fn test_llm_role_critic_debug() {
+        let debug = format!("{:?}", LlmRole::Critic);
+        assert!(debug.contains("Critic"));
+    }
+
+    #[test]
+    fn test_llm_role_critic_equality() {
+        assert_eq!(LlmRole::Critic, LlmRole::Critic);
+        assert_ne!(LlmRole::Critic, LlmRole::Review);
     }
 
     #[test]

@@ -47,6 +47,16 @@ llm:
     provider: anthropic
     model: claude-sonnet-4-20250514
 
+  # Story Critic — independent vision guardian (optional).
+  # When configured, the Critic uses this provider/model for story reviews
+  # and code review decision resolution. Defaults to the review config when absent.
+  # Recommended: use a model with strong reasoning capabilities.
+  # critic:
+  #   provider: anthropic
+  #   model: claude-sonnet-4-20250514
+  #   # base_url: "https://custom-endpoint.example.com"
+  #   # reasoning_effort: high  # for OpenAI models
+
 # Notification channels
 notifications:
   telegram:
