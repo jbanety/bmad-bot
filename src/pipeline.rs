@@ -26,7 +26,8 @@ use crate::notifier::{
     EpicGateNotification, Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier,
 };
 use crate::review::epic::{
-    EpicReviewOutcome, EpicReviewRunner, extract_epic_recap, generate_failure_report,
+    EpicReviewOutcome, EpicReviewRunner, PreEpicStory, extract_epic_recap,
+    generate_failure_report, parse_pre_epic_stories,
 };
 use crate::session::SessionOutcome;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
@@ -1869,6 +1870,64 @@ impl StoryPipeline {
             }
         };
 
+        // Inject pre-epic stories from successful reviews
+        if review_succeeded {
+            let next_epic = epic_num + 1;
+            let pre_epic_stories = parse_pre_epic_stories(&report, next_epic);
+            if pre_epic_stories.is_empty() {
+                tracing::info!(
+                    action = "no_pre_epic_stories",
+                    next_epic = next_epic,
+                    "No pre-epic stories to inject for epic {next_epic}"
+                );
+            } else {
+                match inject_pre_epic_stories(sprint_status_path, &pre_epic_stories, next_epic)
+                    .await
+                {
+                    Ok(count) if count > 0 => {
+                        let skipped = pre_epic_stories.len() - count;
+                        tracing::info!(
+                            action = "pre_epic_stories_injected",
+                            count = count,
+                            skipped = skipped,
+                            next_epic = next_epic,
+                            "Injected {count} pre-epic stories for epic {next_epic} (skipped {skipped} duplicates)"
+                        );
+                        let repo_path = &self.config.bmad_paths.project_root;
+                        let commit_msg = format!(
+                            "chore(sprint-status): add pre-epic-{next_epic} debt stories from epic-{epic_num} review"
+                        );
+                        if let Err(e) =
+                            commit_sprint_status(repo_path, sprint_status_path, &commit_msg).await
+                        {
+                            tracing::error!(
+                                action = "pre_epic_commit_failed",
+                                error = %e,
+                                "Failed to commit pre-epic story injection �� continuing"
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::info!(
+                            action = "pre_epic_stories_all_duplicates",
+                            total = pre_epic_stories.len(),
+                            next_epic = next_epic,
+                            "All {} pre-epic stories for epic {next_epic} already present — skipped",
+                            pre_epic_stories.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            action = "pre_epic_injection_failed",
+                            error = %e,
+                            next_epic = next_epic,
+                            "Failed to inject pre-epic stories — continuing"
+                        );
+                    }
+                }
+            }
+        }
+
         // Save report to disk
         let report_filename = format!("epic-{epic_num}-retrospective-report.md");
         let report_path =
@@ -3174,6 +3233,124 @@ async fn commit_sprint_status(
         "sprint-status.yaml changes committed successfully"
     );
     Ok(())
+}
+
+/// Inject pre-epic stories into `sprint-status.yaml`.
+///
+/// Inserts story entries with status `backlog` under `epic-{next_epic}`,
+/// creating the epic entry if it doesn't exist. Returns the number of
+/// stories actually injected (excluding duplicates already in the file).
+async fn inject_pre_epic_stories(
+    sprint_status_path: &Path,
+    stories: &[PreEpicStory],
+    next_epic: u32,
+) -> Result<usize, String> {
+    if stories.is_empty() {
+        return Ok(0);
+    }
+
+    let content = tokio::fs::read_to_string(sprint_status_path)
+        .await
+        .map_err(|e| format!("Failed to read sprint-status.yaml: {e}"))?;
+
+    // Idempotency: filter out stories already present
+    let new_stories: Vec<&PreEpicStory> = stories
+        .iter()
+        .filter(|s| {
+            let key_with_colon = format!("{}:", s.story_key);
+            if content.contains(&key_with_colon) {
+                tracing::info!(
+                    action = "pre_epic_story_skip_duplicate",
+                    story_key = %s.story_key,
+                    "Pre-epic story already exists in sprint-status — skipping"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if new_stories.is_empty() {
+        return Ok(0);
+    }
+
+    // Build insertion lines — iterate ALL stories to preserve dependency chain
+    // even when earlier stories were filtered as duplicates
+    let new_key_set: std::collections::HashSet<&str> =
+        new_stories.iter().map(|s| s.story_key.as_str()).collect();
+    let mut insertion_lines = Vec::new();
+    let mut prev_key: Option<&str> = None;
+    for story in stories {
+        if new_key_set.contains(story.story_key.as_str()) {
+            let line = if let Some(pk) = prev_key {
+                format!("  {}: backlog  # depends-on: {pk}", story.story_key)
+            } else {
+                format!("  {}: backlog", story.story_key)
+            };
+            insertion_lines.push(line);
+        }
+        prev_key = Some(&story.story_key);
+    }
+    let insertion_block = insertion_lines.join("\n");
+
+    let epic_pattern = format!("epic-{next_epic}:");
+    let lines: Vec<&str> = content.lines().collect();
+
+    let new_content = if let Some(epic_line_idx) = lines.iter().position(|l| {
+        let trimmed = l.trim();
+        trimmed.starts_with(&epic_pattern)
+    }) {
+        // Epic exists — insert after the epic line
+        let mut result = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            result.push(*line);
+            if i == epic_line_idx {
+                result.push(&insertion_block);
+            }
+        }
+        result.join("\n")
+    } else {
+        // Epic doesn't exist — find last entry of previous epic and append
+        let current_epic = next_epic.saturating_sub(1);
+        let current_epic_prefix = format!("{current_epic}-");
+        let current_retro = format!("epic-{current_epic}-retrospective");
+
+        let mut last_entry_idx = None;
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(&current_epic_prefix) || trimmed.starts_with(&current_retro) {
+                last_entry_idx = Some(i);
+            }
+        }
+
+        let insert_after = last_entry_idx.unwrap_or(lines.len().saturating_sub(1));
+        let epic_entry = format!("\n  epic-{next_epic}: backlog");
+
+        let mut result = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            result.push(line.to_string());
+            if i == insert_after {
+                result.push(epic_entry.clone());
+                result.push(insertion_block.clone());
+            }
+        }
+        result.join("\n")
+    };
+
+    // Preserve trailing newline if original had one
+    let final_content = if content.ends_with('\n') && !new_content.ends_with('\n') {
+        format!("{new_content}\n")
+    } else {
+        new_content
+    };
+
+    tokio::fs::write(sprint_status_path, &final_content)
+        .await
+        .map_err(|e| format!("Failed to write sprint-status.yaml: {e}"))?;
+
+    let count = new_stories.len();
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -5901,5 +6078,155 @@ development_status:
             critic.pipeline_phase,
             Some("review-critic-consult".to_string())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // inject_pre_epic_stories tests
+    // -----------------------------------------------------------------------
+
+    fn make_pre_epic_story(key: &str, title: &str) -> PreEpicStory {
+        PreEpicStory {
+            story_key: key.to_string(),
+            title: title.to_string(),
+            source: "deferred-work".to_string(),
+            severity: "medium".to_string(),
+            effort: "small".to_string(),
+            justification: "test justification".to_string(),
+            related_deferred_items: "none".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inject_pre_epic_stories_into_existing_epic() {
+        let dir = tempfile::tempdir().unwrap();
+        let ss = dir.path().join("sprint-status.yaml");
+        let content = "development_status:\n  epic-15: backlog\n  15-1-first-story: backlog\n";
+        tokio::fs::write(&ss, content).await.unwrap();
+
+        let stories = vec![
+            make_pre_epic_story("15-0a-pre-epic-15-fix-something", "Fix something"),
+            make_pre_epic_story("15-0b-pre-epic-15-add-tests", "Add tests"),
+        ];
+
+        let count = inject_pre_epic_stories(&ss, &stories, 15).await.unwrap();
+        assert_eq!(count, 2);
+
+        let result = tokio::fs::read_to_string(&ss).await.unwrap();
+        let epic_pos = result.find("epic-15: backlog").unwrap();
+        let story_0a_pos = result.find("15-0a-pre-epic-15-fix-something: backlog").unwrap();
+        let story_0b_pos = result.find("15-0b-pre-epic-15-add-tests: backlog").unwrap();
+        let story_1_pos = result.find("15-1-first-story: backlog").unwrap();
+
+        assert!(story_0a_pos > epic_pos, "0a should appear after epic entry");
+        assert!(story_0b_pos > story_0a_pos, "0b should appear after 0a");
+        assert!(story_1_pos > story_0b_pos, "regular story should appear after pre-epic stories");
+    }
+
+    #[tokio::test]
+    async fn test_inject_pre_epic_stories_creates_epic_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let ss = dir.path().join("sprint-status.yaml");
+        let content = "development_status:\n  epic-14: in-progress\n  14-1-first-story: done\n  epic-14-retrospective: optional\n";
+        tokio::fs::write(&ss, content).await.unwrap();
+
+        let stories = vec![
+            make_pre_epic_story("15-0a-pre-epic-15-fix-something", "Fix something"),
+            make_pre_epic_story("15-0b-pre-epic-15-add-tests", "Add tests"),
+        ];
+
+        let count = inject_pre_epic_stories(&ss, &stories, 15).await.unwrap();
+        assert_eq!(count, 2);
+
+        let result = tokio::fs::read_to_string(&ss).await.unwrap();
+        assert!(result.contains("epic-15: backlog"), "Should create epic-15 entry");
+        let epic_pos = result.find("epic-15: backlog").unwrap();
+        let story_0a_pos = result.find("15-0a-pre-epic-15-fix-something: backlog").unwrap();
+        assert!(story_0a_pos > epic_pos, "Stories should appear after epic entry");
+    }
+
+    #[tokio::test]
+    async fn test_inject_pre_epic_stories_sequential_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let ss = dir.path().join("sprint-status.yaml");
+        let content = "development_status:\n  epic-15: backlog\n  15-1-first-story: backlog\n";
+        tokio::fs::write(&ss, content).await.unwrap();
+
+        let stories = vec![
+            make_pre_epic_story("15-0a-pre-epic-15-fix-a", "Fix A"),
+            make_pre_epic_story("15-0b-pre-epic-15-fix-b", "Fix B"),
+            make_pre_epic_story("15-0c-pre-epic-15-fix-c", "Fix C"),
+        ];
+
+        inject_pre_epic_stories(&ss, &stories, 15).await.unwrap();
+
+        let result = tokio::fs::read_to_string(&ss).await.unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+
+        let line_0a = lines.iter().find(|l| l.contains("15-0a-pre-epic-15-fix-a")).unwrap();
+        let line_0b = lines.iter().find(|l| l.contains("15-0b-pre-epic-15-fix-b")).unwrap();
+        let line_0c = lines.iter().find(|l| l.contains("15-0c-pre-epic-15-fix-c")).unwrap();
+
+        assert!(!line_0a.contains("depends-on"), "First story should have no depends-on");
+        assert!(line_0b.contains("# depends-on: 15-0a-pre-epic-15-fix-a"), "0b should depend on 0a");
+        assert!(line_0c.contains("# depends-on: 15-0b-pre-epic-15-fix-b"), "0c should depend on 0b");
+    }
+
+    #[tokio::test]
+    async fn test_inject_pre_epic_stories_empty_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let ss = dir.path().join("sprint-status.yaml");
+        let content = "development_status:\n  epic-15: backlog\n";
+        tokio::fs::write(&ss, content).await.unwrap();
+
+        let count = inject_pre_epic_stories(&ss, &[], 15).await.unwrap();
+        assert_eq!(count, 0);
+
+        let result = tokio::fs::read_to_string(&ss).await.unwrap();
+        assert_eq!(result, content, "File should be unchanged");
+    }
+
+    #[tokio::test]
+    async fn test_inject_pre_epic_stories_preserves_existing_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let ss = dir.path().join("sprint-status.yaml");
+        let content = "# generated: 2026-03-05\n# STATUS DEFINITIONS:\n\ndevelopment_status:\n  epic-14: done\n  14-1-first: done\n  epic-14-retrospective: optional\n\n  epic-15: backlog\n  15-1-regular-story: backlog\n";
+        tokio::fs::write(&ss, content).await.unwrap();
+
+        let stories = vec![
+            make_pre_epic_story("15-0a-pre-epic-15-fix-something", "Fix something"),
+        ];
+
+        inject_pre_epic_stories(&ss, &stories, 15).await.unwrap();
+
+        let result = tokio::fs::read_to_string(&ss).await.unwrap();
+        assert!(result.contains("# generated: 2026-03-05"), "Header preserved");
+        assert!(result.contains("# STATUS DEFINITIONS:"), "Comments preserved");
+        assert!(result.contains("epic-14: done"), "Epic 14 preserved");
+        assert!(result.contains("14-1-first: done"), "Epic 14 story preserved");
+        assert!(result.contains("epic-14-retrospective: optional"), "Retro preserved");
+        assert!(result.contains("15-1-regular-story: backlog"), "Regular story preserved");
+    }
+
+    #[tokio::test]
+    async fn test_inject_pre_epic_stories_idempotent_on_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let ss = dir.path().join("sprint-status.yaml");
+        let content = "development_status:\n  epic-15: backlog\n  15-1-first-story: backlog\n";
+        tokio::fs::write(&ss, content).await.unwrap();
+
+        let stories = vec![
+            make_pre_epic_story("15-0a-pre-epic-15-fix-something", "Fix something"),
+            make_pre_epic_story("15-0b-pre-epic-15-add-tests", "Add tests"),
+        ];
+
+        let count1 = inject_pre_epic_stories(&ss, &stories, 15).await.unwrap();
+        assert_eq!(count1, 2);
+
+        let count2 = inject_pre_epic_stories(&ss, &stories, 15).await.unwrap();
+        assert_eq!(count2, 0, "Second run should inject nothing");
+
+        let result = tokio::fs::read_to_string(&ss).await.unwrap();
+        let occurrences = result.matches("15-0a-pre-epic-15-fix-something: backlog").count();
+        assert_eq!(occurrences, 1, "Should not have duplicates");
     }
 }

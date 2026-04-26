@@ -113,15 +113,18 @@ impl StoryInfo {
         }
 
         // Parse: {epic_num}-{story_num}-{slug}
+        // story_num may have trailing alpha for pre-epic stories (e.g., "0a", "0b")
         let mut parts = key.splitn(3, '-');
         let epic_num: u32 = parts.next()?.parse().ok()?;
-        let story_num: u32 = parts.next()?.parse().ok()?;
+        let story_num_raw = parts.next()?;
+        let story_num_stripped: String = story_num_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let story_num: u32 = story_num_stripped.parse().ok()?;
         let slug = parts.next().unwrap_or("");
 
         // Derive label from slug: replace hyphens with spaces
         let label = slug.replace('-', " ");
 
-        let story_id = format!("{epic_num}.{story_num}");
+        let story_id = format!("{epic_num}.{story_num_raw}");
         let branch_name = format!("story/{key}");
         let specs_path = story_dir.join(format!("{key}.md"));
 
@@ -617,6 +620,49 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(info.branch_name, "story/4-3-pre-development-preparation");
+    }
+
+    #[test]
+    fn test_story_info_from_pre_epic_key() {
+        let dir = Path::new("/tmp/artifacts");
+        let info = StoryInfo::from_key_and_status(
+            "15-0a-pre-epic-15-fix-error-handling",
+            "backlog",
+            dir,
+        );
+        let info = info.expect("Should parse pre-epic story key with alpha suffix");
+        assert_eq!(info.epic_num, 15);
+        assert_eq!(info.story_num, 0);
+        assert_eq!(info.story_id, "15.0a");
+        assert_eq!(info.story_key, "15-0a-pre-epic-15-fix-error-handling");
+        assert_eq!(info.status, "backlog");
+        assert!(info.is_eligible());
+    }
+
+    #[test]
+    fn test_story_info_from_pre_epic_key_sub_index_b() {
+        let dir = Path::new("/tmp/artifacts");
+        let info = StoryInfo::from_key_and_status(
+            "15-0b-pre-epic-15-add-tests",
+            "backlog",
+            dir,
+        );
+        let info = info.expect("Should parse pre-epic story key with sub-index b");
+        assert_eq!(info.story_num, 0);
+        assert_eq!(info.story_id, "15.0b");
+    }
+
+    #[test]
+    fn test_story_info_existing_numeric_keys_unchanged() {
+        let dir = Path::new("/tmp/artifacts");
+        let info = StoryInfo::from_key_and_status(
+            "14-3-inject-pre-epic-stories",
+            "ready-for-dev",
+            dir,
+        );
+        let info = info.expect("Regular numeric keys must still parse correctly");
+        assert_eq!(info.story_num, 3);
+        assert_eq!(info.story_id, "14.3");
     }
 
     // --- SprintStatusFile tests ---

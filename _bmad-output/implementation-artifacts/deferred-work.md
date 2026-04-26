@@ -131,3 +131,8 @@
 ## Deferred from: code review of story 14.1 (2026-04-26)
 
 - **Epic review prompt grows monotonically with no token budget or truncation strategy:** Each new feature adds instructional text to `build_epic_review_prompt()` without any size accounting. Eventually the prompt will exceed context limits with no mechanism to detect or handle it.
+
+
+## Deferred from: code review of story 14.3 (2026-04-26)
+
+- **`parse_pre_epic_stories` section boundary relies on sentinel strings:** `section_text = &report[section_start..]` captures everything from the section marker to end of report. Termination depends on `**Must-Do` / `**Can Defer` sentinels. If Winston omits these sentinels, `#####` headings from later report sections would be processed as story candidates. Mitigated by title-required guard and prompt engineering from story 14.2, but fragile if report format evolves.

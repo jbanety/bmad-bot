@@ -92,6 +92,158 @@ pub enum EpicReviewOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// PreEpicStory
+// ---------------------------------------------------------------------------
+
+/// A pre-epic debt/improvement story parsed from Winston's epic review report.
+#[derive(Debug, Clone)]
+pub struct PreEpicStory {
+    /// Full story key, e.g. `15-0a-pre-epic-15-fix-error-handling`.
+    pub story_key: String,
+    /// Human-readable title.
+    pub title: String,
+    /// Origin: `deferred-work` or `code-analysis`.
+    pub source: String,
+    /// Severity level: `low`, `medium`, `high`.
+    pub severity: String,
+    /// Effort estimate: `small`, `medium`, `large`.
+    pub effort: String,
+    /// Why this story is needed.
+    pub justification: String,
+    /// Cross-reference to deferred-work.md items.
+    pub related_deferred_items: String,
+}
+
+/// Parse pre-epic story blocks from Winston's epic review report.
+///
+/// Looks for section `Pre-Epic Stories for Epic {next_epic}` and extracts
+/// each `#####`-headed story block. Returns an empty `Vec` if the section
+/// is missing or contains "No pre-epic stories proposed".
+pub fn parse_pre_epic_stories(report: &str, next_epic: u32) -> Vec<PreEpicStory> {
+    let section_marker = format!("Pre-Epic Stories for Epic {next_epic}");
+    let section_start = match report.find(&section_marker) {
+        Some(pos) => pos + section_marker.len(),
+        None => return Vec::new(),
+    };
+
+    let section_text = &report[section_start..];
+
+    if section_text
+        .lines()
+        .take(5)
+        .any(|l| l.contains("No pre-epic stories proposed"))
+    {
+        return Vec::new();
+    }
+
+    let mut stories = Vec::new();
+
+    for block in section_text.split("##### ").skip(1) {
+        let first_line_end = match block.find('\n') {
+            Some(pos) => pos,
+            None => continue,
+        };
+
+        let first_line = block[..first_line_end].trim();
+        if first_line.starts_with("**Must-Do") || first_line.starts_with("**Can Defer") {
+            break;
+        }
+
+        let story_key = first_line.to_string();
+        if story_key.is_empty() {
+            tracing::warn!(action = "pre_epic_parse_skip", "Skipping block with empty story key");
+            continue;
+        }
+
+        let prefix = format!("pre-epic-{next_epic}-");
+        let slug_after_prefix = match story_key.find(&prefix) {
+            Some(pos) => &story_key[pos + prefix.len()..],
+            None => {
+                tracing::warn!(
+                    action = "pre_epic_parse_missing_prefix",
+                    story_key = %story_key,
+                    expected_prefix = %prefix,
+                    "Skipping story key missing required pre-epic prefix"
+                );
+                continue;
+            }
+        };
+
+        if slug_after_prefix.is_empty() {
+            tracing::warn!(
+                action = "pre_epic_parse_empty_slug",
+                story_key = %story_key,
+                "Skipping story key with empty slug after prefix"
+            );
+            continue;
+        }
+
+        let valid = slug_after_prefix.len() <= 40
+            && slug_after_prefix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !valid {
+            tracing::warn!(
+                action = "pre_epic_parse_invalid_slug",
+                story_key = %story_key,
+                "Skipping story with invalid slug"
+            );
+            continue;
+        }
+
+        let block_text = &block[first_line_end..];
+
+        let title = extract_field(block_text, "Title");
+        let source = extract_field(block_text, "Source");
+        let severity = extract_field(block_text, "Severity");
+        let effort = extract_field(block_text, "Effort");
+        let justification = extract_field(block_text, "Justification");
+        let related_deferred_items = extract_field(block_text, "Related Deferred Items");
+
+        if title.is_empty() {
+            tracing::warn!(
+                action = "pre_epic_parse_skip_no_title",
+                story_key = %story_key,
+                "Skipping story block with missing Title"
+            );
+            continue;
+        }
+
+        stories.push(PreEpicStory {
+            story_key,
+            title,
+            source,
+            severity,
+            effort,
+            justification,
+            related_deferred_items,
+        });
+    }
+
+    stories
+}
+
+/// Extract a field value from a story block.
+///
+/// Looks for `- **{field_name}:**` and captures all text until the next
+/// `- **` prefix or end of block.
+fn extract_field(block: &str, field_name: &str) -> String {
+    let marker = format!("- **{field_name}:**");
+    let start = match block.find(&marker) {
+        Some(pos) => pos + marker.len(),
+        None => return String::new(),
+    };
+
+    let remaining = &block[start..];
+
+    let end = remaining
+        .find("\n- **")
+        .unwrap_or(remaining.len());
+
+    remaining[..end].trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
 // EpicReviewRunner
 // ---------------------------------------------------------------------------
 
@@ -1345,5 +1497,194 @@ mod tests {
             ui_verbosity: "normal".to_string(),
             mcp_servers: vec![],
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_pre_epic_stories tests
+    // -----------------------------------------------------------------------
+
+    fn sample_report_with_two_stories() -> String {
+        r#"## Epic 14 Review
+
+#### 5. Pre-Epic Stories for Epic 15
+
+##### 15-0a-pre-epic-15-fix-transient-error-classification
+- **Title:** Fix transient error classification after Copilot removal
+- **Source:** deferred-work
+- **Severity:** medium
+- **Effort:** small
+- **Justification:** `is_transient_llm_error` classifies "unauthorized" as retryable since epic 11
+- **Related Deferred Items:** story 11.1 (2026-04-15) item 1
+
+##### 15-0b-pre-epic-15-add-mcp-timeout-validation
+- **Title:** Reject zero-value MCP server timeout in config validation
+- **Source:** deferred-work
+- **Severity:** medium
+- **Effort:** small
+- **Justification:** `timeout_secs: 0` causes immediate handshake timeout
+- **Related Deferred Items:** story 9.3 (2026-04-18) item 1
+
+**Must-Do Before Epic 15:**
+Stories 15-0a and 15-0b — both medium severity × small effort.
+
+**Can Defer Further:**
+(none)
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn test_parse_pre_epic_stories_normal_report() {
+        let report = sample_report_with_two_stories();
+        let stories = parse_pre_epic_stories(&report, 15);
+        assert_eq!(stories.len(), 2);
+        assert_eq!(
+            stories[0].story_key,
+            "15-0a-pre-epic-15-fix-transient-error-classification"
+        );
+        assert_eq!(
+            stories[0].title,
+            "Fix transient error classification after Copilot removal"
+        );
+        assert_eq!(stories[0].source, "deferred-work");
+        assert_eq!(stories[0].severity, "medium");
+        assert_eq!(stories[0].effort, "small");
+        assert!(stories[0].justification.contains("is_transient_llm_error"));
+        assert!(stories[0].related_deferred_items.contains("story 11.1"));
+
+        assert_eq!(
+            stories[1].story_key,
+            "15-0b-pre-epic-15-add-mcp-timeout-validation"
+        );
+        assert_eq!(
+            stories[1].title,
+            "Reject zero-value MCP server timeout in config validation"
+        );
+    }
+
+    #[test]
+    fn test_parse_pre_epic_stories_no_section() {
+        let report = "## Epic 14 Review\n\n#### 1. Summary\nAll good.\n";
+        let stories = parse_pre_epic_stories(report, 15);
+        assert!(stories.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pre_epic_stories_no_items() {
+        let report = "#### 5. Pre-Epic Stories for Epic 15\n\nNo pre-epic stories proposed — codebase is clean for Epic 15.\n";
+        let stories = parse_pre_epic_stories(report, 15);
+        assert!(stories.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pre_epic_stories_single_story() {
+        let report = r#"#### 5. Pre-Epic Stories for Epic 15
+
+##### 15-0a-pre-epic-15-fix-something
+- **Title:** Fix something important
+- **Source:** code-analysis
+- **Severity:** high
+- **Effort:** medium
+- **Justification:** This needs fixing
+- **Related Deferred Items:** none
+
+**Must-Do Before Epic 15:**
+Story 15-0a.
+"#;
+        let stories = parse_pre_epic_stories(report, 15);
+        assert_eq!(stories.len(), 1);
+        assert_eq!(stories[0].story_key, "15-0a-pre-epic-15-fix-something");
+        assert_eq!(stories[0].title, "Fix something important");
+    }
+
+    #[test]
+    fn test_parse_pre_epic_stories_malformed_block_skipped() {
+        let report = r#"#### 5. Pre-Epic Stories for Epic 15
+
+##### 15-0a-pre-epic-15-valid-story
+- **Title:** Valid story
+- **Source:** deferred-work
+- **Severity:** medium
+- **Effort:** small
+- **Justification:** Good reason
+- **Related Deferred Items:** story 1.1
+
+##### 15-0b-pre-epic-15-malformed-story
+- **Source:** deferred-work
+- **Severity:** low
+- **Effort:** small
+- **Justification:** Missing title
+- **Related Deferred Items:** none
+
+**Must-Do Before Epic 15:**
+Story 15-0a.
+"#;
+        let stories = parse_pre_epic_stories(report, 15);
+        assert_eq!(stories.len(), 1);
+        assert_eq!(stories[0].story_key, "15-0a-pre-epic-15-valid-story");
+    }
+
+    #[test]
+    fn test_parse_pre_epic_stories_stops_at_grouping() {
+        let report = r#"#### 5. Pre-Epic Stories for Epic 15
+
+##### 15-0a-pre-epic-15-fix-something
+- **Title:** Fix something
+- **Source:** deferred-work
+- **Severity:** medium
+- **Effort:** small
+- **Justification:** Reason
+- **Related Deferred Items:** story 1.1
+
+**Must-Do Before Epic 15:**
+Story 15-0a — medium severity × small effort.
+
+**Can Defer Further:**
+(none)
+"#;
+        let stories = parse_pre_epic_stories(report, 15);
+        assert_eq!(stories.len(), 1);
+        assert_eq!(stories[0].story_key, "15-0a-pre-epic-15-fix-something");
+    }
+
+    #[test]
+    fn test_parse_pre_epic_stories_rejects_invalid_slug() {
+        let report = r#"#### 5. Pre-Epic Stories for Epic 15
+
+##### 15-0a-pre-epic-15-Fix_Error
+- **Title:** Fix error with bad slug
+- **Source:** deferred-work
+- **Severity:** medium
+- **Effort:** small
+- **Justification:** Bad slug
+- **Related Deferred Items:** none
+
+**Must-Do Before Epic 15:**
+none
+"#;
+        let stories = parse_pre_epic_stories(report, 15);
+        assert!(stories.is_empty(), "Story with invalid slug should be skipped");
+    }
+
+    #[test]
+    fn test_parse_pre_epic_stories_multiline_justification() {
+        let report = r#"#### 5. Pre-Epic Stories for Epic 15
+
+##### 15-0a-pre-epic-15-fix-something
+- **Title:** Fix something
+- **Source:** deferred-work
+- **Severity:** medium
+- **Effort:** small
+- **Justification:** First line of justification
+that continues on the second line
+- **Related Deferred Items:** story 1.1
+
+**Must-Do Before Epic 15:**
+Story 15-0a.
+"#;
+        let stories = parse_pre_epic_stories(report, 15);
+        assert_eq!(stories.len(), 1);
+        assert!(stories[0].justification.contains("First line of justification"));
+        assert!(stories[0].justification.contains("second line"));
     }
 }
