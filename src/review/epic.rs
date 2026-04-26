@@ -610,6 +610,17 @@ pub fn build_epic_review_prompt(epic_num: u32, config: &BotConfig) -> String {
          then `read_file` — focus on patterns, decisions, and project structure sections\n\
          5. **Source code**: Use `grep`, `find_path`, `list_directory`, and `read_file` to explore \
          the actual implementation\n\
+         6. **Deferred work**: Use `read_file` to attempt loading \
+         `{implementation}/deferred-work.md`. \
+         If `read_file` returns an error (file not found) or the file is empty, note \
+         `No deferred work items found` in your Technical Analysis and continue normally — \
+         the file is optional. For each deferred item, categorize by **severity** \
+         (critical/high/medium/low) and **effort** (small/medium/large). \
+         The epic number is the integer before the dot in the story number \
+         (e.g., `story 11.3` → epic 11). Compare against Epic {epic_num} to determine how many \
+         epic boundaries an item has crossed. Label items deferred across 2+ epic boundaries as \
+         `[OVERDUE] N epics` (e.g., `[OVERDUE] 3 epics` for an item from epic 11 when reviewing \
+         epic 14)\n\
          \n\
          ### Your Mission\n\
          \n\
@@ -640,6 +651,16 @@ pub fn build_epic_review_prompt(epic_num: u32, config: &BotConfig) -> String {
          Error handling, logging, naming conventions — uniform?\n\
          - **Architecture Adherence**: Does the implementation match architecture.md? Any drift?\n\
          - **Technical Debt Inventory**: TODOs, shortcuts, known issues — list them with file locations\n\
+         - **Deferred Work Analysis**: Integrate items from `deferred-work.md` (if loaded) alongside \
+         your own code-level findings. Present each item in a structured table:\n\
+         \n\
+         | Source (story + date) | Description | Severity | Effort | Epic span | Recommendation |\n\
+         |--------|------------|----------|--------|-----------|----------------|\n\
+         \n\
+         Where `Epic span` is `current` for items from Epic {epic_num}, or `[OVERDUE] N epics` for \
+         items that have crossed 2+ epic boundaries. `Recommendation` is one of: \
+         `address before next epic` / `defer further` / `obsolete (resolved)`. \
+         If `deferred-work.md` was not found or empty, state `No deferred work items found`.\n\
          - **Cross-Cutting Concerns**: Test coverage gaps, security surface, dependency hygiene\n\
          - **Codebase Health**: Run `cargo check`, `cargo test`, `cargo clippy` via terminal tool \
          and report results verbatim\n\
@@ -648,6 +669,8 @@ pub fn build_epic_review_prompt(epic_num: u32, config: &BotConfig) -> String {
          - Actionable items for the next epic\n\
          - Risks to watch\n\
          - Debt to address before it compounds\n\
+         - **Overdue deferred items**: Explicitly list any `[OVERDUE]` items from the Deferred \
+         Work Analysis that should be resolved before the next epic begins\n\
          - Patterns to reinforce or abandon\n\
          \n\
          Use your tools to explore the codebase thoroughly. Read source files, grep for patterns, \
@@ -1004,6 +1027,84 @@ mod tests {
         let config = make_test_config();
         let prompt = build_epic_review_prompt(1, &config);
         assert!(prompt.contains("READ-ONLY"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Deferred work prompt tests (Story 14.1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_prompt_references_deferred_work_file() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(1, &config);
+        assert!(prompt.contains("deferred-work.md"));
+        assert!(
+            prompt.find("deferred-work.md").unwrap() > prompt.find("Source code").unwrap(),
+            "deferred-work.md must appear after Source code (item 5)"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_contains_deferred_work_categorization() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(1, &config);
+        let deferred_pos = prompt.find("deferred-work.md").unwrap();
+        assert!(
+            prompt[deferred_pos..].contains("severity"),
+            "severity must appear in the context of deferred work"
+        );
+        assert!(
+            prompt[deferred_pos..].contains("effort"),
+            "effort must appear in the context of deferred work"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_contains_deferred_work_age_analysis() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(1, &config);
+        assert!(prompt.contains("[OVERDUE]"));
+        assert!(prompt.contains("epic boundaries"));
+    }
+
+    #[test]
+    fn test_build_prompt_contains_graceful_missing_file_handling() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(1, &config);
+        assert!(prompt.contains("read_file"));
+        assert!(
+            prompt.contains("error") || prompt.contains("Error"),
+            "prompt must mention error handling for missing file"
+        );
+        assert!(prompt.contains("No deferred work items found"));
+    }
+
+    #[test]
+    fn test_build_prompt_deferred_work_in_technical_analysis() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(1, &config);
+        assert!(prompt.contains("Deferred Work Analysis"));
+        assert!(
+            prompt.find("Deferred Work Analysis").unwrap()
+                > prompt.find("Technical Debt Inventory").unwrap(),
+            "Deferred Work Analysis must appear after Technical Debt Inventory"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_recommendations_reference_overdue() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(1, &config);
+        let first = prompt.find("[OVERDUE]").unwrap();
+        let last = prompt.rfind("[OVERDUE]").unwrap();
+        assert!(
+            first < last,
+            "[OVERDUE] must appear at least twice (Technical Analysis + Recommendations)"
+        );
+        assert!(
+            last > prompt.find("Recommendations").unwrap(),
+            "last [OVERDUE] must appear after Recommendations section"
+        );
     }
 
     // -----------------------------------------------------------------------
