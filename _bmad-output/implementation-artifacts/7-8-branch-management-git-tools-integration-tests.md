@@ -1,6 +1,6 @@
 # Story 7.8: Branch Management & Git Tools Integration Tests
 
-Status: ready-for-dev
+Status: abandoned
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

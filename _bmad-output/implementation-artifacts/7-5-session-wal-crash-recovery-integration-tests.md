@@ -1,6 +1,6 @@
 # Story 7.5: Session WAL Crash Recovery Integration Tests
 
-Status: ready-for-dev
+Status: abandoned
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

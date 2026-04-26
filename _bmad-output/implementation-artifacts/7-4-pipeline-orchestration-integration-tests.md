@@ -1,6 +1,6 @@
 # Story 7.4: Pipeline Orchestration Integration Tests
 
-Status: ready-for-dev
+Status: abandoned
 
 ## Story
 

@@ -1,6 +1,6 @@
 # Story 7.2: Config → Startup Validation Integration Tests
 
-Status: ready-for-dev
+Status: abandoned
 
 ## Story
 

@@ -1,6 +1,6 @@
 # Story 7.1: Integration Test Infrastructure & Fixtures
 
-Status: ready-for-dev
+Status: abandoned
 
 ## Story
 
