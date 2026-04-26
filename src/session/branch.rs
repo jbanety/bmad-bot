@@ -123,11 +123,11 @@ pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch
     let last_dep = &story.dependencies[story.dependencies.len() - 1];
 
     // Parse the epic number from the dependency key (format: "{epic_num}-{story_num}-{slug}")
-    let dep_epic_num: Option<u32> = last_dep.splitn(2, '-').next().and_then(|s| s.parse().ok());
+    let dep_epic_num: Option<u32> = last_dep.split('-').next().and_then(|s| s.parse().ok());
 
     // Inter-epic dependency: the predecessor epic is fully merged into default_branch.
     // Always fork from default_branch — never from a story branch of another epic.
-    if dep_epic_num.map_or(false, |dep_epic| dep_epic != story.epic_num) {
+    if dep_epic_num.is_some_and(|dep_epic| dep_epic != story.epic_num) {
         tracing::info!(
             action = "base_branch_resolved",
             base = %default_branch,

@@ -3480,7 +3480,7 @@ async fn inject_pre_epic_stories(
 /// non-existent sections or out-of-range indices are silently skipped).
 async fn purge_deferred_items(
     deferred_work_path: &Path,
-    refs: &[crate::review::epic::DeferredItemRef],
+    refs: &[DeferredItemRef],
 ) -> Result<usize, String> {
     if refs.is_empty() {
         return Ok(0);
@@ -3510,7 +3510,7 @@ async fn purge_deferred_items(
             if let Some(heading) = current_heading.take() {
                 sections.push((heading, std::mem::take(&mut current_items)));
             }
-        } else if let Some(_) = &current_heading {
+        } else if current_heading.is_some() {
             if line.starts_with("- ") {
                 current_items.push(line.to_string());
             } else if !line.trim().is_empty() {

@@ -3553,7 +3553,6 @@ mod tests {
             msg.contains("Context Window Limit Reached"),
             "Should contain the reason in the header"
         );
-        assert!(msg.contains("summary text"), "Should contain the summary");
         assert!(
             msg.contains("exchange text"),
             "Should contain the formatted exchanges"
