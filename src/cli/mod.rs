@@ -703,18 +703,21 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
                 model: dev_model,
                 reasoning_effort: None,
                 base_url: dev_base_url,
+                cli_path: None,
             },
             review: LlmRoleConfig {
                 provider: review_provider,
                 model: review_model,
                 reasoning_effort: None,
                 base_url: review_base_url,
+                cli_path: None,
             },
             supervisor: LlmRoleConfig {
                 provider: supervisor_provider,
                 model: supervisor_model,
                 reasoning_effort: None,
                 base_url: supervisor_base_url,
+                cli_path: None,
             },
             epic_review: LlmRoleConfig::default(),
             critic: LlmRoleConfig::default(),
@@ -1271,6 +1274,8 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     let secrets = crate::config::BotSecrets::load()?;
     secrets.validate_for_config(&config)?;
 
+    config.validate_sdk_providers()?;
+
     // BMAD auto-discovery
     let discovery = crate::config::discovery::BmadDiscovery::discover(Path::new(
         &config.bmad_paths.project_root,
@@ -1577,18 +1582,21 @@ mod tests {
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 review: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "openai".to_string(),
                     model: "gpt-4o".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
@@ -1909,6 +1917,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         let env = generate_env_file(&config).unwrap();
         let count = env.matches("ANTHROPIC_API_KEY=").count();

@@ -649,18 +649,21 @@ pub(crate) mod tests {
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 review: LlmRoleConfig {
                     provider: "openai".to_string(),
                     model: "gpt-4o".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "openai".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
@@ -775,6 +778,7 @@ pub(crate) mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: Some("high".to_string()),
             base_url: None,
+            cli_path: None,
         };
         let config = Arc::new(cfg);
         let secrets = Arc::new(make_test_secrets());
@@ -806,6 +810,7 @@ pub(crate) mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         let config = Arc::new(cfg);
         let secrets = Arc::new(make_test_secrets());

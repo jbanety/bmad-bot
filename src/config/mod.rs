@@ -195,7 +195,7 @@ pub struct LlmConfig {
 /// Provider + model pair for a single LLM role.
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct LlmRoleConfig {
-    /// One of: `"anthropic"`, `"openai"`.
+    /// One of: `"anthropic"`, `"openai"`, `"claude-code"`, `"codex"`.
     pub provider: String,
     /// Model identifier, e.g. `"claude-sonnet-4-20250514"`, `"gpt-4o"`.
     pub model: String,
@@ -214,6 +214,22 @@ pub struct LlmRoleConfig {
     /// Must start with `http://` or `https://`. Trailing slashes are stripped automatically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Optional path to the SDK CLI binary (for `claude-code` or `codex` providers).
+    ///
+    /// When set, overrides the default CLI lookup via `$PATH`.
+    /// Subsequent stories (15.5, 15.6) use this path for subprocess invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_path: Option<String>,
+}
+
+impl LlmRoleConfig {
+    pub fn is_sdk_provider(&self) -> bool {
+        matches!(self.provider.as_str(), "claude-code" | "codex")
+    }
+
+    pub fn is_api_provider(&self) -> bool {
+        matches!(self.provider.as_str(), "anthropic" | "openai")
+    }
 }
 
 /// Valid values for `reasoning_effort`.
@@ -316,7 +332,7 @@ fn default_true() -> bool {
 const VALID_GIT_PROVIDERS: &[&str] = &["github", "gitlab"];
 
 /// Recognised LLM provider identifiers.
-const VALID_LLM_PROVIDERS: &[&str] = &["anthropic", "openai"];
+const VALID_LLM_PROVIDERS: &[&str] = &["anthropic", "openai", "claude-code", "codex"];
 
 impl BotConfig {
     /// Loads and deserializes a [`BotConfig`] from a YAML file at `path`.
@@ -489,6 +505,32 @@ impl BotConfig {
             }
         }
 
+        // Validate cli_path if provided — must be non-empty
+        if let Some(ref path) = role.cli_path
+            && path.trim().is_empty()
+        {
+            return Err(ConfigError::InvalidField {
+                field: format!("{field_prefix}.cli_path"),
+                reason: "cli_path must not be empty when set".to_string(),
+            });
+        }
+
+        // Warn about meaningless combinations (not hard errors)
+        if role.cli_path.is_some() && role.is_api_provider() {
+            tracing::warn!(
+                field = %field_prefix,
+                "cli_path is set on API provider '{}' — this field is only used by SDK providers",
+                role.provider
+            );
+        }
+        if role.reasoning_effort.is_some() && role.is_sdk_provider() {
+            tracing::warn!(
+                field = %field_prefix,
+                "reasoning_effort is set on SDK provider '{}' — SDK CLIs manage their own reasoning",
+                role.provider
+            );
+        }
+
         Ok(())
     }
 
@@ -540,6 +582,51 @@ impl BotConfig {
         }
     }
 
+    /// Validates SDK provider requirements: CLI availability and BMAD skill files.
+    ///
+    /// Called separately from `validate()` during `run_start()` because it performs
+    /// I/O (subprocess calls, file-exists checks). Follows the `check_project_brief()`
+    /// precedent.
+    pub fn validate_sdk_providers(&self) -> Result<(), ConfigError> {
+        let roles: Vec<(&str, &LlmRoleConfig)> = {
+            let mut r = vec![
+                ("dev", &self.llm.dev),
+                ("review", &self.llm.review),
+                ("supervisor", &self.llm.supervisor),
+            ];
+            if !self.llm.epic_review.provider.is_empty() {
+                r.push(("epic_review", &self.llm.epic_review));
+            }
+            if !self.llm.critic.provider.is_empty() {
+                r.push(("critic", &self.llm.critic));
+            }
+            r
+        };
+
+        let mut sdk_providers: std::collections::HashMap<&str, (&str, Option<&str>)> =
+            std::collections::HashMap::new();
+        for (role_name, role_config) in &roles {
+            if !role_config.is_sdk_provider() {
+                continue;
+            }
+            sdk_providers
+                .entry(role_config.provider.as_str())
+                .or_insert_with(|| (role_name, role_config.cli_path.as_deref()));
+        }
+
+        if sdk_providers.is_empty() {
+            return Ok(());
+        }
+
+        let project_root = std::path::Path::new(&self.bmad_paths.project_root);
+        for (provider, (role_name, cli_path)) in &sdk_providers {
+            validate_cli_availability(provider, role_name, *cli_path)?;
+            validate_sdk_skill_files(provider, project_root)?;
+        }
+
+        Ok(())
+    }
+
     /// Creates a minimal `BotConfig` for CLI/tracing tests.
     /// Not public API — only used by `cli::tests`.
     #[doc(hidden)]
@@ -561,18 +648,21 @@ impl BotConfig {
                     model: "test".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 review: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 supervisor: LlmRoleConfig {
                     provider: "anthropic".to_string(),
                     model: "test".to_string(),
                     reasoning_effort: None,
                     base_url: None,
+                    cli_path: None,
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
@@ -596,6 +686,85 @@ impl BotConfig {
             critic_memory_threshold_kb: None,
             mcp_servers: vec![],
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SDK provider CLI helpers (standalone functions for testability)
+// ---------------------------------------------------------------------------
+
+fn resolve_cli_name(provider: &str) -> Option<&str> {
+    match provider {
+        "claude-code" => Some("claude"),
+        "codex" => Some("codex"),
+        _ => None,
+    }
+}
+
+pub(crate) fn sdk_provider_skill_dir(provider: &str) -> &str {
+    match provider {
+        "claude-code" => ".claude/skills",
+        "codex" => ".agents/skills",
+        _ => ".claude/skills",
+    }
+}
+
+fn validate_sdk_skill_files(
+    provider: &str,
+    project_root: &std::path::Path,
+) -> Result<(), ConfigError> {
+    let base = sdk_provider_skill_dir(provider);
+    let skill_files = [
+        format!("{base}/bmad-dev-story/SKILL.md"),
+        format!("{base}/bmad-create-story/SKILL.md"),
+        format!("{base}/bmad-code-review/SKILL.md"),
+    ];
+    let missing: Vec<&str> = skill_files
+        .iter()
+        .filter(|p| !project_root.join(p).exists())
+        .map(|p| p.as_str())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidField {
+            field: format!("bmad_skills ({provider})"),
+            reason: format!(
+                "BMAD skills not found for provider '{}'. Run the BMAD installer with {} support enabled. Missing: {}",
+                provider,
+                provider,
+                missing.join(", ")
+            ),
+        })
+    }
+}
+
+fn validate_cli_availability(
+    provider: &str,
+    role_name: &str,
+    cli_path: Option<&str>,
+) -> Result<(), ConfigError> {
+    let default_cli = match resolve_cli_name(provider) {
+        Some(name) => name,
+        None => return Ok(()),
+    };
+    let cli = cli_path.unwrap_or(default_cli);
+
+    let output = std::process::Command::new(cli).arg("--version").output();
+
+    match output {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(ConfigError::InvalidField {
+            field: format!("llm.{role_name}.provider ({provider})"),
+            reason: format!("CLI '{}' returned non-zero exit code: {}", cli, o.status),
+        }),
+        Err(e) => Err(ConfigError::InvalidField {
+            field: format!("llm.{role_name}.provider ({provider})"),
+            reason: format!(
+                "CLI '{}' not found for provider '{}'. Install it or set cli_path. Error: {}",
+                cli, provider, e
+            ),
+        }),
     }
 }
 
@@ -663,6 +832,9 @@ impl BotSecrets {
         }
 
         for (role_name, role_config) in llm_roles {
+            if role_config.is_sdk_provider() {
+                continue;
+            }
             match role_config.provider.as_str() {
                 "anthropic" => {
                     if self.anthropic_api_key.as_ref().is_none_or(|k| k.is_empty()) {
@@ -1776,6 +1948,7 @@ bmad_paths:
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -1788,6 +1961,7 @@ bmad_paths:
             model: "some-model".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         let err = config.validate().unwrap_err();
         let msg = format!("{err:?}");
@@ -1809,12 +1983,14 @@ bmad_paths:
             model: "test".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         config.llm.critic = LlmRoleConfig {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         let secrets = BotSecrets {
             anthropic_api_key: Some("sk-ant-test".to_string()),
@@ -1840,5 +2016,354 @@ bmad_paths:
             telegram_bot_token: None,
         };
         assert!(secrets.validate_for_config(&config).is_ok());
+    }
+
+    // --- SDK provider config tests (Story 15.2) ---
+
+    #[test]
+    fn test_config_sdk_provider_claude_code_accepted() {
+        let mut config = valid_config();
+        config.llm.dev = LlmRoleConfig {
+            provider: "claude-code".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+            cli_path: None,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_sdk_provider_codex_accepted() {
+        let mut config = valid_config();
+        config.llm.dev = LlmRoleConfig {
+            provider: "codex".to_string(),
+            model: "o4-mini".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+            cli_path: None,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_sdk_provider_all_roles() {
+        for role_setter in [
+            |c: &mut BotConfig, r: LlmRoleConfig| c.llm.dev = r,
+            |c: &mut BotConfig, r: LlmRoleConfig| c.llm.review = r,
+            |c: &mut BotConfig, r: LlmRoleConfig| c.llm.supervisor = r,
+            |c: &mut BotConfig, r: LlmRoleConfig| c.llm.epic_review = r,
+            |c: &mut BotConfig, r: LlmRoleConfig| c.llm.critic = r,
+        ] {
+            let role_config = LlmRoleConfig {
+                provider: "claude-code".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                reasoning_effort: None,
+                base_url: None,
+                cli_path: None,
+            };
+            let mut config = valid_config();
+            role_setter(&mut config, role_config);
+            assert!(
+                config.validate().is_ok(),
+                "SDK provider should be accepted for all roles"
+            );
+        }
+    }
+
+    #[test]
+    fn test_config_cli_path_deserialization() {
+        let yaml = r#"
+polling_interval_secs: 60
+log_format: pretty
+log_level: info
+ui_mode: fancy
+ui_verbosity: verbose
+git_provider:
+  provider: github
+  repo_owner: test-org
+  repo_name: test-repo
+llm:
+  dev:
+    provider: claude-code
+    model: claude-sonnet-4-6
+    cli_path: /usr/local/bin/claude
+  review:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+  supervisor:
+    provider: openai
+    model: gpt-4o
+notifications:
+  telegram:
+    enabled: false
+    chat_id: ""
+bmad_paths:
+  project_root: "."
+  output_folder: "_bmad-output"
+  planning_artifacts: "_bmad-output/planning-artifacts"
+  implementation_artifacts: "_bmad-output/implementation-artifacts"
+"#;
+        let config: BotConfig = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.llm.dev.cli_path.as_deref(),
+            Some("/usr/local/bin/claude")
+        );
+    }
+
+    #[test]
+    fn test_config_cli_path_none_by_default() {
+        let config: BotConfig = serde_yml::from_str(VALID_YAML).unwrap();
+        assert!(config.llm.dev.cli_path.is_none());
+        assert!(config.llm.review.cli_path.is_none());
+        assert!(config.llm.supervisor.cli_path.is_none());
+    }
+
+    #[test]
+    fn test_config_cli_path_not_serialized_when_none() {
+        let config = valid_config();
+        let yaml = serde_yml::to_string(&config).unwrap();
+        assert!(
+            !yaml.contains("cli_path"),
+            "cli_path: None should not appear in serialized YAML"
+        );
+    }
+
+    #[test]
+    fn test_config_cli_path_empty_string_rejected() {
+        let mut config = valid_config();
+        config.llm.dev = LlmRoleConfig {
+            provider: "claude-code".to_string(),
+            model: "test".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+            cli_path: Some(String::new()),
+        };
+        let err = config.validate().unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("cli_path"));
+    }
+
+    #[test]
+    fn test_config_cli_path_on_api_provider_accepted() {
+        let mut config = valid_config();
+        config.llm.dev = LlmRoleConfig {
+            provider: "anthropic".to_string(),
+            model: "test".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+            cli_path: Some("/usr/bin/something".to_string()),
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_reasoning_effort_on_sdk_provider_accepted() {
+        let mut config = valid_config();
+        config.llm.dev = LlmRoleConfig {
+            provider: "claude-code".to_string(),
+            model: "test".to_string(),
+            reasoning_effort: Some("high".to_string()),
+            base_url: None,
+            cli_path: None,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_is_sdk_provider() {
+        assert!(
+            LlmRoleConfig {
+                provider: "claude-code".to_string(),
+                ..Default::default()
+            }
+            .is_sdk_provider()
+        );
+        assert!(
+            LlmRoleConfig {
+                provider: "codex".to_string(),
+                ..Default::default()
+            }
+            .is_sdk_provider()
+        );
+        assert!(
+            !LlmRoleConfig {
+                provider: "anthropic".to_string(),
+                ..Default::default()
+            }
+            .is_sdk_provider()
+        );
+        assert!(
+            !LlmRoleConfig {
+                provider: "openai".to_string(),
+                ..Default::default()
+            }
+            .is_sdk_provider()
+        );
+        assert!(!LlmRoleConfig::default().is_sdk_provider());
+    }
+
+    #[test]
+    fn test_is_api_provider() {
+        assert!(
+            LlmRoleConfig {
+                provider: "anthropic".to_string(),
+                ..Default::default()
+            }
+            .is_api_provider()
+        );
+        assert!(
+            LlmRoleConfig {
+                provider: "openai".to_string(),
+                ..Default::default()
+            }
+            .is_api_provider()
+        );
+        assert!(
+            !LlmRoleConfig {
+                provider: "claude-code".to_string(),
+                ..Default::default()
+            }
+            .is_api_provider()
+        );
+        assert!(
+            !LlmRoleConfig {
+                provider: "codex".to_string(),
+                ..Default::default()
+            }
+            .is_api_provider()
+        );
+        assert!(!LlmRoleConfig::default().is_api_provider());
+    }
+
+    #[test]
+    fn test_secrets_validate_skips_sdk_providers() {
+        let mut config = valid_config();
+        config.llm.dev = LlmRoleConfig {
+            provider: "claude-code".to_string(),
+            model: "test".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+            cli_path: None,
+        };
+        let secrets = BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: Some("sk-test".to_string()),
+            github_token: Some("ghp_test".to_string()),
+            gitlab_token: None,
+            telegram_bot_token: None,
+        };
+        assert!(secrets.validate_for_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_secrets_validate_mixed_mode() {
+        let mut config = valid_config();
+        config.llm.dev = LlmRoleConfig {
+            provider: "claude-code".to_string(),
+            model: "test".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+            cli_path: None,
+        };
+        config.llm.review = LlmRoleConfig {
+            provider: "anthropic".to_string(),
+            model: "test".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+            cli_path: None,
+        };
+        let secrets = BotSecrets {
+            anthropic_api_key: None,
+            openai_api_key: Some("sk-test".to_string()),
+            github_token: Some("ghp_test".to_string()),
+            gitlab_token: None,
+            telegram_bot_token: None,
+        };
+        let err = secrets.validate_for_config(&config).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("ANTHROPIC_API_KEY"));
+        assert!(msg.contains("review"));
+    }
+
+    #[test]
+    fn test_validate_sdk_providers_no_sdk_configured() {
+        let config = valid_config();
+        assert!(config.validate_sdk_providers().is_ok());
+    }
+
+    #[test]
+    fn test_validate_cli_availability_api_provider_passthrough() {
+        assert!(validate_cli_availability("anthropic", "dev", None).is_ok());
+        assert!(validate_cli_availability("openai", "dev", None).is_ok());
+    }
+
+    #[test]
+    fn test_resolve_cli_name_sdk_providers() {
+        assert_eq!(resolve_cli_name("claude-code"), Some("claude"));
+        assert_eq!(resolve_cli_name("codex"), Some("codex"));
+        assert_eq!(resolve_cli_name("anthropic"), None);
+        assert_eq!(resolve_cli_name("openai"), None);
+    }
+
+    #[test]
+    fn test_config_base_url_on_sdk_provider_accepted() {
+        let mut config = valid_config();
+        config.llm.dev = LlmRoleConfig {
+            provider: "claude-code".to_string(),
+            model: "test".to_string(),
+            reasoning_effort: None,
+            base_url: Some("https://custom.api.example.com".to_string()),
+            cli_path: None,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_sdk_skill_files_all_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".claude/skills");
+        for skill in ["bmad-dev-story", "bmad-create-story", "bmad-code-review"] {
+            let path = skill_dir.join(skill);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("SKILL.md"), "# skill").unwrap();
+        }
+        assert!(validate_sdk_skill_files("claude-code", dir.path()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_sdk_skill_files_one_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".claude/skills");
+        for skill in ["bmad-dev-story", "bmad-create-story"] {
+            let path = skill_dir.join(skill);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("SKILL.md"), "# skill").unwrap();
+        }
+        let err = validate_sdk_skill_files("claude-code", dir.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("bmad-code-review"));
+    }
+
+    #[test]
+    fn test_validate_sdk_skill_files_all_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = validate_sdk_skill_files("claude-code", dir.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("bmad-dev-story"));
+        assert!(msg.contains("bmad-create-story"));
+        assert!(msg.contains("bmad-code-review"));
+    }
+
+    #[test]
+    fn test_validate_sdk_skill_files_codex_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".agents/skills");
+        for skill in ["bmad-dev-story", "bmad-create-story", "bmad-code-review"] {
+            let path = skill_dir.join(skill);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("SKILL.md"), "# skill").unwrap();
+        }
+        assert!(validate_sdk_skill_files("codex", dir.path()).is_ok());
     }
 }

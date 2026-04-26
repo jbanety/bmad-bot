@@ -46,6 +46,9 @@ pub enum ProviderError {
 
 /// Resolve the API key for a given LLM provider from secrets.
 ///
+/// SDK providers (`claude-code`, `codex`) bypass this function entirely — they
+/// do not use API keys from `BotSecrets`. Key resolution is API-mode only.
+///
 /// Returns the key string if present and non-empty, or a [`ProviderError::MissingApiKey`]
 /// if the key is missing or empty.
 ///
@@ -172,6 +175,7 @@ mod tests {
             model: "gemini-pro".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
 
         let result = create_completion_model(&config, &secrets);
@@ -254,6 +258,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "sk-ant-test-key");
@@ -267,6 +272,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         let key = create_completion_model(&config, &secrets).expect("should succeed");
         assert_eq!(key, "sk-openai-test-key");
@@ -280,6 +286,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             reasoning_effort: None,
             base_url: None,
+            cli_path: None,
         };
         let result = create_completion_model(&config, &secrets);
         assert!(result.is_err());

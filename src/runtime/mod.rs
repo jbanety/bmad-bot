@@ -46,11 +46,7 @@ impl SkillPaths {
     }
 
     fn ide_to_skill_dir(ide: &str) -> &str {
-        match ide {
-            "claude-code" => ".claude/skills",
-            "codex" => ".agents/skills",
-            _ => ".claude/skills",
-        }
+        crate::config::sdk_provider_skill_dir(ide)
     }
 }
 
@@ -137,7 +133,10 @@ impl ApiRuntime {
             ),
             PHASE_DEV => (self.skill_paths.dev_story.clone(), None),
             other => {
-                tracing::warn!(phase = other, "resolve_phase_config: unknown phase, falling back to dev defaults");
+                tracing::warn!(
+                    phase = other,
+                    "resolve_phase_config: unknown phase, falling back to dev defaults"
+                );
                 (self.skill_paths.dev_story.clone(), None)
             }
         }

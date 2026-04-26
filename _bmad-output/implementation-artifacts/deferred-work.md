@@ -152,6 +152,15 @@
 - **Potential panic on empty `dependencies` vector:** `story.dependencies[story.dependencies.len() - 1]` panics if `dependencies` is empty. The diff touches adjacent lines but not this one. Pre-existing latent issue. [src/session/branch.rs:123]
 
 
+## Deferred from: code review of story 15.2 (2026-04-26)
+
+- **No timeout on subprocess CLI validation:** `validate_cli_availability()` at `src/config/mod.rs:710-739` runs `std::process::Command` synchronously with no timeout. Follows the pre-existing `validate_git_version()` pattern. Both should gain a timeout if a CLI ever hangs at startup.
+- **Interactive init does not offer SDK providers:** `LLM_PROVIDERS` constant at `src/cli/mod.rs:127` still lists only `["anthropic", "openai"]`. No default models for SDK providers, no `cli_path` prompt. Story 15.8 (Init command SDK provider setup) is the designated fix.
+- **Pipeline always creates ApiRuntime for all providers:** SDK-configured roles would hit `UnsupportedProvider` at runtime via `AgentFactory::build()`. Story 15.7 (Pipeline dual-runtime orchestration) will implement runtime routing.
+- **Provider identity as stringly-typed String across codebase:** No enum, no shared constants — raw string comparisons for provider identity in config, runtime, session, and pipeline modules. A typo compiles silently. Pre-existing design debt.
+- **No test for validate_cli_availability failure path:** The core CLI validation function is untested for its primary failure scenario (CLI not in PATH). Spec acknowledges limitation: "Do NOT attempt to mock std::process::Command."
+
+
 ## Deferred from: code review of story 15.1 (2026-04-26)
 
 - **`api_session_runner()` panics on Sdk variant:** Crash recovery path in `pipeline.rs` (lines 2748-2882) unconditionally calls `self.session_runtime.api_session_runner()` which panics on `Sdk` variant. Currently safe because Sdk is a stub, but Story 15.7 must implement dual-runtime recovery routing. [src/runtime/mod.rs:90, src/pipeline.rs:2748-2882]
