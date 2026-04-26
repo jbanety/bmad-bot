@@ -578,7 +578,7 @@ pub fn build_epic_review_preamble(config: &BotConfig, mcp_tool_names: &[String])
 /// Build the initial user message for the epic review session.
 ///
 /// Instructs the agent to use tools to load epic definition, story files,
-/// and architecture doc. Provides the four-section report structure and
+/// and architecture doc. Provides the five-section report structure and
 /// delimiter instructions.
 ///
 /// **Why tool-based loading:** Large epics can have 10+ story files at 200-400
@@ -591,6 +591,7 @@ pub fn build_epic_review_prompt(epic_num: u32, config: &BotConfig) -> String {
     let project_root = &config.bmad_paths.project_root;
     let start_delim = REPORT_START_DELIMITER;
     let end_delim = REPORT_END_DELIMITER;
+    let next_epic = epic_num + 1;
 
     format!(
         "## Epic {epic_num} Autonomous Review\n\
@@ -624,7 +625,7 @@ pub fn build_epic_review_prompt(epic_num: u32, config: &BotConfig) -> String {
          \n\
          ### Your Mission\n\
          \n\
-         Produce a comprehensive review report. Structure it with these four sections.\n\
+         Produce a comprehensive review report. Structure it with these five sections.\n\
          Output the COMPLETE report between delimiters:\n\
          \n\
          {start_delim}\n\
@@ -676,6 +677,46 @@ pub fn build_epic_review_prompt(epic_num: u32, config: &BotConfig) -> String {
          Use your tools to explore the codebase thoroughly. Read source files, grep for patterns, \
          run build commands. Do not guess — verify.\n\
          \n\
+         #### 5. Pre-Epic Stories for Epic {next_epic}\n\
+         \n\
+         Using your findings from the Deferred Work Analysis table (section 3 above) and your own \
+         code analysis, propose pre-epic cleanup stories that should be addressed before Epic {next_epic} \
+         feature work begins. Do NOT re-read `deferred-work.md` — reference your own section 3 analysis.\n\
+         \n\
+         **De-duplication:** If the same issue appears in both deferred-work.md items and your code \
+         analysis, emit one story with source `both`.\n\
+         \n\
+         **Story key convention:** Use sequential sub-indices: \
+         `{next_epic}-0a-pre-epic-{next_epic}-{{slug}}`, \
+         `{next_epic}-0b-pre-epic-{next_epic}-{{slug}}`, etc. \
+         Slugs must be short kebab-case (lowercase ASCII, hyphens only, max 40 characters).\n\
+         \n\
+         **Per-story block format (mandatory — emit ALL story blocks BEFORE the grouping sections):**\n\
+         \n\
+         ```\n\
+         ##### {next_epic}-0a-pre-epic-{next_epic}-{{slug}}\n\
+         - **Title:** descriptive action-oriented title\n\
+         - **Source:** deferred-work | epic-review-finding | both\n\
+         - **Severity:** critical | high | medium | low\n\
+         - **Effort:** small | medium | large\n\
+         - **Justification:** why this must be addressed before epic {next_epic}\n\
+         - **Related Deferred Items:** source story references from deferred-work.md \
+         (e.g., \"story 11.1 item 1, story 9.3 item 1\"), or \"N/A\" if source is epic-review-finding\n\
+         ```\n\
+         \n\
+         **After all story blocks**, split into two groups:\n\
+         - **Must-Do Before Epic {next_epic}**: critical/high severity OR `[OVERDUE]` items\n\
+         - **Can Defer Further**: remaining items with rationale for deferral\n\
+         Within each group, order stories by severity × inverse-effort ratio (highest priority first).\n\
+         If either group is empty, state so explicitly.\n\
+         \n\
+         If no items warrant pre-epic stories (deferred-work.md was empty/missing AND your code analysis \
+         found no issues), write: \"No pre-epic stories proposed — codebase is clean for \
+         Epic {next_epic}\"\n\
+         \n\
+         You MUST follow the exact per-story block format above — no variations, no extra fields, \
+         no tables. Story 14.3 parses this output programmatically.\n\
+         \n\
          CRITICAL CONSTRAINTS:\n\
          - You are conducting a READ-ONLY review. Do NOT modify any files.\n\
          - Do NOT use git for write operations. Only: git log, git diff, git status, git show.\n\
@@ -687,6 +728,7 @@ pub fn build_epic_review_prompt(epic_num: u32, config: &BotConfig) -> String {
         implementation = implementation,
         start_delim = start_delim,
         end_delim = end_delim,
+        next_epic = next_epic,
     )
 }
 
@@ -1104,6 +1146,80 @@ mod tests {
         assert!(
             last > prompt.find("Recommendations").unwrap(),
             "last [OVERDUE] must appear after Recommendations section"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pre-epic story generation tests (Story 14.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_prompt_contains_pre_epic_stories_section() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(14, &config);
+        assert!(prompt.contains("Pre-Epic Stories for Epic 15"));
+        assert!(
+            prompt.find("Pre-Epic Stories").unwrap() > prompt.find("Recommendations").unwrap(),
+            "Pre-Epic Stories must appear after Recommendations"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_pre_epic_story_key_format() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(14, &config);
+        assert!(
+            prompt.contains("0a-pre-epic-"),
+            "prompt must contain sub-indexed key convention"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_pre_epic_source_distinction() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(14, &config);
+        assert!(prompt.contains("deferred-work"));
+        assert!(prompt.contains("epic-review-finding"));
+        assert!(prompt.contains("both"));
+    }
+
+    #[test]
+    fn test_build_prompt_pre_epic_prioritization_groups() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(14, &config);
+        assert!(prompt.contains("Must-Do Before Epic"));
+        assert!(prompt.contains("Can Defer Further"));
+    }
+
+    #[test]
+    fn test_build_prompt_pre_epic_next_epic_number() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(7, &config);
+        let pre_epic_pos = prompt.find("Pre-Epic Stories").unwrap();
+        assert!(
+            prompt[pre_epic_pos..].contains("Epic 8"),
+            "Pre-Epic Stories section must reference Epic 8 (next_epic = 7 + 1)"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_pre_epic_no_items_fallback() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(14, &config);
+        assert!(prompt.contains("No pre-epic stories proposed"));
+    }
+
+    #[test]
+    fn test_build_prompt_pre_epic_format_strictness() {
+        let config = make_test_config();
+        let prompt = build_epic_review_prompt(14, &config);
+        assert!(
+            prompt.contains("exact"),
+            "prompt must contain format enforcement instruction with 'exact'"
+        );
+        assert!(
+            prompt.contains("Story 14.3 parses"),
+            "prompt must reference Story 14.3 parser"
         );
     }
 

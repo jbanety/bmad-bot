@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-26 (14-1 done)
+# last_updated: 2026-04-26 (14-2 done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -161,7 +161,7 @@ development_status:
 
   epic-14: in-progress # Epic Review Enhancement & Deferred Work — depends-on: epic-13
   14-1-winston-reads-deferred-work: done
-  14-2-pre-epic-story-generation: backlog # depends-on: 14-1
+  14-2-pre-epic-story-generation: done # depends-on: 14-1
   14-3-inject-pre-epic-stories-sprint-status: backlog # depends-on: 14-2
   14-4-purge-processed-deferred-items: backlog # depends-on: 14-3
   epic-14-retrospective: optional
