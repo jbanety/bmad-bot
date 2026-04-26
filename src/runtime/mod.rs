@@ -1,3 +1,5 @@
+pub mod sdk;
+
 use std::path::Path;
 
 use crate::llm::agent_factory::LlmRole;
@@ -6,6 +8,8 @@ use crate::session::consultation::ConsultationConfig;
 use crate::session::runner::SessionRunner;
 use crate::session::state::{PHASE_CREATE, PHASE_DEV, PHASE_REVIEW};
 use crate::watcher::StoryInfo;
+
+pub use sdk::SdkRuntime;
 
 // ---------------------------------------------------------------------------
 // SkillPaths — resolve-once, use-everywhere skill path registry
@@ -76,7 +80,7 @@ impl SessionRuntime {
     pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
         match self {
             Self::Api(api) => api.run_session(context).await,
-            Self::Sdk(_) => todo!("SDK runtime implemented in Story 15.3+"),
+            Self::Sdk(sdk) => sdk.run_session(context).await,
         }
     }
 
@@ -147,11 +151,7 @@ impl ApiRuntime {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SdkRuntime — stub for CLI subprocess runtime (Stories 15.3+)
-// ---------------------------------------------------------------------------
-
-pub struct SdkRuntime;
+// SdkRuntime re-exported from sdk module above
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -300,7 +300,17 @@ mod tests {
 
     #[test]
     fn test_session_runtime_sdk_variant_construction() {
-        let _runtime = SessionRuntime::Sdk(SdkRuntime);
+        let config = make_test_config(tempfile::tempdir().unwrap().path());
+        let secrets = std::sync::Arc::new(crate::config::BotSecrets {
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sdk = SdkRuntime::new(config, secrets, shutdown, crate::ui::UiHandle::null());
+        let _runtime = SessionRuntime::Sdk(sdk);
     }
 
     #[test]

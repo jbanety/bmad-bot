@@ -161,6 +161,13 @@
 - **No test for validate_cli_availability failure path:** The core CLI validation function is untested for its primary failure scenario (CLI not in PATH). Spec acknowledges limitation: "Do NOT attempt to mock std::process::Command."
 
 
+## Deferred from: code review of story 15.3 (2026-04-26)
+
+- **`#[allow(dead_code)]` on `secrets` field in `SdkRuntime`:** Field is used by `merge_env_vars()` called from `execute_session()`, but binary crate dead_code lint fires because `execute_session()` has no non-test callers yet. Self-resolves when Stories 15.5/15.6 call `execute_session()`. [src/runtime/sdk.rs:89]
+- **Non-Unix `send_sigterm` no-op causes unnecessary grace period delay:** On non-Unix targets, `send_sigterm()` returns `Ok(())` without sending any signal, so `graceful_kill()` waits the full `sigterm_grace` duration before falling through to `child.kill()`. Project targets Linux — non-Unix is a compilation fallback. [src/runtime/sdk.rs]
+- **Missing `Debug`/`PartialEq` trait derivations on `SdkSessionConfig`, `SdkSessionResult`:** Makes test failure messages unhelpful and prevents `assert_eq!`. Nice-to-have improvement.
+- **`graceful_kill` returns `()` instead of `ExitStatus` per spec Task 4.3:** Intentional simplification documented in completion notes — callers use result flags and don't need the exit status. [src/runtime/sdk.rs:327]
+
 ## Deferred from: code review of story 15.1 (2026-04-26)
 
 - **`api_session_runner()` panics on Sdk variant:** Crash recovery path in `pipeline.rs` (lines 2748-2882) unconditionally calls `self.session_runtime.api_session_runner()` which panics on `Sdk` variant. Currently safe because Sdk is a stub, but Story 15.7 must implement dual-runtime recovery routing. [src/runtime/mod.rs:90, src/pipeline.rs:2748-2882]

@@ -207,6 +207,7 @@ dependencies = [
  "http",
  "ignore",
  "indicatif",
+ "libc",
  "octocrab",
  "regex",
  "reqwest",

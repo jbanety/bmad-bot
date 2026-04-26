@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-26 (story 15-2 done)
+# last_updated: 2026-04-26 (story 15-3 done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -176,7 +176,7 @@ development_status:
   15-0a-pre-epic-15-fix-clippy-warnings: done
   15-1-session-runtime-abstraction-layer: done
   15-2-config-extension-sdk-providers: done
-  15-3-sdk-runtime-subprocess-infrastructure: backlog # depends-on: 15-1
+  15-3-sdk-runtime-subprocess-infrastructure: done # depends-on: 15-1
   15-4-supervisor-mcp-server: backlog
   15-5-claude-code-provider-integration: backlog # depends-on: 15-2, 15-3, 15-4
   15-6-codex-provider-integration: backlog # depends-on: 15-2, 15-3, 15-4
