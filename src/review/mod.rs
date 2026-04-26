@@ -338,6 +338,8 @@ pub struct ReviewRunner {
     sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
     /// UI handle for rendering terminal output (fire-and-forget, Story 10.2).
     ui: crate::ui::UiHandle,
+    /// Resolved skill file path for code review activation.
+    skill_path: String,
 }
 
 impl ReviewRunner {
@@ -354,6 +356,7 @@ impl ReviewRunner {
         sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>>,
         sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
         ui: crate::ui::UiHandle,
+        skill_path: String,
     ) -> Self {
         Self {
             config,
@@ -365,6 +368,7 @@ impl ReviewRunner {
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            skill_path,
         }
     }
 
@@ -581,7 +585,7 @@ impl ReviewRunner {
         let (activation_rig_history, _activation_chat_history) = agent
             .activate_agent(
                 &self.config.bmad_paths.project_root,
-                ".claude/skills/bmad-code-review/SKILL.md",
+                &self.skill_path,
                 "review",
                 Some(&self.shutdown),
                 Some(&self.ui),
@@ -1052,6 +1056,7 @@ mod tests {
             sub_agent_sessions,
             sub_agent_in_flight,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-code-review/SKILL.md".to_string(),
         );
         // Verify config is stored by checking a known field
         assert_eq!(runner.config.llm.review.provider, "anthropic");
@@ -1085,6 +1090,7 @@ mod tests {
             Arc::clone(&sessions),
             Arc::clone(&in_flight),
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-code-review/SKILL.md".to_string(),
         );
 
         // >= 2, not == 2: internal cloning is an implementation detail.

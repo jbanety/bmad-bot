@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-26 (15-0a done)
+# last_updated: 2026-04-26 (story 15-1 done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -130,7 +130,7 @@ development_status:
   # See: planning-artifacts/sprint-change-proposal-2026-04-15.md
   # ===================================================================
 
-  epic-11: in-progress # Copilot Removal & Provider Simplification
+  epic-11: done # Copilot Removal & Provider Simplification
   11-1-remove-copilot-auth-module: done
   11-2-simplify-agent-factory-openai-compatible: done # depends-on: 11-1
   11-3-clean-provider-routing-config-secrets: done # depends-on: 11-2
@@ -138,14 +138,14 @@ development_status:
   11-5-update-docs-remove-copilot-references: done # depends-on: 11-4
   epic-11-retrospective: optional
 
-  epic-12: in-progress # Skill-Based Sessions & SpawnAgent Tool — depends-on: epic-11
+  epic-12: done # Skill-Based Sessions & SpawnAgent Tool — depends-on: epic-11
   12-1-parameterize-activation-by-skill: done
   12-2-simplify-response-analyzer: done # depends-on: 12-1
   12-3-spawn-agent-tool: done
   12-4-universal-spawn-agent-registration: done # depends-on: 12-3
   12-5-skill-session-and-spawn-agent-tests: done # depends-on: 12-4
 
-  epic-13: in-progress # Multi-Phase Pipeline & Story Critic — depends-on: epic-12
+  epic-13: done # Multi-Phase Pipeline & Story Critic — depends-on: epic-12
   13-1-watcher-backlog-stories-extension: done
   13-2-pipeline-orchestrator-refonte: done # depends-on: 13-1
   13-3-daemon-orchestrated-consultation-mechanism: done # depends-on: 13-2
@@ -159,12 +159,27 @@ development_status:
   13-11-ui-events-new-phases: done # depends-on: 13-2
   epic-13-retrospective: optional
 
-  epic-14: in-progress # Epic Review Enhancement & Deferred Work — depends-on: epic-13
+  epic-14: done # Epic Review Enhancement & Deferred Work — depends-on: epic-13
   14-1-winston-reads-deferred-work: done
   14-2-pre-epic-story-generation: done # depends-on: 14-1
   14-3-inject-pre-epic-stories-sprint-status: done # depends-on: 14-2
   14-4-purge-processed-deferred-items: done # depends-on: 14-3
   epic-14-retrospective: optional
 
-  epic-15: in-progress # Pre-Epic Cleanup & Next Features
+  # ===================================================================
+  # SPRINT CHANGE PROPOSAL — 2026-04-26
+  # SDK Provider Runtime & Supervisor MCP
+  # See: planning-artifacts/sprint-change-proposal-2026-04-26.md
+  # ===================================================================
+
+  epic-15: in-progress # SDK Provider Runtime & Supervisor MCP — depends-on: epic-13
   15-0a-pre-epic-15-fix-clippy-warnings: done
+  15-1-session-runtime-abstraction-layer: done
+  15-2-config-extension-sdk-providers: backlog
+  15-3-sdk-runtime-subprocess-infrastructure: backlog # depends-on: 15-1
+  15-4-supervisor-mcp-server: backlog
+  15-5-claude-code-provider-integration: backlog # depends-on: 15-2, 15-3, 15-4
+  15-6-codex-provider-integration: backlog # depends-on: 15-2, 15-3, 15-4
+  15-7-pipeline-dual-runtime-orchestration: backlog # depends-on: 15-1, 15-5
+  15-8-init-command-sdk-provider-setup: backlog # depends-on: 15-2
+  epic-15-retrospective: optional

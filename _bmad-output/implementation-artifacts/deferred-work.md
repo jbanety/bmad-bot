@@ -150,3 +150,10 @@
 
 - **Silent skip of non-parseable dependency keys:** `last_dep.split('-').next().and_then(|s| s.parse().ok())` silently returns `None` if the dependency key doesn't start with a number. A malformed key falls through without warning. Pre-existing behavior not introduced by this change. [src/session/branch.rs:126]
 - **Potential panic on empty `dependencies` vector:** `story.dependencies[story.dependencies.len() - 1]` panics if `dependencies` is empty. The diff touches adjacent lines but not this one. Pre-existing latent issue. [src/session/branch.rs:123]
+
+
+## Deferred from: code review of story 15.1 (2026-04-26)
+
+- **`api_session_runner()` panics on Sdk variant:** Crash recovery path in `pipeline.rs` (lines 2748-2882) unconditionally calls `self.session_runtime.api_session_runner()` which panics on `Sdk` variant. Currently safe because Sdk is a stub, but Story 15.7 must implement dual-runtime recovery routing. [src/runtime/mod.rs:90, src/pipeline.rs:2748-2882]
+- **`SkillPaths::resolve()` does not validate skill file existence on disk:** Resolved paths are constructed via string formatting without checking the files exist. Architecture doc requires startup fail-fast validation. Story 15.2 covers this validation. [src/runtime/mod.rs:22-37]
+- **`SessionRunner.skill_path` serves dual purpose (dev default + recovery fallback):** In crash recovery Unknown phase, `resume_session()` falls back to `self.skill_path` (always dev) even if the crashed session was a review. Falls through to dev preamble regardless. Pre-existing behavior not introduced by this change. [src/session/runner.rs:564-573]

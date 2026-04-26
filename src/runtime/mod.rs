@@ -1,0 +1,369 @@
+use std::path::Path;
+
+use crate::llm::agent_factory::LlmRole;
+use crate::session::SessionOutcome;
+use crate::session::consultation::ConsultationConfig;
+use crate::session::runner::SessionRunner;
+use crate::session::state::{PHASE_CREATE, PHASE_DEV, PHASE_REVIEW};
+use crate::watcher::StoryInfo;
+
+// ---------------------------------------------------------------------------
+// SkillPaths — resolve-once, use-everywhere skill path registry
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct SkillPaths {
+    pub dev_story: String,
+    pub create_story: String,
+    pub code_review: String,
+}
+
+impl SkillPaths {
+    pub fn resolve(project_root: &Path) -> Self {
+        let manifest_path = project_root.join("_bmad/_config/manifest.yaml");
+        let base = match Self::read_skill_base(&manifest_path) {
+            Some(base) => base,
+            None => {
+                tracing::warn!(
+                    "BMAD manifest not found or empty ides[], falling back to .claude/skills/"
+                );
+                ".claude/skills".to_string()
+            }
+        };
+        Self {
+            dev_story: format!("{base}/bmad-dev-story/SKILL.md"),
+            create_story: format!("{base}/bmad-create-story/SKILL.md"),
+            code_review: format!("{base}/bmad-code-review/SKILL.md"),
+        }
+    }
+
+    fn read_skill_base(manifest_path: &Path) -> Option<String> {
+        let content = std::fs::read_to_string(manifest_path).ok()?;
+        let doc: serde_yml::Value = serde_yml::from_str(&content).ok()?;
+        let ides = doc.get("ides")?.as_sequence()?;
+        let first_ide = ides.first()?.as_str()?;
+        Some(Self::ide_to_skill_dir(first_ide).to_string())
+    }
+
+    fn ide_to_skill_dir(ide: &str) -> &str {
+        match ide {
+            "claude-code" => ".claude/skills",
+            "codex" => ".agents/skills",
+            _ => ".claude/skills",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SessionContext — runtime-agnostic session parameters
+// ---------------------------------------------------------------------------
+
+pub struct SessionContext<'a> {
+    pub story: &'a StoryInfo,
+    pub base_branch_override: Option<&'a str>,
+    pub consultations: Vec<ConsultationConfig>,
+    pub role: LlmRole,
+    pub initial_phase: &'a str,
+}
+
+// ---------------------------------------------------------------------------
+// SessionRuntime — dual runtime dispatch
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub enum SessionRuntime {
+    Api(Box<ApiRuntime>),
+    Sdk(SdkRuntime),
+}
+
+impl SessionRuntime {
+    pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
+        match self {
+            Self::Api(api) => api.run_session(context).await,
+            Self::Sdk(_) => todo!("SDK runtime implemented in Story 15.3+"),
+        }
+    }
+
+    pub fn api_session_runner(&self) -> &SessionRunner {
+        match self {
+            Self::Api(api) => api.session_runner(),
+            Self::Sdk(_) => panic!("api_session_runner() called on Sdk runtime"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ApiRuntime — thin wrapper around the existing rig-based SessionRunner
+// ---------------------------------------------------------------------------
+
+pub struct ApiRuntime {
+    session_runner: SessionRunner,
+    skill_paths: SkillPaths,
+}
+
+impl ApiRuntime {
+    pub fn new(session_runner: SessionRunner, skill_paths: SkillPaths) -> Self {
+        Self {
+            session_runner,
+            skill_paths,
+        }
+    }
+
+    pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
+        let (skill_path, preamble) = self.resolve_phase_config(context.initial_phase);
+
+        self.session_runner
+            .run_with_consultations(
+                context.story,
+                context.base_branch_override,
+                context.consultations,
+                Some(&skill_path),
+                preamble,
+                context.role,
+                context.initial_phase,
+            )
+            .await
+    }
+
+    fn resolve_phase_config(&self, initial_phase: &str) -> (String, Option<String>) {
+        match initial_phase {
+            PHASE_CREATE => (
+                self.skill_paths.create_story.clone(),
+                Some(crate::session::agent::build_create_preamble()),
+            ),
+            PHASE_REVIEW => (
+                self.skill_paths.code_review.clone(),
+                Some(crate::session::agent::build_review_preamble()),
+            ),
+            PHASE_DEV => (self.skill_paths.dev_story.clone(), None),
+            other => {
+                tracing::warn!(phase = other, "resolve_phase_config: unknown phase, falling back to dev defaults");
+                (self.skill_paths.dev_story.clone(), None)
+            }
+        }
+    }
+
+    pub fn session_runner(&self) -> &SessionRunner {
+        &self.session_runner
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SdkRuntime — stub for CLI subprocess runtime (Stories 15.3+)
+// ---------------------------------------------------------------------------
+
+pub struct SdkRuntime;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_skill_paths_resolve_claude_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_dir = dir.path().join("_bmad/_config");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(
+            manifest_dir.join("manifest.yaml"),
+            "ides:\n  - claude-code\n",
+        )
+        .unwrap();
+
+        let paths = SkillPaths::resolve(dir.path());
+        assert_eq!(paths.dev_story, ".claude/skills/bmad-dev-story/SKILL.md");
+        assert_eq!(
+            paths.create_story,
+            ".claude/skills/bmad-create-story/SKILL.md"
+        );
+        assert_eq!(
+            paths.code_review,
+            ".claude/skills/bmad-code-review/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn test_skill_paths_resolve_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_dir = dir.path().join("_bmad/_config");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(manifest_dir.join("manifest.yaml"), "ides:\n  - codex\n").unwrap();
+
+        let paths = SkillPaths::resolve(dir.path());
+        assert_eq!(paths.dev_story, ".agents/skills/bmad-dev-story/SKILL.md");
+        assert_eq!(
+            paths.create_story,
+            ".agents/skills/bmad-create-story/SKILL.md"
+        );
+        assert_eq!(
+            paths.code_review,
+            ".agents/skills/bmad-code-review/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn test_skill_paths_resolve_missing_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SkillPaths::resolve(dir.path());
+        assert_eq!(paths.dev_story, ".claude/skills/bmad-dev-story/SKILL.md");
+        assert_eq!(
+            paths.create_story,
+            ".claude/skills/bmad-create-story/SKILL.md"
+        );
+        assert_eq!(
+            paths.code_review,
+            ".claude/skills/bmad-code-review/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn test_skill_paths_resolve_empty_ides() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_dir = dir.path().join("_bmad/_config");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(manifest_dir.join("manifest.yaml"), "ides: []\n").unwrap();
+
+        let paths = SkillPaths::resolve(dir.path());
+        assert_eq!(paths.dev_story, ".claude/skills/bmad-dev-story/SKILL.md");
+    }
+
+    #[test]
+    fn test_ide_to_skill_dir_mapping() {
+        assert_eq!(
+            SkillPaths::ide_to_skill_dir("claude-code"),
+            ".claude/skills"
+        );
+        assert_eq!(SkillPaths::ide_to_skill_dir("codex"), ".agents/skills");
+        assert_eq!(
+            SkillPaths::ide_to_skill_dir("unknown-ide"),
+            ".claude/skills"
+        );
+    }
+
+    #[test]
+    fn test_resolve_phase_config_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_paths = SkillPaths::resolve(dir.path());
+        let expected_create = skill_paths.create_story.clone();
+
+        let config = make_test_config(dir.path());
+        let runner = make_test_session_runner(&config, &skill_paths);
+        let api = ApiRuntime::new(runner, skill_paths);
+
+        let (path, preamble) = api.resolve_phase_config(PHASE_CREATE);
+        assert_eq!(path, expected_create);
+        assert!(preamble.is_some());
+    }
+
+    #[test]
+    fn test_resolve_phase_config_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_paths = SkillPaths::resolve(dir.path());
+        let expected_review = skill_paths.code_review.clone();
+
+        let config = make_test_config(dir.path());
+        let runner = make_test_session_runner(&config, &skill_paths);
+        let api = ApiRuntime::new(runner, skill_paths);
+
+        let (path, preamble) = api.resolve_phase_config(PHASE_REVIEW);
+        assert_eq!(path, expected_review);
+        assert!(preamble.is_some());
+    }
+
+    #[test]
+    fn test_resolve_phase_config_dev() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_paths = SkillPaths::resolve(dir.path());
+        let expected_dev = skill_paths.dev_story.clone();
+
+        let config = make_test_config(dir.path());
+        let runner = make_test_session_runner(&config, &skill_paths);
+        let api = ApiRuntime::new(runner, skill_paths);
+
+        let (path, preamble) = api.resolve_phase_config("dev");
+        assert_eq!(path, expected_dev);
+        assert!(preamble.is_none());
+    }
+
+    #[test]
+    fn test_session_runtime_api_variant_construction() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_paths = SkillPaths::resolve(dir.path());
+        let config = make_test_config(dir.path());
+        let runner = make_test_session_runner(&config, &skill_paths);
+        let api = ApiRuntime::new(runner, skill_paths);
+        let _runtime = SessionRuntime::Api(Box::new(api));
+    }
+
+    #[test]
+    fn test_session_runtime_sdk_variant_construction() {
+        let _runtime = SessionRuntime::Sdk(SdkRuntime);
+    }
+
+    #[test]
+    fn test_skill_paths_resolve_first_ide_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_dir = dir.path().join("_bmad/_config");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(
+            manifest_dir.join("manifest.yaml"),
+            "ides:\n  - codex\n  - claude-code\n",
+        )
+        .unwrap();
+
+        let paths = SkillPaths::resolve(dir.path());
+        assert_eq!(
+            paths.dev_story, ".agents/skills/bmad-dev-story/SKILL.md",
+            "first IDE in list should win"
+        );
+    }
+
+    // -- Test helpers --
+
+    fn make_test_config(dir: &Path) -> std::sync::Arc<crate::config::BotConfig> {
+        let mut config = crate::config::BotConfig::_test_minimal("pretty", "info");
+        config.bmad_paths.implementation_artifacts = dir.to_string_lossy().to_string();
+        config.bmad_paths.project_root = dir.to_string_lossy().to_string();
+        std::sync::Arc::new(config)
+    }
+
+    fn make_test_session_runner(
+        config: &std::sync::Arc<crate::config::BotConfig>,
+        skill_paths: &SkillPaths,
+    ) -> SessionRunner {
+        let secrets = std::sync::Arc::new(crate::config::BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        let agent_factory = std::sync::Arc::new(crate::llm::AgentFactory::new(
+            std::sync::Arc::clone(config),
+            secrets,
+        ));
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            crate::tools::SubAgentState,
+        >::new()));
+        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::<String>::new(),
+        ));
+        SessionRunner::new(
+            std::sync::Arc::clone(config),
+            agent_factory,
+            shutdown,
+            mcp,
+            subs,
+            inflt,
+            crate::ui::UiHandle::null(),
+            skill_paths.dev_story.clone(),
+        )
+    }
+}

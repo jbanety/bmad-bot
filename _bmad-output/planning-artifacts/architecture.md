@@ -8,8 +8,8 @@ date: '2026-02-10'
 lastStep: 8
 status: 'complete'
 completedAt: '2026-02-07'
-revisedAt: '2026-04-15'
-revisionNote: 'Sprint Change Proposal 2026-04-15 — Skill-based activation (D5 amended), simplified chat loop (D1 amended), WAL pipeline_phase (D3 amended), Copilot removed + OpenAI-compatible with base_url (D8 amended), new Decision 10 (Daemon-Orchestrated Consultations), new Decision 11 (Story Critic with Persistent Memory). Updated tool patterns (spawn_agent), enforcement guidelines, project structure (critic/ module, auth/ removed), external integration points, configuration files.'
+revisedAt: '2026-04-26'
+revisionNote: 'Sprint Change Proposal 2026-04-26 — Dual runtime SDK providers (D1 amended, D5 amended, D8 amended, D10 amended), new Decision 12 (Dual Runtime Abstraction — SessionRuntime enum), new Decision 13 (Supervisor MCP Server). Updated project structure (runtime/ and mcp_server/ modules), skill path resolution via BMAD manifest, SDK session ID tracking in WAL.'
 ---
 
 # Architecture Decision Document
@@ -159,9 +159,18 @@ bmad-bot/
 │   │   └── gitlab.rs
 │   ├── notifier/
 │   │   └── mod.rs
-│   ├── llm_context.rs                 # Zed-style XML ContextBuilder
+│   ├── runtime/
+│   │   ├── mod.rs                     # SessionRuntime enum, routing, skill path resolution
+│   │   ├── api.rs                     # ApiRuntime — wraps existing rig-based session flow
+│   │   ├── sdk.rs                     # SdkRuntime — subprocess management, NDJSON parsing, session ID tracking
+│   │   ├── sdk_claude.rs              # Claude Code CLI-specific flags, prompt construction
+│   │   └── sdk_codex.rs              # Codex CLI-specific flags, prompt construction
+│   ├── mcp_server/
+│   │   ├── mod.rs                     # MCP server infrastructure (JSON-RPC over stdio)
+│   │   └── supervisor.rs             # ask_supervisor MCP tool — delegates to supervisor/ cascade
+│   ├── llm_context.rs                 # Zed-style XML ContextBuilder (API mode only)
 │   ├── llm_logging.rs                 # LLM request/response debug logging
-│   └── pipeline.rs                    # Pipeline orchestration (watcher → session → review → PR → notify)
+│   └── pipeline.rs                    # Pipeline orchestration (watcher → runtime → review → PR → notify)
 └── tests/
     └── e2e/
 ```
@@ -216,7 +225,11 @@ The hybrid approach uses both rig interaction patterns for their natural strengt
 >
 > With BMAD v6.2+ skill-based activation, the chat loop's auto-response burden is significantly reduced. Skills run autonomously without interactive prompts — no menu selection, no "should I proceed?" confirmations. The `ResponseAnalyzer` is simplified to three essential detections: completion, error/escalation, and consultation injection points. The chat loop gains a new responsibility: daemon-orchestrated consultations (see Decision 10). When the daemon detects a phase completion pattern, it pauses the loop, runs a fresh consultation agent, and injects findings as a new user message to the active session. The `ask_supervisor` tool and its 3-tier cascade remain unchanged.
 
-**Affects:** session module, supervisor module, tools module
+> **Amendment (2026-04-26) — SDK mode: supervisor via MCP transport**
+>
+> In SDK mode (Decision 12), the `ask_supervisor` rig tool is not registered — the external CLI manages its own tools. Instead, the supervisor is exposed as an **MCP server** (Decision 13) that the CLI consumes natively. The 3-tier cascade (rules → LLM fallback → escalation) is identical — only the transport changes (rig Tool `call()` → MCP JSON-RPC over stdio). The chat loop simplification from the 2026-04-15 amendment applies to API mode only — SDK mode has no daemon-controlled chat loop.
+
+**Affects:** session module, supervisor module, tools module, mcp_server module
 
 ### Decision 2: Sprint-Status Mutation — Daemon Reads, Agent Writes
 
@@ -391,7 +404,11 @@ let response = streaming_chat(agent, "DS", rig_history, Some(&shutdown)).await?;
 >
 > **What changed:** BMAD v6.2+ migrated from persona files (agents with menus) to skill files (self-contained workflows). The activation mechanism is identical — the content loaded into `ContextBuilder` changes. **Before:** Load `_bmad/bmm/agents/dev.md` (persona) → agent displays menu → daemon sends `"DS"` command → agent enters dev-story workflow. **After:** Load `.github/skills/bmad-dev-story/SKILL.md` (skill) → agent reads it, discovers `./workflow.md` via `read_file` tool → executes the workflow autonomously. No menu, no commands, no post-activation message. **Updated preamble:** removes persona activation instructions (menu, greeting, activation steps), adds skill execution instructions ("When provided a SKILL.md file in context, follow its instructions completely"), adds `spawn_agent` to the tool inventory. **Updated activation:** `activate_agent()` accepts `skill_path` parameter instead of hardcoded persona. No post-activation command needed — the skill is self-starting. **What this simplifies:** `ResponseAnalyzer` no longer needs menu/confirmation auto-response patterns. Session runner no longer hardcodes persona paths or command strings. Review runner uses the same mechanism with a different SKILL.md.
 
-**Affects:** session module, llm_context module
+> **Amendment (2026-04-26) — API-only; SDK uses native skill invocation**
+>
+> The system preamble (`build_preamble()`, `build_create_preamble()`), tool usage rules, skill activation instructions, spawn_agent rules, and `ContextBuilder` XML wrapping are **exclusively API mode** constructs. They are scoped to `ApiRuntime` and never used by SDK sessions. **SDK mode (Claude Code):** launched without `--bare` so it discovers the project's `.claude/skills/`, `CLAUDE.md`, and conventions natively. Skills invoked via native slash commands (`/bmad-dev-story`, `/bmad-create-story`, `/bmad-code-review`). Prompt contains only: skill invocation + story-specific context (story file path, branch name, language override). **SDK mode (Codex):** discovers `.agents/skills/` + `AGENTS.md` natively. Same slash command invocation pattern. **Skill path resolution:** both runtimes resolve skill paths dynamically via `_bmad/_config/manifest.yaml` → `ides[]` instead of hardcoding `.claude/skills/`. BMAD installer handles placing skills in the correct directory per CLI — the daemon validates presence at startup and fails fast if missing.
+
+**Affects:** session module, llm_context module, runtime module
 
 ### Decision 9: Branch Base Resolution — Inter-Epic vs Intra-Epic Chaining
 
@@ -659,7 +676,11 @@ fn copilot_requires_responses_api(model: &str) -> bool {
 >
 > GitHub Copilot provider removed entirely (auth module, token exchange, cache, streaming compat fixes). The rig fork (`jbanety/rig`, branch `fix/copilot-streaming-compat`) is replaced by official `rig-core` from crates.io. `BuiltAgent::OpenAiCompletions` variant removed (was Copilot-only). **Updated BuiltAgent enum (2 variants):** `Anthropic(Agent<anthropic::CompletionModel>)` and `OpenAiCompatible(Agent<openai::responses_api::ResponsesCompletionModel>)`. The `OpenAiCompatible` variant supports an optional `base_url` — when provided, the OpenAI client is constructed with that base URL; when absent, defaults to `https://api.openai.com/v1`. This enables any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, Groq). **Updated AgentFactory:** no more `CopilotTokenCache` field, no more `copilot_requires_responses_api()`. Two match arms only: `"anthropic"` and `"openai-compatible"`. **Updated LlmRole enum:** `Dev`, `Review`, `Supervisor`, `Critic` — the new `Critic` role allows configuring a different provider/model optimized for reasoning (extended thinking). **Removed:** `copilot_requires_responses_api()`, `resolve_copilot_session()`, `CopilotTokenCache`, `BuiltAgent::OpenAiCompletions`, entire `src/auth/` module.
 
-**Affects:** llm module (new agent_factory.rs), session module, review module, supervisor module, pipeline
+> **Amendment (2026-04-26) — Dual runtime: BuiltAgent for API, SdkSession for SDK**
+>
+> `BuiltAgent` and `AgentFactory` remain unchanged for API mode. A new `SessionRuntime` enum (Decision 12) wraps both runtimes. **Updated provider list:** `"anthropic"`, `"openai-compatible"` (API mode via rig), `"claude-code"`, `"codex"` (SDK mode via CLI subprocess). Each LLM role independently selects its provider — mixed-mode configurations are supported (e.g., dev via `claude-code`, review via `anthropic`). `AgentFactory` is used only by API-mode sessions and the supervisor MCP server's LLM fallback. SDK-mode sessions are managed by `SdkRuntime` (subprocess spawn, NDJSON parsing, session ID tracking).
+
+**Affects:** llm module (new agent_factory.rs), session module, review module, supervisor module, pipeline, runtime module
 
 ### Decision 10: Daemon-Orchestrated Consultations — Pause/Consult/Resume
 
@@ -690,7 +711,11 @@ Certain pipeline phases benefit from external perspectives that must remain cont
 
 **Why not spawn_agent tool?** The `spawn_agent` tool is LLM-initiated — the agent decides when to delegate. Consultations are daemon-initiated — the pipeline orchestrator decides when external review is needed, based on deterministic phase transitions. Both use the same underlying mechanics (fresh agent via AgentFactory), but the control plane is different.
 
-**Affects:** pipeline module, session module (runner)
+> **Amendment (2026-04-26) — SDK mode: session complete → consult → resume**
+>
+> Pipeline orchestration is **unchanged** for both runtimes — same phases, same order, same daemon-orchestrated consultations. The consultation mechanic differs by runtime: **API mode** (unchanged): session paused in memory, consultation agent runs, findings injected as user message, session resumed. **SDK mode:** session completes its phase (CLI subprocess exits), daemon runs consultation as a separate CLI subprocess, then resumes the original session via `--resume {session_id}` (Claude Code) or `codex resume {session_id}` (Codex) with findings as the prompt. **Session ID tracking:** SDK session IDs are persisted per phase in the WAL (`sdk_session_ids: HashMap<String, String>` — phase → session_id) immediately after session start. Required for both consultation injection and crash recovery. **No consultation MCP tools** — consultations remain daemon-initiated, not skill-initiated. Only `ask_supervisor` is exposed via MCP.
+
+**Affects:** pipeline module, session module (runner), runtime module
 
 ### Decision 11: Story Critic — Independent Vision Guardian with Persistent Memory
 
@@ -715,6 +740,114 @@ During manual development, the developer maintains a separate ChatGPT thread whe
 
 **Affects:** new critic module, config module, pipeline module
 
+### Decision 12: Dual Runtime Abstraction — SessionRuntime Enum
+
+> **Added (2026-04-26) — Sprint Change Proposal: SDK Provider Runtime**
+
+**Decision:** Introduce a `SessionRuntime` enum that abstracts session execution behind two variants: `Api` (existing rig-based flow) and `Sdk` (CLI subprocess to Claude Code or Codex). The pipeline calls `SessionRuntime::run_session()` uniformly — routing is based on the provider configured for the phase's LLM role.
+
+**Rationale:**
+Modern agentic CLI tools (Claude Code, Codex) provide battle-tested tool implementations, context management, and autonomous execution capabilities. Rather than maintaining custom tool implementations in the daemon, users can choose to delegate to these tools. The dual runtime preserves full control for API users while offering a "batteries included" alternative via SDK providers. This is a permanent parallel architecture, not a migration — both runtimes are first-class.
+
+**Design:**
+
+```rust
+pub enum SessionRuntime {
+    Api(ApiRuntime),   // rig-based: BuiltAgent, streaming_chat, custom tools
+    Sdk(SdkRuntime),   // CLI subprocess: NDJSON streaming, native tools
+}
+
+impl SessionRuntime {
+    pub async fn run_session(&self, context: SessionContext) -> Result<SessionResult> {
+        match self {
+            Self::Api(api) => api.run_session(context).await,
+            Self::Sdk(sdk) => sdk.run_session(context).await,
+        }
+    }
+}
+```
+
+**ApiRuntime** wraps the existing session flow:
+- `AgentFactory::build()` → `BuiltAgent` → `streaming_chat()` loop
+- System preamble (`build_preamble()`), `ContextBuilder` XML, tool registration
+- Turn-by-turn control, mid-session consultation injection
+- WAL with full `chat_history`
+
+**SdkRuntime** manages CLI subprocesses:
+- Process spawning with configurable command, args, env vars, working directory
+- NDJSON streaming output parsing (`SdkOutputEvent` enum)
+- Session ID extraction and tracking per phase
+- Graceful shutdown via `ShutdownFlag` → SIGTERM → SIGKILL
+- No system preamble — skills invoked natively via slash commands
+- CLI discovers project skills, `CLAUDE.md`/`AGENTS.md`, conventions autonomously
+
+**SDK provider-specific adapters:**
+- `SdkClaudeCodeProvider`: `claude -p "/bmad-dev-story {context}" --output-format stream-json --allowedTools "..." --permission-mode acceptEdits --model {model} --cd {project_root}` — no `--bare`, MCP config injected via `--mcp-config`
+- `SdkCodexProvider`: `codex exec --json --full-auto --cd {project_root} --model {model} "/bmad-dev-story {context}"` — MCP config via `.codex/config.toml`
+
+**Skill path resolution:**
+- Reads `_bmad/_config/manifest.yaml` → `ides[]` to discover installed IDEs/CLIs
+- Maps IDE to skill directory: `claude-code` → `.claude/skills/`, `codex` → `.agents/skills/`
+- Replaces all hardcoded `.claude/skills/` references with centralized `resolve_skill_path(skill_name)`
+- BMAD installer handles skill placement — daemon validates presence at startup, fails fast if missing
+
+**WAL extension:**
+- `runtime_type: String` — `"api"` or `"sdk"`, for correct recovery routing
+- `sdk_session_ids: HashMap<String, String>` — phase → CLI session ID, persisted immediately after session start
+- Recovery: API → mid-session recovery via WAL chat history (existing), SDK → `--resume {session_id}` (Claude Code) / `codex resume {session_id}` (Codex)
+
+**Affects:** new runtime module, pipeline module, config module, session module, WAL
+
+---
+
+### Decision 13: Supervisor MCP Server — stdio Transport for SDK Sessions
+
+> **Added (2026-04-26) — Sprint Change Proposal: SDK Provider Runtime**
+
+**Decision:** Expose the supervisor's `ask_supervisor` capability as an MCP server using stdio transport, so that SDK-mode sessions can access the supervisor via their native MCP integration.
+
+**Rationale:**
+In API mode, `ask_supervisor` is a rig `Tool` registered on the agent. SDK-mode sessions (Claude Code, Codex) manage their own tools and cannot accept rig tool registrations. Both CLIs support MCP servers natively — the daemon starts a supervisor MCP server as a child process and passes its config to SDK sessions. The supervisor logic (rule engine → LLM fallback → escalation) is identical — only the transport changes.
+
+**Design:**
+
+MCP server exposes a single tool:
+
+```
+Tool: ask_supervisor
+Input: { "question": "string" }
+Output: { "answer": "string", "source": "rule_engine|llm_fallback|escalation" }
+```
+
+**Implementation:**
+- New `src/mcp_server/` module implements JSON-RPC over stdio (MCP protocol)
+- New hidden CLI subcommand: `bmad-bot mcp-supervisor --story {story_id}`
+- MCP config generated dynamically per SDK session:
+  ```json
+  {
+    "mcpServers": {
+      "bmad-supervisor": {
+        "command": "bmad-bot",
+        "args": ["mcp-supervisor", "--story", "{story_id}"]
+      }
+    }
+  }
+  ```
+- Tool handler delegates to the existing 3-tier cascade in `supervisor/`
+- LLM fallback backend is **provider-agnostic**: uses `SessionRuntime::Api` or `SessionRuntime::Sdk` based on supervisor role config — a supervisor configured as `provider: claude-code` spawns a separate Claude Code subprocess for the fallback step
+
+**Anti-recursion guard:** The supervisor's own SDK subprocess does NOT receive MCP config. The supervisor IS the MCP backend — passing it its own config would create an infinite loop. Supervisor SDK sessions are simple Q&A calls with project docs context, no tool access beyond read-only file operations.
+
+**Scope:**
+- **Only `ask_supervisor` is exposed via MCP** — no consultation tools
+- Consultations (adversarial, critic) remain daemon-orchestrated (Decision 10)
+- Decision logging preserved — MCP tool calls logged identically to rig tool calls
+- Supervisor decisions file still committed at session end
+
+**Affects:** new mcp_server module, supervisor module, pipeline module, cli module
+
+---
+
 ### Decision Impact Analysis
 
 **Implementation Sequence:**
@@ -726,15 +859,23 @@ During manual development, the developer maintains a separate ChatGPT thread whe
 6. Git Provider: GitHub + GitLab PR creation trait + implementations
 7. Review: separate LLM session for code review (optional, configurable)
 8. Notifier: Telegram integration
+9. Runtime abstraction: SessionRuntime enum, ApiRuntime wrapping existing flow, skill path resolution via BMAD manifest
+10. SDK runtime: SdkRuntime subprocess infrastructure, NDJSON parsing, session ID tracking
+11. Supervisor MCP server: stdio transport, `bmad-bot mcp-supervisor` subcommand
+12. SDK providers: Claude Code and Codex CLI integration, native skill invocation
+13. Pipeline dual-runtime: routing by provider config, SDK consultation via `--resume`, WAL extension
 
 **Cross-Component Dependencies:**
 - Session depends on: tools (edit_file, read_file, grep, find_path, list_directory, git, terminal), supervisor, config, git_provider, llm/context, llm/logging, llm/agent_factory
-- AgentFactory depends on: config (provider/model per role), auth (CopilotTokenCache for Copilot token exchange)
-- Pipeline depends on: session, review, git_provider, notifier, config, llm/agent_factory
+- AgentFactory depends on: config (provider/model per role)
+- Runtime depends on: config (provider type per role), session (ApiRuntime wraps existing), mcp_server (supervisor MCP for SDK sessions)
+- SdkRuntime depends on: config (CLI path, model), mcp_server (supervisor config injection), ShutdownFlag (subprocess termination)
+- MCP Server depends on: supervisor (rule engine, LLM fallback), config (supervisor provider), runtime (provider-agnostic LLM fallback)
+- Pipeline depends on: runtime, session, review, git_provider, notifier, config
 - Supervisor depends on: config (LLM provider for fallback), decisions logging
 - Watcher depends on: config (paths, polling interval)
 - Git Provider depends on: config (provider selection, credentials)
-- All components depend on: error handling strategy (Layer 1-3), tracing setup, ShutdownFlag (pipeline/session/streaming layers)
+- All components depend on: error handling strategy (Layer 1-3), tracing setup, ShutdownFlag (pipeline/session/streaming/subprocess layers)
 
 ## Implementation Patterns & Consistency Rules
 

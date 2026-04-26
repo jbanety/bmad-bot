@@ -10,6 +10,7 @@ mod mcp;
 mod notifier;
 mod pipeline;
 mod review;
+mod runtime;
 mod session;
 mod supervisor;
 mod tools;

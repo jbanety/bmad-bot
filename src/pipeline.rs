@@ -29,6 +29,7 @@ use crate::review::epic::{
     DeferredItemRef, EpicReviewOutcome, EpicReviewRunner, PreEpicStory, extract_epic_recap,
     generate_failure_report, parse_pre_epic_stories, parse_related_deferred_items,
 };
+use crate::runtime::{ApiRuntime, SessionContext, SessionRuntime, SkillPaths};
 use crate::session::SessionOutcome;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::consultation::{ConsultationConfig, ConsultationToolSet};
@@ -144,8 +145,11 @@ pub struct StoryPipeline {
     git_provider: Box<dyn GitProvider>,
     /// Notification sender (Telegram or Noop).
     notifier: Box<dyn Notifier>,
-    /// Development session runner.
-    session_runner: SessionRunner,
+    /// Session runtime abstraction — dispatches to Api or Sdk runtime.
+    session_runtime: SessionRuntime,
+    /// Resolved skill paths for all pipeline phases (used by future stories for ReviewRunner etc.).
+    #[allow(dead_code)]
+    skill_paths: SkillPaths,
     /// Epic review session runner (autonomous post-epic retrospective).
     epic_review_runner: EpicReviewRunner,
     /// Shared sub-agent sessions map — cleared between stories via
@@ -245,6 +249,7 @@ impl StoryPipeline {
             Arc::new(Mutex::new(HashMap::new()));
         let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
+        let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
         let session_runner = SessionRunner::new(
             Arc::clone(&config),
             Arc::clone(&agent_factory),
@@ -253,7 +258,12 @@ impl StoryPipeline {
             Arc::clone(&sub_agent_sessions),
             Arc::clone(&sub_agent_in_flight),
             ui.clone(),
+            skill_paths.dev_story.clone(),
         );
+        let session_runtime = SessionRuntime::Api(Box::new(ApiRuntime::new(
+            session_runner,
+            skill_paths.clone(),
+        )));
         let epic_review_runner = EpicReviewRunner::new(
             Arc::clone(&config),
             Arc::clone(&secrets),
@@ -273,7 +283,8 @@ impl StoryPipeline {
             config,
             git_provider,
             notifier,
-            session_runner,
+            session_runtime,
+            skill_paths,
             epic_review_runner,
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -394,19 +405,16 @@ impl StoryPipeline {
         let project_brief_path = self.prepare_project_brief_path();
         let consultations =
             self.build_create_story_consultations(story, critic_memory_path, project_brief_path);
-        let create_preamble = crate::session::agent::build_create_preamble();
 
         let session_outcome = self
-            .session_runner
-            .run_with_consultations(
+            .session_runtime
+            .run_session(SessionContext {
                 story,
                 base_branch_override,
                 consultations,
-                Some(".claude/skills/bmad-create-story/SKILL.md"),
-                Some(create_preamble),
-                LlmRole::Dev,
-                PHASE_CREATE,
-            )
+                role: LlmRole::Dev,
+                initial_phase: PHASE_CREATE,
+            })
             .await;
 
         self.critic_memory.check_size_threshold();
@@ -691,7 +699,16 @@ impl StoryPipeline {
         // Phase 1 — Dev Session
         self.ui.phase_start("Dev Session");
         let session_start = std::time::Instant::now();
-        let session_outcome = self.session_runner.run(story, base_branch_override).await;
+        let session_outcome = self
+            .session_runtime
+            .run_session(SessionContext {
+                story,
+                base_branch_override,
+                consultations: vec![],
+                role: LlmRole::Dev,
+                initial_phase: PHASE_DEV,
+            })
+            .await;
         let session_elapsed = session_start.elapsed();
 
         match session_outcome {
@@ -1212,19 +1229,16 @@ impl StoryPipeline {
             let project_brief_path = self.prepare_project_brief_path();
             let consultations =
                 self.build_review_consultations(story, critic_memory_path, project_brief_path);
-            let review_preamble = crate::session::agent::build_review_preamble();
 
             let session_outcome = self
-                .session_runner
-                .run_with_consultations(
+                .session_runtime
+                .run_session(SessionContext {
                     story,
-                    Some(&branch),
+                    base_branch_override: Some(&branch),
                     consultations,
-                    Some(".claude/skills/bmad-code-review/SKILL.md"),
-                    Some(review_preamble),
-                    LlmRole::Review,
-                    PHASE_REVIEW,
-                )
+                    role: LlmRole::Review,
+                    initial_phase: PHASE_REVIEW,
+                })
                 .await;
 
             self.critic_memory.check_size_threshold();
@@ -1362,15 +1376,13 @@ impl StoryPipeline {
 
                         // Purge resolved deferred items for pre-epic stories
                         if is_pre_epic_story(story_key) {
-                            let story_file_path = Path::new(
-                                &self.config.bmad_paths.implementation_artifacts,
-                            )
-                            .join(format!("{story_key}.md"));
+                            let story_file_path =
+                                Path::new(&self.config.bmad_paths.implementation_artifacts)
+                                    .join(format!("{story_key}.md"));
 
                             match tokio::fs::read_to_string(&story_file_path).await {
                                 Ok(story_content) => {
-                                    let refs =
-                                        parse_related_deferred_items(&story_content);
+                                    let refs = parse_related_deferred_items(&story_content);
                                     if refs.is_empty() {
                                         tracing::info!(
                                             action = "no_deferred_items_to_purge",
@@ -1390,17 +1402,12 @@ impl StoryPipeline {
                                                 "deferred-work.md not found, skipping purge"
                                             );
                                         } else {
-                                            match purge_deferred_items(
-                                                &deferred_work_path,
-                                                &refs,
-                                            )
-                                            .await
+                                            match purge_deferred_items(&deferred_work_path, &refs)
+                                                .await
                                             {
                                                 Ok(count) if count > 0 => {
-                                                    let epic_num = story_key
-                                                        .split('-')
-                                                        .next()
-                                                        .unwrap_or("0");
+                                                    let epic_num =
+                                                        story_key.split('-').next().unwrap_or("0");
                                                     let commit_msg = format!(
                                                         "chore(deferred): purge resolved items from pre-epic-{epic_num} stories"
                                                     );
@@ -2738,7 +2745,11 @@ impl StoryPipeline {
         };
 
         self.ui.crash_recovery_start();
-        let recovery = self.session_runner.check_and_recover_wal().await?;
+        let recovery = self
+            .session_runtime
+            .api_session_runner()
+            .check_and_recover_wal()
+            .await?;
 
         // Extract pipeline_phase BEFORE consuming recovery (RecoveryInfo is consumed by ownership)
         let pipeline_phase = recovery.state.pipeline_phase.clone();
@@ -2773,13 +2784,17 @@ impl StoryPipeline {
             StoryPhase::Dev => {
                 // Dev recovery: unchanged — attempt mid-session WAL replay
                 story_for_pipeline.status = "in-progress".to_string();
-                let outcome = self.session_runner.resume_session(recovery).await;
+                let outcome = self
+                    .session_runtime
+                    .api_session_runner()
+                    .resume_session(recovery)
+                    .await;
                 self.process_recovered_session(&story_for_pipeline, outcome)
                     .await
             }
             StoryPhase::Create => {
                 // Create recovery: delete stale WAL, restart from scratch
-                let wal_path = self.session_runner.state_file_path();
+                let wal_path = self.session_runtime.api_session_runner().state_file_path();
                 if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
                     tracing::error!(
                         action = "recovery_wal_delete_fatal",
@@ -2809,7 +2824,7 @@ impl StoryPipeline {
             }
             StoryPhase::Review => {
                 // Review recovery: delete stale WAL, restart review from scratch
-                let wal_path = self.session_runner.state_file_path();
+                let wal_path = self.session_runtime.api_session_runner().state_file_path();
                 if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
                     tracing::error!(
                         action = "recovery_wal_delete_fatal",
@@ -2839,7 +2854,7 @@ impl StoryPipeline {
             }
             StoryPhase::Unknown => {
                 // Unrecognized phase — delete corrupt WAL, fall back to dev recovery
-                let wal_path = self.session_runner.state_file_path();
+                let wal_path = self.session_runtime.api_session_runner().state_file_path();
                 if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
                     tracing::error!(
                         action = "recovery_wal_delete_fatal",
@@ -2861,7 +2876,11 @@ impl StoryPipeline {
                     });
                 }
                 story_for_pipeline.status = "in-progress".to_string();
-                let outcome = self.session_runner.resume_session(recovery).await;
+                let outcome = self
+                    .session_runtime
+                    .api_session_runner()
+                    .resume_session(recovery)
+                    .await;
                 self.process_recovered_session(&story_for_pipeline, outcome)
                     .await
             }
@@ -5240,6 +5259,33 @@ development_status:
         }
     }
 
+    fn make_test_session_runtime(
+        config: &Arc<BotConfig>,
+        agent_factory: &Arc<AgentFactory>,
+        shutdown: &ShutdownFlag,
+        mcp_manager: &Arc<crate::mcp::McpManager>,
+        sub_agent_sessions: &Arc<Mutex<HashMap<String, SubAgentState>>>,
+        sub_agent_in_flight: &Arc<Mutex<HashSet<String>>>,
+        ui: &UiHandle,
+    ) -> (SessionRuntime, SkillPaths) {
+        let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
+        let session_runner = SessionRunner::new(
+            Arc::clone(config),
+            Arc::clone(agent_factory),
+            Arc::clone(shutdown),
+            Arc::clone(mcp_manager),
+            Arc::clone(sub_agent_sessions),
+            Arc::clone(sub_agent_in_flight),
+            ui.clone(),
+            skill_paths.dev_story.clone(),
+        );
+        let runtime = SessionRuntime::Api(Box::new(ApiRuntime::new(
+            session_runner,
+            skill_paths.clone(),
+        )));
+        (runtime, skill_paths)
+    }
+
     fn make_pipeline_test_secrets() -> BotSecrets {
         BotSecrets {
             anthropic_api_key: Some("sk-test".to_string()),
@@ -5266,19 +5312,22 @@ development_status:
             config.critic_memory_threshold_kb.unwrap_or(50),
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
+
         StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -5417,8 +5466,9 @@ development_status:
 
     #[test]
     fn test_create_story_initial_message_format() {
-        let create_skill = ".claude/skills/bmad-create-story/SKILL.md";
-        let dev_skill = ".claude/skills/bmad-dev-story/SKILL.md";
+        let skill_paths = SkillPaths::resolve(Path::new("/tmp"));
+        let create_skill = &skill_paths.create_story;
+        let dev_skill = &skill_paths.dev_story;
 
         let story = StoryInfo::from_key_and_status("13-4-test-story", "backlog", Path::new("/tmp"))
             .unwrap();
@@ -5486,7 +5536,8 @@ development_status:
 
     #[test]
     fn test_review_initial_message_format() {
-        let review_skill = ".claude/skills/bmad-code-review/SKILL.md";
+        let skill_paths = SkillPaths::resolve(Path::new("/tmp"));
+        let review_skill = &skill_paths.code_review;
         assert!(review_skill.contains("bmad-code-review"));
 
         let story = StoryInfo::from_key_and_status("13-6-test-review", "review", Path::new("/tmp"))
@@ -5637,19 +5688,21 @@ development_status:
             50,
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -5706,19 +5759,21 @@ development_status:
             50,
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -5870,19 +5925,21 @@ development_status:
             50,
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -5929,19 +5986,21 @@ development_status:
             50,
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -5988,19 +6047,21 @@ development_status:
             50,
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -6046,19 +6107,21 @@ development_status:
             50,
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -6111,19 +6174,21 @@ development_status:
             50,
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -6178,19 +6243,21 @@ development_status:
             50,
         );
 
+        let (session_runtime, skill_paths) = make_test_session_runtime(
+            &config,
+            &agent_factory,
+            &shutdown,
+            &mcp_manager,
+            &sub_agent_sessions,
+            &sub_agent_in_flight,
+            &ui,
+        );
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
             notifier: Box::new(NoopNotifier),
-            session_runner: SessionRunner::new(
-                Arc::clone(&config),
-                Arc::clone(&agent_factory),
-                Arc::clone(&shutdown),
-                Arc::clone(&mcp_manager),
-                Arc::clone(&sub_agent_sessions),
-                Arc::clone(&sub_agent_in_flight),
-                ui.clone(),
-            ),
+            session_runtime,
+            skill_paths,
             epic_review_runner: EpicReviewRunner::new(
                 Arc::clone(&config),
                 Arc::clone(&secrets),
@@ -6349,13 +6416,18 @@ development_status:
 
         let result = tokio::fs::read_to_string(&ss).await.unwrap();
         let epic_pos = result.find("epic-15: backlog").unwrap();
-        let story_0a_pos = result.find("15-0a-pre-epic-15-fix-something: backlog").unwrap();
+        let story_0a_pos = result
+            .find("15-0a-pre-epic-15-fix-something: backlog")
+            .unwrap();
         let story_0b_pos = result.find("15-0b-pre-epic-15-add-tests: backlog").unwrap();
         let story_1_pos = result.find("15-1-first-story: backlog").unwrap();
 
         assert!(story_0a_pos > epic_pos, "0a should appear after epic entry");
         assert!(story_0b_pos > story_0a_pos, "0b should appear after 0a");
-        assert!(story_1_pos > story_0b_pos, "regular story should appear after pre-epic stories");
+        assert!(
+            story_1_pos > story_0b_pos,
+            "regular story should appear after pre-epic stories"
+        );
     }
 
     #[tokio::test]
@@ -6374,10 +6446,18 @@ development_status:
         assert_eq!(count, 2);
 
         let result = tokio::fs::read_to_string(&ss).await.unwrap();
-        assert!(result.contains("epic-15: backlog"), "Should create epic-15 entry");
+        assert!(
+            result.contains("epic-15: backlog"),
+            "Should create epic-15 entry"
+        );
         let epic_pos = result.find("epic-15: backlog").unwrap();
-        let story_0a_pos = result.find("15-0a-pre-epic-15-fix-something: backlog").unwrap();
-        assert!(story_0a_pos > epic_pos, "Stories should appear after epic entry");
+        let story_0a_pos = result
+            .find("15-0a-pre-epic-15-fix-something: backlog")
+            .unwrap();
+        assert!(
+            story_0a_pos > epic_pos,
+            "Stories should appear after epic entry"
+        );
     }
 
     #[tokio::test]
@@ -6398,13 +6478,31 @@ development_status:
         let result = tokio::fs::read_to_string(&ss).await.unwrap();
         let lines: Vec<&str> = result.lines().collect();
 
-        let line_0a = lines.iter().find(|l| l.contains("15-0a-pre-epic-15-fix-a")).unwrap();
-        let line_0b = lines.iter().find(|l| l.contains("15-0b-pre-epic-15-fix-b")).unwrap();
-        let line_0c = lines.iter().find(|l| l.contains("15-0c-pre-epic-15-fix-c")).unwrap();
+        let line_0a = lines
+            .iter()
+            .find(|l| l.contains("15-0a-pre-epic-15-fix-a"))
+            .unwrap();
+        let line_0b = lines
+            .iter()
+            .find(|l| l.contains("15-0b-pre-epic-15-fix-b"))
+            .unwrap();
+        let line_0c = lines
+            .iter()
+            .find(|l| l.contains("15-0c-pre-epic-15-fix-c"))
+            .unwrap();
 
-        assert!(!line_0a.contains("depends-on"), "First story should have no depends-on");
-        assert!(line_0b.contains("# depends-on: 15-0a-pre-epic-15-fix-a"), "0b should depend on 0a");
-        assert!(line_0c.contains("# depends-on: 15-0b-pre-epic-15-fix-b"), "0c should depend on 0b");
+        assert!(
+            !line_0a.contains("depends-on"),
+            "First story should have no depends-on"
+        );
+        assert!(
+            line_0b.contains("# depends-on: 15-0a-pre-epic-15-fix-a"),
+            "0b should depend on 0a"
+        );
+        assert!(
+            line_0c.contains("# depends-on: 15-0b-pre-epic-15-fix-b"),
+            "0c should depend on 0b"
+        );
     }
 
     #[tokio::test]
@@ -6428,19 +6526,35 @@ development_status:
         let content = "# generated: 2026-03-05\n# STATUS DEFINITIONS:\n\ndevelopment_status:\n  epic-14: done\n  14-1-first: done\n  epic-14-retrospective: optional\n\n  epic-15: backlog\n  15-1-regular-story: backlog\n";
         tokio::fs::write(&ss, content).await.unwrap();
 
-        let stories = vec![
-            make_pre_epic_story("15-0a-pre-epic-15-fix-something", "Fix something"),
-        ];
+        let stories = vec![make_pre_epic_story(
+            "15-0a-pre-epic-15-fix-something",
+            "Fix something",
+        )];
 
         inject_pre_epic_stories(&ss, &stories, 15).await.unwrap();
 
         let result = tokio::fs::read_to_string(&ss).await.unwrap();
-        assert!(result.contains("# generated: 2026-03-05"), "Header preserved");
-        assert!(result.contains("# STATUS DEFINITIONS:"), "Comments preserved");
+        assert!(
+            result.contains("# generated: 2026-03-05"),
+            "Header preserved"
+        );
+        assert!(
+            result.contains("# STATUS DEFINITIONS:"),
+            "Comments preserved"
+        );
         assert!(result.contains("epic-14: done"), "Epic 14 preserved");
-        assert!(result.contains("14-1-first: done"), "Epic 14 story preserved");
-        assert!(result.contains("epic-14-retrospective: optional"), "Retro preserved");
-        assert!(result.contains("15-1-regular-story: backlog"), "Regular story preserved");
+        assert!(
+            result.contains("14-1-first: done"),
+            "Epic 14 story preserved"
+        );
+        assert!(
+            result.contains("epic-14-retrospective: optional"),
+            "Retro preserved"
+        );
+        assert!(
+            result.contains("15-1-regular-story: backlog"),
+            "Regular story preserved"
+        );
     }
 
     #[tokio::test]
@@ -6462,7 +6576,9 @@ development_status:
         assert_eq!(count2, 0, "Second run should inject nothing");
 
         let result = tokio::fs::read_to_string(&ss).await.unwrap();
-        let occurrences = result.matches("15-0a-pre-epic-15-fix-something: backlog").count();
+        let occurrences = result
+            .matches("15-0a-pre-epic-15-fix-something: backlog")
+            .count();
         assert_eq!(occurrences, 1, "Should not have duplicates");
     }
 
@@ -6513,7 +6629,9 @@ development_status:
     async fn test_purge_deferred_items_single_item() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deferred-work.md");
-        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+        tokio::fs::write(&path, sample_deferred_work())
+            .await
+            .unwrap();
 
         let refs = vec![DeferredItemRef {
             section_story_id: "11.1".into(),
@@ -6535,7 +6653,9 @@ development_status:
     async fn test_purge_deferred_items_all_items_in_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deferred-work.md");
-        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+        tokio::fs::write(&path, sample_deferred_work())
+            .await
+            .unwrap();
 
         let refs = vec![
             DeferredItemRef {
@@ -6561,13 +6681,31 @@ development_status:
     async fn test_purge_deferred_items_all_sections_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deferred-work.md");
-        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+        tokio::fs::write(&path, sample_deferred_work())
+            .await
+            .unwrap();
 
         let refs = vec![
-            DeferredItemRef { section_story_id: "11.1".into(), section_date: "2026-04-15".into(), item_number: 1 },
-            DeferredItemRef { section_story_id: "11.1".into(), section_date: "2026-04-15".into(), item_number: 2 },
-            DeferredItemRef { section_story_id: "9.3".into(), section_date: "2026-04-18".into(), item_number: 1 },
-            DeferredItemRef { section_story_id: "9.3".into(), section_date: "2026-04-18".into(), item_number: 2 },
+            DeferredItemRef {
+                section_story_id: "11.1".into(),
+                section_date: "2026-04-15".into(),
+                item_number: 1,
+            },
+            DeferredItemRef {
+                section_story_id: "11.1".into(),
+                section_date: "2026-04-15".into(),
+                item_number: 2,
+            },
+            DeferredItemRef {
+                section_story_id: "9.3".into(),
+                section_date: "2026-04-18".into(),
+                item_number: 1,
+            },
+            DeferredItemRef {
+                section_story_id: "9.3".into(),
+                section_date: "2026-04-18".into(),
+                item_number: 2,
+            },
         ];
         let count = purge_deferred_items(&path, &refs).await.unwrap();
         assert_eq!(count, 4);
@@ -6592,8 +6730,16 @@ development_status:
         tokio::fs::write(&path, content).await.unwrap();
 
         let refs = vec![
-            DeferredItemRef { section_story_id: "12.1".into(), section_date: "2026-04-20".into(), item_number: 1 },
-            DeferredItemRef { section_story_id: "12.1".into(), section_date: "2026-04-20".into(), item_number: 3 },
+            DeferredItemRef {
+                section_story_id: "12.1".into(),
+                section_date: "2026-04-20".into(),
+                item_number: 1,
+            },
+            DeferredItemRef {
+                section_story_id: "12.1".into(),
+                section_date: "2026-04-20".into(),
+                item_number: 3,
+            },
         ];
         let count = purge_deferred_items(&path, &refs).await.unwrap();
         assert_eq!(count, 2);
@@ -6609,7 +6755,9 @@ development_status:
     async fn test_purge_deferred_items_nonexistent_ref() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deferred-work.md");
-        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+        tokio::fs::write(&path, sample_deferred_work())
+            .await
+            .unwrap();
 
         let refs = vec![DeferredItemRef {
             section_story_id: "99.9".into(),
@@ -6624,7 +6772,9 @@ development_status:
     async fn test_purge_deferred_items_empty_refs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deferred-work.md");
-        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+        tokio::fs::write(&path, sample_deferred_work())
+            .await
+            .unwrap();
 
         let count = purge_deferred_items(&path, &[]).await.unwrap();
         assert_eq!(count, 0);
@@ -6648,7 +6798,9 @@ development_status:
     async fn test_purge_deferred_items_preserves_other_sections() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deferred-work.md");
-        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+        tokio::fs::write(&path, sample_deferred_work())
+            .await
+            .unwrap();
 
         let refs = vec![DeferredItemRef {
             section_story_id: "11.1".into(),
@@ -6720,6 +6872,9 @@ development_status:
         assert_eq!(count, 0);
 
         let result = tokio::fs::read_to_string(&path).await.unwrap();
-        assert_eq!(result, content, "File should be unchanged when no items are removed");
+        assert_eq!(
+            result, content,
+            "File should be unchanged when no items are removed"
+        );
     }
 }

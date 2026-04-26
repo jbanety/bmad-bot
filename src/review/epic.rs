@@ -140,18 +140,16 @@ pub struct DeferredItemRef {
 ///
 /// Returns an empty `Vec` if the section is missing or contains `"none"`.
 pub fn parse_related_deferred_items(story_file_content: &str) -> Vec<DeferredItemRef> {
-    let re = regex::Regex::new(
-        r"story\s+(\d+\.\d+[a-z]?)\s+\((\d{4}-\d{2}-\d{2})\)\s+item\s+(\d+)",
-    )
-    .expect("invalid regex");
+    let re =
+        regex::Regex::new(r"story\s+(\d+\.\d+[a-z]?)\s+\((\d{4}-\d{2}-\d{2})\)\s+item\s+(\d+)")
+            .expect("invalid regex");
 
     let text_block = if let Some(pos) = story_file_content.find("## Related Deferred Items") {
         let after = &story_file_content[pos + "## Related Deferred Items".len()..];
         let end = after.find("\n## ").unwrap_or(after.len());
         &after[..end]
     } else if let Some(pos) = story_file_content.find("- **Related Deferred Items:**") {
-        let after =
-            &story_file_content[pos + "- **Related Deferred Items:**".len()..];
+        let after = &story_file_content[pos + "- **Related Deferred Items:**".len()..];
         let end = after.find("\n- **").unwrap_or(after.len());
         &after[..end]
     } else {
@@ -222,7 +220,10 @@ pub fn parse_pre_epic_stories(report: &str, next_epic: u32) -> Vec<PreEpicStory>
 
         let story_key = first_line.to_string();
         if story_key.is_empty() {
-            tracing::warn!(action = "pre_epic_parse_skip", "Skipping block with empty story key");
+            tracing::warn!(
+                action = "pre_epic_parse_skip",
+                "Skipping block with empty story key"
+            );
             continue;
         }
 
@@ -307,9 +308,7 @@ fn extract_field(block: &str, field_name: &str) -> String {
 
     let remaining = &block[start..];
 
-    let end = remaining
-        .find("\n- **")
-        .unwrap_or(remaining.len());
+    let end = remaining.find("\n- **").unwrap_or(remaining.len());
 
     remaining[..end].trim().to_string()
 }
@@ -1734,7 +1733,10 @@ Story 15-0a — medium severity × small effort.
 none
 "#;
         let stories = parse_pre_epic_stories(report, 15);
-        assert!(stories.is_empty(), "Story with invalid slug should be skipped");
+        assert!(
+            stories.is_empty(),
+            "Story with invalid slug should be skipped"
+        );
     }
 
     #[test]
@@ -1755,7 +1757,11 @@ Story 15-0a.
 "#;
         let stories = parse_pre_epic_stories(report, 15);
         assert_eq!(stories.len(), 1);
-        assert!(stories[0].justification.contains("First line of justification"));
+        assert!(
+            stories[0]
+                .justification
+                .contains("First line of justification")
+        );
         assert!(stories[0].justification.contains("second line"));
     }
 

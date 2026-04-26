@@ -352,6 +352,7 @@ impl SessionRunner {
     /// `sub_agent_sessions` and `sub_agent_in_flight` are the pipeline-owned shared
     /// state that backs [`SpawnAgentTool`](crate::tools::SpawnAgentTool); the runner
     /// clones them into the tool at agent-build time (Story 12.4).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<BotConfig>,
         agent_factory: Arc<AgentFactory>,
@@ -360,6 +361,7 @@ impl SessionRunner {
         sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>>,
         sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
         ui: crate::ui::UiHandle,
+        skill_path: String,
     ) -> Self {
         let state_file_path =
             Path::new(&config.bmad_paths.implementation_artifacts).join(".bmad-bot-session.yaml");
@@ -379,7 +381,7 @@ impl SessionRunner {
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
-            skill_path: ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
+            skill_path,
             consultation_runner,
         }
     }
@@ -2715,6 +2717,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
 
         assert!(
@@ -2744,6 +2747,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
 
         let expected = dir.path().join(".bmad-bot-session.yaml");
@@ -2765,6 +2769,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
         // Verify mcp_manager is stored (Arc strong count increased)
         assert_eq!(Arc::strong_count(&mcp), 2);
@@ -2792,6 +2797,7 @@ mod tests {
             Arc::clone(&sessions),
             Arc::clone(&in_flight),
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
 
         // >= 2, not == 2: internal cloning is an implementation detail.
@@ -2820,6 +2826,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
 
         // Must still be {implementation_artifacts}/.bmad-bot-session.yaml
@@ -2990,6 +2997,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
 
         let result = runner.check_and_recover_wal().await;
@@ -3021,6 +3029,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
 
         let result = runner.check_and_recover_wal().await;
@@ -3059,6 +3068,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
 
         let result = runner.check_and_recover_wal().await;
@@ -3176,6 +3186,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
         let recovery = runner
             .check_and_recover_wal()
@@ -3218,6 +3229,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         );
         let recovery = runner
             .check_and_recover_wal()
@@ -3502,6 +3514,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         )
     }
 
@@ -3521,6 +3534,7 @@ mod tests {
             subs,
             inflt,
             crate::ui::UiHandle::null(),
+            ".claude/skills/bmad-dev-story/SKILL.md".to_string(),
         )
     }
 

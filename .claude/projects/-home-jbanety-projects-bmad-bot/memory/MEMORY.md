@@ -1,0 +1,2 @@
+- [User profile](user_profile.md) — JB, expert Rust dev, solo on bmad-bot, prefers French communication
+- [Epic 15 SDK runtime](project_epic15_sdk_runtime.md) — Dual runtime (API+SDK) with Claude Code & Codex as providers, approved 2026-04-26

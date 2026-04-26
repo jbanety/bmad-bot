@@ -1,6 +1,6 @@
 ---
 stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step-03-create-stories', 'step-04-final-validation']
-inputDocuments: ['_bmad-output/planning-artifacts/prd.md', '_bmad-output/planning-artifacts/architecture.md', '_bmad-output/planning-artifacts/architect-brief-mcp-client-integration.md', '_bmad-output/planning-artifacts/sprint-change-proposal-2026-04-15.md']
+inputDocuments: ['_bmad-output/planning-artifacts/prd.md', '_bmad-output/planning-artifacts/architecture.md', '_bmad-output/planning-artifacts/architect-brief-mcp-client-integration.md', '_bmad-output/planning-artifacts/sprint-change-proposal-2026-04-15.md', '_bmad-output/planning-artifacts/sprint-change-proposal-2026-04-26.md']
 ---
 
 # BMAD Bot - Epic Breakdown
@@ -25,8 +25,8 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR7: The agent can create and checkout a git branch following the `story/{epic}-{story}` naming convention
 
 **Development Session**
-- FR8: The daemon can instantiate a streaming rig agent session with a BMAD skill (`SKILL.md` loaded via Zed-style XML context as first user message), replacing the former persona-based activation
-- FR9: The daemon can expose surgical development tools to the agent via rig tool calling: `read_file` (partial reading & outline mode), `edit_file` (search-replace surgical editing), `grep` (regex codebase search), `find_path` (glob-based file discovery), `list_directory` (directory listing), `git` (version control operations), `terminal` (shell command execution), `ask_supervisor` (supervision escalation), and `think` (rig's built-in ThinkTool, derived from Anthropic's Claude Think Tool pattern, for structured reasoning without consuming real tool calls). Tools follow the Claude Code / Zed agent-mode pattern for optimal token efficiency and code safety
+- FR8: The daemon can instantiate an agent session via the configured runtime — API mode (streaming rig agent session with BMAD skill loaded via Zed-style XML context) or SDK mode (delegated to an external agentic CLI such as Claude Code or Codex)
+- FR9: The daemon can expose surgical development tools to the agent via rig tool calling: `read_file` (partial reading & outline mode), `edit_file` (search-replace surgical editing), `grep` (regex codebase search), `find_path` (glob-based file discovery), `list_directory` (directory listing), `git` (version control operations), `terminal` (shell command execution), `ask_supervisor` (supervision escalation), and `think` (rig's built-in ThinkTool). In SDK mode, tools are provided by the external CLI; the daemon exposes the supervisor via MCP instead of rig tool registration
 - FR10: The agent can execute the full BMAD `dev-story` workflow autonomously
 - FR11: The daemon can inject a session language override (English) via a minimal system preamble without modifying repo files
 
@@ -62,7 +62,7 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR32: The daemon can auto-discover BMAD version and installed modules from the project repo
 - FR39: ~~REMOVED~~ — GitHub Copilot provider support removed in Sprint Change Proposal 2026-04-15
 - FR40: The daemon logs all LLM requests and responses via a dedicated `llm_logging` module for debugging and operational visibility
-- FR42: The daemon centralizes all LLM provider construction via an `AgentFactory` that returns a `BuiltAgent` with unified `stream_chat()` dispatch. Two providers supported: `anthropic` (Messages API) and `openai-compatible` (Responses API, with optional `base_url` for any compatible endpoint)
+- FR42: The daemon centralizes all LLM provider construction via a `SessionRuntime` enum wrapping `ApiRuntime` (rig-based `AgentFactory` → `BuiltAgent` → `stream_chat()`) and `SdkRuntime` (CLI subprocess). Four providers supported: `anthropic` and `openai-compatible` (API mode), `claude-code` and `codex` (SDK mode). Each LLM role independently selects its provider
 
 **Error Handling & Resilience**
 - FR33: The daemon can handle LLM provider rate limits with retry and exponential backoff
@@ -87,6 +87,13 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR54: The epic review agent (Winston) reads `deferred-work.md` and its own code analysis findings to propose pre-epic debt/improvement stories at epic boundaries
 - FR55: A `spawn_agent` tool is available to all agent sessions for LLM-initiated sub-agent delegation (Zed-style: label, message, session_id for follow-up)
 - FR56: The OpenAI-compatible provider supports an optional `base_url` configuration for any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, Groq, etc.)
+
+**SDK Provider Runtime (Sprint Change 2026-04-26)**
+- FR60: The daemon can delegate a development session to Claude Code CLI (`claude -p`) running as a subprocess, with structured JSON output parsing and real-time progress monitoring
+- FR61: The daemon can delegate a development session to Codex CLI (`codex exec --json`) running as a subprocess, with NDJSON event parsing and real-time progress monitoring
+- FR62: The daemon can expose the supervisor's `ask_supervisor` capability as an MCP server (stdio transport) that SDK-mode sessions consume natively. LLM fallback backend is provider-agnostic. Only `ask_supervisor` exposed via MCP — consultations remain daemon-orchestrated
+- FR63: Each LLM role (dev, review, supervisor, critic) can be independently configured with either an API provider (anthropic, openai-compatible) or an SDK provider (claude-code, codex), with model selection for each
+- FR64: The `bmad-bot init` command supports interactive setup of SDK providers, including CLI availability validation and MCP server configuration
 
 ### NonFunctional Requirements
 
@@ -127,6 +134,14 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - Decision 4 — Error Propagation: Three-tier layered. Layer 1 (HTTP transport): reqwest-middleware auto-retry. Layer 2 (Tools): domain-specific handling + bubble-up. Layer 3 (Session/Daemon): commit partial work, create PR with failure, notify.
 - Decision 5 — Agent Prompt Composition: Minimal system preamble with operational instructions and language override. BMAD dev agent file sent as first user message wrapped in Zed-style XML context tags (`<context><files>`) via `activate_agent()`. Agent executes activation steps via tools before receiving commands. First command message: `"DS"`. New `llm_context` module with `ContextBuilder` handles XML formatting (adaptive backtick fencing, absolute path resolution, multi-file support, line ranges).
 - Decision 6 — Deployment Model: Foreground process via `bmad-bot start`. No self-daemonization. Logs to stdout/stderr.
+- Decision 12 — Dual Runtime Abstraction: `SessionRuntime` enum with `Api(ApiRuntime)` (rig-based) and `Sdk(SdkRuntime)` (CLI subprocess) variants. Pipeline calls `SessionRuntime::run_session()` uniformly. Skill path resolution via `_bmad/_config/manifest.yaml` → `ides[]` replaces all hardcoded `.claude/skills/` references.
+- Decision 13 — Supervisor MCP Server: stdio-transport MCP server exposing single `ask_supervisor` tool for SDK sessions. Hidden `bmad-bot mcp-supervisor --story {story_id}` subcommand. Anti-recursion guard: supervisor's own SDK subprocess does NOT receive MCP config.
+
+**From Architecture — Decision Amendments (Sprint Change 2026-04-26):**
+- D1 amended — SDK mode: supervisor accessed via MCP protocol instead of rig tool. Same 3-tier cascade (rules → LLM → escalation), different transport.
+- D5 amended — System preamble (`build_preamble()`, `build_create_preamble()`, `ContextBuilder` XML) are API-mode-only. SDK mode: no preamble, no inlined skill content. Claude Code discovers `.claude/skills/` + `CLAUDE.md` natively; Codex discovers `.agents/skills/` + `AGENTS.md` natively. Skills invoked via native slash commands.
+- D8 amended — `BuiltAgent` + `AgentFactory` remain for API mode. New `SdkSession` for SDK mode. Both wrapped in `SessionRuntime` enum. Four providers: `anthropic`, `openai-compatible` (API), `claude-code`, `codex` (SDK).
+- D10 amended — SDK consultations: session completes phase (CLI exits), daemon runs consultation as separate CLI subprocess, resumes original session via `--resume {session_id}`. SDK session IDs persisted per phase in WAL (`sdk_session_ids: HashMap<String, String>`).
 
 **From Architecture — Implementation Patterns (mandatory for all stories):**
 - Error Type Pattern: Per-module `thiserror` enums. `anyhow` only in `main.rs` / CLI layer.
@@ -211,6 +226,11 @@ This document provides the complete epic and story breakdown for BMAD Bot, decom
 - FR54: Epic 14 — Epic review reads deferred-work.md and proposes pre-epic debt stories
 - FR55: Epic 12 — spawn_agent tool for LLM-initiated sub-agent delegation in all sessions
 - FR56: Epic 11 — OpenAI-compatible provider with optional base_url for any compatible endpoint
+- FR60: Epic 15 — Delegate dev session to Claude Code CLI with structured JSON output parsing
+- FR61: Epic 15 — Delegate dev session to Codex CLI with NDJSON event parsing
+- FR62: Epic 15 — Expose ask_supervisor as MCP server (stdio transport) for SDK sessions
+- FR63: Epic 15 — Per-role independent API or SDK provider configuration
+- FR64: Epic 15 — bmad-bot init supports SDK provider setup with CLI validation
 
 ## Epic List
 
@@ -274,6 +294,11 @@ The pipeline orchestrates the full story lifecycle from `backlog` to `done`. For
 ### Epic 14: Epic Review Enhancement & Deferred Work
 The epic review agent (Winston) reads `deferred-work.md` and combines it with findings from its own code analysis to propose pre-epic cleanup/improvement stories. These are injected at the head of the next epic in `sprint-status.yaml` as `backlog` stories with convention `X-0-pre-epic-X-{slug}`. Processed debt items are purged from `deferred-work.md`. After this epic, technical debt is managed rhythmically at epic boundaries.
 **FRs covered:** FR54
+
+### Epic 15: SDK Provider Runtime & Supervisor MCP
+Add Claude Code and Codex as SDK-based provider options alongside the existing rig-based API providers. Each LLM role independently selects its provider and model. The session execution logic is abstracted behind a `SessionRuntime` enum with `Api` (existing rig-based flow) and `Sdk` (CLI subprocess) variants. The supervisor's `ask_supervisor` capability is exposed as an MCP server (stdio transport) for SDK sessions. Skill paths are resolved dynamically via BMAD manifest. After this epic, stories can be processed end-to-end using Claude Code or Codex with identical pipeline outcomes as API mode.
+**FRs covered:** FR8 (modified), FR9 (modified), FR42 (modified), FR60, FR61, FR62, FR63, FR64
+**Depends on:** Epic 13 (multi-phase pipeline), Epic 14 (pre-epic story mechanism)
 
 ---
 
@@ -3637,3 +3662,256 @@ So that the deferred work file remains current and doesn't accumulate stale reso
 
 **Dependencies:** Epic 13 (linear pipeline in place to process pre-epic stories)
 **Risk:** 🟢 Low — extends existing epic review functionality
+
+---
+
+## Epic 15: SDK Provider Runtime & Supervisor MCP
+
+**Theme:** Add Claude Code and Codex as SDK-based provider options alongside the existing rig-based API providers. Each LLM role (dev, review, supervisor, critic) independently selects its provider and model. The pipeline orchestration is unchanged — same phases, same consultation pattern — only the session backend varies.
+
+**Sprint Change Proposal:** `planning-artifacts/sprint-change-proposal-2026-04-26.md`
+
+**Dependencies:** Epic 13 (multi-phase pipeline), Epic 14 (pre-epic story mechanism)
+
+### Story 15.1: Session Runtime Abstraction Layer
+
+As a daemon developer,
+I want the session execution logic abstracted behind a `SessionRuntime` enum with an `Api` variant wrapping the current rig-based flow,
+So that a second `Sdk` variant can be added without modifying existing code.
+
+**Acceptance Criteria:**
+
+**Given** the daemon processes a story
+**When** a session needs to be started for any pipeline phase
+**Then** `pipeline.rs` calls `SessionRuntime::run_session()` instead of directly calling `SessionRunner` methods
+**And** a new `src/runtime/mod.rs` module defines `SessionRuntime` enum with `Api(ApiRuntime)` variant
+
+**Given** the current session execution flow (build agent, run session, handle tools)
+**When** the abstraction is applied
+**Then** `ApiRuntime` wraps the existing logic from `session/runner.rs` with zero behavioral changes
+**And** system preamble construction (`build_preamble()`, `build_create_preamble()`) is scoped to `ApiRuntime` only
+
+**Given** skill paths are currently hardcoded to `.claude/skills/` in `pipeline.rs`, `review/mod.rs`, `session/runner.rs`
+**When** the abstraction is applied
+**Then** a centralized `resolve_skill_path(skill_name)` reads `_bmad/_config/manifest.yaml` → `ides[]` and maps to the correct directory
+**And** all hardcoded `.claude/skills/` references are replaced
+
+**Given** the `Sdk` variant is not yet implemented
+**When** the enum is defined
+**Then** `Sdk` variant exists as a stub (`todo!()`) — wired in subsequent stories
+
+### Story 15.2: Config Extension for SDK Providers
+
+As a daemon operator,
+I want to configure `claude-code` and `codex` as provider types in `bmad-bot.yaml`,
+So that each LLM role can independently use API or SDK mode.
+
+**Acceptance Criteria:**
+
+**Given** a user edits `bmad-bot.yaml`
+**When** they set `provider: "claude-code"` or `provider: "codex"` for any LLM role
+**Then** `BotConfig` accepts and validates the configuration
+**And** `VALID_LLM_PROVIDERS` includes `"claude-code"` and `"codex"`
+
+**Given** a SDK provider is configured
+**When** the daemon starts
+**Then** it validates CLI availability (`claude --version` / `codex --version`)
+**And** it validates BMAD skills are installed in the correct directory for the provider (`.claude/skills/bmad-*` for claude-code, `.agents/skills/bmad-*` for codex)
+**And** if either check fails, the daemon exits with a clear error message directing the user to install the CLI or run the BMAD installer
+
+**Given** the config includes an optional `cli_path` field
+**When** the user specifies a non-standard CLI installation path
+**Then** the daemon uses that path instead of searching `$PATH`
+
+### Story 15.3: SDK Runtime Subprocess Infrastructure
+
+As a daemon developer,
+I want a generic `SdkRuntime` that manages an external CLI process (spawn, environment, working directory, streaming output, shutdown),
+So that Claude Code and Codex integrations share common subprocess management code.
+
+**Acceptance Criteria:**
+
+**Given** the daemon needs to run an SDK session
+**When** `SdkRuntime` is invoked
+**Then** it spawns a subprocess with configurable command, args, env vars, and working directory
+**And** streams stdout line-by-line (NDJSON parsing)
+**And** captures stderr for error reporting
+
+**Given** the subprocess is running
+**When** the daemon's `ShutdownFlag` is set
+**Then** the subprocess receives SIGTERM, with SIGKILL after a configurable timeout
+
+**Given** the subprocess produces streaming events
+**When** events are parsed
+**Then** `SdkOutputEvent` enum captures: progress, tool_call, completion, error
+**And** UI events are emitted via `UiHandle` for real-time visibility
+
+**Given** an SDK session starts
+**When** the CLI outputs its session ID
+**Then** the session ID is extracted and stored for later `--resume` usage (consultation injection, crash recovery)
+
+**Given** the subprocess needs API keys
+**When** the session is started
+**Then** environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) are injected from the daemon's secrets
+
+### Story 15.4: Supervisor MCP Server
+
+As a daemon developer,
+I want the supervisor's `ask_supervisor` capability exposed as an MCP server (stdio transport),
+So that SDK-mode sessions can access the supervisor via their native MCP integration.
+
+**Acceptance Criteria:**
+
+**Given** a new `src/mcp_server/` module
+**When** built
+**Then** it implements a stdio-transport MCP server exposing a single tool: `ask_supervisor` with `question: String` parameter
+
+**Given** an SDK session calls `ask_supervisor` via MCP
+**When** the MCP server receives the request
+**Then** it delegates to the existing 3-tier cascade: rule engine → LLM fallback → human escalation
+**And** LLM fallback backend is provider-agnostic (uses `SessionRuntime::Api` or `SessionRuntime::Sdk` based on supervisor role config)
+**And** no MCP config is passed to the supervisor's own subprocess (prevents infinite recursion)
+
+**Given** the daemon starts an SDK session
+**When** it prepares the MCP config
+**Then** it generates a dynamic MCP server config JSON:
+```json
+{
+  "mcpServers": {
+    "bmad-supervisor": {
+      "command": "bmad-bot",
+      "args": ["mcp-supervisor", "--story", "{story_id}"]
+    }
+  }
+}
+```
+**And** a new hidden CLI subcommand `bmad-bot mcp-supervisor` handles the server process
+
+**Given** the supervisor answers via MCP
+**When** decisions are made
+**Then** decision logging is preserved — MCP tool calls logged identically to rig tool calls
+**And** the supervisor decisions file is still committed at session end
+
+### Story 15.5: Claude Code Provider Integration
+
+As a daemon operator,
+I want to use `provider: claude-code` for any LLM role so the daemon delegates sessions to the Claude Code CLI,
+So that I benefit from Claude Code's built-in tools, context management, and agentic capabilities.
+
+**Acceptance Criteria:**
+
+**Given** a role is configured with `provider: claude-code`
+**When** the daemon runs a session for that role
+**Then** `SdkClaudeCodeProvider` invokes: `claude -p "/bmad-dev-story {story_context}" --output-format stream-json --allowedTools "..." --permission-mode acceptEdits --model {configured_model} --cd {project_root}`
+**And** Claude Code is launched **without `--bare`** so it discovers project skills (`.claude/skills/`), `CLAUDE.md`, and conventions natively
+
+**Given** the supervisor MCP server is available
+**When** the CLI is invoked
+**Then** `--mcp-config '{supervisor_mcp_json}'` is passed so the session can call `ask_supervisor`
+
+**Given** skills are invoked via native slash commands
+**When** the daemon composes the prompt
+**Then** it uses `/bmad-dev-story`, `/bmad-create-story`, `/bmad-code-review` etc. with story-specific context (story file path, branch name, language override)
+**And** NO system preamble, NO inlined skill content, NO tool usage rules
+
+**Given** the session completes
+**When** the daemon parses the streaming JSON output
+**Then** the session ID is captured and persisted in WAL for resume and recovery
+
+### Story 15.6: Codex Provider Integration
+
+As a daemon operator,
+I want to use `provider: codex` for any LLM role so the daemon delegates sessions to the Codex CLI,
+So that I can use OpenAI models with autonomous agent capabilities.
+
+**Acceptance Criteria:**
+
+**Given** a role is configured with `provider: codex`
+**When** the daemon runs a session for that role
+**Then** `SdkCodexProvider` invokes: `codex exec --json --full-auto --cd {project_root} --model {configured_model} "/bmad-dev-story {story_context}"`
+**And** Codex discovers project skills (`.agents/skills/`), `AGENTS.md`, and conventions natively
+
+**Given** the supervisor MCP server is available
+**When** the session is prepared
+**Then** MCP config is written to `.codex/config.toml` in the project root for the session
+
+**Given** crash recovery is needed
+**When** the daemon restarts
+**Then** it uses `codex resume {session_id}` with the persisted session ID from WAL
+
+### Story 15.7: Pipeline Dual-Runtime Orchestration
+
+As a daemon developer,
+I want the multi-phase pipeline to route each phase to the appropriate runtime based on the role's provider config,
+So that mixed-mode configurations work seamlessly.
+
+**Acceptance Criteria:**
+
+**Given** a story enters the pipeline
+**When** each phase is executed
+**Then** `pipeline.rs` routes to `SessionRuntime::Api` or `SessionRuntime::Sdk` based on the provider configured for the phase's LLM role
+
+**Given** the pipeline orchestration pattern (Decision 10)
+**When** SDK mode is used
+**Then** the pipeline is unchanged — same phases, same order, same daemon-orchestrated consultations
+**And** API mode: findings injected as user message in paused session
+**And** SDK mode: findings injected via `--resume {session_id}` with findings as prompt
+
+**Given** each SDK session produces a session ID
+**When** it is captured
+**Then** the WAL stores `runtime_type: api | sdk` and `sdk_session_ids: HashMap<String, String>` (phase → session_id) for correct recovery and resume routing
+
+**Given** both runtimes are active
+**When** UI events are emitted
+**Then** both runtimes emit the same event types via `UiHandle` for unified monitoring
+
+### Story 15.8: Init Command SDK Provider Setup
+
+As a new user,
+I want `bmad-bot init` to guide me through SDK provider setup when I choose `claude-code` or `codex`,
+So that configuration is correct and validated before first run.
+
+**Acceptance Criteria:**
+
+**Given** the user runs `bmad-bot init`
+**When** available CLIs are detected (`claude --version`, `codex --version`)
+**Then** they are offered as provider options alongside `anthropic` and `openai-compatible`
+
+**Given** an SDK provider is selected
+**When** configuration is generated
+**Then** the daemon validates CLI version compatibility and BMAD skill presence
+**And** generates the appropriate MCP supervisor config section
+**And** `.env` template includes relevant API keys for the selected providers
+
+### Epic 15 Summary
+
+| Story | Title | Dependencies | Effort |
+|-------|-------|--------------|--------|
+| 15.1 | Session Runtime Abstraction Layer | — | Medium |
+| 15.2 | Config Extension for SDK Providers | — | Small |
+| 15.3 | SDK Runtime Subprocess Infrastructure | 15.1 | Medium |
+| 15.4 | Supervisor MCP Server | — | Large |
+| 15.5 | Claude Code Provider Integration | 15.2, 15.3, 15.4 | Large |
+| 15.6 | Codex Provider Integration | 15.2, 15.3, 15.4 | Medium |
+| 15.7 | Pipeline Dual-Runtime Orchestration | 15.1, 15.5 or 15.6 | Large |
+| 15.8 | Init Command SDK Provider Setup | 15.2 | Small |
+
+**Skill discovery via BMAD manifest — replaces hardcoded paths:**
+- The daemon reads `_bmad/_config/manifest.yaml` → `ides[]` to discover which IDEs/CLIs are installed
+- IDE-to-skill-path mapping: `claude-code` → `.claude/skills/`, `codex` → `.agents/skills/`
+- API mode (rig): uses the manifest to resolve skill paths dynamically instead of hardcoding `.claude/skills/`
+- SDK mode: the CLI discovers skills natively, daemon validates presence at startup
+- BMAD's installer places skills in the correct directory — the daemon does NOT manage skill installation
+- If skills missing → fail fast: "Run BMAD installer with {provider} support enabled."
+
+**Execution Strategy:**
+- Stories 15.1, 15.2, and 15.4 can begin in parallel (no interdependencies)
+- Story 15.3 depends on 15.1 (needs the runtime abstraction)
+- Stories 15.5 and 15.6 can run in parallel once 15.3 and 15.4 are done
+- Story 15.7 integrates everything
+- Story 15.8 can start after 15.2 and be finalized after 15.5/15.6
+
+**Critical path:** 15.1 → 15.3 → 15.5 → 15.7
+
+**Dependencies:** Epic 13 (multi-phase pipeline in place), Epic 14 (pre-epic story mechanism)
+**Risk:** 🟡 Medium — subprocess management and MCP server are new infrastructure, but pipeline orchestration is unchanged
