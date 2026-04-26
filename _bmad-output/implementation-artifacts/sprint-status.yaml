@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-26 (14-3 done)
+# last_updated: 2026-04-26 (14-4 done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -163,5 +163,5 @@ development_status:
   14-1-winston-reads-deferred-work: done
   14-2-pre-epic-story-generation: done # depends-on: 14-1
   14-3-inject-pre-epic-stories-sprint-status: done # depends-on: 14-2
-  14-4-purge-processed-deferred-items: backlog # depends-on: 14-3
+  14-4-purge-processed-deferred-items: done # depends-on: 14-3
   epic-14-retrospective: optional

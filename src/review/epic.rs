@@ -114,6 +114,77 @@ pub struct PreEpicStory {
     pub related_deferred_items: String,
 }
 
+// ---------------------------------------------------------------------------
+// DeferredItemRef
+// ---------------------------------------------------------------------------
+
+/// A reference to a specific item in `deferred-work.md`.
+///
+/// Maps to the format `story {story_id} ({date}) item {number}` found in
+/// pre-epic story files under the "Related Deferred Items" section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferredItemRef {
+    /// Story identifier in the section heading, e.g. `"11.1"`.
+    pub section_story_id: String,
+    /// Date in the section heading, e.g. `"2026-04-15"`.
+    pub section_date: String,
+    /// 1-indexed item number within the section.
+    pub item_number: usize,
+}
+
+/// Parse "Related Deferred Items" references from a pre-epic story file.
+///
+/// Supports two formats:
+/// 1. Section heading: `## Related Deferred Items` followed by bullet lines
+/// 2. Inline field: `- **Related Deferred Items:** ...`
+///
+/// Returns an empty `Vec` if the section is missing or contains `"none"`.
+pub fn parse_related_deferred_items(story_file_content: &str) -> Vec<DeferredItemRef> {
+    let re = regex::Regex::new(
+        r"story\s+(\d+\.\d+[a-z]?)\s+\((\d{4}-\d{2}-\d{2})\)\s+item\s+(\d+)",
+    )
+    .expect("invalid regex");
+
+    let text_block = if let Some(pos) = story_file_content.find("## Related Deferred Items") {
+        let after = &story_file_content[pos + "## Related Deferred Items".len()..];
+        let end = after.find("\n## ").unwrap_or(after.len());
+        &after[..end]
+    } else if let Some(pos) = story_file_content.find("- **Related Deferred Items:**") {
+        let after =
+            &story_file_content[pos + "- **Related Deferred Items:**".len()..];
+        let end = after.find("\n- **").unwrap_or(after.len());
+        &after[..end]
+    } else {
+        return Vec::new();
+    };
+
+    let trimmed = text_block.trim();
+    if trimmed.eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+
+    let mut refs = Vec::new();
+    for cap in re.captures_iter(text_block) {
+        let item_num: usize = match cap[3].parse() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    action = "deferred_ref_parse_error",
+                    raw = %&cap[0],
+                    "Failed to parse item number in deferred item reference"
+                );
+                continue;
+            }
+        };
+        refs.push(DeferredItemRef {
+            section_story_id: cap[1].to_string(),
+            section_date: cap[2].to_string(),
+            item_number: item_num,
+        });
+    }
+    refs
+}
+
 /// Parse pre-epic story blocks from Winston's epic review report.
 ///
 /// Looks for section `Pre-Epic Stories for Epic {next_epic}` and extracts
@@ -1686,5 +1757,103 @@ Story 15-0a.
         assert_eq!(stories.len(), 1);
         assert!(stories[0].justification.contains("First line of justification"));
         assert!(stories[0].justification.contains("second line"));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_related_deferred_items tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_related_deferred_items_section_heading() {
+        let content = "\
+# Story 15-0a
+
+## Related Deferred Items
+
+- story 11.1 (2026-04-15) item 1
+- story 9.3 (2026-04-18) item 1
+
+## Tasks
+";
+        let refs = parse_related_deferred_items(content);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].section_story_id, "11.1");
+        assert_eq!(refs[0].section_date, "2026-04-15");
+        assert_eq!(refs[0].item_number, 1);
+        assert_eq!(refs[1].section_story_id, "9.3");
+        assert_eq!(refs[1].section_date, "2026-04-18");
+        assert_eq!(refs[1].item_number, 1);
+    }
+
+    #[test]
+    fn test_parse_related_deferred_items_inline_field() {
+        let content = "\
+- **Source:** deferred-work
+- **Related Deferred Items:** story 11.1 (2026-04-15) item 1
+- **Severity:** high
+";
+        let refs = parse_related_deferred_items(content);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].section_story_id, "11.1");
+        assert_eq!(refs[0].item_number, 1);
+    }
+
+    #[test]
+    fn test_parse_related_deferred_items_none() {
+        let content = "\
+## Related Deferred Items
+
+none
+
+## Tasks
+";
+        let refs = parse_related_deferred_items(content);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_related_deferred_items_missing_section() {
+        let content = "\
+# Story 15-0a
+
+## Tasks
+
+- [ ] Task 1
+";
+        let refs = parse_related_deferred_items(content);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_related_deferred_items_comma_separated() {
+        let content = "\
+- **Related Deferred Items:** story 11.1 (2026-04-15) item 1, story 11.1 (2026-04-15) item 2
+- **Severity:** low
+";
+        let refs = parse_related_deferred_items(content);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].section_story_id, "11.1");
+        assert_eq!(refs[0].item_number, 1);
+        assert_eq!(refs[1].section_story_id, "11.1");
+        assert_eq!(refs[1].item_number, 2);
+    }
+
+    #[test]
+    fn test_parse_related_deferred_items_multiline() {
+        let content = "\
+## Related Deferred Items
+
+- story 11.1 (2026-04-15) item 1
+- story 11.2 (2026-04-15) item 3
+- story 9.3 (2026-04-18) item 2
+";
+        let refs = parse_related_deferred_items(content);
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0].section_story_id, "11.1");
+        assert_eq!(refs[0].item_number, 1);
+        assert_eq!(refs[1].section_story_id, "11.2");
+        assert_eq!(refs[1].item_number, 3);
+        assert_eq!(refs[2].section_story_id, "9.3");
+        assert_eq!(refs[2].item_number, 2);
     }
 }

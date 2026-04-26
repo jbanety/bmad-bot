@@ -136,3 +136,11 @@
 ## Deferred from: code review of story 14.3 (2026-04-26)
 
 - **`parse_pre_epic_stories` section boundary relies on sentinel strings:** `section_text = &report[section_start..]` captures everything from the section marker to end of report. Termination depends on `**Must-Do` / `**Can Defer` sentinels. If Winston omits these sentinels, `#####` headings from later report sections would be processed as story candidates. Mitigated by title-required guard and prompt engineering from story 14.2, but fragile if report format evolves.
+
+
+## Deferred from: code review of story 14.4 (2026-04-26)
+
+- **Content between top-level heading and first section silently dropped during reconstruction:** `purge_deferred_items` parser discards any text between `# Deferred Work` and the first `## Deferred from:` heading. Also, `# ` headings mid-file orphan subsequent lines. No such content currently exists in the file, but the parser is not resilient to format extensions.
+- **No warning when a DeferredItemRef target section is not found:** When a ref points to a `(story_id, date)` combination that doesn't exist in deferred-work.md, the ref is silently skipped with no log. A `tracing::debug!` would aid troubleshooting.
+- **No integration test for pipeline orchestration path:** The wiring (read story file → parse refs → check deferred-work exists → purge → commit) is untested at integration level. All tests are unit-level against individual functions.
+- **Regex compiled on every function call:** Both `parse_related_deferred_items` and `purge_deferred_items` compile `regex::Regex::new(...)` per call. Could use `std::sync::LazyLock`. Performance impact is negligible (called once per pre-epic story completion).

@@ -26,8 +26,8 @@ use crate::notifier::{
     EpicGateNotification, Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier,
 };
 use crate::review::epic::{
-    EpicReviewOutcome, EpicReviewRunner, PreEpicStory, extract_epic_recap,
-    generate_failure_report, parse_pre_epic_stories,
+    DeferredItemRef, EpicReviewOutcome, EpicReviewRunner, PreEpicStory, extract_epic_recap,
+    generate_failure_report, parse_pre_epic_stories, parse_related_deferred_items,
 };
 use crate::session::SessionOutcome;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
@@ -1358,6 +1358,105 @@ impl StoryPipeline {
                                 error = %e,
                                 "Failed to push sprint-status commit — PR may not reflect done status"
                             );
+                        }
+
+                        // Purge resolved deferred items for pre-epic stories
+                        if is_pre_epic_story(story_key) {
+                            let story_file_path = Path::new(
+                                &self.config.bmad_paths.implementation_artifacts,
+                            )
+                            .join(format!("{story_key}.md"));
+
+                            match tokio::fs::read_to_string(&story_file_path).await {
+                                Ok(story_content) => {
+                                    let refs =
+                                        parse_related_deferred_items(&story_content);
+                                    if refs.is_empty() {
+                                        tracing::info!(
+                                            action = "no_deferred_items_to_purge",
+                                            story_key = %story_key,
+                                            "No related deferred items to purge"
+                                        );
+                                    } else {
+                                        let deferred_work_path = Path::new(
+                                            &self.config.bmad_paths.implementation_artifacts,
+                                        )
+                                        .join("deferred-work.md");
+
+                                        if !deferred_work_path.exists() {
+                                            tracing::info!(
+                                                action = "deferred_work_not_found",
+                                                story_key = %story_key,
+                                                "deferred-work.md not found, skipping purge"
+                                            );
+                                        } else {
+                                            match purge_deferred_items(
+                                                &deferred_work_path,
+                                                &refs,
+                                            )
+                                            .await
+                                            {
+                                                Ok(count) if count > 0 => {
+                                                    let epic_num = story_key
+                                                        .split('-')
+                                                        .next()
+                                                        .unwrap_or("0");
+                                                    let commit_msg = format!(
+                                                        "chore(deferred): purge resolved items from pre-epic-{epic_num} stories"
+                                                    );
+                                                    match commit_sprint_status(
+                                                        &self.config.bmad_paths.project_root,
+                                                        &deferred_work_path,
+                                                        &commit_msg,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(()) => {
+                                                            tracing::info!(
+                                                                action = "deferred_items_purged",
+                                                                count = count,
+                                                                story_key = %story_key,
+                                                                "Purged {count} resolved items from deferred-work.md"
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!(
+                                                                action = "deferred_purge_commit_failed",
+                                                                story_key = %story_key,
+                                                                error = %e,
+                                                                "Failed to commit deferred-work.md purge — {count} items purged but uncommitted"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Ok(_) => {
+                                                    tracing::info!(
+                                                        action = "no_matching_deferred_items",
+                                                        story_key = %story_key,
+                                                        "No matching deferred items found in deferred-work.md"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!(
+                                                        action = "deferred_purge_failed",
+                                                        story_key = %story_key,
+                                                        error = %e,
+                                                        "Failed to purge deferred items"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        action = "story_file_read_failed",
+                                        story_key = %story_key,
+                                        error = %e,
+                                        "Failed to read story file for deferred item purge — skipping"
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -3161,6 +3260,23 @@ async fn has_uncommitted_sprint_status(repo_path: &str, sprint_status_path: &Pat
     }
 }
 
+/// Check whether a story key matches the pre-epic naming convention.
+///
+/// Pre-epic keys follow the pattern `{epic}-0{letter}-pre-epic-{epic}-{slug}`,
+/// e.g. `15-0a-pre-epic-15-fix-error-handling`. Regular stories have a numeric
+/// second segment (e.g. `14-3-inject-...`).
+fn is_pre_epic_story(story_key: &str) -> bool {
+    let parts: Vec<&str> = story_key.splitn(3, '-').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    let seg = parts[1];
+    seg.starts_with('0')
+        && seg.len() == 2
+        && seg.chars().nth(1).is_some_and(|c| c.is_ascii_lowercase())
+        && story_key.contains("pre-epic-")
+}
+
 /// Robustly commit sprint-status.yaml changes.
 ///
 /// Respects the user's full git configuration (hooks, GPG signing, etc.).
@@ -3351,6 +3467,126 @@ async fn inject_pre_epic_stories(
 
     let count = new_stories.len();
     Ok(count)
+}
+
+/// Remove resolved deferred items from `deferred-work.md`.
+///
+/// Each [`DeferredItemRef`] identifies an item by its section heading
+/// (`story_id` + `date`) and 1-indexed bullet position. Sections left
+/// with zero remaining bullets are removed entirely. The top-level
+/// `# Deferred Work` heading is always preserved.
+///
+/// Returns the number of items actually removed (refs pointing to
+/// non-existent sections or out-of-range indices are silently skipped).
+async fn purge_deferred_items(
+    deferred_work_path: &Path,
+    refs: &[crate::review::epic::DeferredItemRef],
+) -> Result<usize, String> {
+    if refs.is_empty() {
+        return Ok(0);
+    }
+
+    if !deferred_work_path.exists() {
+        return Ok(0);
+    }
+
+    let content = tokio::fs::read_to_string(deferred_work_path)
+        .await
+        .map_err(|e| format!("Failed to read deferred-work.md: {e}"))?;
+
+    // Parse into sections: (heading_line, Vec<item_text_including_continuation_lines>)
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current_heading: Option<String> = None;
+    let mut current_items: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        if line.starts_with("## Deferred from:") {
+            if let Some(heading) = current_heading.take() {
+                sections.push((heading, std::mem::take(&mut current_items)));
+            }
+            current_heading = Some(line.to_string());
+        } else if line.starts_with("# ") {
+            // Top-level heading — skip, we always preserve it
+            if let Some(heading) = current_heading.take() {
+                sections.push((heading, std::mem::take(&mut current_items)));
+            }
+        } else if let Some(_) = &current_heading {
+            if line.starts_with("- ") {
+                current_items.push(line.to_string());
+            } else if !line.trim().is_empty() {
+                // Continuation line — append to last item
+                if let Some(last) = current_items.last_mut() {
+                    last.push('\n');
+                    last.push_str(line);
+                }
+            }
+        }
+    }
+    if let Some(heading) = current_heading.take() {
+        sections.push((heading, current_items));
+    }
+
+    // Group refs by (section_story_id, section_date)
+    let mut ref_map: std::collections::HashMap<(String, String), Vec<usize>> =
+        std::collections::HashMap::new();
+    for r in refs {
+        ref_map
+            .entry((r.section_story_id.clone(), r.section_date.clone()))
+            .or_default()
+            .push(r.item_number);
+    }
+
+    let section_heading_re = regex::Regex::new(
+        r"## Deferred from: code review of story (\d+\.\d+[a-z]?) \((\d{4}-\d{2}-\d{2})\)",
+    )
+    .expect("invalid regex");
+
+    let mut total_removed = 0usize;
+
+    for (heading, items) in &mut sections {
+        if let Some(caps) = section_heading_re.captures(heading) {
+            let sid = caps[1].to_string();
+            let sdate = caps[2].to_string();
+            if let Some(indices) = ref_map.get(&(sid, sdate)) {
+                let mut sorted_indices: Vec<usize> = indices.clone();
+                sorted_indices.sort_unstable();
+                sorted_indices.dedup();
+                // Remove from highest to lowest to avoid index shifting
+                for &idx in sorted_indices.iter().rev() {
+                    if idx >= 1 && idx <= items.len() {
+                        items.remove(idx - 1);
+                        total_removed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if total_removed == 0 {
+        return Ok(0);
+    }
+
+    // Reconstruct file content
+    let mut output = String::from("# Deferred Work\n");
+    for (heading, items) in &sections {
+        if items.is_empty() {
+            continue;
+        }
+        output.push('\n');
+        output.push_str(heading);
+        output.push('\n');
+        output.push('\n');
+        for item in items {
+            output.push_str(item);
+            output.push('\n');
+        }
+    }
+
+    tokio::fs::write(deferred_work_path, &output)
+        .await
+        .map_err(|e| format!("Failed to write deferred-work.md: {e}"))?;
+
+    Ok(total_removed)
 }
 
 // ---------------------------------------------------------------------------
@@ -6228,5 +6464,262 @@ development_status:
         let result = tokio::fs::read_to_string(&ss).await.unwrap();
         let occurrences = result.matches("15-0a-pre-epic-15-fix-something: backlog").count();
         assert_eq!(occurrences, 1, "Should not have duplicates");
+    }
+
+    #[test]
+    fn test_is_pre_epic_story_valid_key() {
+        assert!(is_pre_epic_story("15-0a-pre-epic-15-fix-error-handling"));
+    }
+
+    #[test]
+    fn test_is_pre_epic_story_sub_index_b() {
+        assert!(is_pre_epic_story("15-0b-pre-epic-15-add-tests"));
+    }
+
+    #[test]
+    fn test_is_pre_epic_story_regular_key() {
+        assert!(!is_pre_epic_story("14-3-inject-pre-epic-stories"));
+    }
+
+    #[test]
+    fn test_is_pre_epic_story_epic_key() {
+        assert!(!is_pre_epic_story("epic-14"));
+    }
+
+    // -----------------------------------------------------------------------
+    // purge_deferred_items tests
+    // -----------------------------------------------------------------------
+
+    use crate::review::epic::DeferredItemRef;
+
+    fn sample_deferred_work() -> String {
+        "\
+# Deferred Work
+
+## Deferred from: code review of story 11.1 (2026-04-15)
+
+- First item from 11.1
+- Second item from 11.1
+
+## Deferred from: code review of story 9.3 (2026-04-18)
+
+- First item from 9.3
+- Second item from 9.3
+"
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_single_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+
+        let refs = vec![DeferredItemRef {
+            section_story_id: "11.1".into(),
+            section_date: "2026-04-15".into(),
+            item_number: 1,
+        }];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 1);
+
+        let result = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(result.contains("Second item from 11.1"));
+        assert!(!result.contains("First item from 11.1"));
+        assert!(result.contains("## Deferred from: code review of story 11.1 (2026-04-15)"));
+        assert!(result.contains("First item from 9.3"));
+        assert!(result.contains("Second item from 9.3"));
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_all_items_in_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+
+        let refs = vec![
+            DeferredItemRef {
+                section_story_id: "11.1".into(),
+                section_date: "2026-04-15".into(),
+                item_number: 1,
+            },
+            DeferredItemRef {
+                section_story_id: "11.1".into(),
+                section_date: "2026-04-15".into(),
+                item_number: 2,
+            },
+        ];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 2);
+
+        let result = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!result.contains("## Deferred from: code review of story 11.1"));
+        assert!(result.contains("## Deferred from: code review of story 9.3"));
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_all_sections_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+
+        let refs = vec![
+            DeferredItemRef { section_story_id: "11.1".into(), section_date: "2026-04-15".into(), item_number: 1 },
+            DeferredItemRef { section_story_id: "11.1".into(), section_date: "2026-04-15".into(), item_number: 2 },
+            DeferredItemRef { section_story_id: "9.3".into(), section_date: "2026-04-18".into(), item_number: 1 },
+            DeferredItemRef { section_story_id: "9.3".into(), section_date: "2026-04-18".into(), item_number: 2 },
+        ];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 4);
+
+        let result = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(result, "# Deferred Work\n");
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_partial_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        let content = "\
+# Deferred Work
+
+## Deferred from: code review of story 12.1 (2026-04-20)
+
+- Item one
+- Item two
+- Item three
+";
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let refs = vec![
+            DeferredItemRef { section_story_id: "12.1".into(), section_date: "2026-04-20".into(), item_number: 1 },
+            DeferredItemRef { section_story_id: "12.1".into(), section_date: "2026-04-20".into(), item_number: 3 },
+        ];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 2);
+
+        let result = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(result.contains("Item two"));
+        assert!(!result.contains("Item one"));
+        assert!(!result.contains("Item three"));
+        assert!(result.contains("## Deferred from: code review of story 12.1"));
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_nonexistent_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+
+        let refs = vec![DeferredItemRef {
+            section_story_id: "99.9".into(),
+            section_date: "2099-01-01".into(),
+            item_number: 1,
+        }];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_empty_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+
+        let count = purge_deferred_items(&path, &[]).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_file_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.md");
+
+        let refs = vec![DeferredItemRef {
+            section_story_id: "11.1".into(),
+            section_date: "2026-04-15".into(),
+            item_number: 1,
+        }];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_preserves_other_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        tokio::fs::write(&path, sample_deferred_work()).await.unwrap();
+
+        let refs = vec![DeferredItemRef {
+            section_story_id: "11.1".into(),
+            section_date: "2026-04-15".into(),
+            item_number: 1,
+        }];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 1);
+
+        let result = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(result.contains("## Deferred from: code review of story 9.3 (2026-04-18)"));
+        assert!(result.contains("First item from 9.3"));
+        assert!(result.contains("Second item from 9.3"));
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_multiline_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        let content = "\
+# Deferred Work
+
+## Deferred from: code review of story 11.1 (2026-04-15)
+
+- First item spans
+  multiple lines here
+- Second item is single line
+- Third item also spans
+  across two lines
+";
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let refs = vec![DeferredItemRef {
+            section_story_id: "11.1".into(),
+            section_date: "2026-04-15".into(),
+            item_number: 1,
+        }];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 1);
+
+        let result = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!result.contains("First item spans"));
+        assert!(!result.contains("multiple lines here"));
+        assert!(result.contains("Second item is single line"));
+        assert!(result.contains("Third item also spans"));
+        assert!(result.contains("across two lines"));
+    }
+
+    #[tokio::test]
+    async fn test_purge_deferred_items_no_rewrite_when_zero_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-work.md");
+        let content = "\
+# Deferred Work
+
+## Deferred from: code review of story 11.1 (2026-04-15)
+
+- First item from 11.1
+
+";
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let refs = vec![DeferredItemRef {
+            section_story_id: "99.9".into(),
+            section_date: "2099-01-01".into(),
+            item_number: 1,
+        }];
+        let count = purge_deferred_items(&path, &refs).await.unwrap();
+        assert_eq!(count, 0);
+
+        let result = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(result, content, "File should be unchanged when no items are removed");
     }
 }
