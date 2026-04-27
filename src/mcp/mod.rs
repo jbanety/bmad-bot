@@ -5,7 +5,7 @@
 
 mod manager;
 
-pub use manager::{McpError, McpManager};
+pub use manager::McpManager;
 
 /// Extract tool names from MCP server data returned by [`McpManager::tools_for_builder()`].
 ///

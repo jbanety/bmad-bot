@@ -21,6 +21,24 @@ use crate::watcher::StoryInfo;
 pub use sdk::SdkRuntime;
 
 // ---------------------------------------------------------------------------
+// RuntimeDeps — shared daemon dependencies for SessionRuntime construction
+// ---------------------------------------------------------------------------
+
+/// Shared daemon dependencies needed to construct a [`SessionRuntime`].
+pub struct RuntimeDeps {
+    pub config: Arc<BotConfig>,
+    pub secrets: Arc<BotSecrets>,
+    pub config_path: PathBuf,
+    pub shutdown: ShutdownFlag,
+    pub mcp_manager: Arc<crate::mcp::McpManager>,
+    pub sub_agent_sessions: Arc<
+        std::sync::Mutex<std::collections::HashMap<String, crate::tools::SubAgentState>>,
+    >,
+    pub sub_agent_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub ui: UiHandle,
+}
+
+// ---------------------------------------------------------------------------
 // SkillPaths — resolve-once, use-everywhere skill path registry
 // ---------------------------------------------------------------------------
 
@@ -121,19 +139,17 @@ impl SessionRuntime {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_config(
-        config: Arc<BotConfig>,
-        secrets: Arc<BotSecrets>,
-        config_path: PathBuf,
-        shutdown: ShutdownFlag,
-        mcp_manager: Arc<crate::mcp::McpManager>,
-        sub_agent_sessions: Arc<
-            std::sync::Mutex<std::collections::HashMap<String, crate::tools::SubAgentState>>,
-        >,
-        sub_agent_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-        ui: UiHandle,
-    ) -> Self {
+    pub fn from_config(deps: RuntimeDeps) -> Self {
+        let RuntimeDeps {
+            config,
+            secrets,
+            config_path,
+            shutdown,
+            mcp_manager,
+            sub_agent_sessions,
+            sub_agent_in_flight,
+            ui,
+        } = deps;
         let llm = &config.llm;
         let all_roles = [&llm.dev, &llm.review, &llm.supervisor];
         let optional_roles: Vec<&crate::config::LlmRoleConfig> = [&llm.epic_review, &llm.critic]
@@ -523,6 +539,25 @@ mod tests {
         })
     }
 
+    fn make_test_deps(
+        config: std::sync::Arc<crate::config::BotConfig>,
+    ) -> RuntimeDeps {
+        RuntimeDeps {
+            config,
+            secrets: make_test_secrets(),
+            config_path: PathBuf::from("test.yaml"),
+            shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_manager: std::sync::Arc::new(crate::mcp::McpManager::empty()),
+            sub_agent_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            sub_agent_in_flight: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            ui: crate::ui::UiHandle::null(),
+        }
+    }
+
     // -- Story 15.7: Dual runtime tests --
 
     #[test]
@@ -618,26 +653,7 @@ mod tests {
     fn test_from_config_all_api_returns_api_variant() {
         let dir = tempfile::tempdir().unwrap();
         let config = make_test_config(dir.path());
-        let secrets = make_test_secrets();
-        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-            String,
-            crate::tools::SubAgentState,
-        >::new()));
-        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashSet::<String>::new(),
-        ));
-        let runtime = SessionRuntime::from_config(
-            config,
-            secrets,
-            PathBuf::from("test.yaml"),
-            shutdown,
-            mcp,
-            subs,
-            inflt,
-            crate::ui::UiHandle::null(),
-        );
+        let runtime = SessionRuntime::from_config(make_test_deps(config));
         assert!(runtime.api_session_runner().is_some());
         assert!(runtime.sdk_runtime().is_none());
     }
@@ -652,26 +668,7 @@ mod tests {
         raw_config.llm.review.provider = "claude-code".to_string();
         raw_config.llm.supervisor.provider = "codex".to_string();
         let config = std::sync::Arc::new(raw_config);
-        let secrets = make_test_secrets();
-        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-            String,
-            crate::tools::SubAgentState,
-        >::new()));
-        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashSet::<String>::new(),
-        ));
-        let runtime = SessionRuntime::from_config(
-            config,
-            secrets,
-            PathBuf::from("test.yaml"),
-            shutdown,
-            mcp,
-            subs,
-            inflt,
-            crate::ui::UiHandle::null(),
-        );
+        let runtime = SessionRuntime::from_config(make_test_deps(config));
         assert!(runtime.api_session_runner().is_none());
         assert!(runtime.sdk_runtime().is_some());
     }
@@ -686,26 +683,7 @@ mod tests {
         raw_config.llm.review.provider = "anthropic".to_string();
         raw_config.llm.supervisor.provider = "anthropic".to_string();
         let config = std::sync::Arc::new(raw_config);
-        let secrets = make_test_secrets();
-        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-            String,
-            crate::tools::SubAgentState,
-        >::new()));
-        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashSet::<String>::new(),
-        ));
-        let runtime = SessionRuntime::from_config(
-            config,
-            secrets,
-            PathBuf::from("test.yaml"),
-            shutdown,
-            mcp,
-            subs,
-            inflt,
-            crate::ui::UiHandle::null(),
-        );
+        let runtime = SessionRuntime::from_config(make_test_deps(config));
         assert!(runtime.api_session_runner().is_some());
         assert!(runtime.sdk_runtime().is_some());
     }
@@ -714,26 +692,7 @@ mod tests {
     fn test_from_config_backward_compat_existing_api_only() {
         let dir = tempfile::tempdir().unwrap();
         let config = make_test_config(dir.path());
-        let secrets = make_test_secrets();
-        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-            String,
-            crate::tools::SubAgentState,
-        >::new()));
-        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashSet::<String>::new(),
-        ));
-        let runtime = SessionRuntime::from_config(
-            config,
-            secrets,
-            PathBuf::from("test.yaml"),
-            shutdown,
-            mcp,
-            subs,
-            inflt,
-            crate::ui::UiHandle::null(),
-        );
+        let runtime = SessionRuntime::from_config(make_test_deps(config));
         assert!(
             runtime.api_session_runner().is_some(),
             "backward compat: default config should be API"

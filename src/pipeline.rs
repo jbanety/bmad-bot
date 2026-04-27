@@ -29,11 +29,10 @@ use crate::review::epic::{
     DeferredItemRef, EpicReviewOutcome, EpicReviewRunner, PreEpicStory, extract_epic_recap,
     generate_failure_report, parse_pre_epic_stories, parse_related_deferred_items,
 };
-use crate::runtime::{ApiRuntime, SessionContext, SessionRuntime, SkillPaths};
+use crate::runtime::{RuntimeDeps, SessionContext, SessionRuntime, SkillPaths};
 use crate::session::SessionOutcome;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::consultation::{ConsultationConfig, ConsultationToolSet};
-use crate::session::runner::SessionRunner;
 use crate::session::runner::ShutdownFlag;
 use crate::session::state::{
     PHASE_CREATE, PHASE_CREATE_ADVERSARIAL_CONSULT, PHASE_CREATE_CRITIC_CONSULT, PHASE_DEV,
@@ -248,16 +247,16 @@ impl StoryPipeline {
         let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
-        let session_runtime = SessionRuntime::from_config(
-            Arc::clone(&config),
-            Arc::clone(&secrets),
+        let session_runtime = SessionRuntime::from_config(RuntimeDeps {
+            config: Arc::clone(&config),
+            secrets: Arc::clone(&secrets),
             config_path,
-            Arc::clone(&shutdown),
-            Arc::clone(&mcp_manager),
-            Arc::clone(&sub_agent_sessions),
-            Arc::clone(&sub_agent_in_flight),
-            ui.clone(),
-        );
+            shutdown: Arc::clone(&shutdown),
+            mcp_manager: Arc::clone(&mcp_manager),
+            sub_agent_sessions: Arc::clone(&sub_agent_sessions),
+            sub_agent_in_flight: Arc::clone(&sub_agent_in_flight),
+            ui: ui.clone(),
+        });
 
         // AgentFactory for EpicReviewRunner (always API-based)
         let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
@@ -4142,6 +4141,8 @@ fn has_retrospective_entry(ssf: &SprintStatusFile, epic_num: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::ApiRuntime;
+    use crate::session::runner::SessionRunner;
 
     // -----------------------------------------------------------------------
     // PipelineResult construction tests

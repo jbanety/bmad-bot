@@ -2,7 +2,6 @@
 //! consultation execution via API, and SDK session resume with findings.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use crate::session::SessionOutcome;
 use crate::session::consultation::ConsultationConfig;
