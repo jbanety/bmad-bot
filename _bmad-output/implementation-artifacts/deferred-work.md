@@ -181,6 +181,13 @@
 - **`SkillPaths::resolve()` does not validate skill file existence on disk:** Resolved paths are constructed via string formatting without checking the files exist. Architecture doc requires startup fail-fast validation. Story 15.2 covers this validation. [src/runtime/mod.rs:22-37]
 - **`SessionRunner.skill_path` serves dual purpose (dev default + recovery fallback):** In crash recovery Unknown phase, `resume_session()` falls back to `self.skill_path` (always dev) even if the crashed session was a review. Falls through to dev preamble regardless. Pre-existing behavior not introduced by this change. [src/session/runner.rs:564-573]
 
+## Deferred from: code review of story 15-6 (2026-04-27)
+
+- **Race condition on `.codex/config.toml` (concurrent sessions):** `write_codex_mcp_config` / `restore_codex_mcp_config` cycle has no file locking. If two Codex sessions run concurrently on the same project, they clobber each other. Mitigated by daemon processing one story at a time per project. Would need file locking or a session-scoped temp approach if parallelism is ever introduced.
+- **`remove_toml_section` naive TOML parsing:** Line-by-line header matching doesn't handle comments on header lines, `[[array_of_tables]]` double-brackets, or dotted-key variants. Only processes bmad-bot-generated sections correctly. A `toml` crate dependency would fix but was explicitly rejected by spec for this simple case.
+- **`escape_toml_string` does not escape TOML control characters:** Only backslashes and double-quotes are escaped. Newlines (`\n`), tabs (`\t`), and U+0000–U+001F would produce malformed TOML. Currently safe because input values (binary paths, API keys) never contain these characters.
+- **Secret leakage in `.codex/config.toml` on daemon crash (SIGKILL/power loss):** If daemon dies between MCP config write and restore, API keys remain in plaintext in the project directory. Mitigations: (1) `.codex/` should be in `.gitignore` (Story 15.8), (2) stale section cleaned on next run by `merge_mcp_into_config`, (3) section is harmless without running supervisor.
+
 ## Deferred from: code review of story 15-5 (2026-04-27)
 
 - **`timed_out`/`shutdown_requested` ignored in SDK outcome mapping:** `map_sdk_result_to_outcome()` checks only `exit_code`. A timed-out or shutdown-requested session with exit code `None` produces generic "Failed (exit code None)" instead of specific timeout/shutdown indication. Spec Task 4.3 is explicit about exit_code-only checking — improvement belongs to Story 15.7. [sdk_claude.rs:290]

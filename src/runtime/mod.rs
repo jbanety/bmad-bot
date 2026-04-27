@@ -1,5 +1,6 @@
 pub mod sdk;
 pub mod sdk_claude;
+pub mod sdk_codex;
 
 use std::path::Path;
 

@@ -178,12 +178,10 @@ impl SdkRuntime {
         let provider = self.resolve_provider_for_role(&context.role);
         match provider.as_str() {
             "claude-code" => super::sdk_claude::run_claude_code_session(self, context).await,
+            "codex" => super::sdk_codex::run_codex_session(self, context).await,
             other => SessionOutcome::Failed {
                 story_key: context.story.story_key.clone(),
-                error: format!(
-                    "SDK provider '{}' not yet implemented. Requires Story 15.6 (codex).",
-                    other
-                ),
+                error: format!("SDK provider '{}' not implemented.", other),
                 decisions: vec![],
             },
         }
@@ -690,7 +688,7 @@ mod tests {
             SessionOutcome::Failed {
                 error, story_key, ..
             } => {
-                assert!(error.contains("not yet implemented"));
+                assert!(error.contains("not implemented"));
                 assert_eq!(story_key, "15-5-test");
             }
             _ => panic!("expected SessionOutcome::Failed"),

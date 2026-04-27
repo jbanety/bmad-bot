@@ -263,8 +263,7 @@ pub async fn run_claude_code_session(
     // Drop temp file after session completes (best-effort cleanup)
     drop(mcp_temp_file);
 
-    let impl_artifacts_path =
-        PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
+    let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
     map_sdk_result_to_outcome(&result, context.story, &impl_artifacts_path).await
 }
 
@@ -278,12 +277,11 @@ fn write_mcp_config_temp_file(
     Ok(tmp)
 }
 
-async fn map_sdk_result_to_outcome(
+pub(crate) async fn map_sdk_result_to_outcome(
     result: &super::sdk::SdkSessionResult,
     story: &StoryInfo,
     impl_artifacts_path: &Path,
 ) -> SessionOutcome {
-
     let decisions = read_decisions_json_sidecar(impl_artifacts_path, &story.story_key).await;
 
     if let Some((question, reason)) = detect_escalation(&decisions) {
