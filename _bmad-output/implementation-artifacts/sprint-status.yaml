@@ -1,5 +1,5 @@
 # generated: 2026-03-05
-# last_updated: 2026-04-27 (story 15-6 done)
+# last_updated: 2026-04-27 (story 15-7 done)
 # project: bmad-bot
 # project_key: NOKEY
 # tracking_system: file-system
@@ -180,6 +180,6 @@ development_status:
   15-4-supervisor-mcp-server: done
   15-5-claude-code-provider-integration: done # depends-on: 15-2, 15-3, 15-4
   15-6-codex-provider-integration: done # depends-on: 15-2, 15-3, 15-4
-  15-7-pipeline-dual-runtime-orchestration: backlog # depends-on: 15-1, 15-5
+  15-7-pipeline-dual-runtime-orchestration: done # depends-on: 15-1, 15-5
   15-8-init-command-sdk-provider-setup: backlog # depends-on: 15-2
   epic-15-retrospective: optional

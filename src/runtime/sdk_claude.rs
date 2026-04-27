@@ -13,7 +13,7 @@ use crate::supervisor::decisions::{DecisionRecord, DecisionSource};
 use crate::watcher::StoryInfo;
 
 use super::SdkRuntime;
-use super::sdk::{SdkOutputEvent, SdkSessionConfig};
+use super::sdk::{SdkOutputEvent, SdkSessionConfig, SdkSessionResult};
 
 // ---------------------------------------------------------------------------
 // Claude Code streaming JSON deserialization types (private)
@@ -194,6 +194,122 @@ pub fn build_claude_code_prompt(phase: &str, story: &StoryInfo) -> String {
             format!("/bmad-dev-story {}", story.specs_path.to_string_lossy())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resume config builder
+// ---------------------------------------------------------------------------
+
+pub fn build_claude_code_resume_config(
+    role_config: &LlmRoleConfig,
+    project_root: &Path,
+    session_id: &str,
+    prompt: &str,
+    mcp_config_path: Option<&Path>,
+) -> SdkSessionConfig {
+    let command = role_config
+        .cli_path
+        .clone()
+        .unwrap_or_else(|| "claude".to_string());
+
+    let mut args = vec![
+        "--resume".to_string(),
+        session_id.to_string(),
+        "-p".to_string(),
+        prompt.to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--model".to_string(),
+        role_config.model.clone(),
+        "--cd".to_string(),
+        project_root.to_string_lossy().to_string(),
+    ];
+
+    if let Some(mcp_path) = mcp_config_path {
+        args.push("--mcp-config".to_string());
+        args.push(mcp_path.to_string_lossy().to_string());
+    }
+
+    SdkSessionConfig {
+        command,
+        args,
+        env: Vec::new(),
+        working_directory: project_root.to_path_buf(),
+        timeout: Duration::from_secs(30 * 60),
+        sigterm_grace: Duration::from_secs(10),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration — resume_claude_code_session
+// ---------------------------------------------------------------------------
+
+pub async fn resume_claude_code_session(
+    runtime: &SdkRuntime,
+    session_id: &str,
+    prompt: &str,
+    story: &StoryInfo,
+    role: &crate::llm::agent_factory::LlmRole,
+) -> (SessionOutcome, Option<SdkSessionResult>) {
+    let role_config = runtime.config_for_role(role);
+
+    let project_root = match std::fs::canonicalize(&runtime.config().bmad_paths.project_root) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                raw = %runtime.config().bmad_paths.project_root,
+                "Failed to canonicalize project_root for resume, using raw value"
+            );
+            PathBuf::from(&runtime.config().bmad_paths.project_root)
+        }
+    };
+
+    let mcp_json = crate::mcp_server::generate_mcp_supervisor_config(
+        &story.story_key,
+        runtime.config_path(),
+        runtime.secrets(),
+    );
+    let mcp_temp_file = match write_mcp_config_temp_file(&mcp_json) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to write MCP config temp file for resume, proceeding without supervisor");
+            None
+        }
+    };
+    let mcp_config_path = mcp_temp_file.as_ref().map(|f| f.path().to_path_buf());
+
+    let session_config = build_claude_code_resume_config(
+        role_config,
+        &project_root,
+        session_id,
+        prompt,
+        mcp_config_path.as_deref(),
+    );
+
+    let result = match runtime
+        .execute_session(session_config, parse_claude_code_line)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            drop(mcp_temp_file);
+            return (
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("SDK resume failed: {e}"),
+                    decisions: vec![],
+                },
+                None,
+            );
+        }
+    };
+
+    drop(mcp_temp_file);
+
+    let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
+    let outcome = map_sdk_result_to_outcome(&result, story, &impl_artifacts_path).await;
+    (outcome, Some(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -707,5 +823,53 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].question, "question");
         assert_eq!(result[0].answer, "answer");
+    }
+
+    // -- Story 15.7: resume config builder tests --
+
+    #[test]
+    fn test_build_claude_code_resume_config_basic() {
+        let role = make_test_role_config();
+        let config = build_claude_code_resume_config(
+            &role, Path::new("/repo"), "sess-abc", "Continue from where you left off", None,
+        );
+        assert_eq!(config.command, "claude");
+        assert!(config.args.contains(&"--resume".to_string()));
+        assert!(config.args.contains(&"sess-abc".to_string()));
+        assert!(config.args.contains(&"-p".to_string()));
+        assert!(config.args.contains(&"Continue from where you left off".to_string()));
+        assert!(config.args.contains(&"--output-format".to_string()));
+        assert!(config.args.contains(&"stream-json".to_string()));
+        assert!(config.args.contains(&"--cd".to_string()));
+    }
+
+    #[test]
+    fn test_build_claude_code_resume_config_with_mcp() {
+        let role = make_test_role_config();
+        let mcp_path = Path::new("/tmp/mcp.json");
+        let config = build_claude_code_resume_config(
+            &role, Path::new("/repo"), "sess-abc", "prompt", Some(mcp_path),
+        );
+        assert!(config.args.contains(&"--mcp-config".to_string()));
+        assert!(config.args.contains(&"/tmp/mcp.json".to_string()));
+    }
+
+    #[test]
+    fn test_build_claude_code_resume_config_without_mcp() {
+        let role = make_test_role_config();
+        let config = build_claude_code_resume_config(
+            &role, Path::new("/repo"), "sess-abc", "prompt", None,
+        );
+        assert!(!config.args.contains(&"--mcp-config".to_string()));
+    }
+
+    #[test]
+    fn test_build_claude_code_resume_config_custom_cli_path() {
+        let mut role = make_test_role_config();
+        role.cli_path = Some("/custom/claude".to_string());
+        let config = build_claude_code_resume_config(
+            &role, Path::new("/repo"), "sess-abc", "prompt", None,
+        );
+        assert_eq!(config.command, "/custom/claude");
     }
 }

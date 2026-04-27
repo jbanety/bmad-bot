@@ -11,7 +11,7 @@ use crate::session::state::{PHASE_CREATE, PHASE_DEV, PHASE_REVIEW};
 use crate::watcher::StoryInfo;
 
 use super::SdkRuntime;
-use super::sdk::{SdkOutputEvent, SdkSessionConfig};
+use super::sdk::{SdkOutputEvent, SdkSessionConfig, SdkSessionResult};
 
 // ---------------------------------------------------------------------------
 // Codex NDJSON deserialization types (private)
@@ -354,6 +354,113 @@ fn restore_codex_mcp_config(backup: CodexMcpBackup) {
             let _ = std::fs::remove_dir(backup.project_root.join(".codex"));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resume config builder
+// ---------------------------------------------------------------------------
+
+pub fn build_codex_resume_config(
+    role_config: &LlmRoleConfig,
+    project_root: &Path,
+    session_id: &str,
+    prompt: &str,
+) -> SdkSessionConfig {
+    let command = role_config
+        .cli_path
+        .clone()
+        .unwrap_or_else(|| "codex".to_string());
+
+    let mut args = vec![
+        "exec".to_string(),
+        "resume".to_string(),
+        session_id.to_string(),
+        "--json".to_string(),
+        "--cd".to_string(),
+        project_root.to_string_lossy().to_string(),
+    ];
+
+    args.push("--".to_string());
+    args.push(prompt.to_string());
+
+    SdkSessionConfig {
+        command,
+        args,
+        env: Vec::new(),
+        working_directory: project_root.to_path_buf(),
+        timeout: Duration::from_secs(30 * 60),
+        sigterm_grace: Duration::from_secs(10),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration — resume_codex_session
+// ---------------------------------------------------------------------------
+
+pub async fn resume_codex_session(
+    runtime: &SdkRuntime,
+    session_id: &str,
+    prompt: &str,
+    story: &StoryInfo,
+    role: &crate::llm::agent_factory::LlmRole,
+) -> (SessionOutcome, Option<SdkSessionResult>) {
+    let role_config = runtime.config_for_role(role);
+
+    let project_root = match std::fs::canonicalize(&runtime.config().bmad_paths.project_root) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                raw = %runtime.config().bmad_paths.project_root,
+                "Failed to canonicalize project_root for resume, using raw value"
+            );
+            PathBuf::from(&runtime.config().bmad_paths.project_root)
+        }
+    };
+
+    let mcp_json = crate::mcp_server::generate_mcp_supervisor_config(
+        &story.story_key,
+        runtime.config_path(),
+        runtime.secrets(),
+    );
+    let mcp_backup = match write_codex_mcp_config(&project_root, &mcp_json) {
+        Ok(backup) => Some(backup),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to write Codex MCP config for resume, proceeding without supervisor");
+            None
+        }
+    };
+
+    let session_config = build_codex_resume_config(role_config, &project_root, session_id, prompt);
+
+    let result = match runtime
+        .execute_session(session_config, parse_codex_line)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(backup) = mcp_backup {
+                restore_codex_mcp_config(backup);
+            }
+            return (
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("SDK resume failed: {e}"),
+                    decisions: vec![],
+                },
+                None,
+            );
+        }
+    };
+
+    if let Some(backup) = mcp_backup {
+        restore_codex_mcp_config(backup);
+    }
+
+    let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
+    let outcome =
+        super::sdk_claude::map_sdk_result_to_outcome(&result, story, &impl_artifacts_path).await;
+    (outcome, Some(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,5 +1160,48 @@ mod tests {
             }
             other => panic!("expected SessionOutcome::Completed, got {:?}", other),
         }
+    }
+
+    // -- Story 15.7: resume config builder tests --
+
+    #[test]
+    fn test_build_codex_resume_config_basic() {
+        let role = make_test_role_config();
+        let config = build_codex_resume_config(
+            &role, Path::new("/repo"), "thread-abc", "Continue",
+        );
+        assert_eq!(config.command, "codex");
+        assert!(config.args.contains(&"exec".to_string()));
+        assert!(config.args.contains(&"resume".to_string()));
+        assert!(config.args.contains(&"thread-abc".to_string()));
+        assert!(config.args.contains(&"--json".to_string()));
+        assert!(config.args.contains(&"--cd".to_string()));
+        assert!(config.args.contains(&"--".to_string()));
+        assert!(config.args.contains(&"Continue".to_string()));
+    }
+
+    #[test]
+    fn test_build_codex_resume_config_custom_cli_path() {
+        let mut role = make_test_role_config();
+        role.cli_path = Some("/custom/codex".to_string());
+        let config = build_codex_resume_config(
+            &role, Path::new("/repo"), "thread-abc", "prompt",
+        );
+        assert_eq!(config.command, "/custom/codex");
+    }
+
+    #[test]
+    fn test_build_codex_resume_config_args_order() {
+        let role = make_test_role_config();
+        let config = build_codex_resume_config(
+            &role, Path::new("/repo"), "thread-abc", "Continue",
+        );
+        let exec_idx = config.args.iter().position(|a| a == "exec").unwrap();
+        let resume_idx = config.args.iter().position(|a| a == "resume").unwrap();
+        let session_idx = config.args.iter().position(|a| a == "thread-abc").unwrap();
+        let separator_idx = config.args.iter().position(|a| a == "--").unwrap();
+        assert!(exec_idx < resume_idx);
+        assert!(resume_idx < session_idx);
+        assert!(session_idx < separator_idx);
     }
 }

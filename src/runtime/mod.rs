@@ -1,14 +1,21 @@
 pub mod sdk;
 pub mod sdk_claude;
 pub mod sdk_codex;
+pub mod sdk_consultation;
+pub mod sdk_wal;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::config::{BotConfig, BotSecrets};
+use crate::llm::AgentFactory;
 use crate::llm::agent_factory::LlmRole;
 use crate::session::SessionOutcome;
+use crate::session::agent::ShutdownFlag;
 use crate::session::consultation::ConsultationConfig;
 use crate::session::runner::SessionRunner;
 use crate::session::state::{PHASE_CREATE, PHASE_DEV, PHASE_REVIEW};
+use crate::ui::UiHandle;
 use crate::watcher::StoryInfo;
 
 pub use sdk::SdkRuntime;
@@ -72,10 +79,14 @@ pub struct SessionContext<'a> {
 // SessionRuntime — dual runtime dispatch
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub enum SessionRuntime {
     Api(Box<ApiRuntime>),
     Sdk(SdkRuntime),
+    Dual {
+        api: Box<ApiRuntime>,
+        sdk: SdkRuntime,
+        config: Arc<BotConfig>,
+    },
 }
 
 impl SessionRuntime {
@@ -83,13 +94,108 @@ impl SessionRuntime {
         match self {
             Self::Api(api) => api.run_session(context).await,
             Self::Sdk(sdk) => sdk.run_session(context).await,
+            Self::Dual { api, sdk, config } => {
+                let role_config = resolve_role_config(&config.llm, &context.role);
+                if role_config.is_sdk_provider() {
+                    sdk.run_session(context).await
+                } else {
+                    api.run_session(context).await
+                }
+            }
         }
     }
 
-    pub fn api_session_runner(&self) -> &SessionRunner {
+    pub fn api_session_runner(&self) -> Option<&SessionRunner> {
         match self {
-            Self::Api(api) => api.session_runner(),
-            Self::Sdk(_) => panic!("api_session_runner() called on Sdk runtime"),
+            Self::Api(api) => Some(api.session_runner()),
+            Self::Sdk(_) => None,
+            Self::Dual { api, .. } => Some(api.session_runner()),
+        }
+    }
+
+    pub fn sdk_runtime(&self) -> Option<&SdkRuntime> {
+        match self {
+            Self::Api(_) => None,
+            Self::Sdk(sdk) => Some(sdk),
+            Self::Dual { sdk, .. } => Some(sdk),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_config(
+        config: Arc<BotConfig>,
+        secrets: Arc<BotSecrets>,
+        config_path: PathBuf,
+        shutdown: ShutdownFlag,
+        mcp_manager: Arc<crate::mcp::McpManager>,
+        sub_agent_sessions: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::tools::SubAgentState>>>,
+        sub_agent_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        ui: UiHandle,
+    ) -> Self {
+        let llm = &config.llm;
+        let all_roles = [
+            &llm.dev,
+            &llm.review,
+            &llm.supervisor,
+        ];
+        let optional_roles: Vec<&crate::config::LlmRoleConfig> = [&llm.epic_review, &llm.critic]
+            .into_iter()
+            .filter(|r| !r.provider.is_empty())
+            .collect();
+
+        let has_api = all_roles.iter().any(|r| r.is_api_provider())
+            || optional_roles.iter().any(|r| r.is_api_provider());
+        let has_sdk = all_roles.iter().any(|r| r.is_sdk_provider())
+            || optional_roles.iter().any(|r| r.is_sdk_provider());
+
+        if llm.epic_review.is_sdk_provider() {
+            tracing::warn!(
+                "Epic review does not support SDK providers — will fail at runtime"
+            );
+        }
+
+        let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
+
+        let build_api = || -> Box<ApiRuntime> {
+            let agent_factory = Arc::new(AgentFactory::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+            ));
+            let session_runner = SessionRunner::new(
+                Arc::clone(&config),
+                agent_factory,
+                Arc::clone(&shutdown),
+                Arc::clone(&mcp_manager),
+                Arc::clone(&sub_agent_sessions),
+                Arc::clone(&sub_agent_in_flight),
+                ui.clone(),
+                skill_paths.dev_story.clone(),
+            );
+            Box::new(ApiRuntime::new(session_runner, skill_paths.clone()))
+        };
+
+        let build_sdk = || -> SdkRuntime {
+            SdkRuntime::new(
+                Arc::clone(&config),
+                Arc::clone(&secrets),
+                config_path.clone(),
+                Arc::clone(&shutdown),
+                ui.clone(),
+            )
+        };
+
+        match (has_api, has_sdk) {
+            (true, false) => Self::Api(build_api()),
+            (false, true) => Self::Sdk(build_sdk()),
+            (true, true) => Self::Dual {
+                api: build_api(),
+                sdk: build_sdk(),
+                config: Arc::clone(&config),
+            },
+            (false, false) => {
+                tracing::warn!("No recognized providers configured, defaulting to API runtime");
+                Self::Api(build_api())
+            }
         }
     }
 }
@@ -150,6 +256,35 @@ impl ApiRuntime {
 
     pub fn session_runner(&self) -> &SessionRunner {
         &self.session_runner
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Role → config helper (avoids circular dependency config→llm)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn resolve_role_config<'a>(
+    llm: &'a crate::config::LlmConfig,
+    role: &LlmRole,
+) -> &'a crate::config::LlmRoleConfig {
+    match role {
+        LlmRole::Dev => &llm.dev,
+        LlmRole::Review => &llm.review,
+        LlmRole::Supervisor => &llm.supervisor,
+        LlmRole::EpicReview => {
+            if llm.epic_review.provider.is_empty() {
+                &llm.review
+            } else {
+                &llm.epic_review
+            }
+        }
+        LlmRole::Critic => {
+            if llm.critic.provider.is_empty() {
+                &llm.review
+            } else {
+                &llm.critic
+            }
+        }
     }
 }
 
@@ -382,5 +517,230 @@ mod tests {
             crate::ui::UiHandle::null(),
             skill_paths.dev_story.clone(),
         )
+    }
+
+    fn make_test_secrets() -> std::sync::Arc<crate::config::BotSecrets> {
+        std::sync::Arc::new(crate::config::BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        })
+    }
+
+    // -- Story 15.7: Dual runtime tests --
+
+    #[test]
+    fn test_session_runtime_dual_variant_construction() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = make_test_config(dir.path());
+        let secrets = make_test_secrets();
+        let skill_paths = SkillPaths::resolve(dir.path());
+        let runner = make_test_session_runner(&config, &skill_paths);
+        let api = Box::new(ApiRuntime::new(runner, skill_paths));
+        let sdk = SdkRuntime::new(
+            std::sync::Arc::clone(&config),
+            secrets,
+            PathBuf::from("test-config.yaml"),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            crate::ui::UiHandle::null(),
+        );
+        let _runtime = SessionRuntime::Dual { api, sdk, config };
+    }
+
+    #[test]
+    fn test_api_session_runner_returns_some_for_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = make_test_config(dir.path());
+        let skill_paths = SkillPaths::resolve(dir.path());
+        let runner = make_test_session_runner(&config, &skill_paths);
+        let api = ApiRuntime::new(runner, skill_paths);
+        let runtime = SessionRuntime::Api(Box::new(api));
+        assert!(runtime.api_session_runner().is_some());
+    }
+
+    #[test]
+    fn test_api_session_runner_returns_none_for_sdk() {
+        let config = make_test_config(tempfile::tempdir().unwrap().path());
+        let secrets = make_test_secrets();
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sdk = SdkRuntime::new(
+            config,
+            secrets,
+            PathBuf::from("test-config.yaml"),
+            shutdown,
+            crate::ui::UiHandle::null(),
+        );
+        let runtime = SessionRuntime::Sdk(sdk);
+        assert!(runtime.api_session_runner().is_none());
+    }
+
+    #[test]
+    fn test_api_session_runner_returns_some_for_dual() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = make_test_config(dir.path());
+        let secrets = make_test_secrets();
+        let skill_paths = SkillPaths::resolve(dir.path());
+        let runner = make_test_session_runner(&config, &skill_paths);
+        let api = Box::new(ApiRuntime::new(runner, skill_paths));
+        let sdk = SdkRuntime::new(
+            std::sync::Arc::clone(&config),
+            std::sync::Arc::clone(&secrets),
+            PathBuf::from("test-config.yaml"),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            crate::ui::UiHandle::null(),
+        );
+        let runtime = SessionRuntime::Dual { api, sdk, config };
+        assert!(runtime.api_session_runner().is_some());
+    }
+
+    #[test]
+    fn test_sdk_runtime_returns_some_for_sdk() {
+        let config = make_test_config(tempfile::tempdir().unwrap().path());
+        let secrets = make_test_secrets();
+        let sdk = SdkRuntime::new(
+            config,
+            secrets,
+            PathBuf::from("test-config.yaml"),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            crate::ui::UiHandle::null(),
+        );
+        let runtime = SessionRuntime::Sdk(sdk);
+        assert!(runtime.sdk_runtime().is_some());
+    }
+
+    #[test]
+    fn test_sdk_runtime_returns_none_for_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = make_test_config(dir.path());
+        let skill_paths = SkillPaths::resolve(dir.path());
+        let runner = make_test_session_runner(&config, &skill_paths);
+        let runtime = SessionRuntime::Api(Box::new(ApiRuntime::new(runner, skill_paths)));
+        assert!(runtime.sdk_runtime().is_none());
+    }
+
+    #[test]
+    fn test_from_config_all_api_returns_api_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = make_test_config(dir.path());
+        let secrets = make_test_secrets();
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<String, crate::tools::SubAgentState>::new(),
+        ));
+        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::<String>::new(),
+        ));
+        let runtime = SessionRuntime::from_config(
+            config, secrets, PathBuf::from("test.yaml"), shutdown, mcp, subs, inflt,
+            crate::ui::UiHandle::null(),
+        );
+        assert!(runtime.api_session_runner().is_some());
+        assert!(runtime.sdk_runtime().is_none());
+    }
+
+    #[test]
+    fn test_from_config_all_sdk_returns_sdk_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut raw_config = crate::config::BotConfig::_test_minimal("pretty", "info");
+        raw_config.bmad_paths.implementation_artifacts = dir.path().to_string_lossy().to_string();
+        raw_config.bmad_paths.project_root = dir.path().to_string_lossy().to_string();
+        raw_config.llm.dev.provider = "claude-code".to_string();
+        raw_config.llm.review.provider = "claude-code".to_string();
+        raw_config.llm.supervisor.provider = "codex".to_string();
+        let config = std::sync::Arc::new(raw_config);
+        let secrets = make_test_secrets();
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<String, crate::tools::SubAgentState>::new(),
+        ));
+        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::<String>::new(),
+        ));
+        let runtime = SessionRuntime::from_config(
+            config, secrets, PathBuf::from("test.yaml"), shutdown, mcp, subs, inflt,
+            crate::ui::UiHandle::null(),
+        );
+        assert!(runtime.api_session_runner().is_none());
+        assert!(runtime.sdk_runtime().is_some());
+    }
+
+    #[test]
+    fn test_from_config_mixed_returns_dual_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut raw_config = crate::config::BotConfig::_test_minimal("pretty", "info");
+        raw_config.bmad_paths.implementation_artifacts = dir.path().to_string_lossy().to_string();
+        raw_config.bmad_paths.project_root = dir.path().to_string_lossy().to_string();
+        raw_config.llm.dev.provider = "claude-code".to_string();
+        raw_config.llm.review.provider = "anthropic".to_string();
+        raw_config.llm.supervisor.provider = "anthropic".to_string();
+        let config = std::sync::Arc::new(raw_config);
+        let secrets = make_test_secrets();
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<String, crate::tools::SubAgentState>::new(),
+        ));
+        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::<String>::new(),
+        ));
+        let runtime = SessionRuntime::from_config(
+            config, secrets, PathBuf::from("test.yaml"), shutdown, mcp, subs, inflt,
+            crate::ui::UiHandle::null(),
+        );
+        assert!(runtime.api_session_runner().is_some());
+        assert!(runtime.sdk_runtime().is_some());
+    }
+
+    #[test]
+    fn test_from_config_backward_compat_existing_api_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = make_test_config(dir.path());
+        let secrets = make_test_secrets();
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<String, crate::tools::SubAgentState>::new(),
+        ));
+        let inflt = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::<String>::new(),
+        ));
+        let runtime = SessionRuntime::from_config(
+            config, secrets, PathBuf::from("test.yaml"), shutdown, mcp, subs, inflt,
+            crate::ui::UiHandle::null(),
+        );
+        assert!(runtime.api_session_runner().is_some(), "backward compat: default config should be API");
+        assert!(runtime.sdk_runtime().is_none());
+    }
+
+    #[test]
+    fn test_resolve_role_config_dev() {
+        let config = crate::config::BotConfig::_test_minimal("pretty", "info");
+        let role_config = resolve_role_config(&config.llm, &LlmRole::Dev);
+        assert_eq!(role_config.provider, "anthropic");
+    }
+
+    #[test]
+    fn test_resolve_role_config_review() {
+        let config = crate::config::BotConfig::_test_minimal("pretty", "info");
+        let role_config = resolve_role_config(&config.llm, &LlmRole::Review);
+        assert_eq!(role_config.provider, "anthropic");
+    }
+
+    #[test]
+    fn test_resolve_role_config_epic_review_falls_back_to_review() {
+        let config = crate::config::BotConfig::_test_minimal("pretty", "info");
+        let role_config = resolve_role_config(&config.llm, &LlmRole::EpicReview);
+        assert_eq!(role_config.provider, config.llm.review.provider);
+    }
+
+    #[test]
+    fn test_resolve_role_config_critic_falls_back_to_review() {
+        let config = crate::config::BotConfig::_test_minimal("pretty", "info");
+        let role_config = resolve_role_config(&config.llm, &LlmRole::Critic);
+        assert_eq!(role_config.provider, config.llm.review.provider);
     }
 }

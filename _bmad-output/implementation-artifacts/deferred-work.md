@@ -195,3 +195,8 @@
 - **`truncate_str` in decisions.rs uses byte length comparison:** `s.len()` (bytes) vs `chars().count()` (chars) for truncation boundary. Inconsistent with `parse_claude_code_line` which correctly uses char count. Pre-existing bug not introduced by this story. [src/supervisor/decisions.rs:430]
 - **`config_for_role` uses empty string `provider` as sentinel for "unconfigured":** Falls back to review config when `provider.is_empty()` with no warning. Pre-existing config design from Story 15.2. [sdk.rs:135]
 - **`specs_path` with bare filename: `.parent()` returns `Some("")` not `None`:** The `unwrap_or_else(|| PathBuf::from("."))` guard is ineffective for this case. Defensive concern — in practice, story specs always have a directory path. [sdk_claude.rs:284]
+
+## Deferred from: code review of story 15-7 (2026-04-27)
+
+- **`SdkWal::create` returns empty `PathBuf` as second tuple element:** API suggests it returns the WAL path, but always returns `PathBuf::new()`. Callers must use `SdkWal::wal_path()` separately and call `state.save()` manually. Misleading but not a bug — WAL wiring explicitly deferred per spec Task 5.7. [src/runtime/sdk_wal.rs:27]
+- **`run_api_consultation` accepts `trigger_text` and `story` params but discards them:** Parameters suppressed with `let _ = ...`. `ConsultationRunner::execute()` handles its own context loading internally. Unused params are vestiges from a planned but unimplemented integration. [src/runtime/sdk_consultation.rs:188-190]

@@ -1415,6 +1415,8 @@ impl SessionRunner {
             base_branch: original_state.base_branch.clone(),
             skill_path: original_state.skill_path.clone(),
             pipeline_phase: original_state.pipeline_phase.clone(),
+            runtime_type: original_state.runtime_type.clone(),
+            sdk_session_ids: original_state.sdk_session_ids.clone(),
             chat_history: compressed_history,
         };
 
@@ -2858,6 +2860,8 @@ mod tests {
             base_branch: "main".to_string(),
             skill_path: String::new(),
             pipeline_phase: String::new(),
+            runtime_type: String::new(),
+            sdk_session_ids: std::collections::HashMap::new(),
             chat_history: vec![],
         }
     }
@@ -2872,10 +2876,12 @@ mod tests {
             last_activity: "2026-02-01T10:05:00Z".to_string(),
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
-            branch_name: String::new(), // Empty — pre-4.3 WAL
+            branch_name: String::new(),
             base_branch: String::new(),
             skill_path: String::new(),
             pipeline_phase: String::new(),
+            runtime_type: String::new(),
+            sdk_session_ids: std::collections::HashMap::new(),
             chat_history: vec![],
         }
     }
@@ -3957,6 +3963,8 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
             base_branch: "main".to_string(),
             skill_path: String::new(),
             pipeline_phase: String::new(),
+            runtime_type: String::new(),
+            sdk_session_ids: std::collections::HashMap::new(),
             chat_history: vec![],
         };
 
@@ -3973,6 +3981,8 @@ Uses `regex::Regex` for parsing. The pattern `<tag>(.*?)</tag>` works with dotal
             base_branch: original.base_branch.clone(),
             skill_path: original.skill_path.clone(),
             pipeline_phase: original.pipeline_phase.clone(),
+            runtime_type: original.runtime_type.clone(),
+            sdk_session_ids: original.sdk_session_ids.clone(),
             chat_history: vec![],
         };
 

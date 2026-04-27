@@ -1427,6 +1427,7 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     let pipeline = crate::pipeline::StoryPipeline::new(
         Arc::clone(&config),
         Arc::clone(&secrets),
+        config_path.to_path_buf(),
         std::sync::Arc::clone(&shutdown),
         Arc::clone(&mcp_manager),
         ui.clone(),

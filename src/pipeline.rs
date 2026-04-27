@@ -213,6 +213,7 @@ impl StoryPipeline {
     pub fn new(
         config: Arc<BotConfig>,
         secrets: Arc<BotSecrets>,
+        config_path: PathBuf,
         shutdown: ShutdownFlag,
         mcp_manager: Arc<crate::mcp::McpManager>,
         ui: UiHandle,
@@ -240,9 +241,6 @@ impl StoryPipeline {
             .unwrap_or("bmad-bot");
         let notifier = create_notifier(&config.notifications, &secrets, project_name);
 
-        // Create the centralized AgentFactory — owns secrets and provider credentials.
-        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
-
         // Pipeline-owned shared state backing SpawnAgentTool (Story 12.4).
         // Created once per daemon run; cleared between stories by StorySubAgentCleanup.
         let sub_agent_sessions: Arc<Mutex<HashMap<String, SubAgentState>>> =
@@ -250,20 +248,19 @@ impl StoryPipeline {
         let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
-        let session_runner = SessionRunner::new(
+        let session_runtime = SessionRuntime::from_config(
             Arc::clone(&config),
-            Arc::clone(&agent_factory),
+            Arc::clone(&secrets),
+            config_path,
             Arc::clone(&shutdown),
             Arc::clone(&mcp_manager),
             Arc::clone(&sub_agent_sessions),
             Arc::clone(&sub_agent_in_flight),
             ui.clone(),
-            skill_paths.dev_story.clone(),
         );
-        let session_runtime = SessionRuntime::Api(Box::new(ApiRuntime::new(
-            session_runner,
-            skill_paths.clone(),
-        )));
+
+        // AgentFactory for EpicReviewRunner (always API-based)
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let epic_review_runner = EpicReviewRunner::new(
             Arc::clone(&config),
             Arc::clone(&secrets),
@@ -2745,27 +2742,132 @@ impl StoryPipeline {
         };
 
         self.ui.crash_recovery_start();
-        let recovery = self
-            .session_runtime
-            .api_session_runner()
-            .check_and_recover_wal()
-            .await?;
 
-        // Extract pipeline_phase BEFORE consuming recovery (RecoveryInfo is consumed by ownership)
-        let pipeline_phase = recovery.state.pipeline_phase.clone();
+        // Standalone WAL load — works for both API and SDK runtimes
+        let wal_path = Path::new(&self.config.bmad_paths.implementation_artifacts)
+            .join(".bmad-bot-session.yaml");
+        if !SessionState::exists(&wal_path) {
+            self.ui.crash_recovery_complete("none");
+            return None;
+        }
+
+        let wal_state = match SessionState::load(&wal_path).await {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load WAL for recovery, deleting stale file");
+                let _ = SessionState::delete(&wal_path).await;
+                self.ui.crash_recovery_complete("none");
+                return None;
+            }
+        };
+
+        let runtime_type = if wal_state.runtime_type.is_empty() {
+            "api"
+        } else {
+            &wal_state.runtime_type
+        };
+
+        // Check for runtime type mismatch: WAL says one thing, config says another
+        let pipeline_phase = wal_state.pipeline_phase.clone();
         let recovery_route = recovery_phase_to_story_phase(&pipeline_phase);
+        let story_key = wal_state.story_key.clone();
 
         tracing::info!(
             action = "recovery_phase_routing",
-            story_key = %recovery.story_info.story_key,
+            story_key = %story_key,
             pipeline_phase = %pipeline_phase,
+            runtime_type = %runtime_type,
             route = ?recovery_route,
-            "Recovering story {} from pipeline phase: {}",
-            recovery.story_info.story_key,
-            pipeline_phase
+            "Recovering story {} from pipeline phase: {} (runtime: {})",
+            story_key,
+            pipeline_phase,
+            runtime_type
         );
 
-        // Clone StoryInfo fields BEFORE consuming recovery
+        // SDK recovery path
+        if runtime_type == "sdk" {
+            let sdk_session_ids = wal_state.sdk_session_ids.clone();
+            let story_for_pipeline = self.build_story_from_wal(&wal_state);
+            let story_title = story_title_from_label(&story_for_pipeline.label);
+
+            if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
+                tracing::error!(error = %e, "Cannot delete SDK WAL — aborting recovery");
+                self.ui.story_error(&story_key, &format!("WAL delete failed: {e}"));
+                return Some(PipelineResult {
+                    story_key,
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(format!("WAL delete failed during SDK recovery: {e}")),
+                    fatal: false,
+                });
+            }
+
+            let result = match recovery_route {
+                StoryPhase::Dev => {
+                    if let Some(sdk) = self.session_runtime.sdk_runtime() {
+                        if let Some(session_id) = sdk_session_ids.get("dev") {
+                            let provider = sdk.config_for_role(&LlmRole::Dev).provider.clone();
+                            let (outcome, _) = sdk.resume_sdk_session(
+                                &provider,
+                                session_id,
+                                "Resume: the daemon crashed. Please continue from where you left off.",
+                                &story_for_pipeline,
+                                &LlmRole::Dev,
+                            ).await;
+                            if matches!(outcome, SessionOutcome::Failed { .. }) {
+                                tracing::warn!("SDK resume failed — falling back to restart from scratch");
+                                self.run_dev_pipeline(&story_for_pipeline, &story_title, None).await
+                            } else {
+                                self.process_recovered_session(&story_for_pipeline, outcome).await
+                            }
+                        } else {
+                            tracing::warn!("SDK WAL has no session ID for dev phase — restarting from scratch");
+                            self.run_dev_pipeline(&story_for_pipeline, &story_title, None).await
+                        }
+                    } else {
+                        tracing::warn!("SDK WAL found but no SDK runtime configured — restarting from scratch");
+                        self.run_dev_pipeline(&story_for_pipeline, &story_title, None).await
+                    }
+                }
+                StoryPhase::Create => {
+                    let mut story = story_for_pipeline;
+                    story.status = "backlog".to_string();
+                    self.ui.story_start(&story.story_key, &story_title);
+                    self.run_create_pipeline(&story, &story_title, None).await
+                }
+                StoryPhase::Review => {
+                    let mut story = story_for_pipeline;
+                    story.status = "review".to_string();
+                    self.ui.story_start(&story.story_key, &story_title);
+                    self.run_review_pipeline(&story, &story_title, None, None).await
+                }
+                StoryPhase::Unknown => {
+                    tracing::warn!("Unknown phase in SDK WAL — restarting dev from scratch");
+                    self.run_dev_pipeline(&story_for_pipeline, &story_title, None).await
+                }
+            };
+
+            self.notify_story_result(&result).await;
+            self.ui.crash_recovery_complete(&result.story_key);
+            return Some(result);
+        }
+
+        // API recovery path — requires api_session_runner
+        let Some(api_runner) = self.session_runtime.api_session_runner() else {
+            tracing::warn!("API WAL found but no API runtime configured — deleting stale WAL");
+            let _ = delete_wal_with_retry(&wal_path, 3).await;
+            self.ui.crash_recovery_complete("none");
+            return None;
+        };
+
+        let recovery = match api_runner.check_and_recover_wal().await {
+            Some(r) => r,
+            None => {
+                self.ui.crash_recovery_complete("none");
+                return None;
+            }
+        };
+
         let mut story_for_pipeline = StoryInfo {
             story_id: recovery.story_info.story_id.clone(),
             story_key: recovery.story_info.story_key.clone(),
@@ -2782,19 +2884,12 @@ impl StoryPipeline {
 
         let result = match recovery_route {
             StoryPhase::Dev => {
-                // Dev recovery: unchanged — attempt mid-session WAL replay
                 story_for_pipeline.status = "in-progress".to_string();
-                let outcome = self
-                    .session_runtime
-                    .api_session_runner()
-                    .resume_session(recovery)
-                    .await;
+                let outcome = api_runner.resume_session(recovery).await;
                 self.process_recovered_session(&story_for_pipeline, outcome)
                     .await
             }
             StoryPhase::Create => {
-                // Create recovery: delete stale WAL, restart from scratch
-                let wal_path = self.session_runtime.api_session_runner().state_file_path();
                 if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
                     tracing::error!(
                         action = "recovery_wal_delete_fatal",
@@ -2823,8 +2918,6 @@ impl StoryPipeline {
                     .await
             }
             StoryPhase::Review => {
-                // Review recovery: delete stale WAL, restart review from scratch
-                let wal_path = self.session_runtime.api_session_runner().state_file_path();
                 if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
                     tracing::error!(
                         action = "recovery_wal_delete_fatal",
@@ -2853,8 +2946,6 @@ impl StoryPipeline {
                     .await
             }
             StoryPhase::Unknown => {
-                // Unrecognized phase — delete corrupt WAL, fall back to dev recovery
-                let wal_path = self.session_runtime.api_session_runner().state_file_path();
                 if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
                     tracing::error!(
                         action = "recovery_wal_delete_fatal",
@@ -2876,11 +2967,7 @@ impl StoryPipeline {
                     });
                 }
                 story_for_pipeline.status = "in-progress".to_string();
-                let outcome = self
-                    .session_runtime
-                    .api_session_runner()
-                    .resume_session(recovery)
-                    .await;
+                let outcome = api_runner.resume_session(recovery).await;
                 self.process_recovered_session(&story_for_pipeline, outcome)
                     .await
             }
@@ -2895,6 +2982,25 @@ impl StoryPipeline {
     ///
     /// On `Completed`: push → PR → mark review → chain to `run_review_pipeline()`.
     /// On `Escalated`/`Failed`: same as `run_dev_pipeline()` (push, PR, notify).
+    fn build_story_from_wal(&self, wal: &SessionState) -> StoryInfo {
+        let parts: Vec<&str> = wal.story_key.splitn(3, '-').collect();
+        let epic_num = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let story_num = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let label = parts.get(2).copied().unwrap_or("").to_string();
+        StoryInfo {
+            story_id: wal.story_id.clone(),
+            story_key: wal.story_key.clone(),
+            epic_num,
+            story_num,
+            label,
+            branch_name: wal.branch.clone(),
+            specs_path: PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
+                .join(format!("{}.md", wal.story_key)),
+            dependencies: vec![],
+            status: "in-progress".to_string(),
+        }
+    }
+
     async fn process_recovered_session(
         &self,
         story: &StoryInfo,

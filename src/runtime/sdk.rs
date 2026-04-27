@@ -132,6 +132,10 @@ impl SdkRuntime {
         &self.config_path
     }
 
+    pub(crate) fn shutdown_flag(&self) -> &ShutdownFlag {
+        &self.shutdown
+    }
+
     pub(crate) fn config_for_role(&self, role: &LlmRole) -> &LlmRoleConfig {
         let llm = &self.config.llm;
         match role {
@@ -171,6 +175,34 @@ impl SdkRuntime {
 
     fn resolve_provider_for_role(&self, role: &LlmRole) -> String {
         self.config_for_role(role).provider.clone()
+    }
+
+    /// Dispatches an SDK session resume to the appropriate provider.
+    pub async fn resume_sdk_session(
+        &self,
+        provider: &str,
+        session_id: &str,
+        prompt: &str,
+        story: &crate::watcher::StoryInfo,
+        role: &LlmRole,
+    ) -> (SessionOutcome, Option<SdkSessionResult>) {
+        match provider {
+            "claude-code" => {
+                super::sdk_claude::resume_claude_code_session(self, session_id, prompt, story, role)
+                    .await
+            }
+            "codex" => {
+                super::sdk_codex::resume_codex_session(self, session_id, prompt, story, role).await
+            }
+            other => (
+                SessionOutcome::Failed {
+                    story_key: story.story_key.clone(),
+                    error: format!("SDK provider '{}' does not support resume.", other),
+                    decisions: vec![],
+                },
+                None,
+            ),
+        }
     }
 
     /// Dispatches an SDK session to the appropriate provider.
@@ -773,5 +805,48 @@ mod tests {
             }
             other => panic!("expected SessionOutcome::Completed, got {:?}", other),
         }
+    }
+
+    // -- Story 15.7: resume dispatcher tests --
+
+    #[tokio::test]
+    async fn test_resume_sdk_session_unknown_provider_fails() {
+        let runtime = make_test_runtime(make_test_secrets(None, None));
+        let story = crate::watcher::StoryInfo {
+            story_id: "15.7".to_string(),
+            story_key: "15-7-test".to_string(),
+            epic_num: 15,
+            story_num: 7,
+            label: "test".to_string(),
+            branch_name: "story/15-7-test".to_string(),
+            specs_path: PathBuf::from("/tmp/story.md"),
+            dependencies: vec![],
+            status: "in-progress".to_string(),
+        };
+        let (outcome, result) = runtime
+            .resume_sdk_session("unknown-provider", "sess-123", "Continue", &story, &LlmRole::Dev)
+            .await;
+        assert!(result.is_none(), "unknown provider should not return a result");
+        match outcome {
+            SessionOutcome::Failed { error, .. } => {
+                assert!(error.contains("does not support resume"));
+            }
+            _ => panic!("expected Failed"),
+        }
+    }
+
+    #[test]
+    fn test_shutdown_flag_accessor() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runtime = SdkRuntime::new(
+            make_test_config(),
+            make_test_secrets(None, None),
+            PathBuf::from("test.yaml"),
+            Arc::clone(&shutdown),
+            UiHandle::null(),
+        );
+        assert!(!runtime.shutdown_flag().load(Ordering::Relaxed));
+        shutdown.store(true, Ordering::Relaxed);
+        assert!(runtime.shutdown_flag().load(Ordering::Relaxed));
     }
 }

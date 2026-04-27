@@ -132,6 +132,14 @@ pub struct SessionState {
     /// or attempt mid-session recovery (dev).
     #[serde(default)]
     pub pipeline_phase: String,
+    /// Runtime type for crash recovery routing: `"api"` or `"sdk"`.
+    /// Empty/missing defaults to `"api"` for backward compatibility.
+    #[serde(default)]
+    pub runtime_type: String,
+    /// SDK session IDs keyed by pipeline phase (e.g., `{"dev": "sess-abc123"}`).
+    /// Only populated for SDK runtime sessions.
+    #[serde(default)]
+    pub sdk_session_ids: std::collections::HashMap<String, String>,
     /// Complete serialized chat history.
     pub chat_history: Vec<ChatMessage>,
 }
@@ -155,6 +163,8 @@ impl SessionState {
             base_branch: String::new(),
             skill_path: String::new(),
             pipeline_phase: String::new(),
+            runtime_type: String::new(),
+            sdk_session_ids: std::collections::HashMap::new(),
             chat_history: Vec::new(),
         }
     }
@@ -589,5 +599,74 @@ chat_history: []
         // Verify other fields preserved
         assert_eq!(loaded.story_id, state.story_id);
         assert_eq!(loaded.story_key, state.story_key);
+    }
+
+    // -----------------------------------------------------------------------
+    // Story 15.7 — runtime_type and sdk_session_ids tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_state_new_has_empty_runtime_type() {
+        let story = make_test_story();
+        let state = SessionState::new(&story, "anthropic", "test-model");
+        assert!(state.runtime_type.is_empty());
+        assert!(state.sdk_session_ids.is_empty());
+    }
+
+    #[test]
+    fn test_session_state_runtime_type_roundtrip() {
+        let story = make_test_story();
+        let mut state = SessionState::new(&story, "claude-code", "claude-sonnet-4-20250514");
+        state.runtime_type = "sdk".to_string();
+        state.sdk_session_ids.insert("dev".to_string(), "sess-123".to_string());
+
+        let yaml = serde_yml::to_string(&state).expect("serialize");
+        let loaded: SessionState = serde_yml::from_str(&yaml).expect("deserialize");
+
+        assert_eq!(loaded.runtime_type, "sdk");
+        assert_eq!(loaded.sdk_session_ids.get("dev").unwrap(), "sess-123");
+    }
+
+    #[test]
+    fn test_session_state_legacy_wal_without_runtime_type() {
+        let yaml = r#"
+story_id: "4.2"
+story_key: "4-2-agent-session-setup-chat-loop"
+branch: "story/4-2-agent-session-setup-chat-loop"
+started_at: "2026-02-07T00:00:00Z"
+last_activity: "2026-02-07T00:00:00Z"
+provider: "anthropic"
+model: "claude-sonnet-4-20250514"
+chat_history: []
+"#;
+        let state: SessionState = serde_yml::from_str(yaml).expect("deserialize legacy WAL");
+        assert!(state.runtime_type.is_empty(), "runtime_type should default to empty");
+        assert!(state.sdk_session_ids.is_empty(), "sdk_session_ids should default to empty");
+    }
+
+    #[test]
+    fn test_session_state_sdk_session_ids_multiple_phases() {
+        let story = make_test_story();
+        let mut state = SessionState::new(&story, "claude-code", "test-model");
+        state.runtime_type = "sdk".to_string();
+        state.sdk_session_ids.insert("create".to_string(), "sess-create-1".to_string());
+        state.sdk_session_ids.insert("dev".to_string(), "sess-dev-2".to_string());
+        state.sdk_session_ids.insert("review".to_string(), "sess-review-3".to_string());
+
+        let yaml = serde_yml::to_string(&state).expect("serialize");
+        let loaded: SessionState = serde_yml::from_str(&yaml).expect("deserialize");
+
+        assert_eq!(loaded.sdk_session_ids.len(), 3);
+        assert_eq!(loaded.sdk_session_ids["create"], "sess-create-1");
+        assert_eq!(loaded.sdk_session_ids["dev"], "sess-dev-2");
+        assert_eq!(loaded.sdk_session_ids["review"], "sess-review-3");
+    }
+
+    #[test]
+    fn test_session_state_runtime_type_empty_treated_as_api() {
+        let story = make_test_story();
+        let state = SessionState::new(&story, "anthropic", "test-model");
+        let rt = if state.runtime_type.is_empty() { "api" } else { &state.runtime_type };
+        assert_eq!(rt, "api");
     }
 }
