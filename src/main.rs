@@ -7,6 +7,7 @@ mod critic;
 mod git_provider;
 mod llm;
 mod mcp;
+mod mcp_server;
 mod notifier;
 mod pipeline;
 mod review;
@@ -32,6 +33,15 @@ async fn main() -> Result<()> {
     match cli.command {
         cli::Commands::Start => {
             cli::run_start(&cli.config).await?;
+        }
+        cli::Commands::McpSupervisor { story } => {
+            // CRITICAL: tracing MUST write to stderr, never stdout (MCP protocol uses stdout)
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .init();
+            cli::run_mcp_supervisor(&cli.config, &story).await?;
         }
         cli::Commands::Init => {
             // Tracing is global — main.rs owns the subscriber for non-start commands

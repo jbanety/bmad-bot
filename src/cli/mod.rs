@@ -52,6 +52,13 @@ pub enum Commands {
     Start,
     /// Show current daemon state: stories processed, in progress, blocked.
     Status,
+    /// [hidden] Start MCP supervisor server for SDK sessions.
+    #[command(hide = true)]
+    McpSupervisor {
+        /// Story key for decision logging context.
+        #[arg(long)]
+        story: String,
+    },
     /// Display structured daemon logs with filtering.
     Logs {
         /// Minimum log level to display (trace, debug, info, warn, error).
@@ -94,6 +101,10 @@ pub enum CliError {
         /// Human-readable explanation of what went wrong.
         reason: String,
     },
+
+    /// MCP server error.
+    #[error("MCP server error: {0}")]
+    McpServer(#[from] crate::mcp_server::McpServerError),
 
     /// Generic I/O error.
     #[error("I/O error: {0}")]
@@ -1241,6 +1252,71 @@ fn validate_git_version() -> Result<(), CliError> {
         git_version = %version_part,
         "Git version validated (>= 2.30)"
     );
+
+    Ok(())
+}
+
+/// Runs the `mcp-supervisor` subcommand: starts an MCP server on stdio.
+///
+/// This process is spawned by the SDK CLI as a child process. It loads config
+/// and secrets, constructs the supervisor (rule engine + optional LLM fallback),
+/// starts the MCP server on stdio, and blocks until the client disconnects.
+/// On exit, persists decisions to a markdown file if any were recorded.
+pub async fn run_mcp_supervisor(config_path: &Path, story_key: &str) -> Result<(), CliError> {
+    let config = crate::config::BotConfig::load(config_path)?;
+    let secrets = crate::config::BotSecrets::load()?;
+    secrets.validate_for_config(&config)?;
+
+    let factory = Arc::new(crate::llm::agent_factory::AgentFactory::new(
+        Arc::new(config.clone()),
+        Arc::new(secrets),
+    ));
+
+    let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
+
+    let answer_provider: Option<Box<dyn crate::supervisor::architect::AnswerProvider>> =
+        if config.llm.supervisor.is_sdk_provider() {
+            tracing::warn!(
+                "Supervisor LLM fallback not available: supervisor is configured as SDK provider. \
+                 Rule engine will handle questions; unmatched questions will escalate."
+            );
+            None
+        } else {
+            match crate::supervisor::architect::ArchitectSession::new_with_factory(
+                &config,
+                Some(Arc::clone(&factory)),
+                mcp_manager,
+            ) {
+                Ok(session) => Some(Box::new(session)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Supervisor LLM fallback not available: {e}. \
+                         Rule engine will handle questions; unmatched questions will escalate."
+                    );
+                    None
+                }
+            }
+        };
+
+    let decision_log = crate::supervisor::decisions::DecisionLog::new();
+    let server =
+        crate::mcp_server::SupervisorMcpServer::create(answer_provider, decision_log.clone());
+
+    crate::mcp_server::serve_stdio(server).await?;
+
+    // Best-effort decision persistence after server exits
+    let records = decision_log.records();
+    if !records.is_empty() {
+        let decisions_path = std::path::Path::new(&config.bmad_paths.implementation_artifacts)
+            .join(format!("{story_key}-SUPERVISOR-DECISIONS.md"));
+        if let Err(e) =
+            crate::supervisor::decisions::write_decisions_file(&records, &decisions_path, story_key)
+                .await
+        {
+            tracing::warn!(error = %e, "Failed to write MCP supervisor decisions file");
+        }
+    }
 
     Ok(())
 }

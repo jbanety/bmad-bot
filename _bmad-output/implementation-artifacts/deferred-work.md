@@ -168,6 +168,13 @@
 - **Missing `Debug`/`PartialEq` trait derivations on `SdkSessionConfig`, `SdkSessionResult`:** Makes test failure messages unhelpful and prevents `assert_eq!`. Nice-to-have improvement.
 - **`graceful_kill` returns `()` instead of `ExitStatus` per spec Task 4.3:** Intentional simplification documented in completion notes — callers use result flags and don't need the exit status. [src/runtime/sdk.rs:327]
 
+## Deferred from: code review of story 15.4 (2026-04-27)
+
+- **`validate_for_config()` trop strict pour le subprocess MCP supervisor:** `run_mcp_supervisor()` appelle `secrets.validate_for_config(&config)?` qui vérifie tous les secrets configurés (Telegram, Git provider, etc.), mais le subprocess MCP n'a besoin que des secrets LLM supervisor. Si le child process n'a pas `.env` dans son CWD et que seuls les API keys sont injectés via `env`, les secrets non-LLM manquants causeraient un échec au démarrage. [src/cli/mod.rs:1259]
+- **`story_key` non sanitisé avant construction de chemin fichier:** `format!("{story_key}-SUPERVISOR-DECISIONS.md")` construit un nom de fichier à partir du CLI arg `--story` sans validation. Un story_key contenant `../` ou des séparateurs de chemin écrirait le fichier de décisions hors du répertoire artifacts. Pre-existing pattern — le daemon contrôle le story_key via sprint-status.yaml. [src/cli/mod.rs:1308]
+- **`generate_mcp_supervisor_config` dead code warning en production:** La fonction est publique et testée mais n'a aucun call site non-test. Stories 15.5/15.6 l'appelleront lors de la construction du `SdkSessionConfig`. Cohérent avec 40+ dead_code warnings pre-existants. [src/mcp_server/mod.rs:240]
+- **Pas de test d'intégration stdio end-to-end pour le MCP server:** Les 16 unit tests couvrent la logique du handler, mais aucun test ne spawne le binaire avec `mcp-supervisor --story X` et envoie du JSON-RPC sur stdin pour vérifier la réponse stdout. Le projet restreint les E2E tests à manual-launch-only. [src/mcp_server/mod.rs:213]
+
 ## Deferred from: code review of story 15.1 (2026-04-26)
 
 - **`api_session_runner()` panics on Sdk variant:** Crash recovery path in `pipeline.rs` (lines 2748-2882) unconditionally calls `self.session_runtime.api_session_runner()` which panics on `Sdk` variant. Currently safe because Sdk is a stub, but Story 15.7 must implement dual-runtime recovery routing. [src/runtime/mod.rs:90, src/pipeline.rs:2748-2882]
