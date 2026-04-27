@@ -134,8 +134,8 @@ pub enum CliError {
 // Constants for interactive prompts
 // ---------------------------------------------------------------------------
 
-/// Recognised LLM provider identifiers for interactive selection.
-const LLM_PROVIDERS: &[&str] = &["anthropic", "openai"];
+/// Recognised LLM provider identifiers (full superset — interactive prompt uses a runtime-filtered copy).
+const LLM_PROVIDERS: &[&str] = &["anthropic", "openai", "claude-code", "codex"];
 
 /// Recognised git provider identifiers for interactive selection.
 const GIT_PROVIDERS: &[&str] = &["github", "gitlab"];
@@ -151,8 +151,110 @@ fn default_model_for_provider(provider: &str) -> &str {
     match provider {
         "anthropic" => "claude-sonnet-4-20250514",
         "openai" => "gpt-4.1",
+        "claude-code" => "claude-sonnet-4-6",
+        "codex" => "o4-mini",
         _ => "",
     }
+}
+
+/// Detects whether an SDK CLI is available by running `{cli_name} --version`.
+///
+/// Returns `Some(version_string)` on success, `None` if the CLI is not found,
+/// fails, or does not respond within 5 seconds.
+fn detect_sdk_cli(cli_name: &str) -> Option<String> {
+    let mut child = std::process::Command::new(cli_name)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait().ok()? {
+            Some(s) => break s,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+
+    if !status.success() {
+        return None;
+    }
+
+    let mut output = String::new();
+    use std::io::Read;
+    child.stdout.take()?.read_to_string(&mut output).ok()?;
+    let raw = output.trim().to_string();
+    if cli_name == "claude" {
+        Some(raw.trim_end_matches(" (Claude Code)").to_string())
+    } else {
+        Some(raw)
+    }
+}
+
+/// Prompts the user for provider-specific options (base_url or cli_path).
+///
+/// Returns `(base_url, cli_path)` — exactly one will be `Some` at most.
+fn prompt_provider_options(provider: &str) -> Result<(Option<String>, Option<String>), CliError> {
+    if provider == "anthropic" || provider == "openai" {
+        let raw: String = dialoguer::Input::new()
+            .with_prompt(format!(
+                "base_url for {provider} (optional, press Enter for default)"
+            ))
+            .default(String::new())
+            .interact_text()
+            .map_err(|e| CliError::Init {
+                reason: e.to_string(),
+            })?;
+        Ok((parse_base_url_input(&raw), None))
+    } else {
+        let cli_name = match provider {
+            "claude-code" => "claude",
+            _ => "codex",
+        };
+        let raw: String = dialoguer::Input::new()
+            .with_prompt(format!(
+                "Custom path to {cli_name} CLI (optional, Enter for default)"
+            ))
+            .default(String::new())
+            .interact_text()
+            .map_err(|e| CliError::Init {
+                reason: e.to_string(),
+            })?;
+        let cli_path = {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        };
+        Ok((None, cli_path))
+    }
+}
+
+/// Builds the runtime-filtered provider list based on detected SDK CLIs.
+///
+/// Always includes API providers from [`LLM_PROVIDERS`]; SDK providers are
+/// included only when the corresponding CLI is detected.
+fn build_available_providers(
+    claude_detected: &Option<String>,
+    codex_detected: &Option<String>,
+) -> Vec<String> {
+    LLM_PROVIDERS
+        .iter()
+        .filter(|&&p| match p {
+            "claude-code" => claude_detected.is_some(),
+            "codex" => codex_detected.is_some(),
+            _ => true,
+        })
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Parses a raw base_url input from stdin.
@@ -277,6 +379,43 @@ pub async fn run_init(config_path: &Path) -> Result<(), CliError> {
 
     // Validate the generated config
     config.validate().map_err(CliError::Config)?;
+
+    // Best-effort SDK provider validation — warn but don't block
+    match config.validate_sdk_providers() {
+        Ok(()) => {
+            let has_sdk = config.llm.dev.is_sdk_provider()
+                || config.llm.review.is_sdk_provider()
+                || config.llm.supervisor.is_sdk_provider();
+            if has_sdk {
+                println!("  SDK provider validated successfully");
+            }
+        }
+        Err(e) => {
+            println!("  \u{26a0}\u{fe0f}  Warning: {e}. Fix this before running 'bmad-bot start'.");
+        }
+    }
+
+    // Codex trust reminder
+    let uses_codex = config.llm.dev.provider == "codex"
+        || config.llm.review.provider == "codex"
+        || config.llm.supervisor.provider == "codex";
+    if uses_codex {
+        println!(
+            "\n  Note: Run `codex trust .` in your project root to allow Codex MCP server access."
+        );
+    }
+
+    // All-SDK warning
+    if config.llm.dev.is_sdk_provider()
+        && config.llm.review.is_sdk_provider()
+        && config.llm.supervisor.is_sdk_provider()
+    {
+        println!(
+            "\n  \u{26a0}\u{fe0f}  Warning: All core roles use SDK providers. Daemon-orchestrated consultations \
+             (adversarial review, critic) require at least one API provider. Consultations will be \
+             skipped if no API fallback is available."
+        );
+    }
 
     // Generate and write bmad-bot.yaml
     let yaml_content = generate_config_yaml(&config)?;
@@ -475,15 +614,37 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
 
     // --- LLM Providers ---
     println!("\n\u{2500}\u{2500} LLM Configuration \u{2500}\u{2500}");
+
+    // Detect SDK CLIs before showing provider selection
+    let claude_detected = detect_sdk_cli("claude");
+    let codex_detected = detect_sdk_cli("codex");
+
+    // Display detection results
+    let mut detected_parts = Vec::new();
+    if let Some(ref v) = claude_detected {
+        detected_parts.push(format!("claude (v{v})"));
+    }
+    if let Some(ref v) = codex_detected {
+        detected_parts.push(format!("codex (v{v})"));
+    }
+    if detected_parts.is_empty() {
+        println!("  No SDK CLIs detected \u{2014} only API providers available");
+    } else {
+        println!("  Detected: {}", detected_parts.join(", "));
+    }
+    println!();
+
+    let available_providers = build_available_providers(&claude_detected, &codex_detected);
+
     let dev_provider_idx = dialoguer::Select::new()
         .with_prompt("LLM provider for DEV agent")
-        .items(LLM_PROVIDERS)
+        .items(&available_providers)
         .default(0)
         .interact()
         .map_err(|e| CliError::Init {
             reason: e.to_string(),
         })?;
-    let dev_provider = LLM_PROVIDERS[dev_provider_idx].to_string();
+    let dev_provider = available_providers[dev_provider_idx].clone();
 
     let dev_model: String = dialoguer::Input::new()
         .with_prompt("Model for DEV agent")
@@ -493,20 +654,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             reason: e.to_string(),
         })?;
 
-    let dev_base_url = if dev_provider == "openai" || dev_provider == "anthropic" {
-        let raw: String = dialoguer::Input::new()
-            .with_prompt(format!(
-                "base_url for DEV {dev_provider} agent (optional, press Enter for default)"
-            ))
-            .default(String::new())
-            .interact_text()
-            .map_err(|e| CliError::Init {
-                reason: e.to_string(),
-            })?;
-        parse_base_url_input(&raw)
-    } else {
-        None
-    };
+    let (dev_base_url, dev_cli_path) = prompt_provider_options(&dev_provider)?;
 
     let same_for_all = dialoguer::Confirm::new()
         .with_prompt("Use same provider/model for REVIEW and SUPERVISOR roles?")
@@ -520,28 +668,32 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
         review_provider,
         review_model,
         review_base_url,
+        review_cli_path,
         supervisor_provider,
         supervisor_model,
         supervisor_base_url,
+        supervisor_cli_path,
     ) = if same_for_all {
         (
             dev_provider.clone(),
             dev_model.clone(),
             dev_base_url.clone(),
+            dev_cli_path.clone(),
             dev_provider.clone(),
             dev_model.clone(),
             dev_base_url.clone(),
+            dev_cli_path.clone(),
         )
     } else {
         let rp_idx = dialoguer::Select::new()
             .with_prompt("LLM provider for REVIEW agent")
-            .items(LLM_PROVIDERS)
+            .items(&available_providers)
             .default(dev_provider_idx)
             .interact()
             .map_err(|e| CliError::Init {
                 reason: e.to_string(),
             })?;
-        let rp = LLM_PROVIDERS[rp_idx].to_string();
+        let rp = available_providers[rp_idx].clone();
         let rm: String = dialoguer::Input::new()
             .with_prompt("Model for REVIEW agent")
             .default(default_model_for_provider(&rp).to_string())
@@ -549,30 +701,17 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             .map_err(|e| CliError::Init {
                 reason: e.to_string(),
             })?;
-        let rb = if rp == "openai" || rp == "anthropic" {
-            let raw: String = dialoguer::Input::new()
-                .with_prompt(format!(
-                    "base_url for REVIEW {rp} agent (optional, press Enter for default)"
-                ))
-                .default(String::new())
-                .interact_text()
-                .map_err(|e| CliError::Init {
-                    reason: e.to_string(),
-                })?;
-            parse_base_url_input(&raw)
-        } else {
-            None
-        };
+        let (rb, rc) = prompt_provider_options(&rp)?;
 
         let sp_idx = dialoguer::Select::new()
             .with_prompt("LLM provider for SUPERVISOR agent")
-            .items(LLM_PROVIDERS)
+            .items(&available_providers)
             .default(dev_provider_idx)
             .interact()
             .map_err(|e| CliError::Init {
                 reason: e.to_string(),
             })?;
-        let sp = LLM_PROVIDERS[sp_idx].to_string();
+        let sp = available_providers[sp_idx].clone();
         let sm: String = dialoguer::Input::new()
             .with_prompt("Model for SUPERVISOR agent")
             .default(default_model_for_provider(&sp).to_string())
@@ -580,22 +719,9 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             .map_err(|e| CliError::Init {
                 reason: e.to_string(),
             })?;
-        let sb = if sp == "openai" || sp == "anthropic" {
-            let raw: String = dialoguer::Input::new()
-                .with_prompt(format!(
-                    "base_url for SUPERVISOR {sp} agent (optional, press Enter for default)"
-                ))
-                .default(String::new())
-                .interact_text()
-                .map_err(|e| CliError::Init {
-                    reason: e.to_string(),
-                })?;
-            parse_base_url_input(&raw)
-        } else {
-            None
-        };
+        let (sb, sc) = prompt_provider_options(&sp)?;
 
-        (rp, rm, rb, sp, sm, sb)
+        (rp, rm, rb, rc, sp, sm, sb, sc)
     };
 
     // --- Notifications ---
@@ -714,21 +840,21 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
                 model: dev_model,
                 reasoning_effort: None,
                 base_url: dev_base_url,
-                cli_path: None,
+                cli_path: dev_cli_path,
             },
             review: LlmRoleConfig {
                 provider: review_provider,
                 model: review_model,
                 reasoning_effort: None,
                 base_url: review_base_url,
-                cli_path: None,
+                cli_path: review_cli_path,
             },
             supervisor: LlmRoleConfig {
                 provider: supervisor_provider,
                 model: supervisor_model,
                 reasoning_effort: None,
                 base_url: supervisor_base_url,
-                cli_path: None,
+                cli_path: supervisor_cli_path,
             },
             epic_review: LlmRoleConfig::default(),
             critic: LlmRoleConfig::default(),
@@ -798,27 +924,34 @@ fn generate_env_file(config: &BotConfig) -> Result<String, CliError> {
         String::new(),
     ];
 
-    // Build a map of provider → list of roles that use it
-    let mut provider_roles: std::collections::HashMap<&str, Vec<&str>> =
+    // Build a map of normalized API key → list of role descriptions.
+    // SDK providers map to their API key counterpart:
+    //   "claude-code" → "anthropic", "codex" → "openai"
+    let mut api_key_roles: std::collections::HashMap<&str, Vec<String>> =
         std::collections::HashMap::new();
     for (role, role_config) in [
         ("dev", &config.llm.dev),
         ("review", &config.llm.review),
         ("supervisor", &config.llm.supervisor),
     ] {
-        provider_roles
-            .entry(role_config.provider.as_str())
-            .or_default()
-            .push(role);
+        let api_key = match role_config.provider.as_str() {
+            "anthropic" | "claude-code" => "anthropic",
+            "openai" | "codex" => "openai",
+            _ => continue,
+        };
+        api_key_roles.entry(api_key).or_default().push(format!(
+            "{role} ({provider})",
+            provider = role_config.provider
+        ));
     }
 
     // LLM provider keys — with dynamic role comments
     lines.push("# --- LLM Provider API Keys ---".to_string());
-    if let Some(roles) = provider_roles.get("anthropic") {
+    if let Some(roles) = api_key_roles.get("anthropic") {
         lines.push(format!("# Required: used by {} role(s)", roles.join(", ")));
         lines.push("ANTHROPIC_API_KEY=".to_string());
     }
-    if let Some(roles) = provider_roles.get("openai") {
+    if let Some(roles) = api_key_roles.get("openai") {
         lines.push(format!("# Required: used by {} role(s)", roles.join(", ")));
         lines.push("OPENAI_API_KEY=".to_string());
     }
@@ -1964,15 +2097,15 @@ mod tests {
     fn test_generate_env_comments_specify_correct_roles() {
         let config = make_test_config(); // dev+review=anthropic, supervisor=openai
         let env = generate_env_file(&config).unwrap();
-        // Anthropic used by dev and review
+        // Anthropic used by dev and review — format: "dev (anthropic), review (anthropic)"
         assert!(
-            env.contains("dev, review") || env.contains("review, dev"),
-            "Expected roles for anthropic in env comments, got:\n{env}"
+            env.contains("dev (anthropic)") && env.contains("review (anthropic)"),
+            "Expected role+provider for anthropic in env comments, got:\n{env}"
         );
-        // OpenAI used by supervisor
+        // OpenAI used by supervisor — format: "supervisor (openai)"
         assert!(
-            env.contains("supervisor role"),
-            "Expected 'supervisor role' in env comments, got:\n{env}"
+            env.contains("supervisor (openai)"),
+            "Expected 'supervisor (openai)' in env comments, got:\n{env}"
         );
     }
 
@@ -2447,5 +2580,183 @@ development_status:
         let msg = format!("{err}");
         assert!(msg.contains("2.30 required"));
         assert!(msg.contains("2.20"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Story 15.8 — SDK provider init tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_default_model_for_provider_claude_code() {
+        assert_eq!(
+            default_model_for_provider("claude-code"),
+            "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn test_default_model_for_provider_codex() {
+        assert_eq!(default_model_for_provider("codex"), "o4-mini");
+    }
+
+    #[test]
+    fn test_generate_env_sdk_provider_claude_code() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "claude-code".to_string();
+        let env = generate_env_file(&config).unwrap();
+        assert!(
+            env.contains("ANTHROPIC_API_KEY="),
+            "claude-code dev should include ANTHROPIC_API_KEY, got:\n{env}"
+        );
+    }
+
+    #[test]
+    fn test_generate_env_sdk_provider_codex() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "codex".to_string();
+        let env = generate_env_file(&config).unwrap();
+        assert!(
+            env.contains("OPENAI_API_KEY="),
+            "codex dev should include OPENAI_API_KEY, got:\n{env}"
+        );
+    }
+
+    #[test]
+    fn test_generate_env_mixed_anthropic_and_claude_code_dedup() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "claude-code".to_string();
+        config.llm.review.provider = "anthropic".to_string();
+        config.llm.supervisor.provider = "anthropic".to_string();
+        let env = generate_env_file(&config).unwrap();
+        let count = env.matches("ANTHROPIC_API_KEY=").count();
+        assert_eq!(
+            count, 1,
+            "Expected single ANTHROPIC_API_KEY line, got:\n{env}"
+        );
+        assert!(
+            env.contains("dev (claude-code)"),
+            "Comment should include 'dev (claude-code)', got:\n{env}"
+        );
+        assert!(
+            env.contains("review (anthropic)"),
+            "Comment should include 'review (anthropic)', got:\n{env}"
+        );
+    }
+
+    #[test]
+    fn test_generate_env_mixed_openai_and_codex_dedup() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "codex".to_string();
+        config.llm.review.provider = "openai".to_string();
+        config.llm.supervisor.provider = "openai".to_string();
+        let env = generate_env_file(&config).unwrap();
+        let count = env.matches("OPENAI_API_KEY=").count();
+        assert_eq!(count, 1, "Expected single OPENAI_API_KEY line, got:\n{env}");
+        assert!(
+            env.contains("dev (codex)"),
+            "Comment should include 'dev (codex)', got:\n{env}"
+        );
+    }
+
+    #[test]
+    fn test_generate_env_all_claude_code_no_openai_key() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "claude-code".to_string();
+        config.llm.review.provider = "claude-code".to_string();
+        config.llm.supervisor.provider = "claude-code".to_string();
+        let env = generate_env_file(&config).unwrap();
+        assert!(env.contains("ANTHROPIC_API_KEY="));
+        assert!(!env.contains("OPENAI_API_KEY="));
+    }
+
+    #[test]
+    fn test_generate_env_all_codex_no_anthropic_key() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "codex".to_string();
+        config.llm.review.provider = "codex".to_string();
+        config.llm.supervisor.provider = "codex".to_string();
+        let env = generate_env_file(&config).unwrap();
+        assert!(env.contains("OPENAI_API_KEY="));
+        assert!(!env.contains("ANTHROPIC_API_KEY="));
+    }
+
+    #[test]
+    fn test_generate_config_yaml_roundtrips_with_sdk_provider() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "claude-code".to_string();
+        config.llm.dev.model = "claude-sonnet-4-6".to_string();
+        config.llm.dev.cli_path = Some("/usr/local/bin/claude".to_string());
+        config.llm.dev.base_url = None;
+        let yaml = generate_config_yaml(&config).unwrap();
+        let yaml_body: String = yaml
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: BotConfig = serde_yml::from_str(&yaml_body).unwrap();
+        assert_eq!(parsed.llm.dev.provider, "claude-code");
+        assert_eq!(
+            parsed.llm.dev.cli_path,
+            Some("/usr/local/bin/claude".to_string())
+        );
+    }
+
+    #[test]
+    fn test_generate_config_yaml_sdk_validates() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "claude-code".to_string();
+        config.llm.dev.model = "claude-sonnet-4-6".to_string();
+        config.llm.dev.base_url = None;
+        let yaml = generate_config_yaml(&config).unwrap();
+        let yaml_body: String = yaml
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: BotConfig = serde_yml::from_str(&yaml_body).unwrap();
+        assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn test_generate_env_role_comments_include_provider_name() {
+        let mut config = make_test_config();
+        config.llm.dev.provider = "claude-code".to_string();
+        config.llm.review.provider = "anthropic".to_string();
+        config.llm.supervisor.provider = "openai".to_string();
+        let env = generate_env_file(&config).unwrap();
+        assert!(
+            env.contains("dev (claude-code)"),
+            "Expected 'dev (claude-code)' in:\n{env}"
+        );
+        assert!(
+            env.contains("review (anthropic)"),
+            "Expected 'review (anthropic)' in:\n{env}"
+        );
+        assert!(
+            env.contains("supervisor (openai)"),
+            "Expected 'supervisor (openai)' in:\n{env}"
+        );
+    }
+
+    #[test]
+    fn test_build_available_providers_no_sdk() {
+        let providers = build_available_providers(&None, &None);
+        assert_eq!(providers, vec!["anthropic", "openai"]);
+    }
+
+    #[test]
+    fn test_build_available_providers_both_sdk() {
+        let providers =
+            build_available_providers(&Some("1.0.0".to_string()), &Some("0.1.0".to_string()));
+        assert_eq!(
+            providers,
+            vec!["anthropic", "openai", "claude-code", "codex"]
+        );
+    }
+
+    #[test]
+    fn test_build_available_providers_only_claude() {
+        let providers = build_available_providers(&Some("1.0.0".to_string()), &None);
+        assert_eq!(providers, vec!["anthropic", "openai", "claude-code"]);
     }
 }

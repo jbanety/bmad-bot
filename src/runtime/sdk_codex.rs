@@ -1167,9 +1167,7 @@ mod tests {
     #[test]
     fn test_build_codex_resume_config_basic() {
         let role = make_test_role_config();
-        let config = build_codex_resume_config(
-            &role, Path::new("/repo"), "thread-abc", "Continue",
-        );
+        let config = build_codex_resume_config(&role, Path::new("/repo"), "thread-abc", "Continue");
         assert_eq!(config.command, "codex");
         assert!(config.args.contains(&"exec".to_string()));
         assert!(config.args.contains(&"resume".to_string()));
@@ -1184,18 +1182,14 @@ mod tests {
     fn test_build_codex_resume_config_custom_cli_path() {
         let mut role = make_test_role_config();
         role.cli_path = Some("/custom/codex".to_string());
-        let config = build_codex_resume_config(
-            &role, Path::new("/repo"), "thread-abc", "prompt",
-        );
+        let config = build_codex_resume_config(&role, Path::new("/repo"), "thread-abc", "prompt");
         assert_eq!(config.command, "/custom/codex");
     }
 
     #[test]
     fn test_build_codex_resume_config_args_order() {
         let role = make_test_role_config();
-        let config = build_codex_resume_config(
-            &role, Path::new("/repo"), "thread-abc", "Continue",
-        );
+        let config = build_codex_resume_config(&role, Path::new("/repo"), "thread-abc", "Continue");
         let exec_idx = config.args.iter().position(|a| a == "exec").unwrap();
         let resume_idx = config.args.iter().position(|a| a == "resume").unwrap();
         let session_idx = config.args.iter().position(|a| a == "thread-abc").unwrap();

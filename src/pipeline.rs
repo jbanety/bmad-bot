@@ -2792,7 +2792,8 @@ impl StoryPipeline {
 
             if let Err(e) = delete_wal_with_retry(&wal_path, 3).await {
                 tracing::error!(error = %e, "Cannot delete SDK WAL — aborting recovery");
-                self.ui.story_error(&story_key, &format!("WAL delete failed: {e}"));
+                self.ui
+                    .story_error(&story_key, &format!("WAL delete failed: {e}"));
                 return Some(PipelineResult {
                     story_key,
                     status: StoryStatus::Error,
@@ -2815,18 +2816,28 @@ impl StoryPipeline {
                                 &LlmRole::Dev,
                             ).await;
                             if matches!(outcome, SessionOutcome::Failed { .. }) {
-                                tracing::warn!("SDK resume failed — falling back to restart from scratch");
-                                self.run_dev_pipeline(&story_for_pipeline, &story_title, None).await
+                                tracing::warn!(
+                                    "SDK resume failed — falling back to restart from scratch"
+                                );
+                                self.run_dev_pipeline(&story_for_pipeline, &story_title, None)
+                                    .await
                             } else {
-                                self.process_recovered_session(&story_for_pipeline, outcome).await
+                                self.process_recovered_session(&story_for_pipeline, outcome)
+                                    .await
                             }
                         } else {
-                            tracing::warn!("SDK WAL has no session ID for dev phase — restarting from scratch");
-                            self.run_dev_pipeline(&story_for_pipeline, &story_title, None).await
+                            tracing::warn!(
+                                "SDK WAL has no session ID for dev phase — restarting from scratch"
+                            );
+                            self.run_dev_pipeline(&story_for_pipeline, &story_title, None)
+                                .await
                         }
                     } else {
-                        tracing::warn!("SDK WAL found but no SDK runtime configured — restarting from scratch");
-                        self.run_dev_pipeline(&story_for_pipeline, &story_title, None).await
+                        tracing::warn!(
+                            "SDK WAL found but no SDK runtime configured — restarting from scratch"
+                        );
+                        self.run_dev_pipeline(&story_for_pipeline, &story_title, None)
+                            .await
                     }
                 }
                 StoryPhase::Create => {
@@ -2839,11 +2850,13 @@ impl StoryPipeline {
                     let mut story = story_for_pipeline;
                     story.status = "review".to_string();
                     self.ui.story_start(&story.story_key, &story_title);
-                    self.run_review_pipeline(&story, &story_title, None, None).await
+                    self.run_review_pipeline(&story, &story_title, None, None)
+                        .await
                 }
                 StoryPhase::Unknown => {
                     tracing::warn!("Unknown phase in SDK WAL — restarting dev from scratch");
-                    self.run_dev_pipeline(&story_for_pipeline, &story_title, None).await
+                    self.run_dev_pipeline(&story_for_pipeline, &story_title, None)
+                        .await
                 }
             };
 

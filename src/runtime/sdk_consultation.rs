@@ -61,8 +61,9 @@ impl<'a> SdkConsultationRunner<'a> {
                 break;
             }
 
-            let trigger_text =
-                self.capture_trigger_text(story, phase, current_completion.as_deref()).await;
+            let trigger_text = self
+                .capture_trigger_text(story, phase, current_completion.as_deref())
+                .await;
 
             let triggered = self.find_triggered_consultation(&trigger_text);
             let Some(consultation) = triggered else {
@@ -75,12 +76,9 @@ impl<'a> SdkConsultationRunner<'a> {
                 "SDK consultation triggered"
             );
 
-            let findings = self.run_api_consultation(
-                &consultation,
-                story,
-                &trigger_text,
-                agent_factory,
-            ).await;
+            let findings = self
+                .run_api_consultation(&consultation, story, &trigger_text, agent_factory)
+                .await;
 
             let Some(findings) = findings else {
                 self.round += 1;
@@ -250,12 +248,18 @@ mod tests {
     fn test_find_triggered_consultation_matches() {
         let config = std::sync::Arc::new(crate::config::BotConfig::_test_minimal("pretty", "info"));
         let secrets = std::sync::Arc::new(crate::config::BotSecrets {
-            anthropic_api_key: None, openai_api_key: None,
-            github_token: None, gitlab_token: None, telegram_bot_token: None,
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
         });
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sdk = super::SdkRuntime::new(
-            config, secrets, std::path::PathBuf::from("test.yaml"), shutdown,
+            config,
+            secrets,
+            std::path::PathBuf::from("test.yaml"),
+            shutdown,
             crate::ui::UiHandle::null(),
         );
 
@@ -274,16 +278,25 @@ mod tests {
     fn test_find_triggered_consultation_no_match() {
         let config = std::sync::Arc::new(crate::config::BotConfig::_test_minimal("pretty", "info"));
         let secrets = std::sync::Arc::new(crate::config::BotSecrets {
-            anthropic_api_key: None, openai_api_key: None,
-            github_token: None, gitlab_token: None, telegram_bot_token: None,
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
         });
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sdk = super::SdkRuntime::new(
-            config, secrets, std::path::PathBuf::from("test.yaml"), shutdown,
+            config,
+            secrets,
+            std::path::PathBuf::from("test.yaml"),
+            shutdown,
             crate::ui::UiHandle::null(),
         );
 
-        let consultations = vec![make_test_consultation("adversarial", "STORY CONTEXT CREATED")];
+        let consultations = vec![make_test_consultation(
+            "adversarial",
+            "STORY CONTEXT CREATED",
+        )];
         let mut runner = SdkConsultationRunner::new(&sdk, consultations);
 
         let result = runner.find_triggered_consultation("nothing interesting here");
@@ -294,16 +307,25 @@ mod tests {
     fn test_find_triggered_consultation_fires_only_once() {
         let config = std::sync::Arc::new(crate::config::BotConfig::_test_minimal("pretty", "info"));
         let secrets = std::sync::Arc::new(crate::config::BotSecrets {
-            anthropic_api_key: None, openai_api_key: None,
-            github_token: None, gitlab_token: None, telegram_bot_token: None,
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
         });
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sdk = super::SdkRuntime::new(
-            config, secrets, std::path::PathBuf::from("test.yaml"), shutdown,
+            config,
+            secrets,
+            std::path::PathBuf::from("test.yaml"),
+            shutdown,
             crate::ui::UiHandle::null(),
         );
 
-        let consultations = vec![make_test_consultation("adversarial", "STORY CONTEXT CREATED")];
+        let consultations = vec![make_test_consultation(
+            "adversarial",
+            "STORY CONTEXT CREATED",
+        )];
         let mut runner = SdkConsultationRunner::new(&sdk, consultations);
 
         let first = runner.find_triggered_consultation("STORY CONTEXT CREATED");
@@ -322,12 +344,18 @@ mod tests {
     fn test_invalid_regex_skips_consultation() {
         let config = std::sync::Arc::new(crate::config::BotConfig::_test_minimal("pretty", "info"));
         let secrets = std::sync::Arc::new(crate::config::BotSecrets {
-            anthropic_api_key: None, openai_api_key: None,
-            github_token: None, gitlab_token: None, telegram_bot_token: None,
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
         });
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sdk = super::SdkRuntime::new(
-            config, secrets, std::path::PathBuf::from("test.yaml"), shutdown,
+            config,
+            secrets,
+            std::path::PathBuf::from("test.yaml"),
+            shutdown,
             crate::ui::UiHandle::null(),
         );
 

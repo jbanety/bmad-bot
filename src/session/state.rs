@@ -618,7 +618,9 @@ chat_history: []
         let story = make_test_story();
         let mut state = SessionState::new(&story, "claude-code", "claude-sonnet-4-20250514");
         state.runtime_type = "sdk".to_string();
-        state.sdk_session_ids.insert("dev".to_string(), "sess-123".to_string());
+        state
+            .sdk_session_ids
+            .insert("dev".to_string(), "sess-123".to_string());
 
         let yaml = serde_yml::to_string(&state).expect("serialize");
         let loaded: SessionState = serde_yml::from_str(&yaml).expect("deserialize");
@@ -640,8 +642,14 @@ model: "claude-sonnet-4-20250514"
 chat_history: []
 "#;
         let state: SessionState = serde_yml::from_str(yaml).expect("deserialize legacy WAL");
-        assert!(state.runtime_type.is_empty(), "runtime_type should default to empty");
-        assert!(state.sdk_session_ids.is_empty(), "sdk_session_ids should default to empty");
+        assert!(
+            state.runtime_type.is_empty(),
+            "runtime_type should default to empty"
+        );
+        assert!(
+            state.sdk_session_ids.is_empty(),
+            "sdk_session_ids should default to empty"
+        );
     }
 
     #[test]
@@ -649,9 +657,15 @@ chat_history: []
         let story = make_test_story();
         let mut state = SessionState::new(&story, "claude-code", "test-model");
         state.runtime_type = "sdk".to_string();
-        state.sdk_session_ids.insert("create".to_string(), "sess-create-1".to_string());
-        state.sdk_session_ids.insert("dev".to_string(), "sess-dev-2".to_string());
-        state.sdk_session_ids.insert("review".to_string(), "sess-review-3".to_string());
+        state
+            .sdk_session_ids
+            .insert("create".to_string(), "sess-create-1".to_string());
+        state
+            .sdk_session_ids
+            .insert("dev".to_string(), "sess-dev-2".to_string());
+        state
+            .sdk_session_ids
+            .insert("review".to_string(), "sess-review-3".to_string());
 
         let yaml = serde_yml::to_string(&state).expect("serialize");
         let loaded: SessionState = serde_yml::from_str(&yaml).expect("deserialize");
@@ -666,7 +680,11 @@ chat_history: []
     fn test_session_state_runtime_type_empty_treated_as_api() {
         let story = make_test_story();
         let state = SessionState::new(&story, "anthropic", "test-model");
-        let rt = if state.runtime_type.is_empty() { "api" } else { &state.runtime_type };
+        let rt = if state.runtime_type.is_empty() {
+            "api"
+        } else {
+            &state.runtime_type
+        };
         assert_eq!(rt, "api");
     }
 }

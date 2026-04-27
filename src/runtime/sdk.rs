@@ -824,9 +824,18 @@ mod tests {
             status: "in-progress".to_string(),
         };
         let (outcome, result) = runtime
-            .resume_sdk_session("unknown-provider", "sess-123", "Continue", &story, &LlmRole::Dev)
+            .resume_sdk_session(
+                "unknown-provider",
+                "sess-123",
+                "Continue",
+                &story,
+                &LlmRole::Dev,
+            )
             .await;
-        assert!(result.is_none(), "unknown provider should not return a result");
+        assert!(
+            result.is_none(),
+            "unknown provider should not return a result"
+        );
         match outcome {
             SessionOutcome::Failed { error, .. } => {
                 assert!(error.contains("does not support resume"));

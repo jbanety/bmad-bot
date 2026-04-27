@@ -200,3 +200,9 @@
 
 - **`SdkWal::create` returns empty `PathBuf` as second tuple element:** API suggests it returns the WAL path, but always returns `PathBuf::new()`. Callers must use `SdkWal::wal_path()` separately and call `state.save()` manually. Misleading but not a bug — WAL wiring explicitly deferred per spec Task 5.7. [src/runtime/sdk_wal.rs:27]
 - **`run_api_consultation` accepts `trigger_text` and `story` params but discards them:** Parameters suppressed with `let _ = ...`. `ConsultationRunner::execute()` handles its own context loading internally. Unused params are vestiges from a planned but unimplemented integration. [src/runtime/sdk_consultation.rs:188-190]
+
+## Deferred from: code review of story 15-8 (2026-04-27)
+
+- **Wildcard `_ => "codex"` in `prompt_provider_options` maps any unknown provider to codex CLI name:** `match provider { "claude-code" => "claude", _ => "codex" }` at `src/cli/mod.rs:194-195`. If a new SDK provider is added to `LLM_PROVIDERS` without updating this match, the prompt will incorrectly offer "codex" as the CLI name. Maintenance hazard, not a current bug.
+- **8-element positional tuple for same_for_all destructuring is fragile:** The `same_for_all` branch returns `(provider, model, base_url, cli_path, provider, model, base_url, cli_path)` where all `Option<String>` fields can be silently swapped without type errors. A struct would provide named-field safety. [src/cli/mod.rs:647-665]
+- **`parse_base_url_input` does not validate URL format:** User discovers the error only after completing the entire interactive wizard when `config.validate()` fails. Pre-existing behavior not introduced by this story. [src/cli/mod.rs]

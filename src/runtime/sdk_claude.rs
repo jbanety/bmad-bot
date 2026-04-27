@@ -831,13 +831,21 @@ mod tests {
     fn test_build_claude_code_resume_config_basic() {
         let role = make_test_role_config();
         let config = build_claude_code_resume_config(
-            &role, Path::new("/repo"), "sess-abc", "Continue from where you left off", None,
+            &role,
+            Path::new("/repo"),
+            "sess-abc",
+            "Continue from where you left off",
+            None,
         );
         assert_eq!(config.command, "claude");
         assert!(config.args.contains(&"--resume".to_string()));
         assert!(config.args.contains(&"sess-abc".to_string()));
         assert!(config.args.contains(&"-p".to_string()));
-        assert!(config.args.contains(&"Continue from where you left off".to_string()));
+        assert!(
+            config
+                .args
+                .contains(&"Continue from where you left off".to_string())
+        );
         assert!(config.args.contains(&"--output-format".to_string()));
         assert!(config.args.contains(&"stream-json".to_string()));
         assert!(config.args.contains(&"--cd".to_string()));
@@ -848,7 +856,11 @@ mod tests {
         let role = make_test_role_config();
         let mcp_path = Path::new("/tmp/mcp.json");
         let config = build_claude_code_resume_config(
-            &role, Path::new("/repo"), "sess-abc", "prompt", Some(mcp_path),
+            &role,
+            Path::new("/repo"),
+            "sess-abc",
+            "prompt",
+            Some(mcp_path),
         );
         assert!(config.args.contains(&"--mcp-config".to_string()));
         assert!(config.args.contains(&"/tmp/mcp.json".to_string()));
@@ -857,9 +869,8 @@ mod tests {
     #[test]
     fn test_build_claude_code_resume_config_without_mcp() {
         let role = make_test_role_config();
-        let config = build_claude_code_resume_config(
-            &role, Path::new("/repo"), "sess-abc", "prompt", None,
-        );
+        let config =
+            build_claude_code_resume_config(&role, Path::new("/repo"), "sess-abc", "prompt", None);
         assert!(!config.args.contains(&"--mcp-config".to_string()));
     }
 
@@ -867,9 +878,8 @@ mod tests {
     fn test_build_claude_code_resume_config_custom_cli_path() {
         let mut role = make_test_role_config();
         role.cli_path = Some("/custom/claude".to_string());
-        let config = build_claude_code_resume_config(
-            &role, Path::new("/repo"), "sess-abc", "prompt", None,
-        );
+        let config =
+            build_claude_code_resume_config(&role, Path::new("/repo"), "sess-abc", "prompt", None);
         assert_eq!(config.command, "/custom/claude");
     }
 }

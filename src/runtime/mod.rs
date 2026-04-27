@@ -128,16 +128,14 @@ impl SessionRuntime {
         config_path: PathBuf,
         shutdown: ShutdownFlag,
         mcp_manager: Arc<crate::mcp::McpManager>,
-        sub_agent_sessions: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::tools::SubAgentState>>>,
+        sub_agent_sessions: Arc<
+            std::sync::Mutex<std::collections::HashMap<String, crate::tools::SubAgentState>>,
+        >,
         sub_agent_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
         ui: UiHandle,
     ) -> Self {
         let llm = &config.llm;
-        let all_roles = [
-            &llm.dev,
-            &llm.review,
-            &llm.supervisor,
-        ];
+        let all_roles = [&llm.dev, &llm.review, &llm.supervisor];
         let optional_roles: Vec<&crate::config::LlmRoleConfig> = [&llm.epic_review, &llm.critic]
             .into_iter()
             .filter(|r| !r.provider.is_empty())
@@ -149,18 +147,14 @@ impl SessionRuntime {
             || optional_roles.iter().any(|r| r.is_sdk_provider());
 
         if llm.epic_review.is_sdk_provider() {
-            tracing::warn!(
-                "Epic review does not support SDK providers — will fail at runtime"
-            );
+            tracing::warn!("Epic review does not support SDK providers — will fail at runtime");
         }
 
         let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
 
         let build_api = || -> Box<ApiRuntime> {
-            let agent_factory = Arc::new(AgentFactory::new(
-                Arc::clone(&config),
-                Arc::clone(&secrets),
-            ));
+            let agent_factory =
+                Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
             let session_runner = SessionRunner::new(
                 Arc::clone(&config),
                 agent_factory,
@@ -627,14 +621,21 @@ mod tests {
         let secrets = make_test_secrets();
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::<String, crate::tools::SubAgentState>::new(),
-        ));
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            crate::tools::SubAgentState,
+        >::new()));
         let inflt = std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashSet::<String>::new(),
         ));
         let runtime = SessionRuntime::from_config(
-            config, secrets, PathBuf::from("test.yaml"), shutdown, mcp, subs, inflt,
+            config,
+            secrets,
+            PathBuf::from("test.yaml"),
+            shutdown,
+            mcp,
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
         assert!(runtime.api_session_runner().is_some());
@@ -654,14 +655,21 @@ mod tests {
         let secrets = make_test_secrets();
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::<String, crate::tools::SubAgentState>::new(),
-        ));
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            crate::tools::SubAgentState,
+        >::new()));
         let inflt = std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashSet::<String>::new(),
         ));
         let runtime = SessionRuntime::from_config(
-            config, secrets, PathBuf::from("test.yaml"), shutdown, mcp, subs, inflt,
+            config,
+            secrets,
+            PathBuf::from("test.yaml"),
+            shutdown,
+            mcp,
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
         assert!(runtime.api_session_runner().is_none());
@@ -681,14 +689,21 @@ mod tests {
         let secrets = make_test_secrets();
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::<String, crate::tools::SubAgentState>::new(),
-        ));
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            crate::tools::SubAgentState,
+        >::new()));
         let inflt = std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashSet::<String>::new(),
         ));
         let runtime = SessionRuntime::from_config(
-            config, secrets, PathBuf::from("test.yaml"), shutdown, mcp, subs, inflt,
+            config,
+            secrets,
+            PathBuf::from("test.yaml"),
+            shutdown,
+            mcp,
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
         assert!(runtime.api_session_runner().is_some());
@@ -702,17 +717,27 @@ mod tests {
         let secrets = make_test_secrets();
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mcp = std::sync::Arc::new(crate::mcp::McpManager::empty());
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::<String, crate::tools::SubAgentState>::new(),
-        ));
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            crate::tools::SubAgentState,
+        >::new()));
         let inflt = std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashSet::<String>::new(),
         ));
         let runtime = SessionRuntime::from_config(
-            config, secrets, PathBuf::from("test.yaml"), shutdown, mcp, subs, inflt,
+            config,
+            secrets,
+            PathBuf::from("test.yaml"),
+            shutdown,
+            mcp,
+            subs,
+            inflt,
             crate::ui::UiHandle::null(),
         );
-        assert!(runtime.api_session_runner().is_some(), "backward compat: default config should be API");
+        assert!(
+            runtime.api_session_runner().is_some(),
+            "backward compat: default config should be API"
+        );
         assert!(runtime.sdk_runtime().is_none());
     }
 

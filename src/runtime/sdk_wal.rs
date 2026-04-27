@@ -66,7 +66,10 @@ mod tests {
     #[test]
     fn test_wal_path_construction() {
         let path = SdkWal::wal_path("/some/artifacts");
-        assert_eq!(path, PathBuf::from("/some/artifacts/.bmad-bot-session.yaml"));
+        assert_eq!(
+            path,
+            PathBuf::from("/some/artifacts/.bmad-bot-session.yaml")
+        );
     }
 
     #[tokio::test]
