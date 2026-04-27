@@ -1,4 +1,5 @@
 pub mod sdk;
+pub mod sdk_claude;
 
 use std::path::Path;
 
@@ -309,7 +310,13 @@ mod tests {
             telegram_bot_token: None,
         });
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let sdk = SdkRuntime::new(config, secrets, shutdown, crate::ui::UiHandle::null());
+        let sdk = SdkRuntime::new(
+            config,
+            secrets,
+            PathBuf::from("test-config.yaml"),
+            shutdown,
+            crate::ui::UiHandle::null(),
+        );
         let _runtime = SessionRuntime::Sdk(sdk);
     }
 

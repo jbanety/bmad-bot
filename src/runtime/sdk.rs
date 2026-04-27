@@ -1,7 +1,7 @@
 //! SDK runtime subprocess infrastructure for CLI-based LLM providers.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
-use crate::config::{BotConfig, BotSecrets};
+use crate::config::{BotConfig, BotSecrets, LlmRoleConfig};
 use crate::llm::agent_factory::LlmRole;
 use crate::session::SessionOutcome;
 use crate::session::agent::ShutdownFlag;
@@ -84,6 +84,7 @@ pub struct SdkSessionResult {
     pub stderr: String,
     pub timed_out: bool,
     pub shutdown_requested: bool,
+    pub completion_text: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,8 +94,8 @@ pub struct SdkSessionResult {
 /// Manages CLI-based LLM provider subprocesses (Claude Code, Codex).
 pub struct SdkRuntime {
     config: Arc<BotConfig>,
-    #[allow(dead_code)]
     secrets: Arc<BotSecrets>,
+    config_path: PathBuf,
     shutdown: ShutdownFlag,
     ui: UiHandle,
 }
@@ -106,14 +107,51 @@ impl SdkRuntime {
     pub fn new(
         config: Arc<BotConfig>,
         secrets: Arc<BotSecrets>,
+        config_path: PathBuf,
         shutdown: ShutdownFlag,
         ui: UiHandle,
     ) -> Self {
         Self {
             config,
             secrets,
+            config_path,
             shutdown,
             ui,
+        }
+    }
+
+    pub(crate) fn config(&self) -> &BotConfig {
+        &self.config
+    }
+
+    pub(crate) fn secrets(&self) -> &BotSecrets {
+        &self.secrets
+    }
+
+    pub(crate) fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    pub(crate) fn config_for_role(&self, role: &LlmRole) -> &LlmRoleConfig {
+        let llm = &self.config.llm;
+        match role {
+            LlmRole::Dev => &llm.dev,
+            LlmRole::Review => &llm.review,
+            LlmRole::Supervisor => &llm.supervisor,
+            LlmRole::EpicReview => {
+                if llm.epic_review.provider.is_empty() {
+                    &llm.review
+                } else {
+                    &llm.epic_review
+                }
+            }
+            LlmRole::Critic => {
+                if llm.critic.provider.is_empty() {
+                    &llm.review
+                } else {
+                    &llm.critic
+                }
+            }
         }
     }
 
@@ -132,39 +170,22 @@ impl SdkRuntime {
     }
 
     fn resolve_provider_for_role(&self, role: &LlmRole) -> String {
-        let llm = &self.config.llm;
-        let role_config = match role {
-            LlmRole::Dev => &llm.dev,
-            LlmRole::Review => &llm.review,
-            LlmRole::Supervisor => &llm.supervisor,
-            LlmRole::EpicReview => {
-                if llm.epic_review.provider.is_empty() {
-                    &llm.review
-                } else {
-                    &llm.epic_review
-                }
-            }
-            LlmRole::Critic => {
-                if llm.critic.provider.is_empty() {
-                    &llm.review
-                } else {
-                    &llm.critic
-                }
-            }
-        };
-        role_config.provider.clone()
+        self.config_for_role(role).provider.clone()
     }
 
-    /// Dispatches an SDK session. Currently returns `Failed` until provider integrations land.
+    /// Dispatches an SDK session to the appropriate provider.
     pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
         let provider = self.resolve_provider_for_role(&context.role);
-        SessionOutcome::Failed {
-            story_key: context.story.story_key.clone(),
-            error: format!(
-                "SDK provider '{}' not yet implemented. Requires Story 15.5 (claude-code) or 15.6 (codex).",
-                provider
-            ),
-            decisions: vec![],
+        match provider.as_str() {
+            "claude-code" => super::sdk_claude::run_claude_code_session(self, context).await,
+            other => SessionOutcome::Failed {
+                story_key: context.story.story_key.clone(),
+                error: format!(
+                    "SDK provider '{}' not yet implemented. Requires Story 15.6 (codex).",
+                    other
+                ),
+                decisions: vec![],
+            },
         }
     }
 
@@ -229,6 +250,7 @@ impl SdkRuntime {
         let mut session_id: Option<String> = None;
         let mut timed_out = false;
         let mut shutdown_requested = false;
+        let mut last_completion_text: Option<String> = None;
 
         loop {
             tokio::select! {
@@ -265,6 +287,9 @@ impl SdkRuntime {
                                 {
                                     tracing::info!(session_id = %id, "SDK session ID captured");
                                     session_id = Some(id.clone());
+                                }
+                                if let SdkOutputEvent::Completion { ref result, .. } = event {
+                                    last_completion_text = Some(result.clone());
                                 }
                             } else {
                                 tracing::debug!(sdk_stdout_unrecognized = %line);
@@ -305,6 +330,7 @@ impl SdkRuntime {
             stderr: stderr_output,
             timed_out,
             shutdown_requested,
+            completion_text: last_completion_text,
         })
     }
 
@@ -382,6 +408,8 @@ async fn graceful_kill(child: &mut Child, sigterm_grace: Duration) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicBool;
 
     fn make_test_secrets(anthropic: Option<&str>, openai: Option<&str>) -> Arc<BotSecrets> {
@@ -402,6 +430,7 @@ mod tests {
         SdkRuntime::new(
             make_test_config(),
             secrets,
+            PathBuf::from("test-config.yaml"),
             Arc::new(AtomicBool::new(false)),
             UiHandle::null(),
         )
@@ -578,6 +607,7 @@ mod tests {
         let runtime = SdkRuntime::new(
             make_test_config(),
             secrets,
+            PathBuf::from("test-config.yaml"),
             Arc::clone(&shutdown),
             UiHandle::null(),
         );
@@ -632,18 +662,18 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // -- Task 8 test: run_session stub --
+    // -- Task 9.20: unknown SDK provider fails --
 
     #[tokio::test]
-    async fn test_run_session_returns_failed_no_provider() {
+    async fn test_run_session_unknown_sdk_provider_fails() {
         let runtime = make_test_runtime(make_test_secrets(None, None));
         let story = crate::watcher::StoryInfo {
             story_id: "15.5".to_string(),
-            story_key: "15-5-claude-code".to_string(),
+            story_key: "15-5-test".to_string(),
             epic_num: 15,
             story_num: 5,
-            label: "claude-code".to_string(),
-            branch_name: "story/15-5-claude-code".to_string(),
+            label: "test".to_string(),
+            branch_name: "story/15-5-test".to_string(),
             specs_path: PathBuf::from("/tmp/story.md"),
             dependencies: vec![],
             status: "ready-for-dev".to_string(),
@@ -661,9 +691,89 @@ mod tests {
                 error, story_key, ..
             } => {
                 assert!(error.contains("not yet implemented"));
-                assert_eq!(story_key, "15-5-claude-code");
+                assert_eq!(story_key, "15-5-test");
             }
             _ => panic!("expected SessionOutcome::Failed"),
+        }
+    }
+
+    // -- Task 9.21: config_for_role returns correct config --
+
+    #[test]
+    fn test_config_for_role_returns_correct_config() {
+        let runtime = make_test_runtime(make_test_secrets(None, None));
+        let dev_config = runtime.config_for_role(&LlmRole::Dev);
+        assert_eq!(dev_config.provider, "anthropic");
+        let review_config = runtime.config_for_role(&LlmRole::Review);
+        assert_eq!(review_config.provider, "anthropic");
+        let supervisor_config = runtime.config_for_role(&LlmRole::Supervisor);
+        assert_eq!(supervisor_config.provider, "anthropic");
+    }
+
+    // -- Task 9.19: claude-code dispatch integration test --
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_session_claude_code_dispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("fake-claude.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"test-session-123\"}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"All done\",\"is_error\":false}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &script_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let mut config = BotConfig::_test_minimal("pretty", "info");
+        config.llm.dev.provider = "claude-code".to_string();
+        config.llm.dev.cli_path = Some(script_path.to_string_lossy().to_string());
+        config.bmad_paths.project_root = dir.path().to_string_lossy().to_string();
+        config.bmad_paths.implementation_artifacts = dir.path().to_string_lossy().to_string();
+
+        let runtime = SdkRuntime::new(
+            Arc::new(config),
+            make_test_secrets(Some("sk-test"), None),
+            PathBuf::from("test-config.yaml"),
+            Arc::new(AtomicBool::new(false)),
+            UiHandle::null(),
+        );
+
+        let story = crate::watcher::StoryInfo {
+            story_id: "15.5".to_string(),
+            story_key: "15-5-claude-code".to_string(),
+            epic_num: 15,
+            story_num: 5,
+            label: "claude-code".to_string(),
+            branch_name: "story/15-5-claude-code".to_string(),
+            specs_path: dir.path().join("15-5-claude-code.md"),
+            dependencies: vec![],
+            status: "in-progress".to_string(),
+        };
+        let context = SessionContext {
+            story: &story,
+            base_branch_override: None,
+            consultations: vec![],
+            role: LlmRole::Dev,
+            initial_phase: "dev",
+        };
+        let outcome = runtime.run_session(context).await;
+        match outcome {
+            SessionOutcome::Completed {
+                story_key,
+                branch,
+                pr_context,
+                ..
+            } => {
+                assert_eq!(story_key, "15-5-claude-code");
+                assert_eq!(branch, "story/15-5-claude-code");
+                assert!(pr_context.is_some());
+                assert_eq!(pr_context.unwrap(), "All done");
+            }
+            other => panic!("expected SessionOutcome::Completed, got {:?}", other),
         }
     }
 }

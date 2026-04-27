@@ -1316,6 +1316,15 @@ pub async fn run_mcp_supervisor(config_path: &Path, story_key: &str) -> Result<(
         {
             tracing::warn!(error = %e, "Failed to write MCP supervisor decisions file");
         }
+
+        let impl_dir = std::path::Path::new(&config.bmad_paths.implementation_artifacts);
+        if let Err(e) = crate::supervisor::decisions::write_decisions_json_sidecar(
+            &records, impl_dir, story_key,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to write MCP supervisor decisions JSON sidecar");
+        }
     }
 
     Ok(())

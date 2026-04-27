@@ -380,6 +380,52 @@ pub fn format_pr_decisions_section(decisions: &[DecisionRecord]) -> String {
     output
 }
 
+/// Writes all decisions to a JSON sidecar file for programmatic access by SDK mode.
+///
+/// The file follows the convention:
+/// `_bmad-output/implementation-artifacts/{story_key}-SUPERVISOR-DECISIONS.json`
+///
+/// If `decisions` is empty, the file is NOT created.
+/// This is called alongside `write_decisions_file()` — the markdown is for humans,
+/// the JSON is for the daemon to read decisions back after an MCP supervisor process exits.
+pub async fn write_decisions_json_sidecar(
+    decisions: &[DecisionRecord],
+    output_dir: &Path,
+    story_key: &str,
+) -> Result<(), DecisionError> {
+    if decisions.is_empty() {
+        return Ok(());
+    }
+
+    tokio::fs::create_dir_all(output_dir)
+        .await
+        .map_err(|e| DecisionError::DirectoryCreation {
+            reason: format!("{e}"),
+        })?;
+
+    let path = output_dir.join(format!("{story_key}-SUPERVISOR-DECISIONS.json"));
+    let json = serde_json::to_string_pretty(decisions).map_err(|e| DecisionError::WriteFailed {
+        path: path.display().to_string(),
+        reason: format!("JSON serialization failed: {e}"),
+    })?;
+
+    tokio::fs::write(&path, &json)
+        .await
+        .map_err(|e| DecisionError::WriteFailed {
+            path: path.display().to_string(),
+            reason: format!("{e}"),
+        })?;
+
+    tracing::info!(
+        action = "decisions_json_sidecar_written",
+        path = %path.display(),
+        count = decisions.len(),
+        "Decisions JSON sidecar written"
+    );
+
+    Ok(())
+}
+
 /// Truncate a string to the given max length, appending `...` if truncated.
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
@@ -959,5 +1005,38 @@ mod tests {
     fn test_escape_pipe() {
         assert_eq!(escape_pipe("no pipes"), "no pipes");
         assert_eq!(escape_pipe("a|b|c"), "a\\|b\\|c");
+    }
+
+    // -----------------------------------------------------------------------
+    // write_decisions_json_sidecar tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_write_decisions_json_sidecar_happy_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let decisions = make_test_decisions();
+
+        write_decisions_json_sidecar(&decisions, dir.path(), "test-story")
+            .await
+            .expect("should succeed");
+
+        let path = dir.path().join("test-story-SUPERVISOR-DECISIONS.json");
+        assert!(path.exists());
+        let content = tokio::fs::read_to_string(&path).await.expect("read");
+        let parsed: Vec<DecisionRecord> = serde_json::from_str(&content).expect("valid JSON array");
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].question, "Should I proceed?");
+        assert_eq!(parsed[2].source, DecisionSource::Escalation);
+    }
+
+    #[tokio::test]
+    async fn test_write_decisions_json_sidecar_empty_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_decisions_json_sidecar(&[], dir.path(), "test")
+            .await
+            .expect("should succeed");
+
+        let path = dir.path().join("test-SUPERVISOR-DECISIONS.json");
+        assert!(!path.exists());
     }
 }
