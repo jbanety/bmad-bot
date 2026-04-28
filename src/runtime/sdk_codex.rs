@@ -506,6 +506,7 @@ pub async fn run_codex_session(
     let prompt = build_codex_prompt(context.initial_phase, context.story);
     runtime.ui().sdk_session_info(&role_config.provider, &role_config.model);
     runtime.ui().chat_turn(0, &prompt);
+    runtime.ui().activation_start();
 
     let project_root = match std::fs::canonicalize(&runtime.config().bmad_paths.project_root) {
         Ok(p) => p,

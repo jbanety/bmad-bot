@@ -98,11 +98,18 @@ impl<'a> SdkConsultationRunner<'a> {
 
             let findings = match consultation_result {
                 Ok(Some(f)) => {
+                    let finding_count = f.lines().filter(|l| l.starts_with("- ")).count().max(1);
                     self.sdk_runtime.ui().consultation_complete(
                         &consultation.label,
-                        1,
+                        finding_count,
                         consult_elapsed,
                     );
+                    let preview = if f.len() > 300 {
+                        format!("{}...", &f[..297])
+                    } else {
+                        f.clone()
+                    };
+                    self.sdk_runtime.ui().sdk_text(&preview);
                     f
                 }
                 Ok(None) => {

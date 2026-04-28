@@ -438,9 +438,8 @@ impl SdkRuntime {
             .load(std::sync::atomic::Ordering::Relaxed);
         match event {
             SdkOutputEvent::SessionStarted { .. } => {
-                if !suppress {
-                    self.ui.activation_start();
-                }
+                // activation_start is emitted explicitly before spawning,
+                // not from the stream event (which arrives with a delay).
             }
             SdkOutputEvent::ToolCall {
                 tool_name, detail, ..
@@ -459,6 +458,7 @@ impl SdkRuntime {
                     self.ui.activation_complete();
                 }
             }
+
             SdkOutputEvent::Error { message } => {
                 tracing::error!(sdk_error = %message);
             }

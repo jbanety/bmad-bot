@@ -481,11 +481,19 @@ impl UiRenderer for ConsoleRenderer {
     }
 
     fn activation_start(&self) {
-        self.println(&format!("    {} Session started", self.glyph_progress()));
+        self.println(&format!(
+            "    {} {}",
+            self.glyph_progress(),
+            if self.plain_mode { "Session started".to_string() } else { style("Session started").bold().to_string() },
+        ));
     }
 
     fn activation_complete(&self) {
-        self.println(&format!("    {} Session complete", self.glyph_ok()));
+        self.println(&format!(
+            "    {} {}",
+            self.glyph_ok(),
+            if self.plain_mode { "Session done".to_string() } else { style("Session done").bold().to_string() },
+        ));
     }
 
     fn completion_detected(&self, story_key: &str) {
@@ -672,7 +680,7 @@ impl UiRenderer for ConsoleRenderer {
         };
 
         self.println(&format!(
-            "{}{} {}: {}{} [{}]",
+            "{}{} {} done: {}{} [{}]",
             indent,
             self.glyph_ok(),
             display_name,
