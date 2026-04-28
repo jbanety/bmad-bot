@@ -60,9 +60,66 @@ enum ClaudeCodeContentBlock {
         #[allow(dead_code)]
         #[serde(default)]
         id: String,
+        #[serde(default)]
+        input: Option<serde_json::Value>,
     },
     #[serde(other)]
     Other,
+}
+
+fn extract_tool_detail(tool_name: &str, input: Option<&serde_json::Value>) -> String {
+    let Some(obj) = input.and_then(|v| v.as_object()) else {
+        return String::new();
+    };
+    match tool_name {
+        "Read" | "read_file" => obj
+            .get("file_path")
+            .or_else(|| obj.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Edit" | "Write" | "edit_file" => obj
+            .get("file_path")
+            .or_else(|| obj.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Bash" => obj
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|cmd| {
+                if cmd.len() > 80 {
+                    format!("{}...", &cmd[..77])
+                } else {
+                    cmd.to_string()
+                }
+            })
+            .unwrap_or_default(),
+        "Grep" | "grep" => obj
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Glob" | "find_path" => obj
+            .get("pattern")
+            .or_else(|| obj.get("glob"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Agent" => obj
+            .get("description")
+            .or_else(|| obj.get("prompt"))
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                if s.len() > 80 {
+                    format!("{}...", &s[..77])
+                } else {
+                    s.to_string()
+                }
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -85,10 +142,11 @@ pub fn parse_claude_code_line(line: &str) -> Option<SdkOutputEvent> {
         "assistant" => {
             let message = event.message?;
             for block in &message.content {
-                if let ClaudeCodeContentBlock::ToolUse { name, .. } = block {
+                if let ClaudeCodeContentBlock::ToolUse { name, input, .. } = block {
+                    let detail = extract_tool_detail(name, input.as_ref());
                     return Some(SdkOutputEvent::ToolCall {
                         tool_name: name.clone(),
-                        detail: String::new(),
+                        detail,
                     });
                 }
             }
