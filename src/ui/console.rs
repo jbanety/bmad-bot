@@ -722,6 +722,14 @@ impl UiRenderer for ConsoleRenderer {
         ));
     }
 
+    fn sdk_text(&self, text: &str) {
+        if self.plain_mode {
+            self.println(&format!("      | {text}"));
+        } else {
+            self.println(&format!("      {} {}", style("|").dim(), style(text).dim()));
+        }
+    }
+
     fn rate_limit_status(&self, resets_at: Option<u64>, limit_type: &str, percent_used: Option<f64>) {
         let window = match limit_type {
             "five_hour" => "5h",

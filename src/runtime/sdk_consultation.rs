@@ -101,6 +101,13 @@ impl<'a> SdkConsultationRunner<'a> {
                 .resume_message_template
                 .replace("{findings}", &findings);
 
+            let preview = if resume_prompt.len() > 200 {
+                format!("{}...", &resume_prompt[..197])
+            } else {
+                resume_prompt.clone()
+            };
+            self.sdk_runtime.ui().chat_turn(self.round as u32 + 1, &preview);
+
             let (outcome, resume_result) = self
                 .sdk_runtime
                 .resume_sdk_session(&provider, session_id, &resume_prompt, story, role)
