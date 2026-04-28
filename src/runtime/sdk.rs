@@ -230,6 +230,13 @@ impl SdkRuntime {
     {
         let merged_env = self.merge_env_vars(&session_config.env);
 
+        tracing::info!(
+            command = %session_config.command,
+            args = ?session_config.args,
+            cwd = %session_config.working_directory.display(),
+            "Spawning SDK subprocess"
+        );
+
         let mut child = Command::new(&session_config.command)
             .args(&session_config.args)
             .envs(merged_env)
@@ -258,7 +265,7 @@ impl SdkRuntime {
             let mut captured = String::new();
             let mut truncated = false;
             while let Some(line) = reader.next_line().await.unwrap_or(None) {
-                tracing::debug!(sdk_stderr = %line);
+                tracing::warn!(sdk_stderr = %line);
                 if !truncated {
                     if captured.len() + line.len() + 1 > STDERR_MAX_BYTES {
                         captured.push_str("\n...[stderr truncated at 1 MB]");

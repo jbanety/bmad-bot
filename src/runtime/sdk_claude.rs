@@ -433,11 +433,11 @@ pub(crate) async fn map_sdk_result_to_outcome(
             pr_additional_info: None,
         }
     } else {
-        let error = if result.stderr.is_empty() {
-            format!("SDK session failed (exit code {:?})", result.exit_code)
-        } else {
-            result.stderr.clone()
-        };
+        let mut error = format!("SDK session failed (exit code {:?})", result.exit_code);
+        if !result.stderr.is_empty() {
+            error.push_str(": ");
+            error.push_str(&result.stderr);
+        }
 
         SessionOutcome::Failed {
             story_key: story.story_key.clone(),
