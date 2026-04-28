@@ -221,6 +221,10 @@ impl UiHandle {
         self.0.crash_recovery_complete(story_key);
     }
 
+    pub(crate) fn sdk_session_info(&self, provider: &str, model: &str) {
+        self.0.sdk_session_info(provider, model);
+    }
+
     pub(crate) fn sdk_text(&self, text: &str) {
         self.0.sdk_text(text);
     }

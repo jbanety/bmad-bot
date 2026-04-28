@@ -120,6 +120,9 @@ pub(crate) trait UiRenderer: Send + Sync {
     /// Crash recovery completed for a story.
     fn crash_recovery_complete(&self, story_key: &str);
 
+    /// Provider and model info for an SDK session.
+    fn sdk_session_info(&self, _provider: &str, _model: &str) {}
+
     /// Text output from an SDK session (assistant message content).
     fn sdk_text(&self, _text: &str) {}
 

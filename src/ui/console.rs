@@ -722,6 +722,17 @@ impl UiRenderer for ConsoleRenderer {
         ));
     }
 
+    fn sdk_session_info(&self, provider: &str, model: &str) {
+        if self.plain_mode {
+            self.println(&format!("    [{provider}/{model}]"));
+        } else {
+            self.println(&format!(
+                "    {}",
+                style(format!("[{provider}/{model}]")).cyan().dim()
+            ));
+        }
+    }
+
     fn sdk_text(&self, text: &str) {
         if self.plain_mode {
             self.println(&format!("      | {text}"));

@@ -251,6 +251,7 @@ impl<'a> SdkConsultationRunner<'a> {
             provider = %role_config.provider,
             "Running SDK consultation subprocess"
         );
+        self.sdk_runtime.ui().sdk_session_info(&role_config.provider, &role_config.model);
 
         let is_claude = role_config.provider == "claude-code";
 
