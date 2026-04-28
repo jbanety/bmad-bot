@@ -3999,6 +3999,7 @@ fn is_infra_error(error: &str) -> bool {
         || lower.contains("unknown option")
         || lower.contains("command not found")
         || lower.contains("no such file or directory")
+        || lower.contains("requires --verbose")
 }
 
 /// Detect authentication errors that should halt the daemon entirely.

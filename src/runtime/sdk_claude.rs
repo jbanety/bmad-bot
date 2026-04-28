@@ -148,6 +148,7 @@ pub fn build_claude_code_config(
     let mut args = vec![
         "-p".to_string(),
         prompt.to_string(),
+        "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--model".to_string(),
@@ -215,6 +216,7 @@ pub fn build_claude_code_resume_config(
         session_id.to_string(),
         "-p".to_string(),
         prompt.to_string(),
+        "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--model".to_string(),
