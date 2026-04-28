@@ -253,42 +253,12 @@ impl<'a> SdkConsultationRunner<'a> {
         role_config: &crate::config::LlmRoleConfig,
         _trigger_text: &str,
     ) -> Result<Option<String>, String> {
-        let mut context_parts = Vec::new();
-        for file_path in &consultation.context_files {
-            match tokio::fs::read_to_string(file_path).await {
-                Ok(content) => {
-                    context_parts.push(format!("--- {file_path} ---\n{content}"));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %file_path,
-                        error = %e,
-                        "Failed to read consultation context file, skipping"
-                    );
-                }
-            }
-        }
-        let context = context_parts.join("\n\n");
-        let rendered_prompt = consultation.prompt_template.replace("{context}", &context);
+        let skill_command = consultation_skill_command(&consultation.label);
+        let target_file = consultation.context_files.first().cloned().unwrap_or_default();
 
-        let preamble = consultation
-            .preamble_override
-            .as_deref()
-            .unwrap_or("You are an independent reviewer. Analyze the provided context and report your findings. Be specific and actionable.");
+        let prompt = format!("{skill_command} {target_file}");
 
-        let prompt = format!(
-            "{preamble}\n\n\
-             Output ONLY your findings — no preamble, no summary header, no markdown fences around the whole response.\n\n\
-             {rendered_prompt}"
-        );
-
-        let file_names: Vec<&str> = consultation.context_files.iter()
-            .filter_map(|p| p.rsplit('/').next())
-            .collect();
-        let prompt_chars = prompt.chars().count();
-        self.sdk_runtime.ui().sdk_input(
-            &format!("[{}] ({} chars)", file_names.join(", "), prompt_chars),
-        );
+        self.sdk_runtime.ui().sdk_input(&prompt);
 
         let project_root =
             std::path::Path::new(&self.sdk_runtime.config().bmad_paths.project_root);
@@ -405,6 +375,15 @@ impl<'a> SdkConsultationRunner<'a> {
                 None
             }
         }
+    }
+}
+
+fn consultation_skill_command(label: &str) -> &'static str {
+    match label {
+        "adversarial" => "/bmad-review-adversarial-general",
+        "critic" => "/bmad-review-adversarial-general",
+        "review-critic" => "/bmad-code-review",
+        _ => "/bmad-review-adversarial-general",
     }
 }
 
