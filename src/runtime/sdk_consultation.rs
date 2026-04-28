@@ -58,6 +58,8 @@ impl<'a> SdkConsultationRunner<'a> {
         let mut current_session_id = initial_result.session_id.clone();
         let mut current_completion = initial_result.completion_text.clone();
 
+        self.sdk_runtime.set_suppress_activation_ui(true);
+
         loop {
             if self.round >= MAX_SDK_CONSULTATION_ROUNDS {
                 tracing::warn!(
@@ -288,7 +290,6 @@ impl<'a> SdkConsultationRunner<'a> {
             provider = %role_config.provider,
             "Running SDK consultation subprocess"
         );
-        self.sdk_runtime.set_suppress_activation_ui(true);
         self.sdk_runtime.ui().sdk_session_info(&role_config.provider, &role_config.model);
 
         let is_claude = role_config.provider == "claude-code";
