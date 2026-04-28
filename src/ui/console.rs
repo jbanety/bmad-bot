@@ -453,6 +453,9 @@ impl UiRenderer for ConsoleRenderer {
     /// line is shown next to the `└` glyph and subsequent lines are rendered
     /// with the content pipe prefix for readability.
     fn tool_result(&self, _tool_name: &str, detail: &str) {
+        if detail.trim().is_empty() {
+            return;
+        }
         let mut lines = detail.lines();
         let first_line = lines.next().unwrap_or("");
 
