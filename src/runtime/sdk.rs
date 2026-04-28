@@ -331,10 +331,14 @@ impl SdkRuntime {
                                         last_completion_text = Some(result.clone());
                                     }
                                     SdkOutputEvent::Error { message } => {
-                                        stream_error = Some(message.clone());
+                                        if stream_error.is_none() || message != "Unknown error" {
+                                            stream_error = Some(message.clone());
+                                        }
                                     }
-                                    SdkOutputEvent::Progress { message } if message.contains("API Error") => {
-                                        stream_error = Some(message.clone());
+                                    SdkOutputEvent::Progress { message } if message.contains("API Error") || message.contains("Error:") => {
+                                        if stream_error.is_none() {
+                                            stream_error = Some(message.clone());
+                                        }
                                     }
                                     _ => {}
                                 }
