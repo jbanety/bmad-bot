@@ -59,8 +59,6 @@ pub(crate) struct ConsoleRenderer {
     verbose: bool,
     /// Current rate-limit status suffix for spinner updates.
     rate_limit_suffix: Mutex<String>,
-    /// Number of API turns observed (incremented per rate_limit_event).
-    rate_limit_turns: std::sync::atomic::AtomicU32,
 }
 
 impl ConsoleRenderer {
@@ -77,7 +75,6 @@ impl ConsoleRenderer {
             plain_mode: plain,
             verbose,
             rate_limit_suffix: Mutex::new(String::new()),
-            rate_limit_turns: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -329,8 +326,6 @@ impl UiRenderer for ConsoleRenderer {
     // ── Pipeline events ─────────────────────────────────────────────
 
     fn story_start(&self, key: &str, title: &str) {
-        self.rate_limit_turns
-            .store(0, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut s) = self.rate_limit_suffix.lock() {
             s.clear();
         }
@@ -720,11 +715,6 @@ impl UiRenderer for ConsoleRenderer {
     }
 
     fn rate_limit_status(&self, resets_at: Option<u64>, limit_type: &str, percent_used: Option<f64>) {
-        let turns = self
-            .rate_limit_turns
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-
         let window = match limit_type {
             "five_hour" => "5h",
             "daily" => "24h",
@@ -739,13 +729,11 @@ impl UiRenderer for ConsoleRenderer {
             })
             .unwrap_or_else(|| "??:??".to_string());
 
-        let usage = if let Some(pct) = percent_used {
-            format!("{pct:.0}%")
+        let suffix = if let Some(pct) = percent_used {
+            format!("[{window}:{pct:.0}%→{reset_str}]")
         } else {
-            format!("#{turns}")
+            format!("[{window}→{reset_str}]")
         };
-
-        let suffix = format!("[{window}:{usage}→{reset_str}]");
 
         if let Ok(mut prev) = self.rate_limit_suffix.lock() {
             *prev = suffix.clone();
