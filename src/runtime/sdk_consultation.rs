@@ -402,7 +402,7 @@ fn build_sdk_consultation_claude(
         "--model".to_string(),
         role_config.model.clone(),
         "--permission-mode".to_string(),
-        "plan".to_string(),
+        "acceptEdits".to_string(),
         "--max-turns".to_string(),
         "50".to_string(),
     ];
@@ -431,7 +431,7 @@ fn build_sdk_consultation_codex(
         "exec".to_string(),
         "--json".to_string(),
         "--sandbox".to_string(),
-        "read-only".to_string(),
+        "workspace-write".to_string(),
         "--model".to_string(),
         role_config.model.clone(),
         "--cd".to_string(),
