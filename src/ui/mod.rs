@@ -225,6 +225,10 @@ impl UiHandle {
         self.0.sdk_session_info(provider, model);
     }
 
+    pub(crate) fn sdk_input(&self, text: &str) {
+        self.0.sdk_input(text);
+    }
+
     pub(crate) fn sdk_text(&self, text: &str) {
         self.0.sdk_text(text);
     }

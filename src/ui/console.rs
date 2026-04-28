@@ -763,6 +763,14 @@ impl UiRenderer for ConsoleRenderer {
         self.update_active_spinner_combined();
     }
 
+    fn sdk_input(&self, text: &str) {
+        if self.plain_mode {
+            self.println(&format!("      > {text}"));
+        } else {
+            self.println(&format!("      {} {}", style("▸").dim(), style(text).dim()));
+        }
+    }
+
     fn sdk_text(&self, text: &str) {
         if self.plain_mode {
             self.println(&format!("      | {text}"));

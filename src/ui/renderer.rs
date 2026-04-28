@@ -123,6 +123,9 @@ pub(crate) trait UiRenderer: Send + Sync {
     /// Provider and model info for an SDK session.
     fn sdk_session_info(&self, _provider: &str, _model: &str) {}
 
+    /// Text sent TO an SDK session (pipeline → LLM).
+    fn sdk_input(&self, _text: &str) {}
+
     /// Text output from an SDK session (assistant message content).
     fn sdk_text(&self, _text: &str) {}
 
