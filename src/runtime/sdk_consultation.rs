@@ -90,10 +90,17 @@ impl<'a> SdkConsultationRunner<'a> {
                 Some(&format!("round {}", self.round + 1)),
             );
 
-            let findings = match self
+            let consultation_result = self
                 .run_consultation(&consultation, story, &trigger_text, agent_factory)
-                .await
-            {
+                .await;
+
+            self.sdk_runtime.ui().consultation_complete(
+                &consultation.label,
+                0,
+                std::time::Duration::ZERO,
+            );
+
+            let findings = match consultation_result {
                 Ok(Some(f)) => f,
                 Ok(None) => {
                     tracing::warn!(
