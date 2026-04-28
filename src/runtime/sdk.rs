@@ -110,6 +110,8 @@ pub struct SdkRuntime {
     config_path: PathBuf,
     shutdown: ShutdownFlag,
     ui: UiHandle,
+    /// When true, suppress SessionStarted/Completion UI events (used during consultations).
+    suppress_activation_ui: std::sync::atomic::AtomicBool,
 }
 
 const STDERR_MAX_BYTES: usize = 1_024 * 1_024;
@@ -129,6 +131,7 @@ impl SdkRuntime {
             config_path,
             shutdown,
             ui,
+            suppress_activation_ui: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -142,6 +145,11 @@ impl SdkRuntime {
 
     pub(crate) fn ui(&self) -> &UiHandle {
         &self.ui
+    }
+
+    pub(crate) fn set_suppress_activation_ui(&self, suppress: bool) {
+        self.suppress_activation_ui
+            .store(suppress, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn secrets(&self) -> &BotSecrets {
@@ -410,8 +418,15 @@ impl SdkRuntime {
     }
 
     fn emit_ui_event(&self, event: &SdkOutputEvent) {
+        let suppress = self
+            .suppress_activation_ui
+            .load(std::sync::atomic::Ordering::Relaxed);
         match event {
-            SdkOutputEvent::SessionStarted { .. } => self.ui.activation_start(),
+            SdkOutputEvent::SessionStarted { .. } => {
+                if !suppress {
+                    self.ui.activation_start();
+                }
+            }
             SdkOutputEvent::ToolCall {
                 tool_name, detail, ..
             } => self.ui.tool_call(tool_name, detail),
@@ -422,7 +437,11 @@ impl SdkRuntime {
                 tracing::info!(sdk_progress = %message);
                 self.ui.sdk_text(message);
             }
-            SdkOutputEvent::Completion { .. } => self.ui.activation_complete(),
+            SdkOutputEvent::Completion { .. } => {
+                if !suppress {
+                    self.ui.activation_complete();
+                }
+            }
             SdkOutputEvent::Error { message } => {
                 tracing::error!(sdk_error = %message);
             }

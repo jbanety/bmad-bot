@@ -130,7 +130,11 @@ impl<'a> SdkConsultationRunner<'a> {
                 break;
             };
 
-            let provider = self.sdk_runtime.config_for_role(role).provider.clone();
+            self.sdk_runtime.set_suppress_activation_ui(false);
+            let role_config = self.sdk_runtime.config_for_role(role);
+            let provider = role_config.provider.clone();
+            self.sdk_runtime.ui().sdk_session_info(&provider, &role_config.model);
+
             let resume_prompt = consultation
                 .resume_message_template
                 .replace("{findings}", &findings);
@@ -164,6 +168,7 @@ impl<'a> SdkConsultationRunner<'a> {
             self.round += 1;
         }
 
+        self.sdk_runtime.set_suppress_activation_ui(false);
         current_outcome
     }
 
@@ -284,6 +289,7 @@ impl<'a> SdkConsultationRunner<'a> {
             provider = %role_config.provider,
             "Running SDK consultation subprocess"
         );
+        self.sdk_runtime.set_suppress_activation_ui(true);
         self.sdk_runtime.ui().sdk_session_info(&role_config.provider, &role_config.model);
 
         let is_claude = role_config.provider == "claude-code";
