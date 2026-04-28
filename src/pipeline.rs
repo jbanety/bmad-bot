@@ -315,6 +315,21 @@ impl StoryPipeline {
         (sessions_len, in_flight_len)
     }
 
+    fn is_shutdown(&self) -> bool {
+        self.shutdown.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn make_shutdown_result(&self, story_key: &str) -> PipelineResult {
+        self.ui.story_error(story_key, "Shutdown requested");
+        PipelineResult {
+            story_key: story_key.to_string(),
+            status: StoryStatus::Error,
+            pr_url: None,
+            error_detail: Some("Shutdown requested — skipping remaining phases".to_string()),
+            fatal: true,
+        }
+    }
+
     /// Process a single story through the full pipeline.
     ///
     /// Routes to the correct phase based on the story's current status:
@@ -419,6 +434,10 @@ impl StoryPipeline {
 
         self.critic_memory.check_size_threshold();
         let session_elapsed = session_start.elapsed();
+
+        if self.is_shutdown() {
+            return self.make_shutdown_result(&story.story_key);
+        }
 
         match session_outcome {
             SessionOutcome::Completed {
@@ -710,6 +729,10 @@ impl StoryPipeline {
             })
             .await;
         let session_elapsed = session_start.elapsed();
+
+        if self.is_shutdown() {
+            return self.make_shutdown_result(&story.story_key);
+        }
 
         match session_outcome {
             SessionOutcome::Completed {
@@ -1133,6 +1156,11 @@ impl StoryPipeline {
         pr_info_override: Option<PrInfo>,
     ) -> PipelineResult {
         let story_key = &story.story_key;
+
+        if self.is_shutdown() {
+            return self.make_shutdown_result(story_key);
+        }
+
         let branch = branch_override
             .map(|b| b.to_string())
             .unwrap_or_else(|| story.branch_name.clone());
