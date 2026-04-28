@@ -61,6 +61,8 @@ pub(crate) struct ConsoleRenderer {
     session_info_suffix: Mutex<String>,
     /// Current rate-limit status suffix for spinner updates.
     rate_limit_suffix: Mutex<String>,
+    /// Base phase name of the active spinner (unstyled, for rebuilding).
+    active_phase_name: Mutex<String>,
 }
 
 impl ConsoleRenderer {
@@ -78,6 +80,7 @@ impl ConsoleRenderer {
             verbose,
             session_info_suffix: Mutex::new(String::new()),
             rate_limit_suffix: Mutex::new(String::new()),
+            active_phase_name: Mutex::new(String::new()),
         }
     }
 
@@ -121,26 +124,30 @@ impl ConsoleRenderer {
             .map(|s| s.clone())
             .unwrap_or_default();
 
-        let combined = match (info.is_empty(), rate.is_empty()) {
+        let suffix = match (info.is_empty(), rate.is_empty()) {
             (true, true) => return,
             (false, true) => info,
             (true, false) => rate,
             (false, false) => format!("{info} {rate}"),
         };
 
+        let base = self
+            .active_phase_name
+            .lock()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.clone());
+
+        let Some(base) = base else { return };
+
         let spinners = self.spinners.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((pb, _)) = spinners.values().last() {
-            let current = pb.message();
-            let base = current
-                .find(" [")
-                .map(|i| &current[..i])
-                .unwrap_or(&current);
             let styled = if self.plain_mode {
-                combined
+                suffix
             } else {
-                style(combined).cyan().dim().to_string()
+                style(suffix).cyan().dim().to_string()
             };
-            pb.set_message(format!("{base} {styled}"));
+            pb.set_message(format!("{} {base} {styled}", style("◉").cyan()));
         }
     }
 
@@ -413,6 +420,9 @@ impl UiRenderer for ConsoleRenderer {
 
     fn phase_start(&self, phase_name: &str) {
         let sub = self.has_active_spinners();
+        if let Ok(mut name) = self.active_phase_name.lock() {
+            *name = phase_name.to_string();
+        }
         let pb = self.create_spinner(phase_name.to_string(), sub);
         self.store_spinner(phase_name.to_string(), pb, sub);
     }

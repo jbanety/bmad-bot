@@ -475,7 +475,38 @@ pub async fn run_claude_code_session(
     drop(mcp_temp_file);
 
     let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
-    map_sdk_result_to_outcome(&result, context.story, &impl_artifacts_path).await
+    let outcome = map_sdk_result_to_outcome(&result, context.story, &impl_artifacts_path).await;
+
+    if !context.consultations.is_empty() {
+        if let SessionOutcome::Completed { .. } = &outcome {
+            let agent_factory = std::sync::Arc::new(crate::llm::AgentFactory::new(
+                runtime.config_arc(),
+                std::sync::Arc::new(crate::config::BotSecrets {
+                    anthropic_api_key: None,
+                    openai_api_key: None,
+                    github_token: None,
+                    gitlab_token: None,
+                    telegram_bot_token: None,
+                }),
+            ));
+            let mut consultation_runner = super::sdk_consultation::SdkConsultationRunner::new(
+                runtime,
+                context.consultations,
+            );
+            return consultation_runner
+                .run_with_consultations(
+                    context.story,
+                    context.initial_phase,
+                    outcome,
+                    &result,
+                    &context.role,
+                    Some(&agent_factory),
+                )
+                .await;
+        }
+    }
+
+    outcome
 }
 
 fn write_mcp_config_temp_file(
