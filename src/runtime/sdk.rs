@@ -404,46 +404,6 @@ impl SdkRuntime {
         })
     }
 
-    /// Ensures the story branch exists and is checked out before launching an SDK subprocess.
-    pub(crate) async fn ensure_branch(
-        &self,
-        story: &crate::watcher::StoryInfo,
-        base_branch_override: Option<&str>,
-    ) -> Result<(), SessionOutcome> {
-        let repo_path = std::path::PathBuf::from(&self.config.bmad_paths.project_root);
-        let default_branch = self.config.git_provider.target_branch.clone();
-        let base_branch = if let Some(ovr) = base_branch_override {
-            ovr.to_string()
-        } else {
-            crate::session::branch::determine_base_branch(story, &repo_path, &default_branch)
-        };
-
-        let rp = repo_path.clone();
-        let bn = story.branch_name.clone();
-        let bb = base_branch;
-
-        match tokio::task::spawn_blocking(move || {
-            crate::session::branch::ensure_story_branch(&rp, &bn, &bb)
-        })
-        .await
-        {
-            Ok(Ok(action)) => {
-                tracing::info!(action = ?action, "SDK branch setup complete");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(SessionOutcome::Failed {
-                story_key: story.story_key.clone(),
-                error: format!("Branch setup failed: {e}"),
-                decisions: vec![],
-            }),
-            Err(e) => Err(SessionOutcome::Failed {
-                story_key: story.story_key.clone(),
-                error: format!("Branch setup panicked: {e}"),
-                decisions: vec![],
-            }),
-        }
-    }
-
     fn emit_ui_event(&self, event: &SdkOutputEvent) {
         match event {
             SdkOutputEvent::SessionStarted { .. } => self.ui.activation_start(),

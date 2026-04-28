@@ -386,6 +386,10 @@ impl SessionRunner {
         }
     }
 
+    pub fn config(&self) -> &BotConfig {
+        &self.config
+    }
+
     /// Path to the WAL state file on disk.
     pub fn state_file_path(&self) -> PathBuf {
         self.state_file_path.clone()
@@ -761,81 +765,14 @@ impl SessionRunner {
 
         let mut consultation_states = ConsultationState::from_configs(consultations);
 
-        // --- Branch setup (BEFORE agent build) ---
         let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
-        let default_branch = self.config.git_provider.target_branch.clone();
         let branch_name = story.branch_name.clone();
-
-        // Resolve base branch: use sequential override from pipeline when available
-        // (ensures sprint-status.yaml is never forked across parallel branch chains),
-        // fall back to dependency-based resolution for the first story in a run.
+        let default_branch = self.config.git_provider.target_branch.clone();
         let base_branch = if let Some(override_branch) = base_branch_override {
-            tracing::info!(
-                action = "base_branch_override",
-                base = %override_branch,
-                story = %story.story_key,
-                reason = "sequential chaining from previous story in pipeline run",
-                "Using pipeline-provided base branch instead of dependency resolution"
-            );
             override_branch.to_string()
         } else {
             determine_base_branch(story, &repo_path, &default_branch)
         };
-
-        // Create/checkout story branch — wrap blocking git CLI call in spawn_blocking
-        let rp = repo_path.clone();
-        let bn = branch_name.clone();
-        let bb = base_branch.clone();
-
-        let branch_result =
-            match tokio::task::spawn_blocking(move || ensure_story_branch(&rp, &bn, &bb)).await {
-                Ok(Ok(action)) => action,
-                Ok(Err(e)) => {
-                    tracing::error!(
-                        action = "session_failed",
-                        error = %e,
-                        "Branch setup failed"
-                    );
-                    return SessionOutcome::Failed {
-                        story_key: story.story_key.clone(),
-                        error: format!("Branch setup failed: {e}"),
-                        decisions: vec![],
-                    };
-                }
-                Err(e) => {
-                    tracing::error!(
-                        action = "session_failed",
-                        error = %e,
-                        "Branch setup panicked"
-                    );
-                    return SessionOutcome::Failed {
-                        story_key: story.story_key.clone(),
-                        error: format!("Branch setup panicked: {e}"),
-                        decisions: vec![],
-                    };
-                }
-            };
-
-        match &branch_result {
-            BranchAction::Created {
-                branch_name: bn,
-                base_branch: bb,
-            } => {
-                tracing::info!(
-                    action = "branch_ready",
-                    branch = %bn,
-                    base = %bb,
-                    "Story branch created"
-                );
-            }
-            BranchAction::Reused { branch_name: bn } => {
-                tracing::info!(
-                    action = "branch_ready",
-                    branch = %bn,
-                    "Story branch reused"
-                );
-            }
-        }
 
         // Create shared resources for supervisor
         let escalation_slot: EscalationSlot = Arc::new(std::sync::Mutex::new(None));

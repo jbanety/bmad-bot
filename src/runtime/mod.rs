@@ -109,6 +109,10 @@ pub enum SessionRuntime {
 
 impl SessionRuntime {
     pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
+        if let Err(outcome) = self.ensure_branch(&context).await {
+            return outcome;
+        }
+
         match self {
             Self::Api(api) => api.run_session(context).await,
             Self::Sdk(sdk) => sdk.run_session(context).await,
@@ -120,6 +124,55 @@ impl SessionRuntime {
                     api.run_session(context).await
                 }
             }
+        }
+    }
+
+    async fn ensure_branch(&self, context: &SessionContext<'_>) -> Result<(), SessionOutcome> {
+        let cfg = self.config();
+        let repo_path = std::path::PathBuf::from(&cfg.bmad_paths.project_root);
+        let default_branch = cfg.git_provider.target_branch.clone();
+        let base_branch = if let Some(ovr) = context.base_branch_override {
+            ovr.to_string()
+        } else {
+            crate::session::branch::determine_base_branch(
+                context.story,
+                &repo_path,
+                &default_branch,
+            )
+        };
+
+        let rp = repo_path;
+        let bn = context.story.branch_name.clone();
+        let bb = base_branch;
+        let story_key = context.story.story_key.clone();
+
+        match tokio::task::spawn_blocking(move || {
+            crate::session::branch::ensure_story_branch(&rp, &bn, &bb)
+        })
+        .await
+        {
+            Ok(Ok(action)) => {
+                tracing::info!(action = ?action, "Branch setup complete");
+                Ok(())
+            }
+            Ok(Err(e)) => Err(SessionOutcome::Failed {
+                story_key,
+                error: format!("Branch setup failed: {e}"),
+                decisions: vec![],
+            }),
+            Err(e) => Err(SessionOutcome::Failed {
+                story_key,
+                error: format!("Branch setup panicked: {e}"),
+                decisions: vec![],
+            }),
+        }
+    }
+
+    fn config(&self) -> &BotConfig {
+        match self {
+            Self::Api(api) => api.session_runner().config(),
+            Self::Sdk(sdk) => sdk.config(),
+            Self::Dual { config, .. } => config,
         }
     }
 

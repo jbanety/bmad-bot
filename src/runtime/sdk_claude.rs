@@ -409,13 +409,6 @@ pub async fn run_claude_code_session(
     runtime: &SdkRuntime,
     context: super::SessionContext<'_>,
 ) -> SessionOutcome {
-    if let Err(outcome) = runtime
-        .ensure_branch(context.story, context.base_branch_override)
-        .await
-    {
-        return outcome;
-    }
-
     let role_config = runtime.config_for_role(&context.role);
     let prompt = build_claude_code_prompt(context.initial_phase, context.story);
 
