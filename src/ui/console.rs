@@ -57,6 +57,8 @@ pub(crate) struct ConsoleRenderer {
     plain_mode: bool,
     /// When `true`, display truncated content previews for LLM exchanges.
     verbose: bool,
+    /// Current provider/model tag for spinner updates.
+    session_info_suffix: Mutex<String>,
     /// Current rate-limit status suffix for spinner updates.
     rate_limit_suffix: Mutex<String>,
 }
@@ -74,6 +76,7 @@ impl ConsoleRenderer {
             spinners: Mutex::new(HashMap::new()),
             plain_mode: plain,
             verbose,
+            session_info_suffix: Mutex::new(String::new()),
             rate_limit_suffix: Mutex::new(String::new()),
         }
     }
@@ -102,7 +105,29 @@ impl ConsoleRenderer {
         pb
     }
 
-    fn update_active_spinner_suffix(&self, suffix: &str) {
+    fn update_active_spinner_combined(&self) {
+        let info = self
+            .session_info_suffix
+            .lock()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let rate = self
+            .rate_limit_suffix
+            .lock()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.clone())
+            .unwrap_or_default();
+
+        let combined = match (info.is_empty(), rate.is_empty()) {
+            (true, true) => return,
+            (false, true) => info,
+            (true, false) => rate,
+            (false, false) => format!("{info} {rate}"),
+        };
+
         let spinners = self.spinners.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((pb, _)) = spinners.values().last() {
             let current = pb.message();
@@ -111,9 +136,9 @@ impl ConsoleRenderer {
                 .map(|i| &current[..i])
                 .unwrap_or(&current);
             let styled = if self.plain_mode {
-                suffix.to_string()
+                combined
             } else {
-                style(suffix).cyan().dim().to_string()
+                style(combined).cyan().dim().to_string()
             };
             pb.set_message(format!("{base} {styled}"));
         }
@@ -326,6 +351,9 @@ impl UiRenderer for ConsoleRenderer {
     // ── Pipeline events ─────────────────────────────────────────────
 
     fn story_start(&self, key: &str, title: &str) {
+        if let Ok(mut s) = self.session_info_suffix.lock() {
+            s.clear();
+        }
         if let Ok(mut s) = self.rate_limit_suffix.lock() {
             s.clear();
         }
@@ -385,20 +413,7 @@ impl UiRenderer for ConsoleRenderer {
 
     fn phase_start(&self, phase_name: &str) {
         let sub = self.has_active_spinners();
-        let suffix = self
-            .rate_limit_suffix
-            .lock()
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                if self.plain_mode {
-                    format!(" {s}")
-                } else {
-                    format!(" {}", style(&*s).cyan().dim())
-                }
-            })
-            .unwrap_or_default();
-        let pb = self.create_spinner(format!("{phase_name}{suffix}"), sub);
+        let pb = self.create_spinner(phase_name.to_string(), sub);
         self.store_spinner(phase_name.to_string(), pb, sub);
     }
 
@@ -723,14 +738,11 @@ impl UiRenderer for ConsoleRenderer {
     }
 
     fn sdk_session_info(&self, provider: &str, model: &str) {
-        if self.plain_mode {
-            self.println(&format!("    [{provider}/{model}]"));
-        } else {
-            self.println(&format!(
-                "    {}",
-                style(format!("[{provider}/{model}]")).cyan().dim()
-            ));
+        let tag = format!("[{provider}/{model}]");
+        if let Ok(mut s) = self.session_info_suffix.lock() {
+            *s = tag.clone();
         }
+        self.update_active_spinner_combined();
     }
 
     fn sdk_text(&self, text: &str) {
@@ -763,10 +775,10 @@ impl UiRenderer for ConsoleRenderer {
         };
 
         if let Ok(mut prev) = self.rate_limit_suffix.lock() {
-            *prev = suffix.clone();
+            *prev = suffix;
         }
 
-        self.update_active_spinner_suffix(&suffix);
+        self.update_active_spinner_combined();
     }
 
     fn shutdown_requested(&self) {
