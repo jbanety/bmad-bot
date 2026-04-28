@@ -159,6 +159,8 @@ pub struct StoryPipeline {
     sub_agent_in_flight: Arc<Mutex<HashSet<String>>>,
     /// UI handle for rendering terminal output (fire-and-forget).
     ui: UiHandle,
+    /// Shutdown flag — checked between stories to honour Ctrl+C.
+    shutdown: ShutdownFlag,
     /// Persistent memory file for the Story Critic.
     critic_memory: CriticMemory,
 }
@@ -247,6 +249,7 @@ impl StoryPipeline {
         let sub_agent_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let session_runtime = SessionRuntime::from_config(RuntimeDeps {
             config: Arc::clone(&config),
             secrets: Arc::clone(&secrets),
@@ -285,6 +288,7 @@ impl StoryPipeline {
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         })
     }
@@ -1755,6 +1759,14 @@ impl StoryPipeline {
                 Some(s) => s.clone(),
                 None => break, // No more eligible stories in this cycle
             };
+
+            if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(
+                    action = "pipeline_shutdown",
+                    "Shutdown requested — skipping remaining stories"
+                );
+                break;
+            }
 
             processed_keys.insert(story.story_key.clone());
 
@@ -5449,6 +5461,7 @@ development_status:
             &ui,
         );
 
+        let pipeline_shutdown = Arc::clone(&shutdown);
         StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -5466,6 +5479,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         }
     }
@@ -5824,6 +5838,7 @@ development_status:
             &sub_agent_in_flight,
             &ui,
         );
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -5841,6 +5856,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         };
 
@@ -5895,6 +5911,7 @@ development_status:
             &sub_agent_in_flight,
             &ui,
         );
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -5912,6 +5929,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         };
 
@@ -6061,6 +6079,7 @@ development_status:
             &sub_agent_in_flight,
             &ui,
         );
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -6078,6 +6097,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         };
 
@@ -6122,6 +6142,7 @@ development_status:
             &sub_agent_in_flight,
             &ui,
         );
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -6139,6 +6160,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         };
 
@@ -6183,6 +6205,7 @@ development_status:
             &sub_agent_in_flight,
             &ui,
         );
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -6200,6 +6223,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         };
 
@@ -6243,6 +6267,7 @@ development_status:
             &sub_agent_in_flight,
             &ui,
         );
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -6260,6 +6285,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         };
 
@@ -6310,6 +6336,7 @@ development_status:
             &sub_agent_in_flight,
             &ui,
         );
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -6327,6 +6354,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         };
 
@@ -6379,6 +6407,7 @@ development_status:
             &sub_agent_in_flight,
             &ui,
         );
+        let pipeline_shutdown = Arc::clone(&shutdown);
         let pipeline = StoryPipeline {
             config: Arc::clone(&config),
             git_provider: Box::new(MockGitProvider),
@@ -6396,6 +6425,7 @@ development_status:
             sub_agent_sessions,
             sub_agent_in_flight,
             ui,
+            shutdown: pipeline_shutdown,
             critic_memory,
         };
 
