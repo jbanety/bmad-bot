@@ -1674,7 +1674,7 @@ impl StoryPipeline {
                 context_files: vec![story_file_path],
                 trigger_pattern: r"(?i)(STORY\s+CONTEXT\s+CREATED|story\s+file\s+(?:created|saved|written)|Status:\s*ready-for-dev)".to_string(),
                 prompt_template: "Review the following story file for completeness, correctness, and potential issues. Be adversarial — find every weakness, missing detail, and potential disaster.\n\n{context}".to_string(),
-                resume_message_template: "An external adversarial reviewer has analyzed this story and found the following issues:\n\n{findings}\n\nPlease fix all these issues and update the story file.".to_string(),
+                resume_message_template: "An external adversarial reviewer has analyzed this story and found the following issues:\n\n{findings}\n\nPlease fix all these issues and update the story file. When done, output exactly: <<ADVERSARIAL_FIXES_APPLIED>>".to_string(),
                 pipeline_phase: Some(PHASE_CREATE_ADVERSARIAL_CONSULT.into()),
             },
             // Consultation 2 — Story Critic (independent vision guardian)
@@ -1685,7 +1685,7 @@ impl StoryPipeline {
                 role: LlmRole::Critic,
                 tool_set: ConsultationToolSet::Restricted,
                 context_files: critic_context_files,
-                trigger_pattern: r"(?i)(corrections?\s+(applied|made|done|implemented|apportées?|effectuées?)|issues?\s+(fixed|resolved|addressed|résolus?|corrigés?)|changes?\s+(applied|made|done)|problèmes?\s+(résolus?|corrigés?)|mise?\s+[àa]\s+jour|updated?\s+(the\s+)?story)".to_string(),
+                trigger_pattern: r"<<ADVERSARIAL_FIXES_APPLIED>>".to_string(),
                 prompt_template: "Review the following story for alignment with product vision and technical coherence. Identify any deviations from the project's goals or architectural principles.\n\n{context}".to_string(),
                 resume_message_template: "An external product/technical vision reviewer has analyzed this story:\n\n{findings}\n\nPlease apply the relevant corrections to the story file.".to_string(),
                 pipeline_phase: Some(PHASE_CREATE_CRITIC_CONSULT.into()),
