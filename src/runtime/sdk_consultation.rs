@@ -130,7 +130,6 @@ impl<'a> SdkConsultationRunner<'a> {
                 break;
             };
 
-            self.sdk_runtime.set_suppress_activation_ui(false);
             let role_config = self.sdk_runtime.config_for_role(role);
             let provider = role_config.provider.clone();
             self.sdk_runtime.ui().sdk_session_info(&provider, &role_config.model);
