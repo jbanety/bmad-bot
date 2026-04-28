@@ -481,11 +481,11 @@ impl UiRenderer for ConsoleRenderer {
     }
 
     fn activation_start(&self) {
-        self.println(&format!("    {} Agent activation…", self.glyph_progress()));
+        self.println(&format!("    {} Session started", self.glyph_progress()));
     }
 
     fn activation_complete(&self) {
-        self.println(&format!("    {} Agent activated", self.glyph_ok()));
+        self.println(&format!("    {} Session complete", self.glyph_ok()));
     }
 
     fn completion_detected(&self, story_key: &str) {

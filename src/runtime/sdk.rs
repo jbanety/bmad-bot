@@ -450,7 +450,9 @@ impl SdkRuntime {
             } => self.ui.tool_result(tool_name, detail),
             SdkOutputEvent::Progress { message } => {
                 tracing::info!(sdk_progress = %message);
-                self.ui.sdk_text(message);
+                if message != "Turn started" && message != "Reasoning..." {
+                    self.ui.sdk_text(message);
+                }
             }
             SdkOutputEvent::Completion { .. } => {
                 if !suppress {
