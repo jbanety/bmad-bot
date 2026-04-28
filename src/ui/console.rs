@@ -57,8 +57,10 @@ pub(crate) struct ConsoleRenderer {
     plain_mode: bool,
     /// When `true`, display truncated content previews for LLM exchanges.
     verbose: bool,
-    /// Last printed rate-limit line (dedup guard).
-    rate_limit_line: Mutex<Option<String>>,
+    /// Current rate-limit status suffix for spinner updates.
+    rate_limit_suffix: Mutex<String>,
+    /// Number of API turns observed (incremented per rate_limit_event).
+    rate_limit_turns: std::sync::atomic::AtomicU32,
 }
 
 impl ConsoleRenderer {
@@ -74,7 +76,8 @@ impl ConsoleRenderer {
             spinners: Mutex::new(HashMap::new()),
             plain_mode: plain,
             verbose,
-            rate_limit_line: Mutex::new(None),
+            rate_limit_suffix: Mutex::new(String::new()),
+            rate_limit_turns: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -100,6 +103,23 @@ impl ConsoleRenderer {
             pb.set_message(format!("{} {message}", style("◉").cyan()));
         }
         pb
+    }
+
+    fn update_active_spinner_suffix(&self, suffix: &str) {
+        let spinners = self.spinners.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((pb, _)) = spinners.values().last() {
+            let current = pb.message();
+            let base = current
+                .find(" [")
+                .map(|i| &current[..i])
+                .unwrap_or(&current);
+            let styled = if self.plain_mode {
+                suffix.to_string()
+            } else {
+                style(suffix).cyan().dim().to_string()
+            };
+            pb.set_message(format!("{base} {styled}"));
+        }
     }
 
     /// Returns the appropriate glyph for the current mode.
@@ -309,6 +329,11 @@ impl UiRenderer for ConsoleRenderer {
     // ── Pipeline events ─────────────────────────────────────────────
 
     fn story_start(&self, key: &str, title: &str) {
+        self.rate_limit_turns
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut s) = self.rate_limit_suffix.lock() {
+            s.clear();
+        }
         self.println(&format!(
             "{} Story {} — {}",
             self.glyph_progress(),
@@ -365,7 +390,20 @@ impl UiRenderer for ConsoleRenderer {
 
     fn phase_start(&self, phase_name: &str) {
         let sub = self.has_active_spinners();
-        let pb = self.create_spinner(phase_name.to_string(), sub);
+        let suffix = self
+            .rate_limit_suffix
+            .lock()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if self.plain_mode {
+                    format!(" {s}")
+                } else {
+                    format!(" {}", style(&*s).cyan().dim())
+                }
+            })
+            .unwrap_or_default();
+        let pb = self.create_spinner(format!("{phase_name}{suffix}"), sub);
         self.store_spinner(phase_name.to_string(), pb, sub);
     }
 
@@ -682,6 +720,11 @@ impl UiRenderer for ConsoleRenderer {
     }
 
     fn rate_limit_status(&self, resets_at: Option<u64>, limit_type: &str) {
+        let turns = self
+            .rate_limit_turns
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+
         let window = match limit_type {
             "five_hour" => "5h",
             "daily" => "24h",
@@ -690,25 +733,19 @@ impl UiRenderer for ConsoleRenderer {
         };
         let reset_str = resets_at
             .map(|ts| {
-                let naive = chrono::DateTime::from_timestamp(ts as i64, 0)
+                chrono::DateTime::from_timestamp(ts as i64, 0)
                     .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
-                    .unwrap_or_else(|| "??:??".to_string());
-                naive
+                    .unwrap_or_else(|| "??:??".to_string())
             })
             .unwrap_or_else(|| "??:??".to_string());
 
-        let msg = format!("{window} resets {reset_str}");
-        if let Ok(mut prev) = self.rate_limit_line.lock() {
-            if prev.as_deref() == Some(&msg) {
-                return;
-            }
-            *prev = Some(msg.clone());
+        let suffix = format!("[{window} #{turns} →{reset_str}]");
+
+        if let Ok(mut prev) = self.rate_limit_suffix.lock() {
+            *prev = suffix.clone();
         }
-        if self.plain_mode {
-            self.println(&format!("  [{msg}]"));
-        } else {
-            self.println(&format!("  {}", style(msg).cyan().dim()));
-        }
+
+        self.update_active_spinner_suffix(&suffix);
     }
 
     fn shutdown_requested(&self) {
