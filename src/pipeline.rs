@@ -576,6 +576,21 @@ impl StoryPipeline {
             SessionOutcome::Failed {
                 story_key,
                 error,
+                decisions: _,
+            } if parse_rate_limit(&error).is_some() => {
+                self.ui.phase_error("Create Story", "Rate limited");
+                PipelineResult {
+                    story_key: story_key.clone(),
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(error),
+                    fatal: false,
+                }
+            }
+
+            SessionOutcome::Failed {
+                story_key,
+                error,
                 decisions,
             } => {
                 self.ui.phase_error("Create Story", &error);
@@ -993,6 +1008,21 @@ impl StoryPipeline {
                     .phase_complete("Notification", notify_start.elapsed());
                 self.ui.story_escalated(&report.story_key, &report.reason);
                 result
+            }
+
+            SessionOutcome::Failed {
+                story_key,
+                error,
+                decisions: _,
+            } if parse_rate_limit(&error).is_some() => {
+                self.ui.phase_error("Dev Session", "Rate limited");
+                PipelineResult {
+                    story_key: story_key.clone(),
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(error),
+                    fatal: false,
+                }
             }
 
             SessionOutcome::Failed {
@@ -1798,9 +1828,49 @@ impl StoryPipeline {
 
             processed_keys.insert(story.story_key.clone());
 
-            let result = self
+            let mut result = self
                 .process_story(&story, last_completed_branch.as_deref())
                 .await;
+
+            if let Some(ref error_detail) = result.error_detail {
+                if let Some(resets_at) = parse_rate_limit(error_detail) {
+                    let wait_secs = if resets_at > 0 {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        if resets_at > now { resets_at - now + 30 } else { 300 }
+                    } else {
+                        300 // default 5 min when no reset time
+                    };
+                    let wait_mins = wait_secs / 60;
+                    self.ui.story_error(
+                        &story.story_key,
+                        &format!("Rate limited — waiting ~{wait_mins}min for reset"),
+                    );
+                    tracing::warn!(
+                        story_key = %story.story_key,
+                        wait_secs = wait_secs,
+                        resets_at = resets_at,
+                        "Rate limited — sleeping until reset"
+                    );
+
+                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+
+                    if self.is_shutdown() {
+                        results.push(self.make_shutdown_result(&story.story_key));
+                        break;
+                    }
+
+                    processed_keys.remove(&story.story_key);
+                    tracing::info!(
+                        story_key = %story.story_key,
+                        "Rate limit wait complete — retrying story"
+                    );
+                    continue;
+                }
+            }
+
             let mut is_fatal = result.fatal;
             let story_key = &result.story_key;
 
@@ -3291,6 +3361,21 @@ impl StoryPipeline {
             SessionOutcome::Failed {
                 story_key,
                 error,
+                decisions: _,
+            } if parse_rate_limit(&error).is_some() => {
+                self.ui.phase_error("Review Session", "Rate limited");
+                PipelineResult {
+                    story_key: story_key.clone(),
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(error),
+                    fatal: false,
+                }
+            }
+
+            SessionOutcome::Failed {
+                story_key,
+                error,
                 decisions,
             } => {
                 let fatal = is_auth_error(&error);
@@ -4065,6 +4150,16 @@ fn is_auth_error(error: &str) -> bool {
         || lower.contains("http 401")
         || lower.contains("http 403")
         || lower.contains("failed to resolve api key")
+}
+
+/// Parse a rate limit sentinel from an error string.
+///
+/// Returns `Some(resets_at_unix_secs)` if the error matches `RATE_LIMITED:<timestamp>`.
+/// A value of `0` means no specific reset time was provided.
+fn parse_rate_limit(error: &str) -> Option<u64> {
+    error
+        .strip_prefix("RATE_LIMITED:")
+        .and_then(|ts| ts.parse::<u64>().ok())
 }
 
 /// Convert a kebab-case label to a human-readable title.

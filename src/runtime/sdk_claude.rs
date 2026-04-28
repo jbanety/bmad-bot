@@ -37,12 +37,22 @@ struct ClaudeCodeEvent {
     errors: Option<Vec<String>>,
     #[serde(default)]
     tool_use_result: Option<String>,
+    #[serde(default)]
+    rate_limit_info: Option<ClaudeCodeRateLimitInfo>,
     #[allow(dead_code)]
     #[serde(default)]
     duration_ms: Option<u64>,
     #[allow(dead_code)]
     #[serde(default)]
     total_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeCodeRateLimitInfo {
+    #[serde(default)]
+    status: String,
+    #[serde(default, rename = "resetsAt")]
+    resets_at: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +200,16 @@ pub fn parse_claude_code_line(line: &str) -> Option<SdkOutputEvent> {
                     result: event.result.unwrap_or_default(),
                     is_error: false,
                 })
+            }
+        }
+        "rate_limit_event" => {
+            let info = event.rate_limit_info?;
+            if info.status == "rejected" {
+                Some(SdkOutputEvent::RateLimited {
+                    resets_at: info.resets_at,
+                })
+            } else {
+                None
             }
         }
         _ => None,
@@ -464,6 +484,14 @@ pub(crate) async fn map_sdk_result_to_outcome(
 ) -> SessionOutcome {
     let decisions = read_decisions_json_sidecar(impl_artifacts_path, &story.story_key).await;
 
+    if let Some(resets_at) = result.rate_limit_resets_at {
+        return SessionOutcome::Failed {
+            story_key: story.story_key.clone(),
+            error: format!("RATE_LIMITED:{resets_at}"),
+            decisions,
+        };
+    }
+
     if let Some((question, reason)) = detect_escalation(&decisions) {
         return SessionOutcome::Escalated {
             report: EscalationReport::new(
@@ -506,6 +534,14 @@ pub(crate) async fn map_sdk_result_to_outcome(
         } else if !result.stderr.is_empty() {
             error.push_str(": ");
             error.push_str(&result.stderr);
+        }
+
+        if error.to_lowercase().contains("rate limit") && result.rate_limit_resets_at.is_none() {
+            return SessionOutcome::Failed {
+                story_key: story.story_key.clone(),
+                error: "RATE_LIMITED:0".to_string(),
+                decisions,
+            };
         }
 
         SessionOutcome::Failed {

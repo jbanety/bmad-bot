@@ -98,7 +98,11 @@ pub fn parse_codex_line(line: &str) -> Option<SdkOutputEvent> {
                 .map(|e| e.message)
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| "Turn failed".to_string());
-            Some(SdkOutputEvent::Error { message: error_msg })
+            if error_msg.to_lowercase().contains("rate limit") {
+                Some(SdkOutputEvent::RateLimited { resets_at: None })
+            } else {
+                Some(SdkOutputEvent::Error { message: error_msg })
+            }
         }
         "item.started" => {
             let item = event.item?;
@@ -611,12 +615,19 @@ mod tests {
 
     // -- 9.5: turn.failed --
     #[test]
-    fn test_parse_codex_turn_failed() {
+    fn test_parse_codex_turn_failed_rate_limit() {
         let line = r#"{"type":"turn.failed","error":{"message":"Rate limit exceeded"}}"#;
+        let event = parse_codex_line(line).unwrap();
+        assert!(matches!(event, SdkOutputEvent::RateLimited { .. }));
+    }
+
+    #[test]
+    fn test_parse_codex_turn_failed() {
+        let line = r#"{"type":"turn.failed","error":{"message":"Internal server error"}}"#;
         let event = parse_codex_line(line).unwrap();
         match event {
             SdkOutputEvent::Error { message } => {
-                assert_eq!(message, "Rate limit exceeded");
+                assert_eq!(message, "Internal server error");
             }
             _ => panic!("expected Error"),
         }

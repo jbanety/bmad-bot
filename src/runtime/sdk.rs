@@ -71,6 +71,8 @@ pub enum SdkOutputEvent {
     ToolResult { tool_name: String, detail: String },
     Completion { result: String, is_error: bool },
     Error { message: String },
+    /// Rate limit hit — `resets_at` is a Unix timestamp (seconds) when the limit resets.
+    RateLimited { resets_at: Option<u64> },
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +89,8 @@ pub struct SdkSessionResult {
     pub completion_text: Option<String>,
     /// Last error captured from the SDK stream (e.g. API errors, result errors).
     pub stream_error: Option<String>,
+    /// Unix timestamp (seconds) when the rate limit resets, if hit.
+    pub rate_limit_resets_at: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +299,7 @@ impl SdkRuntime {
         let mut shutdown_requested = false;
         let mut last_completion_text: Option<String> = None;
         let mut stream_error: Option<String> = None;
+        let mut rate_limit_resets_at: Option<u64> = None;
 
         loop {
             tokio::select! {
@@ -344,6 +349,9 @@ impl SdkRuntime {
                                             stream_error = Some(message.clone());
                                         }
                                     }
+                                    SdkOutputEvent::RateLimited { resets_at } => {
+                                        rate_limit_resets_at = *resets_at;
+                                    }
                                     _ => {}
                                 }
                             } else {
@@ -387,6 +395,7 @@ impl SdkRuntime {
             shutdown_requested,
             completion_text: last_completion_text,
             stream_error,
+            rate_limit_resets_at,
         })
     }
 
@@ -405,6 +414,21 @@ impl SdkRuntime {
             SdkOutputEvent::Completion { .. } => self.ui.activation_complete(),
             SdkOutputEvent::Error { message } => {
                 tracing::error!(sdk_error = %message);
+            }
+            SdkOutputEvent::RateLimited { resets_at } => {
+                let wait = resets_at
+                    .map(|ts| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        if ts > now { ts - now } else { 0 }
+                    });
+                tracing::warn!(
+                    resets_at = ?resets_at,
+                    wait_secs = ?wait,
+                    "SDK rate limit hit"
+                );
             }
         }
     }
