@@ -4126,6 +4126,8 @@ fn is_infra_error(error: &str) -> bool {
         || lower.contains("no such file or directory")
         || lower.contains("requires --verbose")
         || lower.contains("api error")
+        || lower.contains("model is not supported")
+        || lower.contains("invalid_request_error")
 }
 
 /// Detect authentication errors that should halt the daemon entirely.

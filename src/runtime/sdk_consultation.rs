@@ -88,21 +88,35 @@ impl<'a> SdkConsultationRunner<'a> {
                 Some(&format!("round {}", self.round + 1)),
             );
 
-            let findings = self
+            let findings = match self
                 .run_consultation(&consultation, story, &trigger_text, agent_factory)
-                .await;
-
-            let Some(findings) = findings else {
-                tracing::warn!(
-                    label = %consultation.label,
-                    "SDK consultation returned no findings"
-                );
-                self.sdk_runtime.ui().consultation_error(
-                    &consultation.label,
-                    "no findings returned",
-                );
-                self.round += 1;
-                continue;
+                .await
+            {
+                Ok(Some(f)) => f,
+                Ok(None) => {
+                    tracing::warn!(
+                        label = %consultation.label,
+                        "SDK consultation returned no findings"
+                    );
+                    self.sdk_runtime.ui().consultation_error(
+                        &consultation.label,
+                        "no findings returned",
+                    );
+                    self.round += 1;
+                    continue;
+                }
+                Err(fatal_err) => {
+                    tracing::error!(
+                        label = %consultation.label,
+                        error = %fatal_err,
+                        "Fatal consultation error — aborting"
+                    );
+                    return SessionOutcome::Failed {
+                        story_key: story.story_key.clone(),
+                        error: fatal_err,
+                        decisions: vec![],
+                    };
+                }
             };
 
             tracing::info!(
@@ -202,7 +216,7 @@ impl<'a> SdkConsultationRunner<'a> {
         story: &StoryInfo,
         trigger_text: &str,
         agent_factory: &std::sync::Arc<crate::llm::AgentFactory>,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, String> {
         let role_config =
             super::resolve_role_config(&self.sdk_runtime.config().llm, &consultation.role);
 
@@ -210,8 +224,9 @@ impl<'a> SdkConsultationRunner<'a> {
             self.run_sdk_consultation(consultation, role_config, trigger_text)
                 .await
         } else {
-            self.run_api_consultation(consultation, story, trigger_text, agent_factory)
-                .await
+            Ok(self
+                .run_api_consultation(consultation, story, trigger_text, agent_factory)
+                .await)
         }
     }
 
@@ -220,7 +235,7 @@ impl<'a> SdkConsultationRunner<'a> {
         consultation: &ConsultationConfig,
         role_config: &crate::config::LlmRoleConfig,
         _trigger_text: &str,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, String> {
         let mut context_parts = Vec::new();
         for file_path in &consultation.context_files {
             match tokio::fs::read_to_string(file_path).await {
@@ -262,7 +277,7 @@ impl<'a> SdkConsultationRunner<'a> {
                     label = %consultation.label,
                     "Unknown SDK provider for consultation"
                 );
-                return None;
+                return Ok(None);
             }
         };
 
@@ -297,9 +312,9 @@ impl<'a> SdkConsultationRunner<'a> {
                 if result.exit_code == Some(0) {
                     let findings = result.completion_text.unwrap_or_default();
                     if findings.is_empty() {
-                        None
+                        Ok(None)
                     } else {
-                        Some(findings)
+                        Ok(Some(findings))
                     }
                 } else {
                     let err = result.stream_error
@@ -311,7 +326,14 @@ impl<'a> SdkConsultationRunner<'a> {
                         "SDK consultation subprocess failed"
                     );
                     self.sdk_runtime.ui().consultation_error(&consultation.label, &err);
-                    None
+                    let lower = err.to_lowercase();
+                    if lower.contains("model is not supported")
+                        || lower.contains("invalid_request_error")
+                    {
+                        Err(err)
+                    } else {
+                        Ok(None)
+                    }
                 }
             }
             Err(e) => {
@@ -320,7 +342,7 @@ impl<'a> SdkConsultationRunner<'a> {
                     label = %consultation.label,
                     "SDK consultation subprocess spawn failed"
                 );
-                None
+                Err(e.to_string())
             }
         }
     }
