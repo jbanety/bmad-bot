@@ -140,6 +140,10 @@ impl SdkRuntime {
         Arc::clone(&self.config)
     }
 
+    pub(crate) fn ui(&self) -> &UiHandle {
+        &self.ui
+    }
+
     pub(crate) fn secrets(&self) -> &BotSecrets {
         &self.secrets
     }

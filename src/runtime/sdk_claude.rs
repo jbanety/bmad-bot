@@ -415,6 +415,7 @@ pub async fn run_claude_code_session(
 ) -> SessionOutcome {
     let role_config = runtime.config_for_role(&context.role);
     let prompt = build_claude_code_prompt(context.initial_phase, context.story);
+    runtime.ui().chat_turn(0, &prompt);
 
     let project_root = match std::fs::canonicalize(&runtime.config().bmad_paths.project_root) {
         Ok(p) => p,

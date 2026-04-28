@@ -439,12 +439,20 @@ impl UiRenderer for ConsoleRenderer {
     // ── Session events ──────────────────────────────────────────────
 
     fn chat_turn(&self, turn: u32, summary: &str) {
-        self.println(&format!(
-            "    {} turn {} — {}",
-            self.glyph_sub(),
-            turn,
-            summary,
-        ));
+        if turn == 0 {
+            if self.plain_mode {
+                self.println(&format!("    > {summary}"));
+            } else {
+                self.println(&format!("    {} {}", style("▸").dim(), style(summary).dim()));
+            }
+        } else {
+            self.println(&format!(
+                "    {} turn {} — {}",
+                self.glyph_sub(),
+                turn,
+                summary,
+            ));
+        }
     }
 
     fn activation_start(&self) {
