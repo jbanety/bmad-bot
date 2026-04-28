@@ -32,6 +32,8 @@ struct CodexEvent {
     item: Option<CodexItem>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    delta: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +165,30 @@ pub fn parse_codex_line(line: &str) -> Option<SdkOutputEvent> {
             }
         }
         "item.updated" => None,
+        "item/agentMessage/delta" => {
+            let text = event.delta.unwrap_or_default();
+            if text.is_empty() {
+                None
+            } else {
+                let truncated = if text.chars().count() > 200 {
+                    format!("{}...", text.chars().take(200).collect::<String>())
+                } else {
+                    text
+                };
+                Some(SdkOutputEvent::Progress { message: truncated })
+            }
+        }
+        "item/commandExecution/outputDelta" => {
+            let text = event.delta.unwrap_or_default();
+            if text.is_empty() {
+                None
+            } else {
+                Some(SdkOutputEvent::ToolResult {
+                    tool_name: "command_execution".to_string(),
+                    detail: if text.len() > 120 { format!("{}...", &text[..117]) } else { text },
+                })
+            }
+        }
         "error" => {
             let msg = event
                 .message
