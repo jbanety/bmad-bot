@@ -55,6 +55,8 @@ struct ClaudeCodeRateLimitInfo {
     resets_at: Option<u64>,
     #[serde(default, rename = "rateLimitType")]
     rate_limit_type: Option<String>,
+    #[serde(default, rename = "percentUsed")]
+    percent_used: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,6 +216,7 @@ pub fn parse_claude_code_line(line: &str) -> Option<SdkOutputEvent> {
                 Some(SdkOutputEvent::RateLimitStatus {
                     resets_at: info.resets_at,
                     limit_type: info.rate_limit_type.unwrap_or_default(),
+                    percent_used: info.percent_used,
                 })
             }
         }

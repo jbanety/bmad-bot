@@ -77,6 +77,7 @@ pub enum SdkOutputEvent {
     RateLimitStatus {
         resets_at: Option<u64>,
         limit_type: String,
+        percent_used: Option<f64>,
     },
 }
 
@@ -426,8 +427,9 @@ impl SdkRuntime {
             SdkOutputEvent::RateLimitStatus {
                 resets_at,
                 limit_type,
+                percent_used,
             } => {
-                self.ui.rate_limit_status(*resets_at, limit_type);
+                self.ui.rate_limit_status(*resets_at, limit_type, *percent_used);
             }
         }
     }

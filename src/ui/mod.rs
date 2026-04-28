@@ -221,8 +221,8 @@ impl UiHandle {
         self.0.crash_recovery_complete(story_key);
     }
 
-    pub(crate) fn rate_limit_status(&self, resets_at: Option<u64>, limit_type: &str) {
-        self.0.rate_limit_status(resets_at, limit_type);
+    pub(crate) fn rate_limit_status(&self, resets_at: Option<u64>, limit_type: &str, percent_used: Option<f64>) {
+        self.0.rate_limit_status(resets_at, limit_type, percent_used);
     }
 
     /// A graceful shutdown was requested.

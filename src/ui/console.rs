@@ -719,7 +719,7 @@ impl UiRenderer for ConsoleRenderer {
         ));
     }
 
-    fn rate_limit_status(&self, resets_at: Option<u64>, limit_type: &str) {
+    fn rate_limit_status(&self, resets_at: Option<u64>, limit_type: &str, percent_used: Option<f64>) {
         let turns = self
             .rate_limit_turns
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -739,7 +739,13 @@ impl UiRenderer for ConsoleRenderer {
             })
             .unwrap_or_else(|| "??:??".to_string());
 
-        let suffix = format!("[{window} #{turns} →{reset_str}]");
+        let usage = if let Some(pct) = percent_used {
+            format!("{pct:.0}%")
+        } else {
+            format!("#{turns}")
+        };
+
+        let suffix = format!("[{window}:{usage}→{reset_str}]");
 
         if let Ok(mut prev) = self.rate_limit_suffix.lock() {
             *prev = suffix.clone();
