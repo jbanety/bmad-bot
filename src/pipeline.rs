@@ -4122,6 +4122,7 @@ fn is_infra_error(error: &str) -> bool {
         || lower.contains("agent activation failed")
         || lower.contains("wal creation failed")
         || lower.contains("unknown option")
+        || lower.contains("unexpected argument")
         || lower.contains("command not found")
         || lower.contains("no such file or directory")
         || lower.contains("requires --verbose")

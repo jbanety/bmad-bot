@@ -196,8 +196,7 @@ pub fn build_codex_config(
         "--json".to_string(),
         "--sandbox".to_string(),
         "workspace-write".to_string(),
-        "--ask-for-approval".to_string(),
-        "never".to_string(),
+        "--full-auto".to_string(),
         "--model".to_string(),
         role_config.model.clone(),
         "--cd".to_string(),
@@ -867,15 +866,14 @@ mod tests {
         assert!(config.args.contains(&"--json".to_string()));
         assert!(config.args.contains(&"--sandbox".to_string()));
         assert!(config.args.contains(&"workspace-write".to_string()));
-        assert!(config.args.contains(&"--ask-for-approval".to_string()));
-        assert!(config.args.contains(&"never".to_string()));
+        assert!(config.args.contains(&"--full-auto".to_string()));
+        assert!(!config.args.contains(&"never".to_string()));
         assert!(config.args.contains(&"--model".to_string()));
         assert!(config.args.contains(&"o4-mini".to_string()));
         assert!(config.args.contains(&"--cd".to_string()));
         assert!(config.args.contains(&"/repo".to_string()));
         assert!(config.args.contains(&"--".to_string()));
         assert!(config.args.contains(&"test prompt".to_string()));
-        assert!(!config.args.contains(&"--full-auto".to_string()));
     }
 
     // -- 9.23: cli_path override --
