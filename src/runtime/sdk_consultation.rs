@@ -90,35 +90,34 @@ impl<'a> SdkConsultationRunner<'a> {
                 Some(&format!("round {}", self.round + 1)),
             );
 
+            let consult_start = std::time::Instant::now();
             let consultation_result = self
                 .run_consultation(&consultation, story, &trigger_text, agent_factory)
                 .await;
-
-            self.sdk_runtime.ui().consultation_complete(
-                &consultation.label,
-                0,
-                std::time::Duration::ZERO,
-            );
+            let consult_elapsed = consult_start.elapsed();
 
             let findings = match consultation_result {
-                Ok(Some(f)) => f,
-                Ok(None) => {
-                    tracing::warn!(
-                        label = %consultation.label,
-                        "SDK consultation returned no findings"
-                    );
-                    self.sdk_runtime.ui().consultation_error(
+                Ok(Some(f)) => {
+                    self.sdk_runtime.ui().consultation_complete(
                         &consultation.label,
-                        "no findings returned",
+                        1,
+                        consult_elapsed,
+                    );
+                    f
+                }
+                Ok(None) => {
+                    self.sdk_runtime.ui().consultation_complete(
+                        &consultation.label,
+                        0,
+                        consult_elapsed,
                     );
                     self.round += 1;
                     continue;
                 }
                 Err(fatal_err) => {
-                    tracing::error!(
-                        label = %consultation.label,
-                        error = %fatal_err,
-                        "Fatal consultation error — aborting"
+                    self.sdk_runtime.ui().consultation_error(
+                        &consultation.label,
+                        &fatal_err,
                     );
                     return SessionOutcome::Failed {
                         story_key: story.story_key.clone(),
