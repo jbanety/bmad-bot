@@ -3996,6 +3996,9 @@ fn is_infra_error(error: &str) -> bool {
         || lower.contains("initial chat failed")
         || lower.contains("agent activation failed")
         || lower.contains("wal creation failed")
+        || lower.contains("unknown option")
+        || lower.contains("command not found")
+        || lower.contains("no such file or directory")
 }
 
 /// Detect authentication errors that should halt the daemon entirely.

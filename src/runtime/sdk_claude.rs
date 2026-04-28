@@ -158,8 +158,6 @@ pub fn build_claude_code_config(
         "Read,Edit,Write,Bash,Grep,Glob,WebSearch,Agent,Skill,Monitor,ToolSearch".to_string(),
         "--max-turns".to_string(),
         "200".to_string(),
-        "--cd".to_string(),
-        project_root.to_string_lossy().to_string(),
         "--append-system-prompt".to_string(),
         "OVERRIDE: communication_language = English".to_string(),
     ];
@@ -221,8 +219,6 @@ pub fn build_claude_code_resume_config(
         "stream-json".to_string(),
         "--model".to_string(),
         role_config.model.clone(),
-        "--cd".to_string(),
-        project_root.to_string_lossy().to_string(),
     ];
 
     if let Some(mcp_path) = mcp_config_path {
@@ -659,8 +655,7 @@ mod tests {
         assert!(config.args.contains(&"--allowedTools".to_string()));
         assert!(config.args.contains(&"--max-turns".to_string()));
         assert!(config.args.contains(&"200".to_string()));
-        assert!(config.args.contains(&"--cd".to_string()));
-        assert!(config.args.contains(&"/repo".to_string()));
+        assert_eq!(config.working_directory, Path::new("/repo"));
     }
 
     // -- Task 9.13: cli_path override --
@@ -848,7 +843,7 @@ mod tests {
         );
         assert!(config.args.contains(&"--output-format".to_string()));
         assert!(config.args.contains(&"stream-json".to_string()));
-        assert!(config.args.contains(&"--cd".to_string()));
+        assert_eq!(config.working_directory, Path::new("/repo"));
     }
 
     #[test]
