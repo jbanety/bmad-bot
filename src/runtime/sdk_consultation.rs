@@ -73,6 +73,7 @@ impl<'a> SdkConsultationRunner<'a> {
 
             let triggered = self.find_triggered_consultation(&trigger_text);
             let Some(consultation) = triggered else {
+                tracing::info!("No consultation trigger matched — done");
                 break;
             };
 
@@ -81,15 +82,34 @@ impl<'a> SdkConsultationRunner<'a> {
                 round = self.round,
                 "SDK consultation triggered"
             );
+            self.sdk_runtime.ui().consultation_start(
+                &consultation.label,
+                &story.story_key,
+                Some(&format!("round {}", self.round + 1)),
+            );
 
             let findings = self
                 .run_consultation(&consultation, story, &trigger_text, agent_factory)
                 .await;
 
             let Some(findings) = findings else {
+                tracing::warn!(
+                    label = %consultation.label,
+                    "SDK consultation returned no findings"
+                );
+                self.sdk_runtime.ui().consultation_error(
+                    &consultation.label,
+                    "no findings returned",
+                );
                 self.round += 1;
                 continue;
             };
+
+            tracing::info!(
+                label = %consultation.label,
+                findings_len = findings.len(),
+                "SDK consultation produced findings"
+            );
 
             let Some(ref session_id) = current_session_id else {
                 tracing::warn!("No SDK session ID available for resume after consultation");
@@ -265,6 +285,15 @@ impl<'a> SdkConsultationRunner<'a> {
 
         match self.sdk_runtime.execute_session(session_config, parser).await {
             Ok(result) => {
+                tracing::info!(
+                    label = %consultation.label,
+                    exit_code = ?result.exit_code,
+                    has_completion = result.completion_text.is_some(),
+                    completion_len = result.completion_text.as_deref().map(|s| s.len()).unwrap_or(0),
+                    stream_error = ?result.stream_error,
+                    stderr_len = result.stderr.len(),
+                    "SDK consultation subprocess finished"
+                );
                 if result.exit_code == Some(0) {
                     let findings = result.completion_text.unwrap_or_default();
                     if findings.is_empty() {
@@ -281,6 +310,7 @@ impl<'a> SdkConsultationRunner<'a> {
                         error = %err,
                         "SDK consultation subprocess failed"
                     );
+                    self.sdk_runtime.ui().consultation_error(&consultation.label, &err);
                     None
                 }
             }
