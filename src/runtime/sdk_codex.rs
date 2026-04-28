@@ -475,6 +475,13 @@ pub async fn run_codex_session(
     runtime: &SdkRuntime,
     context: super::SessionContext<'_>,
 ) -> SessionOutcome {
+    if let Err(outcome) = runtime
+        .ensure_branch(context.story, context.base_branch_override)
+        .await
+    {
+        return outcome;
+    }
+
     let role_config = runtime.config_for_role(&context.role);
     let prompt = build_codex_prompt(context.initial_phase, context.story);
 
@@ -1110,6 +1117,34 @@ mod tests {
         use crate::ui::UiHandle;
 
         let dir = tempfile::tempdir().unwrap();
+
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("README.md"), "init").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
         let script_path = dir.path().join("fake-codex.sh");
         std::fs::write(
             &script_path,
