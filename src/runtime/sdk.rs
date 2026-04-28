@@ -85,6 +85,8 @@ pub struct SdkSessionResult {
     pub timed_out: bool,
     pub shutdown_requested: bool,
     pub completion_text: Option<String>,
+    /// Last error captured from the SDK stream (e.g. API errors, result errors).
+    pub stream_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +290,7 @@ impl SdkRuntime {
         let mut timed_out = false;
         let mut shutdown_requested = false;
         let mut last_completion_text: Option<String> = None;
+        let mut stream_error: Option<String> = None;
 
         loop {
             tokio::select! {
@@ -319,14 +322,21 @@ impl SdkRuntime {
                         Ok(Some(line)) => {
                             if let Some(event) = parser(&line) {
                                 self.emit_ui_event(&event);
-                                if let SdkOutputEvent::SessionStarted { session_id: ref id } = event
-                                    && session_id.is_none()
-                                {
-                                    tracing::info!(session_id = %id, "SDK session ID captured");
-                                    session_id = Some(id.clone());
-                                }
-                                if let SdkOutputEvent::Completion { ref result, .. } = event {
-                                    last_completion_text = Some(result.clone());
+                                match &event {
+                                    SdkOutputEvent::SessionStarted { session_id: id } if session_id.is_none() => {
+                                        tracing::info!(session_id = %id, "SDK session ID captured");
+                                        session_id = Some(id.clone());
+                                    }
+                                    SdkOutputEvent::Completion { result, .. } => {
+                                        last_completion_text = Some(result.clone());
+                                    }
+                                    SdkOutputEvent::Error { message } => {
+                                        stream_error = Some(message.clone());
+                                    }
+                                    SdkOutputEvent::Progress { message } if message.contains("API Error") => {
+                                        stream_error = Some(message.clone());
+                                    }
+                                    _ => {}
                                 }
                             } else {
                                 tracing::debug!(sdk_stdout_unrecognized = %line);
@@ -368,6 +378,7 @@ impl SdkRuntime {
             timed_out,
             shutdown_requested,
             completion_text: last_completion_text,
+            stream_error,
         })
     }
 

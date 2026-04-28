@@ -434,7 +434,10 @@ pub(crate) async fn map_sdk_result_to_outcome(
         }
     } else {
         let mut error = format!("SDK session failed (exit code {:?})", result.exit_code);
-        if !result.stderr.is_empty() {
+        if let Some(ref stream_err) = result.stream_error {
+            error.push_str(": ");
+            error.push_str(stream_err);
+        } else if !result.stderr.is_empty() {
             error.push_str(": ");
             error.push_str(&result.stderr);
         }

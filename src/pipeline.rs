@@ -4012,6 +4012,7 @@ fn is_infra_error(error: &str) -> bool {
         || lower.contains("command not found")
         || lower.contains("no such file or directory")
         || lower.contains("requires --verbose")
+        || lower.contains("api error")
 }
 
 /// Detect authentication errors that should halt the daemon entirely.
