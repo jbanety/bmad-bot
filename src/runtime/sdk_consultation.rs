@@ -282,10 +282,12 @@ impl<'a> SdkConsultationRunner<'a> {
              {rendered_prompt}"
         );
 
-        let ctx_files = consultation.context_files.len();
+        let file_names: Vec<&str> = consultation.context_files.iter()
+            .filter_map(|p| p.rsplit('/').next())
+            .collect();
         let prompt_chars = prompt.chars().count();
-        self.sdk_runtime.ui().sdk_text(
-            &format!("{ctx_files} context files, {prompt_chars} chars prompt"),
+        self.sdk_runtime.ui().sdk_input(
+            &format!("[{}] ({} chars)", file_names.join(", "), prompt_chars),
         );
 
         let project_root =
