@@ -275,6 +275,12 @@ impl<'a> SdkConsultationRunner<'a> {
              {rendered_prompt}"
         );
 
+        let ctx_files = consultation.context_files.len();
+        let prompt_chars = prompt.chars().count();
+        self.sdk_runtime.ui().sdk_text(
+            &format!("{ctx_files} context files, {prompt_chars} chars prompt"),
+        );
+
         let project_root =
             std::path::Path::new(&self.sdk_runtime.config().bmad_paths.project_root);
 
