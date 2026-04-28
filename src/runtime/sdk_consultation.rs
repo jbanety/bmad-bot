@@ -42,10 +42,17 @@ impl<'a> SdkConsultationRunner<'a> {
             return initial_outcome;
         }
 
-        let Some(agent_factory) = agent_factory else {
-            tracing::warn!("No API agent factory available for SDK consultations — skipping");
-            return initial_outcome;
-        };
+        let empty_factory = std::sync::Arc::new(crate::llm::AgentFactory::new(
+            self.sdk_runtime.config_arc(),
+            std::sync::Arc::new(crate::config::BotSecrets {
+                anthropic_api_key: None,
+                openai_api_key: None,
+                github_token: None,
+                gitlab_token: None,
+                telegram_bot_token: None,
+            }),
+        ));
+        let agent_factory = agent_factory.unwrap_or(&empty_factory);
 
         let mut current_outcome = initial_outcome;
         let mut current_session_id = initial_result.session_id.clone();
@@ -76,7 +83,7 @@ impl<'a> SdkConsultationRunner<'a> {
             );
 
             let findings = self
-                .run_api_consultation(&consultation, story, &trigger_text, agent_factory)
+                .run_consultation(&consultation, story, &trigger_text, agent_factory)
                 .await;
 
             let Some(findings) = findings else {
@@ -162,7 +169,7 @@ impl<'a> SdkConsultationRunner<'a> {
         None
     }
 
-    async fn run_api_consultation(
+    async fn run_consultation(
         &self,
         consultation: &ConsultationConfig,
         story: &StoryInfo,
@@ -171,28 +178,122 @@ impl<'a> SdkConsultationRunner<'a> {
     ) -> Option<String> {
         let role_config =
             super::resolve_role_config(&self.sdk_runtime.config().llm, &consultation.role);
-        let fallback_config = if role_config.is_sdk_provider() {
-            tracing::warn!(
-                role = ?consultation.role,
-                label = %consultation.label,
-                "Consultation role uses SDK provider — falling back to supervisor API config"
-            );
-            let supervisor_config = &self.sdk_runtime.config().llm.supervisor;
-            if supervisor_config.is_sdk_provider() {
+
+        if role_config.is_sdk_provider() {
+            self.run_sdk_consultation(consultation, role_config, trigger_text)
+                .await
+        } else {
+            self.run_api_consultation(consultation, story, trigger_text, agent_factory)
+                .await
+        }
+    }
+
+    async fn run_sdk_consultation(
+        &self,
+        consultation: &ConsultationConfig,
+        role_config: &crate::config::LlmRoleConfig,
+        _trigger_text: &str,
+    ) -> Option<String> {
+        let mut context_parts = Vec::new();
+        for file_path in &consultation.context_files {
+            match tokio::fs::read_to_string(file_path).await {
+                Ok(content) => {
+                    context_parts.push(format!("--- {file_path} ---\n{content}"));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %file_path,
+                        error = %e,
+                        "Failed to read consultation context file, skipping"
+                    );
+                }
+            }
+        }
+        let context = context_parts.join("\n\n");
+        let rendered_prompt = consultation.prompt_template.replace("{context}", &context);
+
+        let preamble = consultation
+            .preamble_override
+            .as_deref()
+            .unwrap_or("You are an independent reviewer. Analyze the provided context and report your findings. Be specific and actionable.");
+
+        let prompt = format!(
+            "{preamble}\n\n\
+             Output ONLY your findings — no preamble, no summary header, no markdown fences around the whole response.\n\n\
+             {rendered_prompt}"
+        );
+
+        let project_root =
+            std::path::Path::new(&self.sdk_runtime.config().bmad_paths.project_root);
+
+        let session_config = match role_config.provider.as_str() {
+            "claude-code" => build_sdk_consultation_claude(role_config, project_root, &prompt),
+            "codex" => build_sdk_consultation_codex(role_config, project_root, &prompt),
+            other => {
                 tracing::error!(
-                    "No API provider available for consultation (supervisor is also SDK) — skipping"
+                    provider = %other,
+                    label = %consultation.label,
+                    "Unknown SDK provider for consultation"
                 );
                 return None;
             }
-            let mut c = consultation.clone();
-            c.role = crate::llm::agent_factory::LlmRole::Supervisor;
-            Some(c)
-        } else {
-            None
         };
 
-        let effective = fallback_config.as_ref().unwrap_or(consultation);
+        tracing::info!(
+            label = %consultation.label,
+            provider = %role_config.provider,
+            "Running SDK consultation subprocess"
+        );
 
+        let is_claude = role_config.provider == "claude-code";
+
+        let parser = move |line: &str| -> Option<super::sdk::SdkOutputEvent> {
+            if is_claude {
+                super::sdk_claude::parse_claude_code_line(line)
+            } else {
+                super::sdk_codex::parse_codex_line(line)
+            }
+        };
+
+        match self.sdk_runtime.execute_session(session_config, parser).await {
+            Ok(result) => {
+                if result.exit_code == Some(0) {
+                    let findings = result.completion_text.unwrap_or_default();
+                    if findings.is_empty() {
+                        None
+                    } else {
+                        Some(findings)
+                    }
+                } else {
+                    let err = result.stream_error
+                        .or_else(|| if result.stderr.is_empty() { None } else { Some(result.stderr) })
+                        .unwrap_or_else(|| format!("exit code {:?}", result.exit_code));
+                    tracing::error!(
+                        label = %consultation.label,
+                        error = %err,
+                        "SDK consultation subprocess failed"
+                    );
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    label = %consultation.label,
+                    "SDK consultation subprocess spawn failed"
+                );
+                None
+            }
+        }
+    }
+
+    async fn run_api_consultation(
+        &self,
+        consultation: &ConsultationConfig,
+        story: &StoryInfo,
+        trigger_text: &str,
+        agent_factory: &std::sync::Arc<crate::llm::AgentFactory>,
+    ) -> Option<String> {
         let consultation_runner = crate::session::consultation::ConsultationRunner::new(
             agent_factory.clone(),
             self.sdk_runtime.shutdown_flag().clone(),
@@ -202,7 +303,7 @@ impl<'a> SdkConsultationRunner<'a> {
 
         let _ = trigger_text;
         let _ = story;
-        match consultation_runner.execute(effective).await {
+        match consultation_runner.execute(consultation).await {
             Ok(findings) => {
                 if findings.is_empty() {
                     None
@@ -214,11 +315,78 @@ impl<'a> SdkConsultationRunner<'a> {
                 tracing::error!(
                     error = %e,
                     label = %consultation.label,
-                    "SDK consultation failed"
+                    "API consultation failed"
                 );
                 None
             }
         }
+    }
+}
+
+fn build_sdk_consultation_claude(
+    role_config: &crate::config::LlmRoleConfig,
+    project_root: &std::path::Path,
+    prompt: &str,
+) -> super::sdk::SdkSessionConfig {
+    let command = role_config
+        .cli_path
+        .clone()
+        .unwrap_or_else(|| "claude".to_string());
+
+    let args = vec![
+        "-p".to_string(),
+        prompt.to_string(),
+        "--verbose".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--model".to_string(),
+        role_config.model.clone(),
+        "--permission-mode".to_string(),
+        "plan".to_string(),
+        "--max-turns".to_string(),
+        "50".to_string(),
+    ];
+
+    super::sdk::SdkSessionConfig {
+        command,
+        args,
+        env: Vec::new(),
+        working_directory: project_root.to_path_buf(),
+        timeout: std::time::Duration::from_secs(10 * 60),
+        sigterm_grace: std::time::Duration::from_secs(10),
+    }
+}
+
+fn build_sdk_consultation_codex(
+    role_config: &crate::config::LlmRoleConfig,
+    project_root: &std::path::Path,
+    prompt: &str,
+) -> super::sdk::SdkSessionConfig {
+    let command = role_config
+        .cli_path
+        .clone()
+        .unwrap_or_else(|| "codex".to_string());
+
+    let args = vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "--sandbox".to_string(),
+        "read-only".to_string(),
+        "--model".to_string(),
+        role_config.model.clone(),
+        "--cd".to_string(),
+        project_root.to_string_lossy().to_string(),
+        "--".to_string(),
+        prompt.to_string(),
+    ];
+
+    super::sdk::SdkSessionConfig {
+        command,
+        args,
+        env: Vec::new(),
+        working_directory: project_root.to_path_buf(),
+        timeout: std::time::Duration::from_secs(10 * 60),
+        sigterm_grace: std::time::Duration::from_secs(10),
     }
 }
 

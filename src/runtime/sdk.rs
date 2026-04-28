@@ -126,6 +126,10 @@ impl SdkRuntime {
         &self.config
     }
 
+    pub(crate) fn config_arc(&self) -> Arc<BotConfig> {
+        Arc::clone(&self.config)
+    }
+
     pub(crate) fn secrets(&self) -> &BotSecrets {
         &self.secrets
     }
