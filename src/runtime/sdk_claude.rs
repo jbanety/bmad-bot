@@ -270,6 +270,7 @@ pub fn build_claude_code_config(
         working_directory: project_root.to_path_buf(),
         timeout: Duration::from_secs(30 * 60),
         sigterm_grace: Duration::from_secs(10),
+        stdin_data: None,
     }
 }
 
@@ -330,6 +331,7 @@ pub fn build_claude_code_resume_config(
         working_directory: project_root.to_path_buf(),
         timeout: Duration::from_secs(30 * 60),
         sigterm_grace: Duration::from_secs(10),
+        stdin_data: None,
     }
 }
 

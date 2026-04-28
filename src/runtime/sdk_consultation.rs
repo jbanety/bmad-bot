@@ -418,6 +418,7 @@ fn build_sdk_consultation_claude(
         working_directory: project_root.to_path_buf(),
         timeout: std::time::Duration::from_secs(10 * 60),
         sigterm_grace: std::time::Duration::from_secs(10),
+        stdin_data: None,
     }
 }
 
@@ -440,8 +441,6 @@ fn build_sdk_consultation_codex(
         role_config.model.clone(),
         "--cd".to_string(),
         project_root.to_string_lossy().to_string(),
-        "--".to_string(),
-        prompt.to_string(),
     ];
 
     super::sdk::SdkSessionConfig {
@@ -449,6 +448,7 @@ fn build_sdk_consultation_codex(
         args,
         env: Vec::new(),
         working_directory: project_root.to_path_buf(),
+        stdin_data: Some(prompt.to_string()),
         timeout: std::time::Duration::from_secs(10 * 60),
         sigterm_grace: std::time::Duration::from_secs(10),
     }

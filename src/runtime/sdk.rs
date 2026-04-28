@@ -56,6 +56,8 @@ pub struct SdkSessionConfig {
     pub working_directory: PathBuf,
     pub timeout: Duration,
     pub sigterm_grace: Duration,
+    /// Optional data to pipe to the subprocess via stdin.
+    pub stdin_data: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -265,19 +267,32 @@ impl SdkRuntime {
             "Spawning SDK subprocess"
         );
 
+        let needs_stdin = session_config.stdin_data.is_some();
         let mut child = Command::new(&session_config.command)
             .args(&session_config.args)
             .envs(merged_env)
             .current_dir(&session_config.working_directory)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::null())
+            .stdin(if needs_stdin {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| SdkError::SpawnFailed {
                 command: session_config.command.clone(),
                 source: e,
             })?;
+
+        if let Some(data) = session_config.stdin_data {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(data.as_bytes()).await;
+                drop(stdin);
+            }
+        }
 
         let stdout = child.stdout.take().ok_or_else(|| SdkError::SpawnFailed {
             command: session_config.command.clone(),
@@ -549,6 +564,7 @@ mod tests {
             working_directory: std::env::temp_dir(),
             timeout: Duration::from_secs(10),
             sigterm_grace: Duration::from_secs(2),
+            stdin_data: None,
         }
     }
 
@@ -563,6 +579,7 @@ mod tests {
             working_directory: PathBuf::from("/tmp"),
             timeout: Duration::from_secs(1800),
             sigterm_grace: Duration::from_secs(10),
+            stdin_data: None,
         };
         assert_eq!(config.command, "claude");
         assert_eq!(config.args, vec!["--json"]);
