@@ -120,6 +120,9 @@ pub(crate) trait UiRenderer: Send + Sync {
     /// Crash recovery completed for a story.
     fn crash_recovery_complete(&self, story_key: &str);
 
+    /// Rate limit status update from SDK provider.
+    fn rate_limit_status(&self, _resets_at: Option<u64>, _limit_type: &str) {}
+
     /// A graceful shutdown was requested.
     fn shutdown_requested(&self);
 }

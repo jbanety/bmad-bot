@@ -73,6 +73,11 @@ pub enum SdkOutputEvent {
     Error { message: String },
     /// Rate limit hit — `resets_at` is a Unix timestamp (seconds) when the limit resets.
     RateLimited { resets_at: Option<u64> },
+    /// Rate limit status update (emitted on every API call, including allowed).
+    RateLimitStatus {
+        resets_at: Option<u64>,
+        limit_type: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -416,19 +421,13 @@ impl SdkRuntime {
                 tracing::error!(sdk_error = %message);
             }
             SdkOutputEvent::RateLimited { resets_at } => {
-                let wait = resets_at
-                    .map(|ts| {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        if ts > now { ts - now } else { 0 }
-                    });
-                tracing::warn!(
-                    resets_at = ?resets_at,
-                    wait_secs = ?wait,
-                    "SDK rate limit hit"
-                );
+                tracing::warn!(resets_at = ?resets_at, "SDK rate limit hit");
+            }
+            SdkOutputEvent::RateLimitStatus {
+                resets_at,
+                limit_type,
+            } => {
+                self.ui.rate_limit_status(*resets_at, limit_type);
             }
         }
     }

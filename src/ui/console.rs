@@ -57,6 +57,8 @@ pub(crate) struct ConsoleRenderer {
     plain_mode: bool,
     /// When `true`, display truncated content previews for LLM exchanges.
     verbose: bool,
+    /// Last printed rate-limit line (dedup guard).
+    rate_limit_line: Mutex<Option<String>>,
 }
 
 impl ConsoleRenderer {
@@ -72,6 +74,7 @@ impl ConsoleRenderer {
             spinners: Mutex::new(HashMap::new()),
             plain_mode: plain,
             verbose,
+            rate_limit_line: Mutex::new(None),
         }
     }
 
@@ -676,6 +679,36 @@ impl UiRenderer for ConsoleRenderer {
             self.glyph_ok(),
             style(story_key).bold(),
         ));
+    }
+
+    fn rate_limit_status(&self, resets_at: Option<u64>, limit_type: &str) {
+        let window = match limit_type {
+            "five_hour" => "5h",
+            "daily" => "24h",
+            other if other.is_empty() => "?",
+            other => other,
+        };
+        let reset_str = resets_at
+            .map(|ts| {
+                let naive = chrono::DateTime::from_timestamp(ts as i64, 0)
+                    .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                    .unwrap_or_else(|| "??:??".to_string());
+                naive
+            })
+            .unwrap_or_else(|| "??:??".to_string());
+
+        let msg = format!("{window} resets {reset_str}");
+        if let Ok(mut prev) = self.rate_limit_line.lock() {
+            if prev.as_deref() == Some(&msg) {
+                return;
+            }
+            *prev = Some(msg.clone());
+        }
+        if self.plain_mode {
+            self.println(&format!("  [{msg}]"));
+        } else {
+            self.println(&format!("  {}", style(msg).cyan().dim()));
+        }
     }
 
     fn shutdown_requested(&self) {
