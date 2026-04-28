@@ -35,6 +35,8 @@ struct ClaudeCodeEvent {
     is_error: Option<bool>,
     #[serde(default)]
     errors: Option<Vec<String>>,
+    #[serde(default)]
+    tool_use_result: Option<String>,
     #[allow(dead_code)]
     #[serde(default)]
     duration_ms: Option<u64>,
@@ -165,10 +167,16 @@ pub fn parse_claude_code_line(line: &str) -> Option<SdkOutputEvent> {
             }
             None
         }
-        "user" => Some(SdkOutputEvent::ToolResult {
-            tool_name: String::new(),
-            detail: String::new(),
-        }),
+        "user" => {
+            let detail = event
+                .tool_use_result
+                .map(|s| if s.len() > 120 { format!("{}...", &s[..117]) } else { s })
+                .unwrap_or_default();
+            Some(SdkOutputEvent::ToolResult {
+                tool_name: String::new(),
+                detail,
+            })
+        }
         "result" => {
             let is_error = event.is_error.unwrap_or(false);
             if is_error {
