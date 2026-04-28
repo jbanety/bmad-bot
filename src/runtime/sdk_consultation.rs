@@ -170,7 +170,7 @@ impl<'a> SdkConsultationRunner<'a> {
     async fn capture_trigger_text(
         &self,
         story: &StoryInfo,
-        phase: &str,
+        _phase: &str,
         completion_text: Option<&str>,
     ) -> String {
         let mut text = String::new();
@@ -179,11 +179,9 @@ impl<'a> SdkConsultationRunner<'a> {
             text.push_str(&content);
         }
 
-        if phase != crate::session::state::PHASE_CREATE {
-            if let Some(completion) = completion_text {
-                text.push('\n');
-                text.push_str(completion);
-            }
+        if let Some(completion) = completion_text {
+            text.push('\n');
+            text.push_str(completion);
         }
 
         text

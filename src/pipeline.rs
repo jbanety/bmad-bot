@@ -1685,7 +1685,7 @@ impl StoryPipeline {
                 role: LlmRole::Critic,
                 tool_set: ConsultationToolSet::Restricted,
                 context_files: critic_context_files,
-                trigger_pattern: r"(?i)(corrections?\s+(applied|made|done|implemented)|issues?\s+(fixed|resolved|addressed)|changes?\s+(applied|made|done))".to_string(),
+                trigger_pattern: r"(?i)(corrections?\s+(applied|made|done|implemented|apportées?|effectuées?)|issues?\s+(fixed|resolved|addressed|résolus?|corrigés?)|changes?\s+(applied|made|done)|problèmes?\s+(résolus?|corrigés?)|mise?\s+[àa]\s+jour|updated?\s+(the\s+)?story)".to_string(),
                 prompt_template: "Review the following story for alignment with product vision and technical coherence. Identify any deviations from the project's goals or architectural principles.\n\n{context}".to_string(),
                 resume_message_template: "An external product/technical vision reviewer has analyzed this story:\n\n{findings}\n\nPlease apply the relevant corrections to the story file.".to_string(),
                 pipeline_phase: Some(PHASE_CREATE_CRITIC_CONSULT.into()),
