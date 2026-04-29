@@ -444,7 +444,11 @@ impl StoryPipeline {
             SessionOutcome::Completed {
                 story_key, branch, ..
             } => {
-                self.ui.phase_complete("Create Story", session_elapsed);
+                self.ui.phase_complete_with_result(
+                    "Create Story",
+                    session_elapsed,
+                    "story created",
+                );
                 tracing::info!(
                     action = "create_phase_complete",
                     story_key = %story_key,
@@ -759,7 +763,8 @@ impl StoryPipeline {
                 pr_how_to_test,
                 pr_additional_info,
             } => {
-                self.ui.phase_complete("Dev Session", session_elapsed);
+                self.ui
+                    .phase_complete_with_result("Dev Session", session_elapsed, "completed");
 
                 // Phase 2 — Push branch to remote before PR creation (non-blocking)
                 self.ui.phase_start("Push Branch");
@@ -1313,11 +1318,25 @@ impl StoryPipeline {
 
             match session_outcome {
                 SessionOutcome::Completed { .. } => {
-                    self.ui
-                        .phase_complete("Code Review", review_start.elapsed());
                     let report = extract_review_report_from_story(
                         story,
                         Path::new(&self.config.bmad_paths.project_root),
+                    );
+                    let summary = match &report {
+                        Some(text) => {
+                            let count = text.lines().filter(|l| l.starts_with("- ")).count();
+                            if count > 0 {
+                                format!("{count} findings")
+                            } else {
+                                "clean".to_string()
+                            }
+                        }
+                        None => "clean".to_string(),
+                    };
+                    self.ui.phase_complete_with_result(
+                        "Code Review",
+                        review_start.elapsed(),
+                        &summary,
                     );
                     if report.is_none() {
                         tracing::info!(
@@ -1351,10 +1370,31 @@ impl StoryPipeline {
                 }
             }
         } else {
-            self.ui
-                .phase_complete("Code Review", std::time::Duration::ZERO);
+            self.ui.phase_complete_with_result(
+                "Code Review",
+                std::time::Duration::ZERO,
+                "disabled",
+            );
             None
         };
+
+        // Critic status — if the critic trigger pattern is not in the story file,
+        // the critic was not triggered. Show explicit "skipped" so the user knows.
+        if self.config.code_review_enabled && review_report.is_some() {
+            let story_path = PathBuf::from(&self.config.bmad_paths.project_root)
+                .join(&story.specs_path);
+            let critic_triggered = tokio::fs::read_to_string(&story_path)
+                .await
+                .map(|content| content.contains("[Review][Decision]"))
+                .unwrap_or(false);
+            if !critic_triggered {
+                self.ui.phase_complete_with_result(
+                    "Review critic",
+                    std::time::Duration::ZERO,
+                    "skipped (0 decision-needed)",
+                );
+            }
+        }
 
         // Phase 5 — Push review fix commits to update PR (if review ran)
         if review_report.is_some()

@@ -39,6 +39,19 @@ pub(crate) trait UiRenderer: Send + Sync {
     /// A named phase completed successfully.
     fn phase_complete(&self, phase_name: &str, duration: std::time::Duration);
 
+    /// A named phase completed with a one-line result summary.
+    ///
+    /// Default delegates to [`phase_complete`] so existing renderers are unaffected.
+    fn phase_complete_with_result(
+        &self,
+        phase_name: &str,
+        duration: std::time::Duration,
+        result: &str,
+    ) {
+        self.phase_complete(phase_name, duration);
+        let _ = result;
+    }
+
     /// A named phase encountered an error.
     fn phase_error(&self, phase_name: &str, error: &str);
 

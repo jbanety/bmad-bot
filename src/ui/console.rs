@@ -444,6 +444,29 @@ impl UiRenderer for ConsoleRenderer {
         ));
     }
 
+    fn phase_complete_with_result(
+        &self,
+        phase_name: &str,
+        duration: Duration,
+        result: &str,
+    ) {
+        let indent = match self.take_spinner(phase_name) {
+            Some((pb, sub)) => {
+                pb.finish_and_clear();
+                if sub { "    " } else { "  " }
+            }
+            None => "  ",
+        };
+        self.println(&format!(
+            "{}{} {} [{}] — {}",
+            indent,
+            self.glyph_ok(),
+            phase_name,
+            format_duration(duration),
+            result,
+        ));
+    }
+
     fn phase_error(&self, phase_name: &str, error: &str) {
         let indent = match self.take_spinner(phase_name) {
             Some((pb, sub)) => {

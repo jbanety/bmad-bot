@@ -89,6 +89,16 @@ impl UiHandle {
         self.0.phase_complete(phase_name, duration);
     }
 
+    /// A named phase completed with a one-line result summary.
+    pub(crate) fn phase_complete_with_result(
+        &self,
+        phase_name: &str,
+        duration: Duration,
+        result: &str,
+    ) {
+        self.0.phase_complete_with_result(phase_name, duration, result);
+    }
+
     /// A named phase encountered an error.
     pub(crate) fn phase_error(&self, phase_name: &str, error: &str) {
         self.0.phase_error(phase_name, error);
