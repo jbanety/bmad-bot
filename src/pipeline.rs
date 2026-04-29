@@ -360,7 +360,42 @@ impl StoryPipeline {
             "Starting pipeline for story"
         );
 
-        match route_story_status(&story.status) {
+        let phase = route_story_status(&story.status);
+
+        // Guard: spec file must exist before dev or review phases.
+        // Create phase produces the file, so it's exempt.
+        if matches!(phase, StoryPhase::Dev | StoryPhase::Review)
+            && !story.specs_path.exists()
+        {
+            let msg = format!(
+                "Story spec file not found: {}. Cannot proceed with {} phase — \
+                 the story may not have been through the create phase yet.",
+                story.specs_path.display(),
+                match phase {
+                    StoryPhase::Dev => "dev",
+                    StoryPhase::Review => "review",
+                    _ => unreachable!(),
+                }
+            );
+            tracing::error!(
+                action = "spec_file_missing",
+                story_key = %story.story_key,
+                specs_path = %story.specs_path.display(),
+                "{msg}"
+            );
+            self.ui.story_error(&story.story_key, &msg);
+            let result = PipelineResult {
+                story_key: story.story_key.clone(),
+                status: StoryStatus::Error,
+                pr_url: None,
+                error_detail: Some(msg),
+                fatal: false,
+            };
+            self.notify_story_result(&result).await;
+            return result;
+        }
+
+        match phase {
             StoryPhase::Create => {
                 self.run_create_pipeline(story, &story_title, base_branch_override)
                     .await
