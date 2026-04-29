@@ -459,8 +459,7 @@ fn build_sdk_consultation_codex(
     let args = vec![
         "exec".to_string(),
         "--json".to_string(),
-        "--sandbox".to_string(),
-        "workspace-write".to_string(),
+        "--dangerously-bypass-approvals-and-sandbox".to_string(),
         "--model".to_string(),
         role_config.model.clone(),
         "--cd".to_string(),

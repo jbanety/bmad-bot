@@ -220,9 +220,7 @@ pub fn build_codex_config(
     let mut args = vec![
         "exec".to_string(),
         "--json".to_string(),
-        "--sandbox".to_string(),
-        "workspace-write".to_string(),
-        "--full-auto".to_string(),
+        "--dangerously-bypass-approvals-and-sandbox".to_string(),
         "--model".to_string(),
         role_config.model.clone(),
         "--cd".to_string(),
@@ -891,10 +889,9 @@ mod tests {
         assert_eq!(config.command, "codex");
         assert!(config.args.contains(&"exec".to_string()));
         assert!(config.args.contains(&"--json".to_string()));
-        assert!(config.args.contains(&"--sandbox".to_string()));
-        assert!(config.args.contains(&"workspace-write".to_string()));
-        assert!(config.args.contains(&"--full-auto".to_string()));
-        assert!(!config.args.contains(&"never".to_string()));
+        assert!(config
+            .args
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(config.args.contains(&"--model".to_string()));
         assert!(config.args.contains(&"o4-mini".to_string()));
         assert!(config.args.contains(&"--cd".to_string()));
