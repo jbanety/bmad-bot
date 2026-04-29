@@ -389,7 +389,7 @@ impl StoryPipeline {
                 status: StoryStatus::Error,
                 pr_url: None,
                 error_detail: Some(msg),
-                fatal: false,
+                fatal: true,
             };
             self.notify_story_result(&result).await;
             return result;
