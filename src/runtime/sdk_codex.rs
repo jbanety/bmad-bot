@@ -268,7 +268,7 @@ pub fn build_codex_prompt(phase: &str, story: &StoryInfo) -> String {
             format!("/bmad-dev-story {}", story.specs_path.to_string_lossy())
         }
     };
-    format!("IMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.\n\n{skill_cmd}")
+    format!("{skill_cmd}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.")
 }
 
 // ---------------------------------------------------------------------------

@@ -255,10 +255,10 @@ impl<'a> SdkConsultationRunner<'a> {
         role_config: &crate::config::LlmRoleConfig,
         _trigger_text: &str,
     ) -> Result<Option<String>, String> {
-        let lang_override = "IMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.\n\n";
+        let lang_override = "\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.";
         let prompt = if let Some(skill) = consultation_skill_command(&consultation.label) {
             let target_file = consultation.context_files.first().cloned().unwrap_or_default();
-            format!("{lang_override}{skill} {target_file}")
+            format!("{skill} {target_file}{lang_override}")
         } else {
             let mut context_parts = Vec::new();
             for file_path in &consultation.context_files {
@@ -281,7 +281,7 @@ impl<'a> SdkConsultationRunner<'a> {
                 .preamble_override
                 .as_deref()
                 .unwrap_or("You are an independent reviewer. Analyze the provided context and report your findings.");
-            format!("{lang_override}{preamble}\n\n{rendered}")
+            format!("{preamble}\n\n{rendered}{lang_override}")
         };
 
         self.sdk_runtime.ui().sdk_input(
