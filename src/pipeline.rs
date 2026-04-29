@@ -1746,6 +1746,7 @@ impl StoryPipeline {
         if let Some(memory_path) = critic_memory_path {
             critic_context_files.push(memory_path);
         }
+        critic_context_files.extend(self.completed_epic_story_paths(story));
         critic_context_files.push(story_file_path.clone());
 
         vec![
@@ -1801,6 +1802,7 @@ impl StoryPipeline {
         if let Some(memory_path) = critic_memory_path {
             context_files.push(memory_path);
         }
+        context_files.extend(self.completed_epic_story_paths(story));
         context_files.push(story_file_path);
 
         vec![ConsultationConfig {
@@ -1823,6 +1825,65 @@ impl StoryPipeline {
                 .to_string(),
             pipeline_phase: Some(PHASE_REVIEW_CRITIC_CONSULT.into()),
         }]
+    }
+
+    /// Collect file paths for completed stories from the same epic.
+    ///
+    /// Returns absolute paths to spec files with `done` status and the same epic
+    /// number as the given story (excluding the story itself). Gives the critic
+    /// context about decisions and implementation details from prior stories.
+    fn completed_epic_story_paths(&self, story: &StoryInfo) -> Vec<String> {
+        let sprint_status_path =
+            PathBuf::from(&self.config.bmad_paths.implementation_artifacts).join("sprint-status.yaml");
+        let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
+
+        let sprint_status = match SprintStatusFile::load(&sprint_status_path, &story_dir) {
+            Ok(ssf) => ssf,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to load sprint-status.yaml for completed story collection"
+                );
+                return vec![];
+            }
+        };
+
+        let project_root = PathBuf::from(&self.config.bmad_paths.project_root);
+        let mut paths = Vec::new();
+
+        for (key, status) in sprint_status.entries() {
+            if status != "done" {
+                continue;
+            }
+            if key == &story.story_key {
+                continue;
+            }
+            let epic_num: Option<u32> = key.split('-').next().and_then(|s| s.parse().ok());
+            if epic_num != Some(story.epic_num) {
+                continue;
+            }
+            let spec_path = story_dir.join(format!("{key}.md"));
+            if spec_path.exists() {
+                paths.push(
+                    project_root
+                        .join(&spec_path)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+        }
+
+        if !paths.is_empty() {
+            tracing::info!(
+                action = "critic_context_stories",
+                story_key = %story.story_key,
+                epic = story.epic_num,
+                count = paths.len(),
+                "Loaded completed epic stories for critic context"
+            );
+        }
+
+        paths
     }
 
     /// Re-read sprint-status.yaml and return an updated `StoryInfo` for the given key.
