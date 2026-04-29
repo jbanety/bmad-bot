@@ -148,6 +148,7 @@ impl<'a> SdkConsultationRunner<'a> {
             let role_config = self.sdk_runtime.config_for_role(role);
             let provider = role_config.provider.clone();
             self.sdk_runtime.ui().sdk_session_info(&provider, &role_config.model);
+            self.sdk_runtime.ui().sdk_text("Session resumed with consultation findings");
 
             let resume_prompt = consultation
                 .resume_message_template
