@@ -92,6 +92,7 @@ pub fn create_base_tools(project_root: &Path) -> BaseToolSet {
 ///
 /// Returns 8 custom tools (7 base + supervisor). Caller adds `ThinkTool` via
 /// `configure_agent_tools!`.
+#[allow(clippy::too_many_arguments)]
 pub fn create_tools_with_supervisor(
     project_root: &Path,
     config: &BotConfig,
@@ -99,6 +100,8 @@ pub fn create_tools_with_supervisor(
     escalation_slot: EscalationSlot,
     decision_log: DecisionLog,
     mcp_manager: &Arc<McpManager>,
+    shutdown: ShutdownFlag,
+    ui: UiHandle,
 ) -> Result<FullToolSet, Box<dyn std::error::Error>> {
     let (git, read_file, edit_file, grep, find_path, list_dir, terminal) =
         create_base_tools(project_root);
@@ -108,6 +111,8 @@ pub fn create_tools_with_supervisor(
         escalation_slot,
         decision_log,
         Arc::clone(mcp_manager),
+        shutdown,
+        ui,
     )?;
     Ok((
         git, read_file, edit_file, grep, find_path, list_dir, terminal, supervisor,

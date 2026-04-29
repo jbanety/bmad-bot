@@ -185,11 +185,12 @@ impl AskSupervisor {
         }
     }
 
-    /// Create an AskSupervisor with an [`ArchitectSession`] built from the daemon config
-    /// and a shared [`EscalationSlot`].
+    /// Create an AskSupervisor with the appropriate [`AnswerProvider`] built from
+    /// the daemon config and a shared [`EscalationSlot`].
     ///
-    /// This reads the `architect.md` agent file, resolves the supervisor LLM
-    /// provider/model/key, and stores everything for on-demand session creation.
+    /// Dispatches based on the supervisor role config:
+    /// - SDK provider → [`SdkAnswerProvider`](architect::SdkAnswerProvider)
+    /// - API provider → [`ArchitectSession`]
     ///
     /// When `factory` is provided, the [`ArchitectSession`] delegates all agent
     /// construction to the shared [`AgentFactory`] instead of resolving keys
@@ -200,11 +201,34 @@ impl AskSupervisor {
         escalation_slot: EscalationSlot,
         decision_log: DecisionLog,
         mcp_manager: Arc<crate::mcp::McpManager>,
+        shutdown: crate::session::agent::ShutdownFlag,
+        ui: crate::ui::UiHandle,
     ) -> Result<Self, ArchitectSessionError> {
-        let session = ArchitectSession::new_with_factory(config, factory, mcp_manager)?;
+        let provider = architect::build_answer_provider(
+            config,
+            factory.as_ref().map_or_else(
+                || Arc::new(config.clone()),
+                |f| f.config_arc(),
+            ),
+            factory.as_ref().map_or_else(
+                || Arc::new(crate::config::BotSecrets {
+                    anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+                    openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
+                    github_token: std::env::var("GITHUB_TOKEN").ok(),
+                    gitlab_token: std::env::var("GITLAB_TOKEN").ok(),
+                    telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+                }),
+                |f| f.secrets_arc(),
+            ),
+            std::path::PathBuf::new(),
+            shutdown,
+            ui,
+            factory,
+            mcp_manager,
+        )?;
         Ok(Self {
             rule_engine: RuleEngine::new(),
-            answer_provider: Some(Box::new(session)),
+            answer_provider: Some(provider),
             escalation_slot,
             decision_log,
         })

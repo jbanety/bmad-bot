@@ -475,6 +475,8 @@ impl ReviewRunner {
                 escalation_slot,
                 decision_log,
                 &self.mcp_manager,
+                Arc::clone(&self.shutdown),
+                self.ui.clone(),
             )
             .map_err(|e| ReviewError::AgentBuildFailed {
                 reason: format!("Failed to create AskSupervisor: {e}"),

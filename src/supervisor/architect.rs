@@ -15,10 +15,11 @@
 //!
 //! Each `ask()` call creates an entirely fresh session (no persistence).
 
-use crate::config::BotConfig;
+use crate::config::{BotConfig, BotSecrets};
 use crate::llm::agent_factory::{AgentFactory, BuiltAgent, LlmRole};
 use crate::llm::logging::{log_llm_error, log_llm_request, log_llm_response};
-use crate::session::agent::{build_preamble, create_base_tools};
+use crate::session::agent::{build_preamble, create_base_tools, ShutdownFlag};
+use crate::ui::UiHandle;
 use async_trait::async_trait;
 use rig::completion::Message;
 use std::path::PathBuf;
@@ -435,6 +436,204 @@ impl AnswerProvider for MockAnswerProvider {
 }
 
 // -----------------------------------------------------------------------
+// SdkAnswerProvider — SDK subprocess-based supervisor fallback
+// -----------------------------------------------------------------------
+
+/// SDK-based implementation of [`AnswerProvider`] for supervisor LLM fallback.
+///
+/// Spawns a CLI subprocess (Claude Code or Codex) with a combined prompt
+/// containing the architect persona, English override, and the developer's
+/// question. No supervisor MCP is injected (prevents recursion).
+#[derive(Debug)]
+pub struct SdkAnswerProvider {
+    config: Arc<BotConfig>,
+    secrets: Arc<BotSecrets>,
+    config_path: PathBuf,
+    shutdown: ShutdownFlag,
+    ui: UiHandle,
+}
+
+impl SdkAnswerProvider {
+    /// Create a new SDK-based answer provider.
+    pub fn new(
+        config: Arc<BotConfig>,
+        secrets: Arc<BotSecrets>,
+        config_path: PathBuf,
+        shutdown: ShutdownFlag,
+        ui: UiHandle,
+    ) -> Self {
+        Self {
+            config,
+            secrets,
+            config_path,
+            shutdown,
+            ui,
+        }
+    }
+
+    fn build_prompt(question: &str, context: Option<&str>) -> String {
+        let mut prompt = String::from(
+            "You are Winston, a Senior Architect. A developer agent working on this project \
+             needs your expert guidance. IMPORTANT: ALL communication MUST be in English.\n\n\
+             Use your tools to explore the codebase and project documentation as needed to \
+             give an accurate, well-informed answer.\n\n",
+        );
+
+        prompt.push_str(&format!("**Developer's question:** {question}\n"));
+
+        if let Some(ctx) = context {
+            prompt.push_str(&format!("\n**Additional context:** {ctx}\n"));
+        }
+
+        prompt.push_str(
+            "\nProvide a clear, actionable answer. If you need to explore files to answer \
+             accurately, do so before responding.",
+        );
+
+        prompt
+    }
+}
+
+#[async_trait]
+impl AnswerProvider for SdkAnswerProvider {
+    async fn ask(
+        &self,
+        question: &str,
+        context: Option<&str>,
+    ) -> Result<String, ArchitectSessionError> {
+        use crate::runtime::sdk::SdkRuntime;
+
+        let role_config = crate::runtime::resolve_role_config(&self.config.llm, &LlmRole::Supervisor);
+        let project_root = std::path::Path::new(&self.config.bmad_paths.project_root);
+
+        let prompt = Self::build_prompt(question, context);
+
+        let session_config = match role_config.provider.as_str() {
+            "claude-code" => crate::runtime::sdk_claude::build_claude_code_config(
+                role_config,
+                project_root,
+                &prompt,
+                None, // No MCP supervisor — prevents recursion
+            ),
+            "codex" => crate::runtime::sdk_codex::build_codex_config(
+                role_config,
+                project_root,
+                &prompt,
+            ),
+            other => {
+                return Err(ArchitectSessionError::UnsupportedProvider {
+                    provider: other.to_string(),
+                });
+            }
+        };
+
+        tracing::info!(
+            provider = %role_config.provider,
+            model = %role_config.model,
+            "Supervisor SDK fallback: spawning subprocess"
+        );
+
+        let sdk_runtime = SdkRuntime::new(
+            Arc::clone(&self.config),
+            Arc::clone(&self.secrets),
+            self.config_path.clone(),
+            Arc::clone(&self.shutdown),
+            self.ui.clone(),
+        );
+
+        let is_claude = role_config.provider == "claude-code";
+        let parser = move |line: &str| -> Option<crate::runtime::sdk::SdkOutputEvent> {
+            if is_claude {
+                crate::runtime::sdk_claude::parse_claude_code_line(line)
+            } else {
+                crate::runtime::sdk_codex::parse_codex_line(line)
+            }
+        };
+
+        let result = sdk_runtime
+            .execute_session(session_config, parser)
+            .await
+            .map_err(|e| ArchitectSessionError::ChatFailed {
+                turn: 1,
+                reason: format!("SDK subprocess failed: {e}"),
+            })?;
+
+        if result.exit_code != Some(0) {
+            let error = result
+                .stream_error
+                .or_else(|| {
+                    if result.stderr.is_empty() {
+                        None
+                    } else {
+                        Some(result.stderr.clone())
+                    }
+                })
+                .unwrap_or_else(|| format!("exit code {:?}", result.exit_code));
+            return Err(ArchitectSessionError::ChatFailed {
+                turn: 1,
+                reason: format!("SDK subprocess failed: {error}"),
+            });
+        }
+
+        let answer = result
+            .completion_text
+            .filter(|t| !t.trim().is_empty())
+            .ok_or(ArchitectSessionError::NoResponse)?;
+
+        tracing::info!(
+            response_len = answer.len(),
+            "Supervisor SDK fallback answered"
+        );
+
+        Ok(answer)
+    }
+}
+
+// -----------------------------------------------------------------------
+// build_answer_provider — factory for API vs SDK dispatch
+// -----------------------------------------------------------------------
+
+/// Build the appropriate [`AnswerProvider`] based on the supervisor role config.
+///
+/// - SDK provider (claude-code, codex) → [`SdkAnswerProvider`]
+/// - API provider (anthropic, openai) → [`ArchitectSession`]
+#[allow(clippy::too_many_arguments)]
+pub fn build_answer_provider(
+    config: &BotConfig,
+    config_arc: Arc<BotConfig>,
+    secrets: Arc<BotSecrets>,
+    config_path: PathBuf,
+    shutdown: ShutdownFlag,
+    ui: UiHandle,
+    factory: Option<Arc<AgentFactory>>,
+    mcp_manager: Arc<crate::mcp::McpManager>,
+) -> Result<Box<dyn AnswerProvider>, ArchitectSessionError> {
+    let role_config = crate::runtime::resolve_role_config(&config.llm, &LlmRole::Supervisor);
+
+    if role_config.is_sdk_provider() {
+        tracing::info!(
+            provider = %role_config.provider,
+            "Supervisor LLM fallback: using SDK provider"
+        );
+        Ok(Box::new(SdkAnswerProvider::new(
+            config_arc,
+            secrets,
+            config_path,
+            shutdown,
+            ui,
+        )))
+    } else {
+        tracing::info!(
+            provider = %role_config.provider,
+            "Supervisor LLM fallback: using API provider"
+        );
+        Ok(Box::new(ArchitectSession::new_with_factory(
+            config, factory, mcp_manager,
+        )?))
+    }
+}
+
+// -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
 
@@ -621,5 +820,133 @@ mod tests {
         });
         // Just verifying it compiles and the Debug impl works
         let _debug = format!("{:?}", mock);
+    }
+
+    // -- SdkAnswerProvider tests --
+
+    #[test]
+    fn test_sdk_answer_provider_build_prompt_without_context() {
+        let prompt = SdkAnswerProvider::build_prompt("What pattern should I follow?", None);
+        assert!(prompt.contains("Winston"));
+        assert!(prompt.contains("What pattern should I follow?"));
+        assert!(!prompt.contains("Additional context"));
+    }
+
+    #[test]
+    fn test_sdk_answer_provider_build_prompt_with_context() {
+        let prompt = SdkAnswerProvider::build_prompt(
+            "What pattern should I follow?",
+            Some("Using the observer pattern"),
+        );
+        assert!(prompt.contains("Winston"));
+        assert!(prompt.contains("What pattern should I follow?"));
+        assert!(prompt.contains("Additional context"));
+        assert!(prompt.contains("observer pattern"));
+    }
+
+    #[test]
+    fn test_sdk_answer_provider_is_debug() {
+        let config = Arc::new(BotConfig::_test_minimal("pretty", "info"));
+        let secrets = Arc::new(crate::config::BotSecrets {
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = SdkAnswerProvider::new(
+            config,
+            secrets,
+            PathBuf::from("test.yaml"),
+            shutdown,
+            crate::ui::UiHandle::null(),
+        );
+        let debug = format!("{:?}", provider);
+        assert!(debug.contains("SdkAnswerProvider"));
+    }
+
+    #[test]
+    fn test_sdk_answer_provider_implements_answer_provider() {
+        let config = Arc::new(BotConfig::_test_minimal("pretty", "info"));
+        let secrets = Arc::new(crate::config::BotSecrets {
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = SdkAnswerProvider::new(
+            config,
+            secrets,
+            PathBuf::from("test.yaml"),
+            shutdown,
+            crate::ui::UiHandle::null(),
+        );
+        let _boxed: Box<dyn AnswerProvider> = Box::new(provider);
+    }
+
+    // -- build_answer_provider tests --
+
+    #[test]
+    fn test_build_answer_provider_returns_sdk_for_sdk_provider() {
+        let dir = TempDir::new().unwrap();
+        let mut config = make_test_config(&dir, "claude-code", true);
+        config.llm.supervisor.provider = "claude-code".to_string();
+        let config_arc = Arc::new(config.clone());
+        let secrets = Arc::new(crate::config::BotSecrets {
+            anthropic_api_key: None,
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = build_answer_provider(
+            &config,
+            config_arc,
+            secrets,
+            PathBuf::from("test.yaml"),
+            shutdown,
+            crate::ui::UiHandle::null(),
+            None,
+            Arc::new(crate::mcp::McpManager::empty()),
+        );
+        assert!(result.is_ok());
+        let debug = format!("{:?}", result.unwrap());
+        assert!(debug.contains("SdkAnswerProvider"));
+    }
+
+    #[test]
+    fn test_build_answer_provider_returns_architect_for_api_provider() {
+        let dir = TempDir::new().unwrap();
+        let config = make_test_config(&dir, "anthropic", true);
+        let config_arc = Arc::new(config.clone());
+        let secrets = Arc::new(crate::config::BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        let factory = Arc::new(AgentFactory::new(
+            Arc::clone(&config_arc),
+            Arc::clone(&secrets),
+        ));
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = build_answer_provider(
+            &config,
+            config_arc,
+            secrets,
+            PathBuf::from("test.yaml"),
+            shutdown,
+            crate::ui::UiHandle::null(),
+            Some(factory),
+            Arc::new(crate::mcp::McpManager::empty()),
+        );
+        assert!(result.is_ok());
+        let debug = format!("{:?}", result.unwrap());
+        assert!(debug.contains("ArchitectSession"));
     }
 }

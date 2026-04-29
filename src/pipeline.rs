@@ -250,6 +250,7 @@ impl StoryPipeline {
 
         let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
         let pipeline_shutdown = Arc::clone(&shutdown);
+        let epic_review_config_path = config_path.clone();
         let session_runtime = SessionRuntime::from_config(RuntimeDeps {
             config: Arc::clone(&config),
             secrets: Arc::clone(&secrets),
@@ -261,7 +262,6 @@ impl StoryPipeline {
             ui: ui.clone(),
         });
 
-        // AgentFactory for EpicReviewRunner (always API-based)
         let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
         let epic_review_runner = EpicReviewRunner::new(
             Arc::clone(&config),
@@ -270,6 +270,7 @@ impl StoryPipeline {
             shutdown,
             mcp_manager,
             ui.clone(),
+            epic_review_config_path,
         );
 
         let critic_memory = CriticMemory::new(
@@ -5591,6 +5592,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -5968,6 +5970,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -6041,6 +6044,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -6209,6 +6213,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -6272,6 +6277,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -6335,6 +6341,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -6397,6 +6404,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -6466,6 +6474,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,
@@ -6537,6 +6546,7 @@ development_status:
                 shutdown,
                 mcp_manager,
                 ui.clone(),
+                PathBuf::from("test-config.yaml"),
             ),
             sub_agent_sessions,
             sub_agent_in_flight,

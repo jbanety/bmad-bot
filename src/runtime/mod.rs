@@ -215,10 +215,6 @@ impl SessionRuntime {
         let has_sdk = all_roles.iter().any(|r| r.is_sdk_provider())
             || optional_roles.iter().any(|r| r.is_sdk_provider());
 
-        if llm.epic_review.is_sdk_provider() {
-            tracing::warn!("Epic review does not support SDK providers — will fail at runtime");
-        }
-
         let skill_paths = SkillPaths::resolve(Path::new(&config.bmad_paths.project_root));
 
         let build_api = || -> Box<ApiRuntime> {

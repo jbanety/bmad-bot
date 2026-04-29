@@ -906,6 +906,8 @@ impl SessionRunner {
                 escalation_slot,
                 decision_log,
                 &self.mcp_manager,
+                Arc::clone(&self.shutdown),
+                self.ui.clone(),
             )
             .map_err(|e| ProviderError::ClientCreation {
                 provider: "supervisor".to_string(),

@@ -36,6 +36,8 @@ use crate::tools::{
 };
 use crate::ui::UiHandle;
 
+use std::path::Path;
+
 use super::{MAX_SESSION_RETRIES, is_retryable_review_error};
 
 // ---------------------------------------------------------------------------
@@ -326,7 +328,6 @@ pub struct EpicReviewRunner {
     /// Shared bot configuration.
     config: Arc<BotConfig>,
     /// Shared secrets (API keys loaded from `.env`).
-    #[allow(dead_code)]
     secrets: Arc<BotSecrets>,
     /// Centralized agent construction factory.
     agent_factory: Arc<AgentFactory>,
@@ -336,6 +337,8 @@ pub struct EpicReviewRunner {
     mcp_manager: Arc<crate::mcp::McpManager>,
     /// UI handle for rendering terminal output.
     ui: UiHandle,
+    /// Path to the daemon config file (needed for SDK subprocess spawning).
+    config_path: PathBuf,
 }
 
 impl EpicReviewRunner {
@@ -347,6 +350,7 @@ impl EpicReviewRunner {
         shutdown: ShutdownFlag,
         mcp_manager: Arc<crate::mcp::McpManager>,
         ui: UiHandle,
+        config_path: PathBuf,
     ) -> Self {
         Self {
             config,
@@ -355,6 +359,7 @@ impl EpicReviewRunner {
             shutdown,
             mcp_manager,
             ui,
+            config_path,
         }
     }
 
@@ -461,6 +466,8 @@ impl EpicReviewRunner {
     }
 
     /// Inner implementation that can fail with [`EpicReviewError`].
+    ///
+    /// Dispatches to SDK or API runtime based on the epic_review role config.
     async fn run_inner(&self, epic_num: u32) -> Result<EpicReviewOutcome, EpicReviewError> {
         let span = tracing::info_span!("epic_review_session", epic_num = epic_num);
         let _guard = span.enter();
@@ -474,11 +481,21 @@ impl EpicReviewRunner {
         self.ui
             .phase_start(&format!("Epic {epic_num} Autonomous Review"));
 
-        let agent = self.build_epic_review_agent().await?;
+        let role_config =
+            crate::runtime::resolve_role_config(&self.config.llm, &LlmRole::EpicReview);
 
-        let prompt = build_epic_review_prompt(epic_num, &self.config);
-
-        let outcome = self.drive_epic_review(agent, epic_num, &prompt).await?;
+        let outcome = if role_config.is_sdk_provider() {
+            tracing::info!(
+                provider = %role_config.provider,
+                model = %role_config.model,
+                "Epic review: using SDK runtime"
+            );
+            self.run_sdk_epic_review(epic_num, role_config).await?
+        } else {
+            let agent = self.build_epic_review_agent().await?;
+            let prompt = build_epic_review_prompt(epic_num, &self.config);
+            self.drive_epic_review(agent, epic_num, &prompt).await?
+        };
 
         let outcome_type = match &outcome {
             EpicReviewOutcome::Completed { .. } => "completed",
@@ -498,6 +515,100 @@ impl EpicReviewRunner {
         );
 
         Ok(outcome)
+    }
+
+    /// Run epic review via SDK subprocess (Claude Code or Codex).
+    ///
+    /// Builds a combined prompt (preamble + review instructions), spawns the
+    /// subprocess without MCP supervisor (read-only session), and extracts the
+    /// report from the completion text.
+    async fn run_sdk_epic_review(
+        &self,
+        epic_num: u32,
+        role_config: &crate::config::LlmRoleConfig,
+    ) -> Result<EpicReviewOutcome, EpicReviewError> {
+        use crate::runtime::sdk::SdkRuntime;
+
+        let preamble = build_epic_review_preamble(&self.config, &[]);
+        let prompt = build_epic_review_prompt(epic_num, &self.config);
+        let combined_prompt = format!("{preamble}\n\n{prompt}");
+
+        let project_root = Path::new(&self.config.bmad_paths.project_root);
+
+        let session_config = match role_config.provider.as_str() {
+            "claude-code" => crate::runtime::sdk_claude::build_claude_code_config(
+                role_config,
+                project_root,
+                &combined_prompt,
+                None, // No MCP supervisor — read-only session
+            ),
+            "codex" => crate::runtime::sdk_codex::build_codex_config(
+                role_config,
+                project_root,
+                &combined_prompt,
+            ),
+            other => {
+                return Err(EpicReviewError::ProviderInit {
+                    reason: format!("Unknown SDK provider for epic review: {other}"),
+                });
+            }
+        };
+
+        self.ui
+            .sdk_session_info(&role_config.provider, &role_config.model);
+
+        let sdk_runtime = SdkRuntime::new(
+            Arc::clone(&self.config),
+            Arc::clone(&self.secrets),
+            self.config_path.clone(),
+            Arc::clone(&self.shutdown),
+            self.ui.clone(),
+        );
+
+        let is_claude = role_config.provider == "claude-code";
+        let parser = move |line: &str| -> Option<crate::runtime::sdk::SdkOutputEvent> {
+            if is_claude {
+                crate::runtime::sdk_claude::parse_claude_code_line(line)
+            } else {
+                crate::runtime::sdk_codex::parse_codex_line(line)
+            }
+        };
+
+        let result = sdk_runtime
+            .execute_session(session_config, parser)
+            .await
+            .map_err(|e| EpicReviewError::ProviderInit {
+                reason: format!("SDK subprocess failed: {e}"),
+            })?;
+
+        if result.exit_code != Some(0) {
+            let error = result
+                .stream_error
+                .or_else(|| {
+                    if result.stderr.is_empty() {
+                        None
+                    } else {
+                        Some(result.stderr.clone())
+                    }
+                })
+                .unwrap_or_else(|| format!("exit code {:?}", result.exit_code));
+            return Ok(EpicReviewOutcome::Failed {
+                reason: format!("SDK epic review failed: {error}"),
+                epic_num,
+            });
+        }
+
+        let completion = result.completion_text.unwrap_or_default();
+        if completion.trim().is_empty() {
+            return Ok(EpicReviewOutcome::Failed {
+                reason: "SDK epic review returned empty completion".to_string(),
+                epic_num,
+            });
+        }
+
+        let report = extract_report(&[completion], epic_num);
+
+        Ok(EpicReviewOutcome::Completed { report, epic_num })
     }
 
     /// Drive the epic review chat loop.
@@ -1845,6 +1956,60 @@ none
         assert_eq!(refs[0].item_number, 1);
         assert_eq!(refs[1].section_story_id, "11.1");
         assert_eq!(refs[1].item_number, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // SDK dispatch tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_epic_review_runner_accepts_config_path() {
+        let config = Arc::new(make_test_config());
+        let secrets = Arc::new(crate::config::BotSecrets {
+            anthropic_api_key: Some("sk-test".to_string()),
+            openai_api_key: None,
+            github_token: None,
+            gitlab_token: None,
+            telegram_bot_token: None,
+        });
+        let agent_factory = Arc::new(AgentFactory::new(Arc::clone(&config), Arc::clone(&secrets)));
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mcp = Arc::new(crate::mcp::McpManager::empty());
+
+        let runner = EpicReviewRunner::new(
+            config,
+            secrets,
+            agent_factory,
+            shutdown,
+            mcp,
+            crate::ui::UiHandle::null(),
+            PathBuf::from("test-config.yaml"),
+        );
+        let _debug = format!("{:?}", runner);
+    }
+
+    #[test]
+    fn test_sdk_dispatch_detects_sdk_provider() {
+        let mut config = make_test_config();
+        config.llm.epic_review = crate::config::LlmRoleConfig {
+            provider: "claude-code".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            reasoning_effort: None,
+            base_url: None,
+            cli_path: None,
+        };
+        let role_config =
+            crate::runtime::resolve_role_config(&config.llm, &LlmRole::EpicReview);
+        assert!(role_config.is_sdk_provider());
+        assert_eq!(role_config.provider, "claude-code");
+    }
+
+    #[test]
+    fn test_sdk_dispatch_detects_api_provider() {
+        let config = make_test_config();
+        let role_config =
+            crate::runtime::resolve_role_config(&config.llm, &LlmRole::EpicReview);
+        assert!(!role_config.is_sdk_provider());
     }
 
     #[test]

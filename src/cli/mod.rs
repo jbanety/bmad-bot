@@ -1407,28 +1407,29 @@ pub async fn run_mcp_supervisor(config_path: &Path, story_key: &str) -> Result<(
 
     let mcp_manager = Arc::new(crate::mcp::McpManager::empty());
 
+    let shutdown: crate::session::agent::ShutdownFlag =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ui = crate::ui::UiHandle::null();
+
     let answer_provider: Option<Box<dyn crate::supervisor::architect::AnswerProvider>> =
-        if config.llm.supervisor.is_sdk_provider() {
-            tracing::warn!(
-                "Supervisor LLM fallback not available: supervisor is configured as SDK provider. \
-                 Rule engine will handle questions; unmatched questions will escalate."
-            );
-            None
-        } else {
-            match crate::supervisor::architect::ArchitectSession::new_with_factory(
-                &config,
-                Some(Arc::clone(&factory)),
-                mcp_manager,
-            ) {
-                Ok(session) => Some(Box::new(session)),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Supervisor LLM fallback not available: {e}. \
-                         Rule engine will handle questions; unmatched questions will escalate."
-                    );
-                    None
-                }
+        match crate::supervisor::architect::build_answer_provider(
+            &config,
+            factory.config_arc(),
+            factory.secrets_arc(),
+            config_path.to_path_buf(),
+            shutdown,
+            ui,
+            Some(Arc::clone(&factory)),
+            mcp_manager,
+        ) {
+            Ok(provider) => Some(provider),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Supervisor LLM fallback not available: {e}. \
+                     Rule engine will handle questions; unmatched questions will escalate."
+                );
+                None
             }
         };
 

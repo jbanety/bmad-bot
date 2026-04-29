@@ -359,9 +359,19 @@ impl AgentFactory {
         &self.config
     }
 
+    /// Get an `Arc` clone of the shared [`BotConfig`].
+    pub fn config_arc(&self) -> Arc<BotConfig> {
+        Arc::clone(&self.config)
+    }
+
     /// Get a reference to the shared [`BotSecrets`].
     pub fn secrets(&self) -> &BotSecrets {
         &self.secrets
+    }
+
+    /// Get an `Arc` clone of the shared [`BotSecrets`].
+    pub fn secrets_arc(&self) -> Arc<BotSecrets> {
+        Arc::clone(&self.secrets)
     }
 
     /// Get the project root path from the config.
