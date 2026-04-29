@@ -603,6 +603,17 @@ pub(crate) async fn map_sdk_result_to_outcome(
     story: &StoryInfo,
     impl_artifacts_path: &Path,
 ) -> SessionOutcome {
+    if let Some(ref text) = result.completion_text {
+        tracing::info!(
+            action = "sdk_completion",
+            story_key = %story.story_key,
+            exit_code = ?result.exit_code,
+            len = text.len(),
+            text = %text,
+            "SDK session final completion"
+        );
+    }
+
     let decisions = read_decisions_json_sidecar(impl_artifacts_path, &story.story_key).await;
 
     if let Some(resets_at) = result.rate_limit_resets_at {

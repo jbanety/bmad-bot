@@ -137,6 +137,7 @@ impl<'a> SdkConsultationRunner<'a> {
             tracing::info!(
                 label = %consultation.label,
                 findings_len = findings.len(),
+                findings = %findings,
                 "SDK consultation produced findings"
             );
 
