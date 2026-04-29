@@ -806,6 +806,7 @@ impl UiRenderer for ConsoleRenderer {
         let window = match limit_type {
             "five_hour" => "5h",
             "daily" => "24h",
+            "seven_day" => "7d",
             other if other.is_empty() => "?",
             other => other,
         };
