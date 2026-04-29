@@ -1366,11 +1366,27 @@ impl StoryPipeline {
                     );
                     let summary = match &report {
                         Some(text) => {
-                            let count = text.lines().filter(|l| l.starts_with("- ")).count();
-                            if count > 0 {
-                                format!("{count} findings")
-                            } else {
+                            let trimmed = text.trim();
+                            if trimmed.is_empty()
+                                || trimmed.starts_with("(none")
+                                || trimmed.starts_with("None")
+                                || trimmed.starts_with("No findings")
+                            {
                                 "clean".to_string()
+                            } else {
+                                let count = trimmed
+                                    .lines()
+                                    .filter(|l| {
+                                        let s = l.trim_start();
+                                        s.starts_with("- [")
+                                            || (s.starts_with("- **") && !s.contains("MODIFIED") && !s.contains("NEW"))
+                                    })
+                                    .count();
+                                if count > 0 {
+                                    format!("{count} findings")
+                                } else {
+                                    "clean".to_string()
+                                }
                             }
                         }
                         None => "clean".to_string(),
