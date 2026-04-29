@@ -1200,7 +1200,16 @@ impl StoryPipeline {
         let pr_info = if let Some(info) = pr_info_override {
             info
         } else {
-            // Direct from watcher — push branch and create PR
+            // Direct from watcher — ensure branch exists before pushing.
+            // The branch may not exist locally if the daemon restarted after dev
+            // completed on a different machine, or if the status was set manually.
+            if let Err(fallback) = self
+                .ensure_branch_for_review(story, story_title, &branch)
+                .await
+            {
+                return fallback;
+            }
+
             self.ui.phase_start("Push Branch");
             let push_start = std::time::Instant::now();
             if let Err(e) = self.push_branch(&branch).await {
@@ -2729,6 +2738,131 @@ fn re_poll_eligible(sprint_status_path: &Path, story_dir: &Path) -> Result<Vec<S
 }
 
 impl StoryPipeline {
+    /// Ensure the story branch exists locally before the review pipeline pushes it.
+    ///
+    /// When `run_review_pipeline()` is entered directly from the watcher (not chained
+    /// from dev), the branch may not exist locally — e.g. work was done directly on
+    /// main, or the daemon restarted on a different machine.
+    ///
+    /// Resolution order:
+    /// 1. Branch exists locally → checkout
+    /// 2. Branch exists on remote → fetch + checkout
+    /// 3. Neither → create from target branch (initially identical to main, PR starts empty)
+    ///
+    /// Never modifies sprint-status.yaml — the status is the source of truth.
+    async fn ensure_branch_for_review(
+        &self,
+        story: &StoryInfo,
+        _story_title: &str,
+        branch: &str,
+    ) -> Result<(), PipelineResult> {
+        let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
+        let target_branch = self.config.git_provider.target_branch.clone();
+
+        let local_exists = tokio::task::spawn_blocking({
+            let rp = repo_path.clone();
+            let bn = branch.to_string();
+            move || crate::session::branch::branch_exists_local(&rp, &bn)
+        })
+        .await
+        .unwrap_or(false);
+
+        if local_exists {
+            let checkout = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["checkout", branch])
+                .output()
+                .await;
+            if let Ok(out) = checkout {
+                if out.status.success() {
+                    return Ok(());
+                }
+            }
+        }
+
+        tracing::info!(
+            action = "review_branch_missing_locally",
+            story_key = %story.story_key,
+            branch = %branch,
+            "Review branch not found locally — trying remote"
+        );
+
+        let fetch_ok = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["fetch", "origin", &format!("{branch}:{branch}")])
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success());
+
+        if fetch_ok {
+            let checkout = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["checkout", branch])
+                .output()
+                .await;
+            if let Ok(out) = checkout {
+                if out.status.success() {
+                    tracing::info!(
+                        action = "review_branch_fetched",
+                        story_key = %story.story_key,
+                        branch = %branch,
+                        "Fetched and checked out review branch from remote"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        tracing::info!(
+            action = "review_branch_creating",
+            story_key = %story.story_key,
+            branch = %branch,
+            base = %target_branch,
+            "Branch not found anywhere — creating from target branch"
+        );
+
+        let create_result = tokio::task::spawn_blocking({
+            let rp = repo_path;
+            let bn = branch.to_string();
+            let bb = target_branch;
+            move || crate::session::branch::ensure_story_branch(&rp, &bn, &bb)
+        })
+        .await;
+
+        match create_result {
+            Ok(Ok(action)) => {
+                tracing::info!(action = ?action, "Review branch created");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                let msg = format!("Failed to create review branch {branch}: {e}");
+                tracing::error!(error = %e, "{msg}");
+                self.ui.story_error(&story.story_key, &msg);
+                Err(PipelineResult {
+                    story_key: story.story_key.clone(),
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(msg),
+                    fatal: false,
+                })
+            }
+            Err(e) => {
+                let msg = format!("Branch creation panicked for {branch}: {e}");
+                tracing::error!("{msg}");
+                Err(PipelineResult {
+                    story_key: story.story_key.clone(),
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(msg),
+                    fatal: false,
+                })
+            }
+        }
+    }
+
     /// Send a notification for a single story result (non-blocking).
     ///
     /// Push a local branch to the remote using git CLI.
@@ -5618,16 +5752,10 @@ development_status:
         let pipeline = make_test_pipeline();
         let story = StoryInfo::from_key_and_status("2-1-bar", "review", Path::new("/tmp")).unwrap();
         let result = pipeline.process_story(&story, None).await;
-        // Review pipeline runs but fails (no git repo at /tmp/test-pipeline — push fails)
+        // Review pipeline runs — ensure_branch_for_review tries to create the branch
+        // but fails (no git repo at /tmp/test-pipeline)
         assert_eq!(result.status, StoryStatus::Error);
         assert!(!result.fatal);
-        assert!(
-            result
-                .error_detail
-                .as_deref()
-                .unwrap()
-                .contains("Git push failed")
-        );
     }
 
     #[tokio::test]

@@ -77,6 +77,10 @@ pub enum BranchAction {
 ///
 /// Returns `true` if the branch exists locally, `false` otherwise.
 /// On any CLI error, returns `false` (safe fallback).
+pub fn branch_exists_local(repo_path: &Path, branch_name: &str) -> bool {
+    branch_exists(repo_path, branch_name)
+}
+
 fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
     match std::process::Command::new("git")
         .arg("-C")
