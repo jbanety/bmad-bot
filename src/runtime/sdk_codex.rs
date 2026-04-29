@@ -545,7 +545,7 @@ pub async fn run_codex_session(
 
     let session_config = build_codex_config(role_config, &project_root, &prompt);
 
-    let result = match runtime
+    let mut result = match runtime
         .execute_session(session_config, parse_codex_line)
         .await
     {
@@ -561,6 +561,46 @@ pub async fn run_codex_session(
             };
         }
     };
+
+    // Auto-confirm loop (same as claude code)
+    let mut confirm_attempts = 0;
+    while confirm_attempts < 5 {
+        if result.exit_code != Some(0) {
+            break;
+        }
+        let needs_confirm = result
+            .completion_text
+            .as_deref()
+            .map(super::sdk_claude::is_confirmation_prompt)
+            .unwrap_or(false);
+        if !needs_confirm {
+            break;
+        }
+        let Some(ref session_id) = result.session_id else {
+            break;
+        };
+        confirm_attempts += 1;
+        tracing::info!(
+            action = "auto_confirm",
+            attempt = confirm_attempts,
+            story_key = %context.story.story_key,
+            "Detected [Y]/[N] confirmation prompt — auto-resuming with Y"
+        );
+        runtime.ui().sdk_text("Auto-confirming [Y] prompt");
+        let (_, resume_result) = runtime
+            .resume_sdk_session(
+                "codex",
+                session_id,
+                "Y",
+                context.story,
+                &context.role,
+            )
+            .await;
+        match resume_result {
+            Some(r) => result = r,
+            None => break,
+        }
+    }
 
     if let Some(backup) = mcp_backup {
         restore_codex_mcp_config(backup);

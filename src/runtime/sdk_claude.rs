@@ -462,7 +462,7 @@ pub async fn run_claude_code_session(
         mcp_config_path.as_deref(),
     );
 
-    let result = match runtime
+    let mut result = match runtime
         .execute_session(session_config, parse_claude_code_line)
         .await
     {
@@ -475,6 +475,48 @@ pub async fn run_claude_code_session(
             };
         }
     };
+
+    // Auto-confirm loop: if the session ended with a [Y]/[N] confirmation prompt,
+    // resume with "Y" and repeat until the session completes without a prompt.
+    let mut confirm_attempts = 0;
+    const MAX_CONFIRM_ATTEMPTS: usize = 5;
+    while confirm_attempts < MAX_CONFIRM_ATTEMPTS {
+        if result.exit_code != Some(0) {
+            break;
+        }
+        let needs_confirm = result
+            .completion_text
+            .as_deref()
+            .map(|t| is_confirmation_prompt(t))
+            .unwrap_or(false);
+        if !needs_confirm {
+            break;
+        }
+        let Some(ref session_id) = result.session_id else {
+            break;
+        };
+        confirm_attempts += 1;
+        tracing::info!(
+            action = "auto_confirm",
+            attempt = confirm_attempts,
+            story_key = %context.story.story_key,
+            "Detected [Y]/[N] confirmation prompt — auto-resuming with Y"
+        );
+        runtime.ui().sdk_text("Auto-confirming [Y] prompt");
+        let (_, resume_result) = runtime
+            .resume_sdk_session(
+                &role_config.provider,
+                session_id,
+                "Y",
+                context.story,
+                &context.role,
+            )
+            .await;
+        match resume_result {
+            Some(r) => result = r,
+            None => break,
+        }
+    }
 
     // Drop temp file after session completes (best-effort cleanup)
     drop(mcp_temp_file);
@@ -522,6 +564,38 @@ fn write_mcp_config_temp_file(
     serde_json::to_writer(&mut tmp, mcp_json).map_err(std::io::Error::other)?;
     tmp.flush()?;
     Ok(tmp)
+}
+
+/// Detect if the completion text ends with a BMAD skill confirmation prompt.
+///
+/// Matches patterns like `[Y]/[N]`, `[Y] pour confirmer`, `[Y] Yes`, etc.
+/// Only considers the last ~500 chars to avoid false positives in large outputs.
+pub(crate) fn is_confirmation_prompt(text: &str) -> bool {
+    let tail = if text.len() > 500 {
+        &text[text.len() - 500..]
+    } else {
+        text
+    };
+    let lower = tail.to_lowercase();
+    // [Y]/[N] or [Y] / [N] patterns
+    if lower.contains("[y]/[n]") || lower.contains("[y] / [n]") {
+        return true;
+    }
+    // [Y] followed by confirming text (but not inside a checklist like "- [x]")
+    if let Some(pos) = lower.rfind("[y]") {
+        let after = &lower[pos + 3..];
+        let trimmed = after.trim_start();
+        if trimmed.starts_with("pour")
+            || trimmed.starts_with("yes")
+            || trimmed.starts_with("oui")
+            || trimmed.starts_with("to confirm")
+            || trimmed.is_empty()
+            || trimmed.starts_with('\n')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) async fn map_sdk_result_to_outcome(
