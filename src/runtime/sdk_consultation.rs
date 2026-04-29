@@ -255,9 +255,10 @@ impl<'a> SdkConsultationRunner<'a> {
         role_config: &crate::config::LlmRoleConfig,
         _trigger_text: &str,
     ) -> Result<Option<String>, String> {
+        let lang_override = "IMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.\n\n";
         let prompt = if let Some(skill) = consultation_skill_command(&consultation.label) {
             let target_file = consultation.context_files.first().cloned().unwrap_or_default();
-            format!("{skill} {target_file}")
+            format!("{lang_override}{skill} {target_file}")
         } else {
             let mut context_parts = Vec::new();
             for file_path in &consultation.context_files {
@@ -280,7 +281,7 @@ impl<'a> SdkConsultationRunner<'a> {
                 .preamble_override
                 .as_deref()
                 .unwrap_or("You are an independent reviewer. Analyze the provided context and report your findings.");
-            format!("{preamble}\n\n{rendered}")
+            format!("{lang_override}{preamble}\n\n{rendered}")
         };
 
         self.sdk_runtime.ui().sdk_input(
@@ -423,9 +424,12 @@ fn build_sdk_consultation_claude(
         .clone()
         .unwrap_or_else(|| "claude".to_string());
 
+    let full_prompt = format!(
+        "IMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.\n\n{prompt}"
+    );
     let args = vec![
         "-p".to_string(),
-        prompt.to_string(),
+        full_prompt,
         "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),

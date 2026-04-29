@@ -277,7 +277,7 @@ pub fn build_claude_code_config(
 // ---------------------------------------------------------------------------
 
 pub fn build_claude_code_prompt(phase: &str, story: &StoryInfo) -> String {
-    match phase {
+    let skill_cmd = match phase {
         PHASE_CREATE => format!("/bmad-create-story {}", story.story_key),
         PHASE_REVIEW => format!("/bmad-code-review {}", story.specs_path.to_string_lossy()),
         _ => {
@@ -286,7 +286,8 @@ pub fn build_claude_code_prompt(phase: &str, story: &StoryInfo) -> String {
             }
             format!("/bmad-dev-story {}", story.specs_path.to_string_lossy())
         }
-    }
+    };
+    format!("IMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.\n\n{skill_cmd}")
 }
 
 // ---------------------------------------------------------------------------
