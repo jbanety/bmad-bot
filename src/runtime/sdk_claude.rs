@@ -360,10 +360,11 @@ pub async fn resume_claude_code_session(
         }
     };
 
-    let mcp_json = crate::mcp_server::generate_mcp_supervisor_config(
+    let mcp_json = crate::mcp_server::generate_mcp_config(
         &story.story_key,
         runtime.config_path(),
         runtime.secrets(),
+        &runtime.config().mcp_servers,
     );
     let mcp_temp_file = match write_mcp_config_temp_file(&mcp_json) {
         Ok(f) => Some(f),
@@ -435,10 +436,11 @@ pub async fn run_claude_code_session(
 
     let needs_supervisor = matches!(context.initial_phase, PHASE_CREATE | PHASE_DEV);
     let mcp_temp_file = if needs_supervisor {
-        let mcp_json = crate::mcp_server::generate_mcp_supervisor_config(
+        let mcp_json = crate::mcp_server::generate_mcp_config(
             &context.story.story_key,
             runtime.config_path(),
             runtime.secrets(),
+            &runtime.config().mcp_servers,
         );
         match write_mcp_config_temp_file(&mcp_json) {
             Ok(f) => Some(f),

@@ -242,6 +242,17 @@ pub fn generate_mcp_supervisor_config(
     config_path: &Path,
     secrets: &BotSecrets,
 ) -> serde_json::Value {
+    generate_mcp_config(story_key, config_path, secrets, &[])
+}
+
+/// Generate MCP config JSON for SDK sessions, including both the supervisor
+/// and any user-configured MCP servers from `bmad-bot.yaml`.
+pub fn generate_mcp_config(
+    story_key: &str,
+    config_path: &Path,
+    secrets: &BotSecrets,
+    user_mcp_servers: &[crate::config::McpServerConfig],
+) -> serde_json::Value {
     let mut env = serde_json::Map::new();
     if let Some(key) = &secrets.anthropic_api_key {
         env.insert(
@@ -256,21 +267,37 @@ pub fn generate_mcp_supervisor_config(
         );
     }
 
-    serde_json::json!({
-        "mcpServers": {
-            "bmad-supervisor": {
-                "command": std::env::current_exe()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| "bmad-bot".to_string()),
-                "args": [
-                    "mcp-supervisor",
-                    "--story", story_key,
-                    "--config", config_path.to_string_lossy()
-                ],
-                "env": serde_json::Value::Object(env)
-            }
+    let mut servers = serde_json::Map::new();
+
+    servers.insert(
+        "bmad-supervisor".to_string(),
+        serde_json::json!({
+            "command": std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "bmad-bot".to_string()),
+            "args": [
+                "mcp-supervisor",
+                "--story", story_key,
+                "--config", config_path.to_string_lossy()
+            ],
+            "env": serde_json::Value::Object(env)
+        }),
+    );
+
+    for mcp in user_mcp_servers {
+        if !mcp.enabled {
+            continue;
         }
-    })
+        servers.insert(
+            mcp.name.clone(),
+            serde_json::json!({
+                "command": mcp.command,
+                "args": mcp.args,
+            }),
+        );
+    }
+
+    serde_json::json!({ "mcpServers": serde_json::Value::Object(servers) })
 }
 
 // ---------------------------------------------------------------------------

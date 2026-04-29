@@ -447,10 +447,11 @@ pub async fn resume_codex_session(
         }
     };
 
-    let mcp_json = crate::mcp_server::generate_mcp_supervisor_config(
+    let mcp_json = crate::mcp_server::generate_mcp_config(
         &story.story_key,
         runtime.config_path(),
         runtime.secrets(),
+        &runtime.config().mcp_servers,
     );
     let mcp_backup = match write_codex_mcp_config(&project_root, &mcp_json) {
         Ok(backup) => Some(backup),
@@ -520,10 +521,11 @@ pub async fn run_codex_session(
 
     let needs_supervisor = matches!(context.initial_phase, PHASE_CREATE | PHASE_DEV);
     let mcp_backup: Option<CodexMcpBackup> = if needs_supervisor {
-        let mcp_json = crate::mcp_server::generate_mcp_supervisor_config(
+        let mcp_json = crate::mcp_server::generate_mcp_config(
             &context.story.story_key,
             runtime.config_path(),
             runtime.secrets(),
+            &runtime.config().mcp_servers,
         );
         match write_codex_mcp_config(&project_root, &mcp_json) {
             Ok(backup) => {
