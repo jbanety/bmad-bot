@@ -478,12 +478,13 @@ impl EpicReviewRunner {
             "Starting autonomous epic review session"
         );
 
-        self.ui
-            .phase_start(&format!("Epic {epic_num} Autonomous Review"));
+        let phase_name = format!("Epic {epic_num} Autonomous Review");
+        self.ui.phase_start(&phase_name);
 
         let role_config =
             crate::runtime::resolve_role_config(&self.config.llm, &LlmRole::EpicReview);
 
+        let start = std::time::Instant::now();
         let outcome = if role_config.is_sdk_provider() {
             tracing::info!(
                 provider = %role_config.provider,
@@ -502,10 +503,8 @@ impl EpicReviewRunner {
             EpicReviewOutcome::Failed { .. } => "failed",
         };
 
-        self.ui.phase_complete(
-            &format!("Epic {epic_num} Review: {outcome_type}"),
-            std::time::Duration::ZERO,
-        );
+        self.ui
+            .phase_complete_with_result(&phase_name, start.elapsed(), outcome_type);
 
         tracing::info!(
             action = "epic_review_end",
