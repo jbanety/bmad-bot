@@ -576,22 +576,27 @@ pub(crate) fn is_confirmation_prompt(text: &str) -> bool {
         text
     };
     let lower = tail.to_lowercase();
-    // [Y]/[N] or [Y] / [N] patterns
-    if lower.contains("[y]/[n]") || lower.contains("[y] / [n]") {
+    // Any text that contains both Y and N as expected responses
+    // Covers: [Y]/[N], `Y`/`N`, Y for yes / N for no, [Y] Yes / [N] No, etc.
+    let has_y = lower.contains("`y`") || lower.contains("[y]");
+    let has_n = lower.contains("`n`") || lower.contains("[n]");
+    if has_y && has_n {
         return true;
     }
-    // [Y] followed by confirming text (but not inside a checklist like "- [x]")
-    if let Some(pos) = lower.rfind("[y]") {
-        let after = &lower[pos + 3..];
-        let trimmed = after.trim_start();
-        if trimmed.starts_with("pour")
-            || trimmed.starts_with("yes")
-            || trimmed.starts_with("oui")
-            || trimmed.starts_with("to confirm")
-            || trimmed.is_empty()
-            || trimmed.starts_with('\n')
-        {
-            return true;
+    // [Y] alone (confirm-only prompts without N option)
+    if lower.contains("[y]") {
+        if let Some(pos) = lower.rfind("[y]") {
+            let after = &lower[pos + 3..];
+            let trimmed = after.trim_start();
+            if trimmed.starts_with("pour")
+                || trimmed.starts_with("yes")
+                || trimmed.starts_with("oui")
+                || trimmed.starts_with("to confirm")
+                || trimmed.is_empty()
+                || trimmed.starts_with('\n')
+            {
+                return true;
+            }
         }
     }
     false
