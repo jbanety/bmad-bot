@@ -45,6 +45,8 @@ pub enum LlmRole {
     EpicReview,
     /// Story Critic — independent vision guardian for story and decision review.
     Critic,
+    /// Utility — lightweight tasks (commit messages, impact analysis, PR summaries).
+    Utility,
 }
 
 impl std::fmt::Display for LlmRole {
@@ -55,6 +57,7 @@ impl std::fmt::Display for LlmRole {
             Self::Supervisor => write!(f, "supervisor"),
             Self::EpicReview => write!(f, "epic_review"),
             Self::Critic => write!(f, "critic"),
+            Self::Utility => write!(f, "utility"),
         }
     }
 }
@@ -224,9 +227,16 @@ impl AgentFactory {
             }
             LlmRole::Critic => {
                 if self.config.llm.critic.provider.is_empty() {
-                    &self.config.llm.review // fallback to review config
+                    &self.config.llm.review
                 } else {
                     &self.config.llm.critic
+                }
+            }
+            LlmRole::Utility => {
+                if self.config.llm.utility.provider.is_empty() {
+                    &self.config.llm.review
+                } else {
+                    &self.config.llm.utility
                 }
             }
         }
@@ -677,6 +687,7 @@ pub(crate) mod tests {
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
+                utility: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

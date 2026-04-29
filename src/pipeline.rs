@@ -491,6 +491,8 @@ impl StoryPipeline {
                     "Create-story phase completed — chaining to dev phase"
                 );
 
+                self.post_session_commit(story).await;
+
                 // Re-read sprint-status.yaml to get updated StoryInfo
                 // (the create-story agent set status to "ready-for-dev")
                 let updated_story = match self.reload_story_info(&story.story_key) {
@@ -794,12 +796,16 @@ impl StoryPipeline {
                 story_key,
                 branch,
                 decisions,
-                pr_context,
-                pr_how_to_test,
-                pr_additional_info,
+                ..
             } => {
                 self.ui
                     .phase_complete_with_result("Dev Session", session_elapsed, "completed");
+
+                // Post-session pipeline steps (unified API/SDK)
+                self.post_session_commit(story).await;
+                self.post_session_impact_analysis(story).await;
+                let (pr_context, pr_how_to_test, pr_additional_info) =
+                    self.post_session_pr_summary(story, None).await;
 
                 // Phase 2 — Push branch to remote before PR creation (non-blocking)
                 self.ui.phase_start("Push Branch");
@@ -1353,6 +1359,7 @@ impl StoryPipeline {
 
             match session_outcome {
                 SessionOutcome::Completed { .. } => {
+                    self.post_session_commit(story).await;
                     let report = extract_review_report_from_story(
                         story,
                         Path::new(&self.config.bmad_paths.project_root),
@@ -1884,6 +1891,315 @@ impl StoryPipeline {
         }
 
         paths
+    }
+
+    /// Commit any uncommitted changes left by the session agent.
+    ///
+    /// Runs `git add -A`, captures the staged diff, dispatches a one-shot LLM call
+    /// via the `Utility` role to generate a descriptive conventional commit message,
+    /// then commits. No-op if the worktree is clean.
+    ///
+    /// Uses the `utility` LLM role — supports both API and SDK providers.
+    async fn post_session_commit(&self, story: &StoryInfo) {
+        let repo_path = &self.config.bmad_paths.project_root;
+
+        // Stage all changes
+        let add_output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["add", "-A"])
+            .output()
+            .await;
+        if let Err(e) = add_output {
+            tracing::warn!(error = %e, "post_session_commit: git add -A failed");
+            return;
+        }
+
+        // Check if there's anything staged
+        let diff_stat = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["diff", "--cached", "--stat"])
+            .output()
+            .await;
+        let has_changes = diff_stat
+            .as_ref()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false);
+        if !has_changes {
+            tracing::info!(
+                action = "post_session_commit_skip",
+                story_key = %story.story_key,
+                "No uncommitted changes — skipping post-session commit"
+            );
+            return;
+        }
+
+        // Capture diff for LLM (truncated to ~4K)
+        let diff_output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["diff", "--cached"])
+            .output()
+            .await;
+        let diff_text = diff_output
+            .map(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).to_string();
+                if s.len() > 4096 {
+                    format!("{}...\n[truncated]", &s[..4096])
+                } else {
+                    s
+                }
+            })
+            .unwrap_or_else(|_| "Unable to capture diff".to_string());
+
+        self.ui.phase_start("Final Commit");
+        let commit_start = std::time::Instant::now();
+
+        let prompt = format!(
+            "Generate a single conventional commit message (feat/fix/refactor/chore/docs) \
+             for the following staged changes. The story is {story_key} — {label}. \
+             Reply with ONLY the commit message, nothing else. No markdown, no explanation.\n\n\
+             ```diff\n{diff}\n```",
+            story_key = story.story_key,
+            label = story.label,
+            diff = diff_text,
+        );
+
+        let commit_msg = self.utility_llm_oneshot(&prompt).await.unwrap_or_else(|| {
+            format!("chore({}): finalize session changes", story.story_key)
+        });
+
+        // Clean the message — strip markdown fences, quotes, leading/trailing whitespace
+        let commit_msg = commit_msg
+            .trim()
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim_start_matches('`')
+            .trim_end_matches('`')
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("chore: finalize session changes");
+
+        let commit_result = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["commit", "-m", commit_msg])
+            .output()
+            .await;
+
+        match commit_result {
+            Ok(output) if output.status.success() => {
+                self.ui
+                    .phase_complete_with_result("Final Commit", commit_start.elapsed(), commit_msg);
+                tracing::info!(
+                    action = "post_session_commit_done",
+                    story_key = %story.story_key,
+                    message = %commit_msg,
+                    "Post-session commit completed"
+                );
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                self.ui.phase_error("Final Commit", &stderr);
+                tracing::warn!(
+                    action = "post_session_commit_failed",
+                    story_key = %story.story_key,
+                    stderr = %stderr,
+                    "git commit failed"
+                );
+            }
+            Err(e) => {
+                self.ui.phase_error("Final Commit", &e.to_string());
+                tracing::warn!(
+                    action = "post_session_commit_failed",
+                    story_key = %story.story_key,
+                    error = %e,
+                    "git commit command failed"
+                );
+            }
+        }
+    }
+
+    /// One-shot LLM call using the `Utility` role. Supports API and SDK providers.
+    ///
+    /// Returns the completion text on success, `None` on any failure.
+    async fn utility_llm_oneshot(&self, prompt: &str) -> Option<String> {
+        let role_config =
+            crate::runtime::resolve_role_config(&self.config.llm, &LlmRole::Utility);
+
+        if role_config.is_sdk_provider() {
+            let project_root = std::path::Path::new(&self.config.bmad_paths.project_root);
+            let session_config = match role_config.provider.as_str() {
+                "claude-code" => crate::runtime::sdk_claude::build_claude_code_config(
+                    role_config,
+                    project_root,
+                    prompt,
+                    None,
+                ),
+                "codex" => crate::runtime::sdk_codex::build_codex_config(
+                    role_config,
+                    project_root,
+                    prompt,
+                ),
+                _ => return None,
+            };
+
+            let sdk_runtime = crate::runtime::sdk::SdkRuntime::new(
+                Arc::clone(&self.config),
+                self.session_runtime
+                    .api_session_runner()
+                    .map(|r| r.agent_factory_arc())
+                    .map(|f| f.secrets_arc())
+                    .unwrap_or_else(|| {
+                        Arc::new(crate::config::BotSecrets {
+                            anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+                            openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
+                            github_token: None,
+                            gitlab_token: None,
+                            telegram_bot_token: None,
+                        })
+                    }),
+                PathBuf::new(),
+                Arc::clone(&self.shutdown),
+                self.ui.clone(),
+            );
+
+            let is_claude = role_config.provider == "claude-code";
+            let parser = move |line: &str| -> Option<crate::runtime::sdk::SdkOutputEvent> {
+                if is_claude {
+                    crate::runtime::sdk_claude::parse_claude_code_line(line)
+                } else {
+                    crate::runtime::sdk_codex::parse_codex_line(line)
+                }
+            };
+
+            let result = sdk_runtime.execute_session(session_config, parser).await.ok()?;
+            if result.exit_code == Some(0) {
+                result.completion_text.filter(|t| !t.trim().is_empty())
+            } else {
+                None
+            }
+        } else {
+            // API mode — single-turn via AgentFactory
+            let api_runner = self.session_runtime.api_session_runner()?;
+            let agent = api_runner
+                .agent_factory_arc()
+                .build(
+                    LlmRole::Utility,
+                    "You are a concise utility assistant. Follow instructions exactly.",
+                    crate::configure_agent_tools!(rig::tools::think::ThinkTool),
+                )
+                .await
+                .ok()?;
+            let (response, _) = agent
+                .stream_chat(prompt, vec![], None, None)
+                .await
+                .ok()?;
+            if response.trim().is_empty() {
+                None
+            } else {
+                Some(response)
+            }
+        }
+    }
+
+    /// Run impact analysis on downstream stories (best-effort).
+    ///
+    /// Dispatches a one-shot LLM call via the `Utility` role with the impact
+    /// analysis prompt. The LLM reads sprint-status, identifies dependents, and
+    /// updates their specs if the implementation deviated from planned assumptions.
+    async fn post_session_impact_analysis(&self, story: &StoryInfo) {
+        self.ui.phase_start("Impact Analysis");
+        let start = std::time::Instant::now();
+
+        let prompt = crate::session::runner::build_impact_analysis_prompt(
+            &story.story_key,
+            &self.config.bmad_paths.implementation_artifacts,
+            &self.config.bmad_paths.planning_artifacts,
+        );
+
+        match self.utility_llm_oneshot(&prompt).await {
+            Some(_) => {
+                self.ui
+                    .phase_complete_with_result("Impact Analysis", start.elapsed(), "done");
+                tracing::info!(
+                    action = "post_session_impact_analysis_done",
+                    story_key = %story.story_key,
+                    "Impact analysis completed"
+                );
+            }
+            None => {
+                self.ui
+                    .phase_error("Impact Analysis", "LLM call failed — skipped");
+                tracing::warn!(
+                    action = "post_session_impact_analysis_failed",
+                    story_key = %story.story_key,
+                    "Impact analysis failed — continuing"
+                );
+            }
+        }
+    }
+
+    /// Generate a structured PR summary via the `Utility` role (best-effort).
+    ///
+    /// If the session already produced `pr_context` (e.g. from SDK completion text),
+    /// returns it directly. Otherwise dispatches a one-shot LLM call.
+    async fn post_session_pr_summary(
+        &self,
+        story: &StoryInfo,
+        existing_pr_context: Option<&str>,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        if let Some(ctx) = existing_pr_context {
+            if !ctx.trim().is_empty() {
+                return (Some(ctx.to_string()), None, None);
+            }
+        }
+
+        self.ui.phase_start("PR Summary");
+        let start = std::time::Instant::now();
+
+        let story_title = crate::pipeline::story_title_from_label(&story.label);
+        let prompt = format!(
+            "Based on the git diff of branch `{branch}` vs `{target}`, \
+             summarize what was built. Use this exact format:\n\n\
+             <pr-summary>\n\
+             <context>\n\
+             (What was built and why — reference actual files)\n\
+             </context>\n\
+             <how-to-test>\n\
+             (Concrete commands to test)\n\
+             </how-to-test>\n\
+             <additional-info>\n\
+             (Design decisions, caveats)\n\
+             </additional-info>\n\
+             </pr-summary>\n\n\
+             Story: {key} — {title}\n\
+             Branch: {branch}",
+            branch = story.branch_name,
+            target = self.config.git_provider.target_branch,
+            key = story.story_key,
+            title = story_title,
+        );
+
+        match self.utility_llm_oneshot(&prompt).await {
+            Some(response) => {
+                self.ui
+                    .phase_complete_with_result("PR Summary", start.elapsed(), "generated");
+                match crate::session::runner::parse_pr_summary(&response) {
+                    Some((ctx, test, info)) => (Some(ctx), Some(test), Some(info)),
+                    None => (Some(response), None, None),
+                }
+            }
+            None => {
+                self.ui
+                    .phase_error("PR Summary", "LLM call failed — using defaults");
+                (None, None, None)
+            }
+        }
     }
 
     /// Re-read sprint-status.yaml and return an updated `StoryInfo` for the given key.
@@ -5760,6 +6076,7 @@ development_status:
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
+                utility: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

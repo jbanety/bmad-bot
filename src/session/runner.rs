@@ -390,6 +390,11 @@ impl SessionRunner {
         &self.config
     }
 
+    /// Get an `Arc` clone of the [`AgentFactory`].
+    pub fn agent_factory_arc(&self) -> Arc<AgentFactory> {
+        Arc::clone(&self.agent_factory)
+    }
+
     /// Path to the WAL state file on disk.
     pub fn state_file_path(&self) -> PathBuf {
         self.state_file_path.clone()
@@ -794,6 +799,13 @@ impl SessionRunner {
                     &self.config.llm.review
                 } else {
                     &self.config.llm.critic
+                }
+            }
+            LlmRole::Utility => {
+                if self.config.llm.utility.provider.is_empty() {
+                    &self.config.llm.review
+                } else {
+                    &self.config.llm.utility
                 }
             }
         };
@@ -1939,284 +1951,8 @@ impl SessionRunner {
                         action = "session_completed",
                         turn = %turn,
                         story_key = %story.story_key,
-                        "Agent signaled workflow completion — sending final commit request"
+                        "Agent signaled workflow completion"
                     );
-
-                    // ── Step 7: Final commit ──────────────────────────────
-                    // Ask the agent to commit any remaining uncommitted changes.
-                    // The BMAD workflow should commit after each task, but this
-                    // catches anything left over before we close the session.
-                    let commit_msg = "Commit ALL uncommitted changes now (git add -A, then commit). \
-                        Use conventional commits with descriptive messages. Do NOT push.";
-                    state.add_user_message(commit_msg);
-
-                    self.ui.phase_start("Final Commit");
-                    let final_commit_start = std::time::Instant::now();
-                    log_llm_request("dev", turn, commit_msg, full_history.len());
-                    self.ui.llm_request("dev", turn as u32);
-                    self.ui.llm_request_content("dev", turn as u32, commit_msg);
-                    match agent
-                        .stream_chat(
-                            commit_msg,
-                            full_history.clone(),
-                            Some(&self.shutdown),
-                            Some(&self.ui),
-                        )
-                        .await
-                    {
-                        Ok((r, new_hist)) => {
-                            log_llm_response("dev", turn, &r);
-                            self.ui.llm_response("dev", turn as u32, r.len());
-                            self.ui.llm_response_content("dev", turn as u32, &r);
-                            full_history = new_hist;
-                            state.add_assistant_message(&r);
-                            let _ = state.save(&self.state_file_path).await;
-                            self.ui
-                                .phase_complete("Final Commit", final_commit_start.elapsed());
-                            tracing::info!(
-                                action = "final_commit_done",
-                                turn = %turn,
-                                story_key = %story.story_key,
-                                "Final commit request completed"
-                            );
-                        }
-                        Err(e) => {
-                            log_llm_error("dev", turn, &e);
-                            self.ui.llm_error("dev", turn as u32, &e.to_string());
-                            self.ui.phase_error("Final Commit", &e.to_string());
-                            tracing::warn!(
-                                action = "final_commit_failed",
-                                error = %e,
-                                story_key = %story.story_key,
-                                "Final commit request failed — proceeding anyway"
-                            );
-                        }
-                    }
-
-                    // ── Step 7b: Dirty worktree safety net ────────────────
-                    // The agent may have left uncommitted files despite the
-                    // final commit request (e.g., touched files outside story
-                    // scope, or tool calls that modified files after the commit).
-                    // If the worktree is still dirty, send one more turn so
-                    // the agent commits with a descriptive message — prevents
-                    // checkout failures when the pipeline switches branches.
-                    let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
-                    let dirty_files = get_dirty_files(&repo_path).await;
-                    if !dirty_files.is_empty() {
-                        let file_list = dirty_files.join("\n  - ");
-                        let dirty_msg = format!(
-                            "WARNING: There are still uncommitted files in the working tree:\n  \
-                             - {file_list}\n\n\
-                             You MUST commit ALL of these files NOW. Use `git add -A` then \
-                             `git commit` with a descriptive conventional commit message \
-                             that explains what these files contain. Then push with `git push`."
-                        );
-                        tracing::warn!(
-                            action = "dirty_worktree_detected",
-                            file_count = dirty_files.len(),
-                            story_key = %story.story_key,
-                            step = "post_final_commit",
-                            "Uncommitted files remain after final commit — sending cleanup turn"
-                        );
-                        state.add_user_message(&dirty_msg);
-                        let dirty_turn = turn + 1;
-                        log_llm_request(
-                            "dev",
-                            dirty_turn,
-                            "[dirty-worktree-cleanup]",
-                            full_history.len(),
-                        );
-                        self.ui.llm_request("dev", dirty_turn as u32);
-                        self.ui
-                            .llm_request_content("dev", dirty_turn as u32, &dirty_msg);
-                        match agent
-                            .stream_chat(
-                                &dirty_msg,
-                                full_history.clone(),
-                                Some(&self.shutdown),
-                                Some(&self.ui),
-                            )
-                            .await
-                        {
-                            Ok((r, new_hist)) => {
-                                log_llm_response("dev", dirty_turn, &r);
-                                self.ui.llm_response("dev", dirty_turn as u32, r.len());
-                                self.ui.llm_response_content("dev", dirty_turn as u32, &r);
-                                full_history = new_hist;
-                                state.add_assistant_message(&r);
-                                let _ = state.save(&self.state_file_path).await;
-                                tracing::info!(
-                                    action = "dirty_worktree_cleanup_done",
-                                    story_key = %story.story_key,
-                                    "Dirty worktree cleanup turn completed"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    action = "dirty_worktree_cleanup_failed",
-                                    error = %e,
-                                    story_key = %story.story_key,
-                                    "Dirty worktree cleanup turn failed — proceeding anyway"
-                                );
-                            }
-                        }
-                    }
-
-                    // ── Step 8: Impact analysis (best-effort) ─────────────
-                    // Ask the agent to analyze downstream dependent stories
-                    // and update their "Previous Story Intelligence" sections
-                    // if the actual implementation deviates from planned specs.
-                    let impact_prompt = build_impact_analysis_prompt(
-                        &story.story_key,
-                        &self.config.bmad_paths.implementation_artifacts,
-                        &self.config.bmad_paths.planning_artifacts,
-                    );
-                    state.add_user_message(&impact_prompt);
-
-                    self.ui.phase_start("Impact Analysis");
-                    let impact_start = std::time::Instant::now();
-                    log_llm_request("dev", turn + 1, "[impact-analysis]", full_history.len());
-                    self.ui.llm_request("dev", (turn + 1) as u32);
-                    self.ui
-                        .llm_request_content("dev", (turn + 1) as u32, &impact_prompt);
-                    match agent
-                        .stream_chat(
-                            &impact_prompt,
-                            full_history.clone(),
-                            Some(&self.shutdown),
-                            Some(&self.ui),
-                        )
-                        .await
-                    {
-                        Ok((r, new_hist)) => {
-                            log_llm_response("dev", turn + 1, &r);
-                            self.ui.llm_response("dev", (turn + 1) as u32, r.len());
-                            self.ui.llm_response_content("dev", (turn + 1) as u32, &r);
-                            full_history = new_hist;
-                            state.add_assistant_message(&r);
-                            let _ = state.save(&self.state_file_path).await;
-                            self.ui
-                                .phase_complete("Impact Analysis", impact_start.elapsed());
-                            tracing::info!(
-                                action = "impact_analysis_done",
-                                turn = %(turn + 1),
-                                story_key = %story.story_key,
-                                "Impact analysis completed"
-                            );
-                        }
-                        Err(e) => {
-                            log_llm_error("dev", turn + 1, &e);
-                            self.ui.llm_error("dev", (turn + 1) as u32, &e.to_string());
-                            self.ui.phase_error("Impact Analysis", &e.to_string());
-                            tracing::warn!(
-                                action = "impact_analysis_failed",
-                                error = %e,
-                                story_key = %story.story_key,
-                                "Impact analysis failed — proceeding to PR summary"
-                            );
-                        }
-                    }
-
-                    // ── Step 9: PR summary (always, dedicated turn) ──────
-                    let story_title = story
-                        .label
-                        .split('-')
-                        .map(|w| {
-                            let mut c = w.chars();
-                            match c.next() {
-                                Some(ch) => ch.to_uppercase().to_string() + c.as_str(),
-                                None => String::new(),
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let pr_summary_prompt = format!(
-                        "STOP. Do NOT use any tools. Do NOT start a new workflow. \
-                        Just reply with text.\n\n\
-                        CONTEXT REMINDER:\n\
-                        - Project: {owner}/{repo}\n\
-                        - Story: {key} — {title}\n\
-                        - Branch: {branch}\n\n\
-                        Based ONLY on the work you actually performed in this session \
-                        (files created, modified, tests written), \
-                        summarize using this exact format:\n\n\
-                        <pr-summary>\n\
-                        <context>\n\
-                        (What was built and why — reference actual files and modules you touched)\n\
-                        </context>\n\
-                        <how-to-test>\n\
-                        (Concrete commands: cargo test, specific test names you created)\n\
-                        </how-to-test>\n\
-                        <additional-info>\n\
-                        (Design decisions, deps added, caveats)\n\
-                        </additional-info>\n\
-                        </pr-summary>\n\n\
-                        DO NOT invent project names, module names, or features. \
-                        Only describe what you actually implemented.",
-                        owner = self.config.git_provider.repo_owner,
-                        repo = self.config.git_provider.repo_name,
-                        key = story.story_key,
-                        title = story_title,
-                        branch = story.branch_name,
-                    );
-                    state.add_user_message(&pr_summary_prompt);
-
-                    self.ui.phase_start("PR Summary");
-                    let pr_start = std::time::Instant::now();
-                    log_llm_request("dev", turn + 2, "[pr-summary]", full_history.len());
-                    self.ui.llm_request("dev", (turn + 2) as u32);
-                    self.ui
-                        .llm_request_content("dev", (turn + 2) as u32, &pr_summary_prompt);
-                    let (pr_context, pr_how_to_test, pr_additional_info) = match agent
-                        .stream_chat(
-                            &pr_summary_prompt,
-                            full_history.clone(),
-                            Some(&self.shutdown),
-                            Some(&self.ui),
-                        )
-                        .await
-                    {
-                        Ok((r, _)) => {
-                            log_llm_response("dev", turn + 2, &r);
-                            self.ui.llm_response("dev", (turn + 2) as u32, r.len());
-                            self.ui.llm_response_content("dev", (turn + 2) as u32, &r);
-                            state.add_assistant_message(&r);
-                            let _ = state.save(&self.state_file_path).await;
-                            self.ui.phase_complete("PR Summary", pr_start.elapsed());
-                            match parse_pr_summary(&r) {
-                                Some((ctx, test, info)) => {
-                                    tracing::info!(
-                                        action = "pr_summary_parsed",
-                                        story_key = %story.story_key,
-                                        "PR summary extracted successfully"
-                                    );
-                                    (Some(ctx), Some(test), Some(info))
-                                }
-                                None => {
-                                    tracing::warn!(
-                                        action = "pr_summary_parse_failed",
-                                        story_key = %story.story_key,
-                                        "Could not parse PR summary — using defaults"
-                                    );
-                                    (None, None, None)
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log_llm_error("dev", turn + 2, &e);
-                            self.ui.llm_error("dev", (turn + 2) as u32, &e.to_string());
-                            let error_str = e.to_string();
-
-                            self.ui.phase_error("PR Summary", &error_str);
-                            tracing::warn!(
-                                action = "pr_summary_failed",
-                                error = %e,
-                                story_key = %story.story_key,
-                                "PR summary turn failed — using defaults"
-                            );
-                            (None, None, None)
-                        }
-                    };
 
                     // Write decisions file (best-effort)
                     self.write_decisions(story, &decision_log).await;
@@ -2228,9 +1964,9 @@ impl SessionRunner {
                         story_key: story.story_key.clone(),
                         branch: story.branch_name.clone(),
                         decisions: decision_log.records(),
-                        pr_context,
-                        pr_how_to_test,
-                        pr_additional_info,
+                        pr_context: None,
+                        pr_how_to_test: None,
+                        pr_additional_info: None,
                     };
                 }
 
@@ -2583,6 +2319,7 @@ mod tests {
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
+                utility: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

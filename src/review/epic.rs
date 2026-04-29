@@ -1657,6 +1657,7 @@ mod tests {
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
+                utility: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

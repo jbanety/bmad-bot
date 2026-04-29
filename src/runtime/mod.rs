@@ -205,10 +205,11 @@ impl SessionRuntime {
         } = deps;
         let llm = &config.llm;
         let all_roles = [&llm.dev, &llm.review, &llm.supervisor];
-        let optional_roles: Vec<&crate::config::LlmRoleConfig> = [&llm.epic_review, &llm.critic]
-            .into_iter()
-            .filter(|r| !r.provider.is_empty())
-            .collect();
+        let optional_roles: Vec<&crate::config::LlmRoleConfig> =
+            [&llm.epic_review, &llm.critic, &llm.utility]
+                .into_iter()
+                .filter(|r| !r.provider.is_empty())
+                .collect();
 
         let has_api = all_roles.iter().any(|r| r.is_api_provider())
             || optional_roles.iter().any(|r| r.is_api_provider());
@@ -342,6 +343,13 @@ pub(crate) fn resolve_role_config<'a>(
                 &llm.review
             } else {
                 &llm.critic
+            }
+        }
+        LlmRole::Utility => {
+            if llm.utility.provider.is_empty() {
+                &llm.review
+            } else {
+                &llm.utility
             }
         }
     }

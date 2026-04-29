@@ -190,6 +190,10 @@ pub struct LlmConfig {
     /// Defaults to empty — at runtime, falls back to the review config.
     #[serde(default)]
     pub critic: LlmRoleConfig,
+    /// Provider + model for lightweight utility tasks (commit messages, impact
+    /// analysis, PR summaries). Defaults to empty — falls back to review config.
+    #[serde(default)]
+    pub utility: LlmRoleConfig,
 }
 
 /// Provider + model pair for a single LLM role.
@@ -666,6 +670,7 @@ impl BotConfig {
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
+                utility: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

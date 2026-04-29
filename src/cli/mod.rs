@@ -858,6 +858,7 @@ fn collect_config_interactively() -> Result<BotConfig, CliError> {
             },
             epic_review: LlmRoleConfig::default(),
             critic: LlmRoleConfig::default(),
+            utility: LlmRoleConfig::default(),
         },
         notifications: NotificationConfig {
             telegram: TelegramConfig {
@@ -1820,6 +1821,7 @@ mod tests {
                 },
                 epic_review: LlmRoleConfig::default(),
                 critic: LlmRoleConfig::default(),
+                utility: LlmRoleConfig::default(),
             },
             notifications: NotificationConfig {
                 telegram: TelegramConfig {

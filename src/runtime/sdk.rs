@@ -186,6 +186,13 @@ impl SdkRuntime {
                     &llm.critic
                 }
             }
+            LlmRole::Utility => {
+                if llm.utility.provider.is_empty() {
+                    &llm.review
+                } else {
+                    &llm.utility
+                }
+            }
         }
     }
 
