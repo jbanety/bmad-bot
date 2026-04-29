@@ -432,7 +432,7 @@ fn build_sdk_consultation_claude(
         "--model".to_string(),
         role_config.model.clone(),
         "--permission-mode".to_string(),
-        "acceptEdits".to_string(),
+        "bypassPermissions".to_string(),
         "--max-turns".to_string(),
         "50".to_string(),
     ];

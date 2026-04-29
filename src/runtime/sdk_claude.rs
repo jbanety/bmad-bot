@@ -249,9 +249,7 @@ pub fn build_claude_code_config(
         "--model".to_string(),
         role_config.model.clone(),
         "--permission-mode".to_string(),
-        "acceptEdits".to_string(),
-        "--allowedTools".to_string(),
-        "Read,Edit,Write,Bash,Grep,Glob,WebSearch,Agent,Skill,Monitor,ToolSearch".to_string(),
+        "bypassPermissions".to_string(),
         "--max-turns".to_string(),
         "200".to_string(),
         "--append-system-prompt".to_string(),
@@ -890,8 +888,7 @@ mod tests {
                 .contains(&"claude-sonnet-4-20250514".to_string())
         );
         assert!(config.args.contains(&"--permission-mode".to_string()));
-        assert!(config.args.contains(&"acceptEdits".to_string()));
-        assert!(config.args.contains(&"--allowedTools".to_string()));
+        assert!(config.args.contains(&"bypassPermissions".to_string()));
         assert!(config.args.contains(&"--max-turns".to_string()));
         assert!(config.args.contains(&"200".to_string()));
         assert_eq!(config.working_directory, Path::new("/repo"));
