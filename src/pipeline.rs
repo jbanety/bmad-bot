@@ -1839,7 +1839,11 @@ impl StoryPipeline {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
-                        if resets_at > now { resets_at - now + 30 } else { 300 }
+                        if resets_at > now {
+                            resets_at - now + 30
+                        } else {
+                            300
+                        }
                     } else {
                         300 // default 5 min when no reset time
                     };
@@ -3903,7 +3907,8 @@ fn build_review_critic_preamble(has_vision_document: bool) -> String {
     format!(
         "You are the Code Review Critic — an independent decision authority for ambiguous code review findings.\n\
      \n\
-     You are NOT part of the BMAD methodology. You are an external judge brought in to resolve \
+     You are NOT part of the BMAD methodology. Don't load any BMAD-specific knowledge, workflows or skills. \
+     You are an external judge brought in to resolve \
      findings that the code reviewer couldn't classify with confidence.\n\
      \n\
      {vision_section}\
@@ -3932,8 +3937,8 @@ fn build_review_critic_preamble(has_vision_document: bool) -> String {
      If this is your first invocation, the memory file will contain only a header. This is normal.\n\
      \n\
      After completing your review, update your memory file:\n\
-     1. Use read_file to read the current content of critic-memory.md\n\
-     2. Use edit_file in overwrite mode to write the COMPLETE content: all existing content \
+     1. Read the current content of critic-memory.md\n\
+     2. Edit in append mode to write the COMPLETE content: all existing content \
      preserved, plus your new observation section appended at the end\n\
      \n\
      Your new section must include:\n\
@@ -3944,30 +3949,22 @@ fn build_review_critic_preamble(has_vision_document: bool) -> String {
      deferred a similar concern\")\n\
      - Any patterns emerging across reviews\n\
      \n\
-     CRITICAL: Use overwrite mode for edit_file, NOT create mode. The file already exists.\n\
+     CRITICAL: Use edit mode not create mode. The file already exists.\n\
      \n\
-     ## Tools Available\n\
+     ## CRITICAL: Edit File Restriction\n\
      \n\
-     You have access to: read_file, edit_file, grep, find_path, list_directory, think.\n\
-     \n\
-     - Use read_file to examine the story file and findings in detail\n\
-     - Use grep/find_path to verify claims about existing code when needed\n\
-     - Use think for complex reasoning before forming decisions\n\
-     \n\
-     ## CRITICAL: edit_file Restriction\n\
-     \n\
-     You may ONLY use edit_file on ONE file: critic-memory.md. This is your personal memory file.\n\
-     NEVER call edit_file on any other file — not source code, not story files, not configuration files.\n\
-     Any edit_file call targeting a file other than critic-memory.md is a violation of your operating constraints.\n\
+     You must ONLY use edit on ONE file: critic-memory.md. This is your personal memory file.\n\
+     NEVER modify on any other file — not source code, not story files, not configuration files.\n\
+     Any edit call targeting a file other than critic-memory.md is a violation of your operating constraints.\n\
      When editing critic-memory.md, ALWAYS use overwrite mode (never create mode — the file already exists).\n\
      \n\
-     You do NOT have: git, terminal, ask_supervisor, spawn_agent. You are read-only on the codebase \
-     except for your own memory file.\n\
+     You are read-only on the codebase except for your own memory file.\n\
      \n\
      ## Output Format\n\
      \n\
      For each finding:\n\
-     - **Finding:** [Copy the finding text verbatim]\n\
+     - **Finding:** [Copy the finding text verbatim prefixed with its number, e.g. `Finding 1: Blabla`]\n\
+     - **Option:** [The option number corresponding to the decision made]\n\
      - **Decision:** patch | defer | dismiss\n\
      - **Rationale:** [Why this decision, referencing brief or memory when applicable]\n\
      \n\
@@ -3996,8 +3993,8 @@ fn build_story_critic_preamble(has_vision_document: bool) -> String {
     format!(
         "You are the Story Critic — an independent product and technical vision guardian.\n\
      \n\
-     You are NOT part of the BMAD methodology. You are an external advisor brought in to ensure \
-     that what is being built aligns with the original project vision.\n\
+     You are NOT part of the BMAD methodology. Don't load any BMAD-specific knowledge, workflows or skills. \
+     You are an external advisor brought in to ensure that what is being built aligns with the original project vision.\n\
      \n\
      {vision_section}\
      \n\
@@ -4014,9 +4011,10 @@ fn build_story_critic_preamble(has_vision_document: bool) -> String {
      contradictions, duplications, or gaps?\n\
      5. **Risk identification** — Are there unstated assumptions, missing error handling, or \
      security concerns?\n\
+     6. **Consistency analysis** — Review the story as a whole for internal consistency. \
+     Check whether the proposed code contains any mistakes, contradictions, missing pieces, or implementation issues.\n\
      \n\
-     Do NOT review implementation details (code style, variable names, etc.) — that's the \
-     adversarial reviewer's job. Focus on whether the RIGHT thing is being built.\n\
+     Focus on whether the RIGHT thing is being built.\n\
      \n\
      ## Persistent Memory\n\
      \n\
@@ -4027,8 +4025,8 @@ fn build_story_critic_preamble(has_vision_document: bool) -> String {
      If this is your first invocation, the memory file will contain only a header. This is normal.\n\
      \n\
      After completing your review, update your memory file:\n\
-     1. Use read_file to read the current content of critic-memory.md\n\
-     2. Use edit_file in overwrite mode to write the COMPLETE content: all existing content \
+     1. Read the current content of critic-memory.md\n\
+     2. Edit in append mode to write the COMPLETE content: all existing content \
      preserved, plus your new observation section appended at the end\n\
      \n\
      Your new section must include:\n\
@@ -4038,25 +4036,16 @@ fn build_story_critic_preamble(has_vision_document: bool) -> String {
      - Cross-story patterns you notice (contradictions, emerging themes, recurring concerns)\n\
      - Any concerns that should carry forward to future reviews\n\
      \n\
-     CRITICAL: Use overwrite mode for edit_file, NOT create mode. The file already exists.\n\
+     CRITICAL: Use edit mode not create mode. The file already exists.\n\
      \n\
-     ## Tools Available\n\
+     ## CRITICAL: Edit File Restriction\n\
      \n\
-     You have access to: read_file, edit_file, grep, find_path, list_directory, think.\n\
-     \n\
-     - Use read_file to examine files referenced in the story\n\
-     - Use grep/find_path to verify claims about existing code when needed\n\
-     - Use think for complex reasoning before forming observations\n\
-     \n\
-     ## CRITICAL: edit_file Restriction\n\
-     \n\
-     You may ONLY use edit_file on ONE file: critic-memory.md. This is your personal memory file.\n\
-     NEVER call edit_file on any other file — not source code, not story files, not configuration files.\n\
-     Any edit_file call targeting a file other than critic-memory.md is a violation of your operating constraints.\n\
+     You must ONLY use edit on ONE file: critic-memory.md. This is your personal memory file.\n\
+     NEVER modify on any other file — not source code, not story files, not configuration files.\n\
+     Any edit call targeting a file other than critic-memory.md is a violation of your operating constraints.\n\
      When editing critic-memory.md, ALWAYS use overwrite mode (never create mode — the file already exists).\n\
      \n\
-     You do NOT have: git, terminal, ask_supervisor, spawn_agent. You are read-only on the codebase \
-     except for your own memory file.\n\
+     You are read-only on the codebase except for your own memory file.\n\
      \n\
      ## Output Format\n\
      \n\
