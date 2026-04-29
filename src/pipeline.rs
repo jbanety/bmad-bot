@@ -1371,19 +1371,36 @@ impl StoryPipeline {
                                 || trimmed.starts_with("(none")
                                 || trimmed.starts_with("None")
                                 || trimmed.starts_with("No findings")
+                                || trimmed.starts_with("Clean review")
+                                || trimmed.contains("✅")
                             {
                                 "clean".to_string()
                             } else {
-                                let count = trimmed
+                                let decision = trimmed
                                     .lines()
-                                    .filter(|l| {
-                                        let s = l.trim_start();
-                                        s.starts_with("- [")
-                                            || (s.starts_with("- **") && !s.contains("MODIFIED") && !s.contains("NEW"))
-                                    })
+                                    .filter(|l| l.contains("[Review][Decision]"))
                                     .count();
-                                if count > 0 {
-                                    format!("{count} findings")
+                                let patch = trimmed
+                                    .lines()
+                                    .filter(|l| l.contains("[Review][Patch]"))
+                                    .count();
+                                let defer = trimmed
+                                    .lines()
+                                    .filter(|l| l.contains("[Review][Defer]"))
+                                    .count();
+                                let total = decision + patch + defer;
+                                if total > 0 {
+                                    let mut parts = Vec::new();
+                                    if decision > 0 {
+                                        parts.push(format!("{decision} decision-needed"));
+                                    }
+                                    if patch > 0 {
+                                        parts.push(format!("{patch} patch"));
+                                    }
+                                    if defer > 0 {
+                                        parts.push(format!("{defer} defer"));
+                                    }
+                                    parts.join(", ")
                                 } else {
                                     "clean".to_string()
                                 }
