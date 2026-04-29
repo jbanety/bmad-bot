@@ -562,20 +562,17 @@ pub async fn run_codex_session(
         }
     };
 
-    // Auto-confirm loop (same as claude code)
+    // Auto-confirm loop (same logic as claude code)
     let mut confirm_attempts = 0;
-    while confirm_attempts < 5 {
+    while confirm_attempts < 15 {
         if result.exit_code != Some(0) {
             break;
         }
-        let needs_confirm = result
-            .completion_text
-            .as_deref()
-            .map(super::sdk_claude::is_confirmation_prompt)
-            .unwrap_or(false);
-        if !needs_confirm {
+        let completion = result.completion_text.as_deref().unwrap_or("");
+        let response = super::sdk_claude::auto_response_for_prompt(completion);
+        let Some(response) = response else {
             break;
-        }
+        };
         let Some(ref session_id) = result.session_id else {
             break;
         };
@@ -583,15 +580,18 @@ pub async fn run_codex_session(
         tracing::info!(
             action = "auto_confirm",
             attempt = confirm_attempts,
+            response = %response,
             story_key = %context.story.story_key,
-            "Detected [Y]/[N] confirmation prompt — auto-resuming with Y"
+            "Detected interactive prompt — auto-resuming"
         );
-        runtime.ui().sdk_text("Auto-confirming [Y] prompt");
+        runtime
+            .ui()
+            .sdk_text(&format!("Auto-responding: {response}"));
         let (_, resume_result) = runtime
             .resume_sdk_session(
                 "codex",
                 session_id,
-                "Y",
+                &response,
                 context.story,
                 &context.role,
             )

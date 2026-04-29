@@ -475,22 +475,19 @@ pub async fn run_claude_code_session(
         }
     };
 
-    // Auto-confirm loop: if the session ended with a [Y]/[N] confirmation prompt,
-    // resume with "Y" and repeat until the session completes without a prompt.
+    // Auto-confirm loop: if the session ended with a prompt waiting for input,
+    // detect the type and resume with the appropriate response.
     let mut confirm_attempts = 0;
-    const MAX_CONFIRM_ATTEMPTS: usize = 5;
+    const MAX_CONFIRM_ATTEMPTS: usize = 15;
     while confirm_attempts < MAX_CONFIRM_ATTEMPTS {
         if result.exit_code != Some(0) {
             break;
         }
-        let needs_confirm = result
-            .completion_text
-            .as_deref()
-            .map(|t| is_confirmation_prompt(t))
-            .unwrap_or(false);
-        if !needs_confirm {
+        let completion = result.completion_text.as_deref().unwrap_or("");
+        let response = auto_response_for_prompt(completion);
+        let Some(response) = response else {
             break;
-        }
+        };
         let Some(ref session_id) = result.session_id else {
             break;
         };
@@ -498,15 +495,18 @@ pub async fn run_claude_code_session(
         tracing::info!(
             action = "auto_confirm",
             attempt = confirm_attempts,
+            response = %response,
             story_key = %context.story.story_key,
-            "Detected [Y]/[N] confirmation prompt — auto-resuming with Y"
+            "Detected interactive prompt — auto-resuming"
         );
-        runtime.ui().sdk_text("Auto-confirming [Y] prompt");
+        runtime
+            .ui()
+            .sdk_text(&format!("Auto-responding: {response}"));
         let (_, resume_result) = runtime
             .resume_sdk_session(
                 &role_config.provider,
                 session_id,
-                "Y",
+                &response,
                 context.story,
                 &context.role,
             )
@@ -563,6 +563,50 @@ fn write_mcp_config_temp_file(
     serde_json::to_writer(&mut tmp, mcp_json).map_err(std::io::Error::other)?;
     tmp.flush()?;
     Ok(tmp)
+}
+
+/// Determine the automatic response for an interactive prompt, if any.
+///
+/// Returns `Some(response)` if the prompt is recognized, `None` if the session
+/// should not be auto-resumed (legitimate completion or unrecognized prompt).
+pub(crate) fn auto_response_for_prompt(text: &str) -> Option<String> {
+    if !is_confirmation_prompt(text) && !is_numeric_choice_prompt(text) {
+        return None;
+    }
+
+    let lower = text.to_lowercase();
+
+    // Chunk review: "offer to chunk the review by file group" → accept and go in order
+    if lower.contains("chunk") && is_confirmation_prompt(text) {
+        return Some("Y — review all chunks in order, starting from the first group".to_string());
+    }
+
+    // Numeric choice prompts (1/2/3) — always pick option 1
+    if is_numeric_choice_prompt(text) {
+        return Some("1".to_string());
+    }
+
+    // Default Y/N confirmation
+    Some("Y".to_string())
+}
+
+/// Detect if the completion text ends with a numeric choice prompt (1, 2, 3...).
+fn is_numeric_choice_prompt(text: &str) -> bool {
+    let tail = if text.len() > 500 {
+        &text[text.len() - 500..]
+    } else {
+        text
+    };
+    // Look for numbered options like "1." or "1)" at line starts in the tail
+    let has_option_1 = tail.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("1.") || t.starts_with("1)") || t.starts_with("1 —") || t.starts_with("1-")
+    });
+    let has_option_2 = tail.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("2.") || t.starts_with("2)") || t.starts_with("2 —") || t.starts_with("2-")
+    });
+    has_option_1 && has_option_2
 }
 
 /// Detect if the completion text ends with a BMAD skill confirmation prompt.
