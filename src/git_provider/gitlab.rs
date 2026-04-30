@@ -105,7 +105,16 @@ impl GitProvider for GitLabProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(map_gitlab_error(status, body));
+            let err = map_gitlab_error(status, body);
+            if matches!(err, GitProviderError::DuplicatePr { .. }) {
+                tracing::info!(
+                    action = "mr_already_exists",
+                    source_branch = %params.source_branch,
+                    "MR already exists for branch — fetching existing MR"
+                );
+                return self.find_open_mr(&params.source_branch).await;
+            }
+            return Err(err);
         }
 
         let resp_bytes = response
@@ -206,6 +215,83 @@ impl GitProvider for GitLabProvider {
     }
 }
 
+/// GitLab API response for listing merge requests (reuses the same fields as creation).
+#[derive(serde::Deserialize)]
+struct ListMrResponse {
+    iid: u64,
+    web_url: String,
+}
+
+impl GitLabProvider {
+    /// Find an existing open MR for the given source branch.
+    ///
+    /// Queries `GET /projects/:id/merge_requests?source_branch=X&state=opened`
+    /// and returns the first match.
+    async fn find_open_mr(&self, source_branch: &str) -> Result<PrInfo, GitProviderError> {
+        let base = format!(
+            "{}/projects/{}/merge_requests",
+            self.base_url, self.project_path
+        );
+        let url = reqwest::Url::parse_with_params(
+            &base,
+            &[("source_branch", source_branch), ("state", "opened")],
+        )
+        .map_err(|e| GitProviderError::InvalidResponse {
+            reason: format!("Failed to build MR list URL: {e}"),
+        })?;
+
+        let response = self
+            .client
+            .get(url)
+            .header("PRIVATE-TOKEN", &self.token)
+            .send()
+            .await
+            .map_err(|e| GitProviderError::NetworkError {
+                reason: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(map_gitlab_error(status, body));
+        }
+
+        let resp_bytes = response
+            .bytes()
+            .await
+            .map_err(|e| GitProviderError::InvalidResponse {
+                reason: format!("Failed to read GitLab MR list response: {e}"),
+            })?;
+
+        let mrs: Vec<ListMrResponse> =
+            serde_json::from_slice(&resp_bytes).map_err(|e| GitProviderError::InvalidResponse {
+                reason: format!("Failed to parse GitLab MR list response: {e}"),
+            })?;
+
+        let mr = mrs.into_iter().next().ok_or_else(|| {
+            GitProviderError::BranchNotFound {
+                branch: format!(
+                    "MR reported as duplicate but no open MR found for source branch '{source_branch}'"
+                ),
+            }
+        })?;
+
+        tracing::info!(
+            action = "mr_found_existing",
+            mr_iid = %mr.iid,
+            url = %mr.web_url,
+            source_branch = %source_branch,
+            "Found existing open MR for branch"
+        );
+
+        Ok(PrInfo {
+            id: mr.iid.to_string(),
+            url: mr.web_url,
+            number: mr.iid,
+        })
+    }
+}
+
 /// Map an HTTP status code and response body to a [`GitProviderError`].
 ///
 /// Called when the GitLab API returns a non-success status. Transient errors
@@ -217,6 +303,10 @@ fn map_gitlab_error(status: reqwest::StatusCode, body: String) -> GitProviderErr
         404 => GitProviderError::ApiError {
             status: status.as_u16(),
             message: body,
+        },
+        409 => GitProviderError::DuplicatePr {
+            branch: String::new(),
+            details: body,
         },
         422 => GitProviderError::BranchNotFound { branch: body },
         429 => GitProviderError::RateLimited {
@@ -391,6 +481,21 @@ mod tests {
     }
 
     #[test]
+    fn test_map_gitlab_error_409_duplicate_pr() {
+        let body = r#"{"message":["Another open merge request already exists for this source branch: !15"]}"#;
+        let err = map_gitlab_error(reqwest::StatusCode::CONFLICT, body.into());
+        match err {
+            GitProviderError::DuplicatePr { details, .. } => {
+                assert!(
+                    details.contains("Another open merge request"),
+                    "Expected duplicate MR message, got: {details}"
+                );
+            }
+            other => panic!("Expected DuplicatePr, got: {other}"),
+        }
+    }
+
+    #[test]
     fn test_map_gitlab_error_500_api_error() {
         let err = map_gitlab_error(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
@@ -478,5 +583,41 @@ mod tests {
             mr.web_url, "https://gitlab.com/test-owner/test-repo/-/merge_requests/34",
             "Should extract web_url"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ListMrResponse deserialization test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_list_mr_response_deserializes_from_gitlab_json() {
+        let json = r#"[
+            {
+                "id": 100,
+                "iid": 15,
+                "title": "Existing MR",
+                "state": "opened",
+                "web_url": "https://gitlab.com/test-owner/test-repo/-/merge_requests/15",
+                "source_branch": "story/1-2-rate-limit",
+                "target_branch": "main"
+            }
+        ]"#;
+
+        let mrs: Vec<ListMrResponse> =
+            serde_json::from_str(json).expect("Should deserialize GitLab MR list response");
+        assert_eq!(mrs.len(), 1);
+        assert_eq!(mrs[0].iid, 15);
+        assert_eq!(
+            mrs[0].web_url,
+            "https://gitlab.com/test-owner/test-repo/-/merge_requests/15"
+        );
+    }
+
+    #[test]
+    fn test_list_mr_response_empty_array() {
+        let json = "[]";
+        let mrs: Vec<ListMrResponse> =
+            serde_json::from_str(json).expect("Should deserialize empty MR list");
+        assert!(mrs.is_empty());
     }
 }

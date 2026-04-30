@@ -201,6 +201,15 @@
 - **`SdkWal::create` returns empty `PathBuf` as second tuple element:** API suggests it returns the WAL path, but always returns `PathBuf::new()`. Callers must use `SdkWal::wal_path()` separately and call `state.save()` manually. Misleading but not a bug — WAL wiring explicitly deferred per spec Task 5.7. [src/runtime/sdk_wal.rs:27]
 - **`run_api_consultation` accepts `trigger_text` and `story` params but discards them:** Parameters suppressed with `let _ = ...`. `ConsultationRunner::execute()` handles its own context loading internally. Unused params are vestiges from a planned but unimplemented integration. [src/runtime/sdk_consultation.rs:188-190]
 
+## Deferred from: fix gitlab-409-duplicate-mr (2026-04-30)
+
+- **`get_pr_url` and `base_url` hardcode `gitlab.com`:** No support for self-hosted GitLab instances. If `base_url` is changed to a self-hosted instance, `get_pr_url` still generates `gitlab.com` links. The GitHub provider has the same limitation but self-hosted GitHub is far less common. [src/git_provider/gitlab.rs:62,211]
+- **422 mapped to `BranchNotFound` unconditionally:** GitLab returns 422 for multiple distinct validation errors (missing title, invalid target, source equals target), not just branch issues. Should inspect body text like the GitHub provider does. [src/git_provider/gitlab.rs:304] (also noted in 13.5 review)
+- **`RateLimited` does not extract GitLab `Retry-After` header:** Response headers are consumed before `map_gitlab_error` is called. [src/git_provider/gitlab.rs:305-307]
+- **`project_path` encoding uses naive `replace('/', "%2F")`:** Does not handle other URL-unsafe characters in owner/repo names. [src/git_provider/gitlab.rs:58]
+- **GitLab 404 could mean permission denied:** GitLab returns 404 instead of 403 for unauthorized access to private projects. Currently mapped as generic `ApiError`. [src/git_provider/gitlab.rs:299]
+
+
 ## Deferred from: code review of story 15-8 (2026-04-27)
 
 - **Wildcard `_ => "codex"` in `prompt_provider_options` maps any unknown provider to codex CLI name:** `match provider { "claude-code" => "claude", _ => "codex" }` at `src/cli/mod.rs:194-195`. If a new SDK provider is added to `LLM_PROVIDERS` without updating this match, the prompt will incorrectly offer "codex" as the CLI name. Maintenance hazard, not a current bug.
