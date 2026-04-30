@@ -268,13 +268,7 @@ pub fn build_codex_prompt(phase: &str, story: &StoryInfo) -> String {
             format!("/bmad-dev-story {}", story.specs_path.to_string_lossy())
         }
     };
-    format!(
-        "{skill_cmd}\n\n\
-         IMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.\n\
-         You are running in AUTONOMOUS DAEMON MODE. When a workflow step asks for confirmation \
-         ([Y]/[N], `Y`/`N`, or numbered choices), always answer Y (or 1 for the first option) \
-         and continue immediately. Never wait for user input."
-    )
+    format!("{skill_cmd}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.")
 }
 
 // ---------------------------------------------------------------------------
@@ -408,10 +402,8 @@ pub fn build_codex_resume_config(
     let mut args = vec![
         "exec".to_string(),
         "resume".to_string(),
-        session_id.to_string(),
         "--json".to_string(),
-        "--cd".to_string(),
-        project_root.to_string_lossy().to_string(),
+        session_id.to_string(),
     ];
 
     args.push("--".to_string());
