@@ -1358,7 +1358,7 @@ impl StoryPipeline {
             self.critic_memory.check_size_threshold();
 
             match session_outcome {
-                SessionOutcome::Completed { .. } => {
+                SessionOutcome::Completed { pr_context, .. } => {
                     self.post_session_commit(story).await;
                     let report = extract_review_report_from_story(
                         story,
@@ -1408,12 +1408,46 @@ impl StoryPipeline {
                         }
                         None => "clean".to_string(),
                     };
+
+                    // Fallback: if story file says "clean" but the SDK completion
+                    // text contains findings, the skill didn't persist them.
+                    // Count numbered findings in the completion text as a safety net.
+                    let summary = if summary == "clean" {
+                        if let Some(ref completion) = pr_context {
+                            let completion_findings = completion
+                                .lines()
+                                .filter(|l| {
+                                    let t = l.trim();
+                                    // Numbered findings: "1. ...", "2. ..." at start of line
+                                    t.len() > 3
+                                        && t.as_bytes()[0].is_ascii_digit()
+                                        && (t.as_bytes()[1] == b'.' || t.as_bytes()[1] == b')')
+                                })
+                                .count();
+                            if completion_findings > 0 {
+                                tracing::warn!(
+                                    action = "review_findings_in_completion_only",
+                                    story_key = %story_key,
+                                    count = completion_findings,
+                                    "Review findings found in SDK completion text but not in story file"
+                                );
+                                format!("{completion_findings} findings (from LLM output)")
+                            } else {
+                                summary
+                            }
+                        } else {
+                            summary
+                        }
+                    } else {
+                        summary
+                    };
+
                     self.ui.phase_complete_with_result(
                         "Code Review",
                         review_start.elapsed(),
                         &summary,
                     );
-                    if report.is_none() {
+                    if report.is_none() && summary == "clean" {
                         tracing::info!(
                             action = "review_clean",
                             story_key = %story_key,
