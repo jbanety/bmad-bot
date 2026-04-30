@@ -268,7 +268,13 @@ pub fn build_codex_prompt(phase: &str, story: &StoryInfo) -> String {
             format!("/bmad-dev-story {}", story.specs_path.to_string_lossy())
         }
     };
-    format!("{skill_cmd}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.")
+    format!(
+        "{skill_cmd}\n\n\
+         IMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.\n\
+         You are running in AUTONOMOUS DAEMON MODE. When a workflow step asks for confirmation \
+         ([Y]/[N], `Y`/`N`, or numbered choices), always answer Y (or 1 for the first option) \
+         and continue immediately. Never wait for user input."
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -253,7 +253,11 @@ pub fn build_claude_code_config(
         "--max-turns".to_string(),
         "200".to_string(),
         "--append-system-prompt".to_string(),
-        "OVERRIDE: communication_language = English".to_string(),
+        "OVERRIDE: communication_language = English. \
+         You are running in AUTONOMOUS DAEMON MODE. When a workflow step asks for \
+         confirmation ([Y]/[N], `Y`/`N`, or numbered choices), always answer Y \
+         (or 1 for the first option) and continue immediately. Never wait for user input."
+            .to_string(),
     ];
 
     if let Some(mcp_path) = mcp_config_path {
