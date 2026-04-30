@@ -803,7 +803,9 @@ impl StoryPipeline {
 
                 // Post-session pipeline steps (unified API/SDK)
                 self.post_session_commit(story).await;
-                self.post_session_impact_analysis(story).await;
+                // Impact analysis disabled — stories are created on-demand now,
+                // no downstream specs to update.
+                // self.post_session_impact_analysis(story).await;
                 let (pr_context, pr_how_to_test, pr_additional_info) =
                     self.post_session_pr_summary(story, None).await;
 
