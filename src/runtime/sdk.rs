@@ -223,6 +223,15 @@ impl SdkRuntime {
         story: &crate::watcher::StoryInfo,
         role: &LlmRole,
     ) -> (SessionOutcome, Option<SdkSessionResult>) {
+        tracing::info!(
+            action = "sdk_resume",
+            provider = %provider,
+            session_id = %session_id,
+            prompt_len = prompt.len(),
+            prompt_preview = %if prompt.len() > 200 { format!("{}...", &prompt[..197]) } else { prompt.to_string() },
+            story_key = %story.story_key,
+            "Resuming SDK session with prompt"
+        );
         match provider {
             "claude-code" => {
                 super::sdk_claude::resume_claude_code_session(self, session_id, prompt, story, role)
@@ -369,6 +378,7 @@ impl SdkRuntime {
                 line = reader.next_line() => {
                     match line {
                         Ok(Some(line)) => {
+                            tracing::debug!(sdk_stdout_raw = %line);
                             if let Some(event) = parser(&line) {
                                 self.emit_ui_event(&event);
                                 match &event {
