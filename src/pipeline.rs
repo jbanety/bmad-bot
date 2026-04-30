@@ -2100,6 +2100,9 @@ impl StoryPipeline {
         let role_config =
             crate::runtime::resolve_role_config(&self.config.llm, &LlmRole::Utility);
 
+        self.ui
+            .sdk_session_info(&role_config.provider, &role_config.model);
+
         if role_config.is_sdk_provider() {
             let project_root = std::path::Path::new(&self.config.bmad_paths.project_root);
             let session_config = match role_config.provider.as_str() {
