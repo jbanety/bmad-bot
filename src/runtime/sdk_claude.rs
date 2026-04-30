@@ -253,11 +253,7 @@ pub fn build_claude_code_config(
         "--max-turns".to_string(),
         "200".to_string(),
         "--append-system-prompt".to_string(),
-        "OVERRIDE: communication_language = English. \
-         You are running in AUTONOMOUS DAEMON MODE. When a workflow step asks for \
-         confirmation ([Y]/[N], `Y`/`N`, or numbered choices), always answer Y \
-         (or 1 for the first option) and continue immediately. Never wait for user input."
-            .to_string(),
+        "OVERRIDE: communication_language = English".to_string(),
     ];
 
     if let Some(mcp_path) = mcp_config_path {
@@ -574,11 +570,17 @@ fn write_mcp_config_temp_file(
 /// Returns `Some(response)` if the prompt is recognized, `None` if the session
 /// should not be auto-resumed (legitimate completion or unrecognized prompt).
 pub(crate) fn auto_response_for_prompt(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+
+    // BMAD checkpoint: "HALT and wait for user confirmation to proceed"
+    // Matches: "proceed", "continue", "confirm", "go ahead" as expected response
+    if is_checkpoint_prompt(&lower) {
+        return Some("proceed".to_string());
+    }
+
     if !is_confirmation_prompt(text) && !is_numeric_choice_prompt(text) {
         return None;
     }
-
-    let lower = text.to_lowercase();
 
     // Chunk review: "offer to chunk the review by file group" → accept and go in order
     if lower.contains("chunk") && is_confirmation_prompt(text) {
@@ -592,6 +594,33 @@ pub(crate) fn auto_response_for_prompt(text: &str) -> Option<String> {
 
     // Default Y/N confirmation
     Some("Y".to_string())
+}
+
+/// Detect BMAD skill checkpoint prompts that wait for free-text confirmation.
+///
+/// Only matches the last ~200 chars (the actual ask) to avoid false positives
+/// from earlier narrative text like "I will proceed to review...".
+/// Looks for imperative patterns directed at the user: "Reply `proceed`",
+/// "Confirm and I'll proceed", "HALT and wait for confirmation".
+fn is_checkpoint_prompt(lower: &str) -> bool {
+    let tail = if lower.len() > 200 {
+        &lower[lower.len() - 200..]
+    } else {
+        lower
+    };
+    // "reply `proceed`" / "reply proceed" — explicit ask
+    if tail.contains("reply") && tail.contains("proceed") {
+        return true;
+    }
+    // "confirm and I'll proceed" / "confirm to proceed" — imperative directed at user
+    if tail.contains("confirm") && tail.contains("proceed") {
+        return true;
+    }
+    // "halt and wait for confirmation/user" — BMAD checkpoint language
+    if tail.contains("halt") && tail.contains("wait") {
+        return true;
+    }
+    false
 }
 
 /// Detect if the completion text ends with a numeric choice prompt (1, 2, 3...).
@@ -993,7 +1022,8 @@ mod tests {
     fn test_build_claude_code_prompt_create() {
         let story = make_test_story();
         let prompt = build_claude_code_prompt("create", &story);
-        assert_eq!(prompt, "/bmad-create-story 15-5-claude-code");
+        assert!(prompt.starts_with("/bmad-create-story 15-5-claude-code"), "prompt should start with /skill command: {prompt}");
+        assert!(prompt.contains("English"), "prompt should contain English override");
     }
 
     // -- Task 9.17: prompt dev phase --
@@ -1001,10 +1031,8 @@ mod tests {
     fn test_build_claude_code_prompt_dev() {
         let story = make_test_story();
         let prompt = build_claude_code_prompt("dev", &story);
-        assert_eq!(
-            prompt,
-            "/bmad-dev-story /tmp/impl-artifacts/15-5-claude-code.md"
-        );
+        assert!(prompt.starts_with("/bmad-dev-story /tmp/impl-artifacts/15-5-claude-code.md"), "prompt should start with /skill command: {prompt}");
+        assert!(prompt.contains("English"), "prompt should contain English override");
     }
 
     // -- Task 9.18: prompt review phase --
@@ -1012,10 +1040,8 @@ mod tests {
     fn test_build_claude_code_prompt_review() {
         let story = make_test_story();
         let prompt = build_claude_code_prompt("review", &story);
-        assert_eq!(
-            prompt,
-            "/bmad-code-review /tmp/impl-artifacts/15-5-claude-code.md"
-        );
+        assert!(prompt.starts_with("/bmad-code-review /tmp/impl-artifacts/15-5-claude-code.md"), "prompt should start with /skill command: {prompt}");
+        assert!(prompt.contains("English"), "prompt should contain English override");
     }
 
     // -- Task 9.22: detect escalation found --

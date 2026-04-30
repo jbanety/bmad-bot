@@ -457,6 +457,8 @@ fn build_sdk_consultation_codex(
     project_root: &std::path::Path,
     prompt: &str,
 ) -> super::sdk::SdkSessionConfig {
+    // Codex uses `$skill` syntax, not `/skill`
+    let prompt = prompt.replacen("/bmad-", "$bmad-", 1);
     let command = role_config
         .cli_path
         .clone()
