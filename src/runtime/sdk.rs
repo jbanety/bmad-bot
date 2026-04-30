@@ -461,9 +461,10 @@ impl SdkRuntime {
                 }
             }
             SdkOutputEvent::Completion { .. } => {
-                if !suppress {
-                    self.ui.activation_complete();
-                }
+                // Don't emit activation_complete() — Codex emits multiple Completion
+                // events (one per agent_message turn), flooding the console with
+                // "Session done". The real completion signal is phase_complete from
+                // the pipeline.
             }
 
             SdkOutputEvent::Error { message } => {
