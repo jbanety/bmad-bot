@@ -81,6 +81,46 @@ struct CodexItem {
 // Line parser — public, passed to execute_session()
 // ---------------------------------------------------------------------------
 
+/// Parse "try again at 1:20 PM" style reset times from Codex error messages.
+fn parse_codex_reset_time(msg: &str) -> Option<u64> {
+    let lower = msg.to_lowercase();
+    let marker = "try again at ";
+    let start = lower.find(marker)? + marker.len();
+    let rest = &msg[start..];
+    let time_end = rest.find('.').or_else(|| rest.find(',')).unwrap_or(rest.len());
+    let time_str = rest[..time_end].trim();
+
+    let is_pm = time_str.to_lowercase().contains("pm");
+    let is_am = time_str.to_lowercase().contains("am");
+    let digits_part: String = time_str
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == ':')
+        .collect();
+    let parts: Vec<&str> = digits_part.split(':').collect();
+    let hour: u64 = parts.first()?.parse().ok()?;
+    let minute: u64 = parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
+
+    let mut hour_24 = hour;
+    if is_pm && hour < 12 {
+        hour_24 += 12;
+    } else if is_am && hour == 12 {
+        hour_24 = 0;
+    }
+
+    let now = chrono::Local::now();
+    let mut target = now
+        .date_naive()
+        .and_hms_opt(hour_24 as u32, minute as u32, 0)?
+        .and_local_timezone(chrono::Local)
+        .single()?;
+
+    if target <= now {
+        target += chrono::Duration::days(1);
+    }
+
+    Some(target.timestamp() as u64)
+}
+
 pub fn parse_codex_line(line: &str) -> Option<SdkOutputEvent> {
     let event: CodexEvent = serde_json::from_str(line).ok()?;
     match event.event_type.as_str() {
@@ -100,8 +140,10 @@ pub fn parse_codex_line(line: &str) -> Option<SdkOutputEvent> {
                 .map(|e| e.message)
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| "Turn failed".to_string());
-            if error_msg.to_lowercase().contains("rate limit") {
-                Some(SdkOutputEvent::RateLimited { resets_at: None })
+            let lower = error_msg.to_lowercase();
+            if lower.contains("rate limit") || lower.contains("usage limit") {
+                let resets_at = parse_codex_reset_time(&error_msg);
+                Some(SdkOutputEvent::RateLimited { resets_at })
             } else {
                 Some(SdkOutputEvent::Error { message: error_msg })
             }

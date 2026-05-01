@@ -785,7 +785,8 @@ pub(crate) async fn map_sdk_result_to_outcome(
             error.push_str(&result.stderr);
         }
 
-        if error.to_lowercase().contains("rate limit") && result.rate_limit_resets_at.is_none() {
+        let error_lower = error.to_lowercase();
+        if (error_lower.contains("rate limit") || error_lower.contains("usage limit")) && result.rate_limit_resets_at.is_none() {
             return SessionOutcome::Failed {
                 story_key: story.story_key.clone(),
                 error: "RATE_LIMITED:0".to_string(),
