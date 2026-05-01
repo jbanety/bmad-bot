@@ -1510,14 +1510,6 @@ impl StoryPipeline {
             }
         }
 
-        // DEBUG: early exit after review + critic to inspect output
-        tracing::info!(
-            action = "debug_early_exit",
-            story_key = %story_key,
-            "Review + critic complete — exiting for debug"
-        );
-        std::process::exit(0);
-
         // Phase 5 — Push review fix commits to update PR (if review ran)
         if review_report.is_some()
             && let Err(e) = self.push_branch(&branch).await
