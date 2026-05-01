@@ -112,9 +112,12 @@ pub enum ConsultationError {
 // ConsultationState
 // ---------------------------------------------------------------------------
 
+/// Maximum times a single consultation can re-trigger within one session.
+const MAX_CONSULTATION_TRIGGERS: usize = 5;
+
 pub(crate) struct ConsultationState {
     pub config: ConsultationConfig,
-    pub triggered: bool,
+    pub trigger_count: usize,
     pub compiled_regex: regex::Regex,
 }
 
@@ -129,7 +132,7 @@ impl ConsultationState {
                 match config.trigger_regex() {
                     Ok(regex) => Some(Self {
                         config,
-                        triggered: false,
+                        trigger_count: 0,
                         compiled_regex: regex,
                     }),
                     Err(e) => {
@@ -144,6 +147,10 @@ impl ConsultationState {
                 }
             })
             .collect()
+    }
+
+    pub fn can_trigger(&self) -> bool {
+        self.trigger_count < MAX_CONSULTATION_TRIGGERS
     }
 }
 
@@ -535,8 +542,8 @@ mod tests {
         ];
         let states = ConsultationState::from_configs(configs);
         assert_eq!(states.len(), 2);
-        assert!(!states[0].triggered);
-        assert!(!states[1].triggered);
+        assert!(states[0].can_trigger());
+        assert!(states[1].can_trigger());
     }
 
     #[test]

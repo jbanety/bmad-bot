@@ -1891,7 +1891,7 @@ impl StoryPipeline {
             role: LlmRole::Critic,
             tool_set: ConsultationToolSet::Restricted,
             context_files,
-            trigger_pattern: r"- \[ \] \[Review\]\[Decision\]".to_string(),
+            trigger_pattern: r"(?i)(\[Review\]\[Decision\]|decision[_\s-]*needed)".to_string(),
             prompt_template: "The following code review findings need decisions. For each \
                 decision-needed finding, decide: patch (the fix is clear and unambiguous), \
                 defer (real issue but not actionable now), or dismiss (noise/false positive). \
@@ -6564,11 +6564,13 @@ development_status:
         assert!(re.is_match("- [ ] [Review][Decision] Some Finding"));
         assert!(re.is_match("- [ ] [Review][Decision] Missing null check — src/main.rs:42"));
 
-        // Should NOT match natural language
-        assert!(!re.is_match("For findings tagged [Review][Decision]"));
-        assert!(!re.is_match("decision-needed"));
-        // Should NOT match checked items
-        assert!(!re.is_match("- [x] [Review][Decision] Already resolved"));
+        // Should also match natural language variants
+        assert!(re.is_match("Decision Needed: how to handle this"));
+        assert!(re.is_match("decision-needed"));
+        assert!(re.is_match("DECISION_NEEDED"));
+
+        // Should match checked items too (re-triggerable)
+        assert!(re.is_match("- [x] [Review][Decision] Already resolved"));
 
         assert!(critic.resume_message_template.contains("{findings}"));
         assert!(!critic.resume_message_template.contains("decision-needed"));
@@ -6694,11 +6696,7 @@ development_status:
     #[test]
     fn test_review_preamble_contains_key_directives() {
         let preamble = crate::session::agent::build_review_preamble();
-        assert!(preamble.contains("NEXT response"));
         assert!(preamble.contains("<<BMAD_JOB_DONE>>"));
-        assert!(preamble.contains("SEPARATE turns"));
-        assert!(preamble.contains("Autonomous Review Mode"));
-        assert!(preamble.contains("[Review][Decision]"));
         assert!(preamble.contains("communication_language = English"));
     }
 

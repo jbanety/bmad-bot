@@ -1,7 +1,6 @@
 //! SDK consultation orchestration: post-session trigger detection,
 //! consultation execution via API, and SDK session resume with findings.
 
-use std::collections::HashSet;
 
 use crate::session::SessionOutcome;
 use crate::session::consultation::ConsultationConfig;
@@ -15,7 +14,6 @@ const MAX_SDK_CONSULTATION_ROUNDS: usize = 3;
 pub struct SdkConsultationRunner<'a> {
     sdk_runtime: &'a SdkRuntime,
     consultations: Vec<ConsultationConfig>,
-    fired: HashSet<String>,
     round: usize,
 }
 
@@ -24,7 +22,6 @@ impl<'a> SdkConsultationRunner<'a> {
         Self {
             sdk_runtime,
             consultations,
-            fired: HashSet::new(),
             round: 0,
         }
     }
@@ -210,12 +207,8 @@ impl<'a> SdkConsultationRunner<'a> {
 
     fn find_triggered_consultation(&mut self, trigger_text: &str) -> Option<ConsultationConfig> {
         for consultation in &self.consultations {
-            if self.fired.contains(&consultation.label) {
-                continue;
-            }
             if let Ok(re) = regex::Regex::new(&consultation.trigger_pattern) {
                 if re.is_match(trigger_text) {
-                    self.fired.insert(consultation.label.clone());
                     return Some(consultation.clone());
                 }
             } else {
@@ -566,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_triggered_consultation_fires_only_once() {
+    fn test_find_triggered_consultation_can_retrigger() {
         let config = std::sync::Arc::new(crate::config::BotConfig::_test_minimal("pretty", "info"));
         let secrets = std::sync::Arc::new(crate::config::BotSecrets {
             anthropic_api_key: None,
@@ -594,7 +587,7 @@ mod tests {
         assert!(first.is_some());
 
         let second = runner.find_triggered_consultation("STORY CONTEXT CREATED again");
-        assert!(second.is_none(), "consultation should only fire once");
+        assert!(second.is_some(), "consultation should be re-triggerable");
     }
 
     #[test]
