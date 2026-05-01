@@ -402,7 +402,6 @@ impl<'a> SdkConsultationRunner<'a> {
 fn consultation_skill_command(label: &str) -> Option<&'static str> {
     match label {
         "adversarial" => Some("/bmad-review-adversarial-general"),
-        "review-critic" => Some("/bmad-code-review"),
         _ => None,
     }
 }
