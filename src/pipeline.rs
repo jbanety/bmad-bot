@@ -3016,7 +3016,8 @@ impl StoryPipeline {
                 );
 
                 let trimmed = findings.trim();
-                if trimmed.is_empty() || trimmed == "NO_ACTION_NEEDED" || trimmed.starts_with("NO_ACTION_NEEDED\n") {
+                let upper = trimmed.to_uppercase();
+                if trimmed.is_empty() || upper == "NO_ACTION_NEEDED" || upper.starts_with("NO_ACTION_NEEDED\n") || upper.starts_with("NO_ACTION_NEEDED.") || upper.starts_with("NO_ACTION_NEEDED —") {
                     tracing::info!(
                         action = "epic_critic_clean",
                         epic_num = epic_num,
