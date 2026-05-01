@@ -2,7 +2,7 @@
 title: 'Move post-session pipeline steps from SessionRunner to pipeline level'
 type: 'refactor'
 created: '2026-04-29'
-status: 'in-progress'
+status: 'done'
 baseline_commit: '0f7c3a0'
 context:
   - '_bmad-output/project-context.md'

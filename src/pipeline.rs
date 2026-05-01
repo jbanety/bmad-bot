@@ -26,13 +26,13 @@ use crate::notifier::{
     EpicGateNotification, Notifier, RunSummary, StoryNotification, StoryStatus, create_notifier,
 };
 use crate::review::epic::{
-    DeferredItemRef, EpicReviewOutcome, EpicReviewRunner, PreEpicStory, extract_epic_recap,
-    generate_failure_report, parse_pre_epic_stories, parse_related_deferred_items,
+    DeferredItemRef, EpicReviewOutcome, EpicReviewRunner, PreEpicStory,
+    generate_failure_report, parse_related_deferred_items,
 };
 use crate::runtime::{RuntimeDeps, SessionContext, SessionRuntime, SkillPaths};
 use crate::session::SessionOutcome;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
-use crate::session::consultation::{ConsultationConfig, ConsultationToolSet};
+use crate::session::consultation::{ConsultationConfig, ConsultationRunner, ConsultationToolSet};
 use crate::session::runner::ShutdownFlag;
 use crate::session::state::{
     PHASE_CREATE, PHASE_CREATE_ADVERSARIAL_CONSULT, PHASE_CREATE_CRITIC_CONSULT, PHASE_DEV,
@@ -163,6 +163,8 @@ pub struct StoryPipeline {
     shutdown: ShutdownFlag,
     /// Persistent memory file for the Story Critic.
     critic_memory: CriticMemory,
+    /// Agent factory for standalone consultation runs (epic critic review).
+    agent_factory: Arc<AgentFactory>,
 }
 
 /// RAII guard that clears the sub-agent sessions map and in-flight set on drop.
@@ -291,6 +293,7 @@ impl StoryPipeline {
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory,
         })
     }
 
@@ -2593,24 +2596,23 @@ impl StoryPipeline {
     /// Core epic gate logic shared by [`try_epic_gate`] (post-story-completion)
     /// and [`scan_pending_epic_reviews`] (poll-cycle re-trigger).
     ///
-    /// Runs the autonomous review, saves the report, updates sprint-status to
-    /// `review`, creates a retro branch + MR, and sends a notification.
+    /// Autonomous flow: review → critic → create-story → finalize (done).
+    /// No human gate, no retro branch/MR.
     /// Returns `true` if the gate was activated (regardless of review success).
     async fn run_epic_gate_inner(
         &self,
         epic_num: u32,
         ssf: &SprintStatusFile,
         sprint_status_path: &Path,
-        last_completed_branch: Option<&str>,
+        _last_completed_branch: Option<&str>,
     ) -> bool {
-        // Count stories in the epic
         let story_count = ssf
             .stories()
             .iter()
             .filter(|s| s.epic_num == epic_num)
             .count();
 
-        // Run the autonomous epic review
+        // Step 1: Run the autonomous epic review (Winston)
         let outcome = self.epic_review_runner.run(epic_num).await;
         let (report, review_succeeded, error_summary) = match &outcome {
             EpicReviewOutcome::Completed { report, .. } => (report.clone(), true, None),
@@ -2619,64 +2621,6 @@ impl StoryPipeline {
                 (failure_report, false, Some(reason.clone()))
             }
         };
-
-        // Inject pre-epic stories from successful reviews
-        if review_succeeded {
-            let next_epic = epic_num + 1;
-            let pre_epic_stories = parse_pre_epic_stories(&report, next_epic);
-            if pre_epic_stories.is_empty() {
-                tracing::info!(
-                    action = "no_pre_epic_stories",
-                    next_epic = next_epic,
-                    "No pre-epic stories to inject for epic {next_epic}"
-                );
-            } else {
-                match inject_pre_epic_stories(sprint_status_path, &pre_epic_stories, next_epic)
-                    .await
-                {
-                    Ok(count) if count > 0 => {
-                        let skipped = pre_epic_stories.len() - count;
-                        tracing::info!(
-                            action = "pre_epic_stories_injected",
-                            count = count,
-                            skipped = skipped,
-                            next_epic = next_epic,
-                            "Injected {count} pre-epic stories for epic {next_epic} (skipped {skipped} duplicates)"
-                        );
-                        let repo_path = &self.config.bmad_paths.project_root;
-                        let commit_msg = format!(
-                            "chore(sprint-status): add pre-epic-{next_epic} debt stories from epic-{epic_num} review"
-                        );
-                        if let Err(e) =
-                            commit_sprint_status(repo_path, sprint_status_path, &commit_msg).await
-                        {
-                            tracing::error!(
-                                action = "pre_epic_commit_failed",
-                                error = %e,
-                                "Failed to commit pre-epic story injection �� continuing"
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        tracing::info!(
-                            action = "pre_epic_stories_all_duplicates",
-                            total = pre_epic_stories.len(),
-                            next_epic = next_epic,
-                            "All {} pre-epic stories for epic {next_epic} already present — skipped",
-                            pre_epic_stories.len()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            action = "pre_epic_injection_failed",
-                            error = %e,
-                            next_epic = next_epic,
-                            "Failed to inject pre-epic stories — continuing"
-                        );
-                    }
-                }
-            }
-        }
 
         // Save report to disk
         let report_filename = format!("epic-{epic_num}-retrospective-report.md");
@@ -2687,69 +2631,88 @@ impl StoryPipeline {
                 action = "epic_gate_report_save_failed",
                 error = %e,
                 epic_num = epic_num,
-                "Failed to save epic review report — continuing with gate activation"
+                "Failed to save epic review report — continuing"
             );
         }
 
-        // Update sprint-status on CURRENT branch (optional → review)
+        // Step 2: Critic review (only on successful review)
+        if review_succeeded {
+            let critic_findings = self.run_epic_critic_review(&report, epic_num).await;
+
+            // Step 3: Create pre-epic story if Critic found issues
+            if let Some(ref findings) = critic_findings {
+                let next_epic = epic_num + 1;
+                let created = self
+                    .run_pre_epic_story_creation(epic_num, &report, findings)
+                    .await;
+                if created {
+                    tracing::info!(
+                        action = "pre_epic_story_created",
+                        epic_num = epic_num,
+                        next_epic = next_epic,
+                        "Pre-epic story created for epic {next_epic}"
+                    );
+                } else {
+                    tracing::warn!(
+                        action = "pre_epic_story_creation_failed",
+                        epic_num = epic_num,
+                        next_epic = next_epic,
+                        "Pre-epic story creation failed — continuing without it"
+                    );
+                }
+            } else {
+                tracing::info!(
+                    action = "epic_critic_no_issues",
+                    epic_num = epic_num,
+                    "Critic found no issues — skipping pre-epic story creation"
+                );
+            }
+        }
+
+        // Step 4: Finalize — mark retrospective as done (no human gate)
         let retro_key = format!("epic-{epic_num}-retrospective");
         let repo_path = &self.config.bmad_paths.project_root;
-        if let Err(e) = update_story_status(sprint_status_path, &retro_key, "review").await {
+        if let Err(e) = update_story_status(sprint_status_path, &retro_key, "done").await {
             tracing::error!(
                 action = "epic_gate_status_update_failed",
                 error = %e,
                 epic_num = epic_num,
-                "Failed to update retrospective status — gate may not activate"
+                "Failed to update retrospective status to done"
             );
             return false;
         }
 
-        let gate_commit_msg =
-            format!("chore(sprint-status): epic {epic_num} gate activated — awaiting human review");
-        if let Err(e) = commit_sprint_status(repo_path, sprint_status_path, &gate_commit_msg).await
-        {
+        let commit_msg =
+            format!("chore(sprint-status): epic {epic_num} review complete — autonomous finalization");
+        if let Err(e) = commit_sprint_status(repo_path, sprint_status_path, &commit_msg).await {
             tracing::error!(
                 action = "epic_gate_commit_failed",
                 error = %e,
                 epic_num = epic_num,
-                "Failed to commit sprint-status gate update"
+                "Failed to commit sprint-status finalization"
             );
             return false;
         }
 
-        // Push current branch so watcher sees the gate
         if let Err(e) = push_current_branch(repo_path).await {
             tracing::error!(
                 action = "epic_gate_push_failed",
                 error = %e,
                 epic_num = epic_num,
-                "Failed to push sprint-status gate — watcher may not see gate until next push"
+                "Failed to push sprint-status — watcher may not see update until next push"
             );
-            // Non-fatal — continue with branch/MR creation
         }
 
-        // Create retro branch, commit report, push, create MR
-        let base_branch = last_completed_branch.unwrap_or(&self.config.git_provider.target_branch);
-        let retro_branch = format!("epic-{epic_num}-retrospective");
-        let mr_url = self
-            .create_retro_branch_and_mr(epic_num, &retro_branch, base_branch, &report_path, &report)
-            .await;
-
-        // Checkout back to the working branch (best effort)
-        let _ = checkout_branch(repo_path, base_branch).await;
-
-        // Resolve epic title for notification
+        // Notify
         let epic_title = resolve_epic_title(
             Path::new(&self.config.bmad_paths.planning_artifacts),
             epic_num,
         );
-
-        // Notify
         let notification = EpicGateNotification {
             epic_num,
             epic_title,
             story_count,
-            mr_url,
+            mr_url: None,
             review_succeeded,
             error_summary,
         };
@@ -2766,12 +2729,11 @@ impl StoryPipeline {
             action = "epic_gate_complete",
             epic_num = epic_num,
             review_succeeded = review_succeeded,
-            "Epic {epic_num} gate flow complete"
+            "Epic {epic_num} autonomous gate flow complete"
         );
 
         true
     }
-
     /// Scan sprint-status for completed epics whose retrospective is still
     /// `optional` — i.e. the review was never run or was reset after a failure.
     ///
@@ -2849,21 +2811,6 @@ impl StoryPipeline {
         let target_branch = &self.config.git_provider.target_branch;
 
         for epic_num in pending {
-            // Cleanup leftover retro branch from prior failed attempt (idempotent)
-            let retro_branch = format!("epic-{epic_num}-retrospective");
-            let _ = tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(repo_path)
-                .args(["branch", "-D", &retro_branch])
-                .output()
-                .await;
-            let _ = tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(repo_path)
-                .args(["push", "origin", "--delete", &retro_branch])
-                .output()
-                .await;
-
             // Re-load SSF since run_epic_gate_inner modifies sprint-status
             let ssf = match SprintStatusFile::load(&sprint_status_path, &story_dir) {
                 Ok(ssf) => ssf,
@@ -2983,136 +2930,262 @@ impl StoryPipeline {
         triggered
     }
 
-    /// Create the retrospective branch, commit the report, push, and create an MR.
+    /// Run the Critic on the epic review report.
     ///
-    /// Returns the MR URL if PR creation succeeded, `None` otherwise.
-    async fn create_retro_branch_and_mr(
-        &self,
-        epic_num: u32,
-        retro_branch: &str,
-        base_branch: &str,
-        report_path: &Path,
-        report: &str,
-    ) -> Option<String> {
-        let repo_path = &self.config.bmad_paths.project_root;
+    /// Spawns a standalone `ConsultationRunner` with the Critic role. The Critic
+    /// analyzes the report, determines what must be fixed before the next epic,
+    /// and appends its observations to critic-memory.md.
+    ///
+    /// Returns `Some(findings)` if the Critic identified issues, `None` if
+    /// nothing to fix or the consultation failed.
+    async fn run_epic_critic_review(&self, report: &str, epic_num: u32) -> Option<String> {
+        let next_epic = epic_num + 1;
+        self.ui
+            .phase_start(&format!("Epic {epic_num} Critic Review"));
+        let start = std::time::Instant::now();
 
-        // Compute a path relative to repo_path for `git add` — an absolute path
-        // passed to `git -C <repo> add -- <abs>` can silently fail on some git versions.
-        let report_path_relative = report_path
-            .strip_prefix(repo_path)
-            .unwrap_or(report_path)
-            .to_str()
-            .unwrap_or("epic-retrospective-report.md");
+        let critic_memory_path = self.critic_memory.prepare_context_path();
+        let project_brief_path = self.prepare_project_brief_path();
 
-        // Create branch from base
-        let create_output = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["checkout", "-b", retro_branch, base_branch])
-            .output()
-            .await;
+        // The report was already saved to disk — use that as context
+        let report_context_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
+            .join(format!("epic-{epic_num}-retrospective-report.md"));
 
-        match create_output {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                tracing::error!(
-                    action = "retro_branch_create_failed",
-                    error = %stderr,
-                    "Failed to create retrospective branch"
-                );
-                return None;
-            }
-            Err(e) => {
-                tracing::error!(
-                    action = "retro_branch_create_exec_failed",
-                    error = %e,
-                    "Failed to execute git checkout for retrospective branch"
-                );
-                return None;
-            }
+        let mut context_files = Vec::new();
+        if report_context_path.exists() {
+            context_files.push(report_context_path.to_string_lossy().to_string());
+        }
+        if let Some(brief_path) = project_brief_path {
+            context_files.push(brief_path);
+        }
+        if let Some(ref memory_path) = critic_memory_path {
+            context_files.push(memory_path.clone());
         }
 
-        // Write report file on retro branch (it may have been written before on a different branch)
-        if let Err(e) = tokio::fs::write(report_path, report).await {
-            tracing::error!(
-                action = "retro_report_write_failed",
-                error = %e,
-                "Failed to write report on retro branch"
-            );
-            let _ = checkout_branch(repo_path, base_branch).await;
-            return None;
-        }
-
-        // Stage and commit the report (use relative path for portability across git versions)
-        let _ = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["add", "--", report_path_relative])
-            .output()
-            .await;
-
-        let commit_msg = format!("docs(retrospective): epic {epic_num} autonomous review report");
-        let commit_output = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["commit", "-m", &commit_msg])
-            .output()
-            .await;
-
-        if let Ok(output) = &commit_output
-            && !output.status.success()
-        {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                action = "retro_commit_warn",
-                error = %stderr,
-                "Retrospective commit may have failed"
-            );
-        }
-
-        // Push retro branch — checkout back to base on failure to avoid leaving
-        // HEAD stranded on the retro branch for the remainder of the pipeline run.
-        if let Err(e) = self.push_branch(retro_branch).await {
-            tracing::error!(
-                action = "retro_push_failed",
-                error = %e,
-                "Failed to push retrospective branch"
-            );
-            let _ = checkout_branch(repo_path, base_branch).await;
-            return None;
-        }
-
-        // Create MR/PR
-        let mr_title = format!("Epic {epic_num} Retrospective — Review Gate");
-        let mr_description = extract_epic_recap(report);
-
-        let pr_params = CreatePrParams {
-            title: mr_title,
-            body: mr_description,
-            source_branch: retro_branch.to_string(),
-            target_branch: self.config.git_provider.target_branch.clone(),
+        let memory_instruction = if let Some(ref memory_path) = critic_memory_path {
+            format!(
+                "\n\nIMPORTANT: After your analysis, append a summary of your epic {epic_num} review \
+                 observations to your memory file at `{memory_path}` using `edit_file`. Include: \
+                 the epic number, key findings, and items requiring attention for epic {next_epic}. \
+                 This ensures cross-epic continuity in your reviews."
+            )
+        } else {
+            String::new()
         };
 
-        match self.git_provider.create_pr(pr_params).await {
-            Ok(pr_info) => {
-                tracing::info!(
-                    action = "retro_mr_created",
-                    url = %pr_info.url,
-                    epic_num = epic_num,
-                    "Retrospective MR created"
+        let config = ConsultationConfig {
+            label: format!("epic-{epic_num}-critic"),
+            skill_path: None,
+            preamble_override: Some(build_epic_critic_preamble()),
+            role: LlmRole::Critic,
+            tool_set: ConsultationToolSet::Restricted,
+            context_files,
+            trigger_pattern: String::new(),
+            prompt_template: format!(
+                "You are reviewing the autonomous epic review report for Epic {epic_num}. \
+                 Analyze the report and determine what technical issues, debt items, or risks \
+                 MUST be addressed before Epic {next_epic} begins.\n\n\
+                 Focus on:\n\
+                 - Critical or high-severity items from the Technical Analysis and Deferred Work sections\n\
+                 - Pattern inconsistencies that will compound if not fixed now\n\
+                 - Architecture drift that needs correction before new feature work\n\n\
+                 If there are items that must be fixed, describe them clearly with file paths and \
+                 specific actions. If the codebase is clean and nothing needs immediate attention, \
+                 respond with exactly: NO_ACTION_NEEDED\n\n\
+                 {{context}}{memory_instruction}\n\n\
+                 When finished, output <<BMAD_JOB_DONE>>"
+            ),
+            resume_message_template: String::new(),
+            pipeline_phase: None,
+        };
+
+        let runner = ConsultationRunner::new(
+            Arc::clone(&self.agent_factory),
+            Arc::clone(&self.shutdown),
+            self.ui.clone(),
+            PathBuf::from(&self.config.bmad_paths.project_root),
+        );
+
+        match runner.execute(&config).await {
+            Ok(findings) => {
+                self.critic_memory.check_size_threshold();
+                self.ui.phase_complete_with_result(
+                    &format!("Epic {epic_num} Critic Review"),
+                    start.elapsed(),
+                    "completed",
                 );
-                Some(pr_info.url)
+
+                let trimmed = findings.trim();
+                if trimmed.is_empty() || trimmed == "NO_ACTION_NEEDED" || trimmed.starts_with("NO_ACTION_NEEDED\n") {
+                    tracing::info!(
+                        action = "epic_critic_clean",
+                        epic_num = epic_num,
+                        "Critic found no issues requiring pre-epic story"
+                    );
+                    None
+                } else {
+                    tracing::info!(
+                        action = "epic_critic_findings",
+                        epic_num = epic_num,
+                        findings_len = trimmed.len(),
+                        "Critic identified issues for pre-epic story"
+                    );
+                    Some(trimmed.to_string())
+                }
             }
             Err(e) => {
-                tracing::error!(
-                    action = "retro_mr_failed",
+                tracing::warn!(
+                    action = "epic_critic_failed",
                     error = %e,
                     epic_num = epic_num,
-                    "Failed to create retrospective MR"
+                    "Epic critic review failed — continuing without pre-epic story"
+                );
+                self.ui.phase_complete_with_result(
+                    &format!("Epic {epic_num} Critic Review"),
+                    start.elapsed(),
+                    "failed",
                 );
                 None
             }
+        }
+    }
+
+    /// Create a pre-epic story via a standard create-story session.
+    ///
+    /// Spawns a session with the `bmad-create-story` skill, injecting the epic
+    /// review report and Critic findings as context.
+    async fn run_pre_epic_story_creation(
+        &self,
+        epic_num: u32,
+        report: &str,
+        critic_findings: &str,
+    ) -> bool {
+        let next_epic = epic_num + 1;
+        let story_info = self.build_pre_epic_story_info(epic_num);
+
+        self.ui
+            .phase_start(&format!("Pre-Epic {next_epic} Story Creation"));
+        let start = std::time::Instant::now();
+
+        let critic_memory_path = self.critic_memory.prepare_context_path();
+        let project_brief_path = self.prepare_project_brief_path();
+        let consultations =
+            self.build_create_story_consultations(&story_info, critic_memory_path, project_brief_path);
+
+        // Truncate report context to avoid blowing the context window
+        let report_excerpt = if report.len() > 8192 {
+            let boundary = report.floor_char_boundary(8192);
+            format!(
+                "{}...\n\n[Report truncated — full report saved to disk]",
+                &report[..boundary]
+            )
+        } else {
+            report.to_string()
+        };
+
+        // Write context as the story's specs file so the create-story skill picks it up
+        let pre_epic_context = format!(
+            "# Pre-Epic Story Context for Epic {next_epic}\n\n\
+             Create a single consolidated pre-epic story that addresses the following issues \
+             identified during the Epic {epic_num} review. The story key should follow the \
+             convention: `{next_epic}-0a-pre-epic-{next_epic}-{{slug}}`.\n\n\
+             ## Epic {epic_num} Review Report (excerpt)\n\n\
+             {report_excerpt}\n\n\
+             ## Critic Findings — Items to Fix Before Epic {next_epic}\n\n\
+             {critic_findings}\n"
+        );
+
+        let specs_path = PathBuf::from(&self.config.bmad_paths.project_root)
+            .join(&story_info.specs_path);
+        if let Some(parent) = specs_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        if let Err(e) = tokio::fs::write(&specs_path, &pre_epic_context).await {
+            tracing::error!(
+                action = "pre_epic_context_write_failed",
+                error = %e,
+                "Failed to write pre-epic story context file"
+            );
+            return false;
+        }
+
+        let session_outcome = self
+            .session_runtime
+            .run_session(SessionContext {
+                story: &story_info,
+                base_branch_override: None,
+                consultations,
+                role: LlmRole::Dev,
+                initial_phase: PHASE_CREATE,
+            })
+            .await;
+
+        let elapsed = start.elapsed();
+
+        match session_outcome {
+            SessionOutcome::Completed { story_key, .. } => {
+                self.ui.phase_complete_with_result(
+                    &format!("Pre-Epic {next_epic} Story Creation"),
+                    elapsed,
+                    "story created",
+                );
+                tracing::info!(
+                    action = "pre_epic_story_complete",
+                    story_key = %story_key,
+                    "Pre-epic story creation completed"
+                );
+                self.post_session_commit(&story_info).await;
+                true
+            }
+            SessionOutcome::Escalated {
+                report: esc_report, ..
+            } => {
+                self.ui.phase_complete_with_result(
+                    &format!("Pre-Epic {next_epic} Story Creation"),
+                    elapsed,
+                    "escalated",
+                );
+                tracing::warn!(
+                    action = "pre_epic_story_escalated",
+                    reason = %esc_report.reason,
+                    "Pre-epic story creation escalated — continuing without story"
+                );
+                false
+            }
+            SessionOutcome::Failed { error, .. } => {
+                self.ui.phase_complete_with_result(
+                    &format!("Pre-Epic {next_epic} Story Creation"),
+                    elapsed,
+                    "failed",
+                );
+                tracing::warn!(
+                    action = "pre_epic_story_failed",
+                    error = %error,
+                    "Pre-epic story creation failed — continuing without story"
+                );
+                false
+            }
+        }
+    }
+
+    /// Construct a synthetic `StoryInfo` for a pre-epic story.
+    fn build_pre_epic_story_info(&self, epic_num: u32) -> StoryInfo {
+        let next_epic = epic_num + 1;
+        let story_key = format!("{next_epic}-0a-pre-epic-{next_epic}");
+        let branch_name = format!("story/{story_key}");
+        let specs_path =
+            PathBuf::from(&self.config.bmad_paths.implementation_artifacts).join(format!("{story_key}.md"));
+
+        StoryInfo {
+            story_id: format!("{next_epic}.0a"),
+            story_key,
+            epic_num: next_epic,
+            story_num: 0,
+            label: format!("pre-epic-{next_epic}"),
+            branch_name,
+            specs_path,
+            dependencies: Vec::new(),
+            status: "backlog".to_string(),
         }
     }
 }
@@ -4738,6 +4811,60 @@ fn build_story_critic_preamble(has_vision_document: bool) -> String {
     )
 }
 
+fn build_epic_critic_preamble() -> String {
+    "You are the Story Critic — an independent product and technical vision guardian.\n\
+     \n\
+     You are NOT part of the BMAD methodology. You are an external advisor reviewing an \
+     autonomous epic review report to determine what must be fixed before the next epic.\n\
+     \n\
+     ## Your Review Mandate\n\
+     \n\
+     Analyze the epic review report and identify:\n\
+     1. **Critical debt** — Technical debt items that will compound if not addressed now\n\
+     2. **Architecture drift** — Implementation patterns that deviate from the architecture\n\
+     3. **Pattern inconsistencies** — Same problems solved differently across stories\n\
+     4. **Overdue items** — Deferred work that has crossed multiple epic boundaries\n\
+     5. **Risk items** — Issues that could cause failures in the next epic\n\
+     \n\
+     Focus on items that MUST be fixed before the next epic begins. Ignore cosmetic issues \
+     and items that can safely defer further.\n\
+     \n\
+     ## Persistent Memory\n\
+     \n\
+     You have a persistent memory file (critic-memory.md) loaded in your context. It contains \
+     your observations from all previous reviews. Read it carefully — it is your \
+     institutional knowledge.\n\
+     \n\
+     After completing your review, update your memory file:\n\
+     1. Read the current content of critic-memory.md\n\
+     2. Edit in append mode to write the COMPLETE content: all existing content \
+     preserved, plus your new observation section appended at the end\n\
+     \n\
+     Your new section must include:\n\
+     - Date and epic number (e.g., \"## Epic 15 Review — 2026-05-01\")\n\
+     - Review type: \"Epic Review\"\n\
+     - Key findings from the report\n\
+     - Items you flagged for pre-epic remediation\n\
+     - Cross-epic patterns and trends\n\
+     \n\
+     CRITICAL: Use edit mode not create mode. The file already exists.\n\
+     \n\
+     ## CRITICAL: Edit File Restriction\n\
+     \n\
+     You must ONLY use edit on ONE file: critic-memory.md. This is your personal memory file.\n\
+     NEVER modify any other file — not source code, not story files, not configuration files.\n\
+     When editing critic-memory.md, ALWAYS use overwrite mode (never create mode — the file already exists).\n\
+     \n\
+     You are read-only on the codebase except for your own memory file.\n\
+     \n\
+     ## Communication\n\
+     - Respond in English\n\
+     - Be constructive but direct — flag real concerns, not theoretical ones\n\
+     - Every finding must reference specific file paths or code patterns from the report\n\
+     - Quality over quantity — 3 critical items are better than 10 minor ones"
+        .to_string()
+}
+
 /// Detect infrastructure errors where the session never started.
 ///
 /// These errors mean no partial work exists on the branch — creating a failure
@@ -6258,6 +6385,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory,
         }
     }
 
@@ -6630,6 +6758,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory: Arc::clone(&agent_factory),
         };
 
         let story =
@@ -6704,6 +6833,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory: Arc::clone(&agent_factory),
         };
 
         let story =
@@ -6873,6 +7003,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory: Arc::clone(&agent_factory),
         };
 
         let result = pipeline.prepare_project_brief_path();
@@ -6937,6 +7068,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory: Arc::clone(&agent_factory),
         };
 
         let result = pipeline.prepare_project_brief_path();
@@ -7001,6 +7133,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory: Arc::clone(&agent_factory),
         };
 
         let result = pipeline.prepare_project_brief_path();
@@ -7064,6 +7197,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory: Arc::clone(&agent_factory),
         };
 
         let result = pipeline.prepare_project_brief_path();
@@ -7134,6 +7268,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory: Arc::clone(&agent_factory),
         };
 
         let result = pipeline.prepare_project_brief_path();
@@ -7206,6 +7341,7 @@ development_status:
             ui,
             shutdown: pipeline_shutdown,
             critic_memory,
+            agent_factory: Arc::clone(&agent_factory),
         };
 
         let result = pipeline.prepare_project_brief_path();

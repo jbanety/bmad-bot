@@ -215,3 +215,7 @@
 - **Wildcard `_ => "codex"` in `prompt_provider_options` maps any unknown provider to codex CLI name:** `match provider { "claude-code" => "claude", _ => "codex" }` at `src/cli/mod.rs:194-195`. If a new SDK provider is added to `LLM_PROVIDERS` without updating this match, the prompt will incorrectly offer "codex" as the CLI name. Maintenance hazard, not a current bug.
 - **8-element positional tuple for same_for_all destructuring is fragile:** The `same_for_all` branch returns `(provider, model, base_url, cli_path, provider, model, base_url, cli_path)` where all `Option<String>` fields can be silently swapped without type errors. A struct would provide named-field safety. [src/cli/mod.rs:647-665]
 - **`parse_base_url_input` does not validate URL format:** User discovers the error only after completing the entire interactive wizard when `config.validate()` fails. Pre-existing behavior not introduced by this story. [src/cli/mod.rs]
+
+## Deferred from: code review of epic-review-critic-autonomous (2026-05-01)
+
+- **`inject_pre_epic_stories()` is now dead code in the autonomous epic gate flow:** The function at `src/pipeline.rs` and its 8+ tests still exist, but the only call site in `run_epic_gate_inner()` was removed. The autonomous flow now uses Critic + create-story session instead. Consider removing the function and tests, or documenting it as a utility for manual use.
