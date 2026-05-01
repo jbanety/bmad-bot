@@ -1904,7 +1904,8 @@ impl StoryPipeline {
                 that need human decisions. You are acting as the human decision-maker.\n\n\
                 Read the reviewer's message below and answer each question directly — \
                 pick a numbered option or provide the requested input. Base your decisions \
-                on the project brief, your memory of previous reviews, and engineering judgment.\n\n\
+                on the project brief, your memory of previous reviews, the completed stories \
+                from this epic, and the current story spec — all loaded in your context.\n\n\
                 --- Reviewer message ---\n{context}"
                 .to_string(),
             resume_message_template: "An external vision reviewer has resolved the following \
