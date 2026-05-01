@@ -246,7 +246,7 @@ impl<'a> SdkConsultationRunner<'a> {
         &self,
         consultation: &ConsultationConfig,
         role_config: &crate::config::LlmRoleConfig,
-        _trigger_text: &str,
+        trigger_text: &str,
     ) -> Result<Option<String>, String> {
         let lang_override = "\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.";
         let prompt = if let Some(skill) = consultation_skill_command(&consultation.label) {
@@ -274,7 +274,14 @@ impl<'a> SdkConsultationRunner<'a> {
                 .preamble_override
                 .as_deref()
                 .unwrap_or("You are an independent reviewer. Analyze the provided context and report your findings.");
-            format!("{preamble}\n\n{rendered}{lang_override}")
+
+            let trigger_section = if trigger_text.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n--- Code review output ---\n{trigger_text}")
+            };
+
+            format!("{preamble}\n\n{rendered}{trigger_section}{lang_override}")
         };
 
         self.sdk_runtime.ui().sdk_input(
