@@ -588,12 +588,12 @@ pub(crate) fn auto_response_for_prompt(text: &str) -> Option<String> {
 
     // Numeric choice prompts — detect specific BMAD workflow patterns
     if is_numeric_choice_prompt(text) {
-        // "What would you like to do next?" / "next steps" → Done (end session)
+        // "What would you like to do next?" / "next steps" → stop, don't burn tokens
         if lower.contains("what would you like to do next")
             || lower.contains("next step")
             || (lower.contains("done") && lower.contains("re-run"))
         {
-            return Some("3".to_string());
+            return None;
         }
 
         // Patch handling: prefer batch-apply (0) when offered, else apply all (1)
