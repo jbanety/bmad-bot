@@ -1465,6 +1465,27 @@ pub async fn run_mcp_supervisor(config_path: &Path, story_key: &str) -> Result<(
     Ok(())
 }
 
+fn ensure_gitignored(project_root: &str, filename: &str) {
+    let gitignore_path = Path::new(project_root).join(".gitignore");
+    let content = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+    if content.lines().any(|l| l.trim() == filename) {
+        return;
+    }
+    let entry = if content.ends_with('\n') || content.is_empty() {
+        format!("{filename}\n")
+    } else {
+        format!("\n{filename}\n")
+    };
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&gitignore_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, entry.as_bytes()))
+    {
+        tracing::warn!(error = %e, "Failed to add {filename} to .gitignore");
+    }
+}
+
 pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
     let config = BotConfig::load(config_path)?;
     config.validate()?;
@@ -1512,6 +1533,9 @@ pub async fn run_start(config_path: &Path) -> Result<(), CliError> {
             "No BMAD installation detected — _bmad/ directory not found"
         );
     }
+
+    // Ensure daemon artifacts are gitignored so branch checkouts don't fail
+    ensure_gitignored(&config.bmad_paths.project_root, state::STATE_FILE_NAME);
 
     // Write daemon state file
     let state_path = Path::new(state::STATE_FILE_NAME);
