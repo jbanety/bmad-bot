@@ -573,7 +573,6 @@ pub(crate) fn auto_response_for_prompt(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
     // BMAD checkpoint: "HALT and wait for user confirmation to proceed"
-    // Matches: "proceed", "continue", "confirm", "go ahead" as expected response
     if is_checkpoint_prompt(&lower) {
         return Some("proceed".to_string());
     }
@@ -587,9 +586,46 @@ pub(crate) fn auto_response_for_prompt(text: &str) -> Option<String> {
         return Some("Y — review all chunks in order, starting from the first group".to_string());
     }
 
-    // Numeric choice prompts (1/2/3) — always pick option 1
+    // Numeric choice prompts — detect specific BMAD workflow patterns
     if is_numeric_choice_prompt(text) {
-        return Some("1".to_string());
+        // "What would you like to do next?" / "next steps" → Done (end session)
+        if lower.contains("what would you like to do next")
+            || lower.contains("next step")
+            || (lower.contains("done") && lower.contains("re-run"))
+        {
+            return Some("3".to_string());
+        }
+
+        // Patch handling: prefer batch-apply (0) when offered, else apply all (1)
+        if lower.contains("patch") && lower.contains("handle") {
+            let tail = if text.len() > 500 {
+                &text[text.len() - 500..]
+            } else {
+                text
+            };
+            let has_option_0 = tail.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with("0.") || t.starts_with("0)")  || t.starts_with("0 —") || t.starts_with("0-")
+            });
+            return if has_option_0 {
+                Some("0".to_string())
+            } else {
+                Some("1".to_string())
+            };
+        }
+
+        // Approve / confirm spec → [A]
+        if lower.contains("[a] approv") || lower.contains("[a] approve") {
+            return Some("A".to_string());
+        }
+
+        // Default: don't auto-respond to unknown numeric prompts
+        tracing::warn!(
+            action = "auto_confirm_unknown_prompt",
+            tail = %&text[text.len().saturating_sub(200)..],
+            "Unknown numeric choice prompt — not auto-responding"
+        );
+        return None;
     }
 
     // Default Y/N confirmation
