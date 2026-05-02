@@ -2180,14 +2180,14 @@ impl SessionRunner {
         session_state: &mut SessionState,
     ) -> Option<ResponseAction> {
         for state in consultation_states.iter_mut() {
-            if state.triggered {
+            if !state.can_trigger() {
                 continue;
             }
             if !state.compiled_regex.is_match(response) {
                 continue;
             }
 
-            state.triggered = true;
+            state.trigger_count += 1;
 
             if let Some(ref phase) = state.config.pipeline_phase {
                 session_state.set_pipeline_phase(phase);
