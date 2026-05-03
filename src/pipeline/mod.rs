@@ -1445,9 +1445,11 @@ impl StoryPipeline {
                         .completion_text
                         .as_deref()
                         .map(|t| {
-                            t.contains("[Review][Patch]")
-                                || t.contains("[Review][Decision]")
-                                || t.contains("[Review][Defer]")
+                            let lower = t.to_lowercase();
+                            (lower.contains("`decision-needed`")
+                                || lower.contains("`patch`")
+                                || lower.contains("`defer`"))
+                                && lower.contains("code review complete")
                         })
                         .unwrap_or(false);
                     let story_path = PathBuf::from(&self.config.bmad_paths.project_root)
@@ -2265,7 +2267,7 @@ impl StoryPipeline {
                 }
             };
 
-            // Persist findings to critic memory
+            // Persist findings to critic memory and commit
             if let Err(e) = self
                 .critic_memory
                 .append_entry(&story.story_key, &consult_config.label, &findings)
@@ -2278,6 +2280,7 @@ impl StoryPipeline {
                 );
             } else {
                 self.ui.critic_memory_update(&story.story_key);
+                self.commit_critic_memory().await;
             }
 
             tracing::info!(
@@ -2544,6 +2547,56 @@ impl StoryPipeline {
                     error = %e,
                     "git commit command failed"
                 );
+            }
+        }
+    }
+
+    /// Commit critic-memory.md if it has uncommitted changes.
+    async fn commit_critic_memory(&self) {
+        let repo_path = &self.config.bmad_paths.project_root;
+        let memory_path = self.critic_memory.prepare_context_path();
+        let Some(mem_path) = memory_path else { return };
+
+        let status = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["status", "--porcelain", "--"])
+            .arg(&mem_path)
+            .output()
+            .await;
+        let is_dirty = status.as_ref().map(|o| !o.stdout.is_empty()).unwrap_or(false);
+        if !is_dirty {
+            return;
+        }
+
+        let add = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["add", "--"])
+            .arg(&mem_path)
+            .output()
+            .await;
+        if let Err(e) = add {
+            tracing::warn!(error = %e, "Failed to git add critic-memory.md");
+            return;
+        }
+
+        let commit = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["commit", "-m", "docs: update critic memory with review findings"])
+            .output()
+            .await;
+        match commit {
+            Ok(o) if o.status.success() => {
+                tracing::info!(action = "critic_memory_committed", "Committed critic-memory.md");
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!(stderr = %stderr, "git commit critic-memory.md failed");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "git commit critic-memory.md exec failed");
             }
         }
     }
@@ -3498,6 +3551,7 @@ impl StoryPipeline {
                 tracing::warn!(error = %e, "Failed to append epic critic findings to critic memory");
             } else {
                 self.ui.critic_memory_update(&story_key);
+                self.commit_critic_memory().await;
             }
             Some(findings.to_string())
         }
