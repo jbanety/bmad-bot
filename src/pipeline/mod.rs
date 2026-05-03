@@ -3609,25 +3609,6 @@ impl StoryPipeline {
             || upper.starts_with("NO_ACTION_NEEDED.")
             || upper.starts_with("NO_ACTION_NEEDED —");
 
-        // Always persist to memory — even clean reviews provide cross-epic continuity
-        let memory_content = if no_action {
-            format!("Epic {epic_num} reviewed — no action needed, codebase healthy.")
-        } else {
-            self.summarize_for_memory(&story_key, "Epic Critic Review", findings, Some(report))
-                .await
-                .unwrap_or_else(|| findings.to_string())
-        };
-        if let Err(e) = self
-            .critic_memory
-            .append_entry(&story_key, "Epic Critic Review", &memory_content)
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to append epic critic findings to critic memory");
-        } else {
-            self.ui.critic_memory_update(&story_key);
-            self.commit_critic_memory().await;
-        }
-
         if no_action {
             tracing::info!(
                 action = "epic_critic_clean",
