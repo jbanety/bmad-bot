@@ -822,16 +822,38 @@ impl StoryPipeline {
         // Phase 1 — Dev Session
         self.ui.phase_start("Dev Session");
         let session_start = std::time::Instant::now();
-        let session_outcome = self
+
+        // Branch setup (pipeline-owned)
+        if let Err(outcome) = self
+            .pipeline_ensure_branch(story, base_branch_override)
+            .await
+        {
+            return self.outcome_to_pipeline_result(outcome, story_title);
+        }
+
+        let prompt = format!(
+            "/bmad-dev-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+            story.specs_path.to_string_lossy()
+        );
+
+        let raw = self
             .session_runtime
-            .run_session(SessionContext {
-                story,
-                base_branch_override,
-                consultations: vec![],
+            .execute(RuntimeCommand::Start {
                 role: LlmRole::Dev,
-                initial_phase: PHASE_DEV,
+                phase: PHASE_DEV.to_string(),
+                story_key: story.story_key.clone(),
+                prompt,
+                skill_path: None,
+                preamble: None,
+                needs_supervisor: true,
             })
             .await;
+
+        let raw = self
+            .auto_response_loop(raw, &LlmRole::Dev, &story.story_key)
+            .await;
+
+        let session_outcome = self.interpret_raw_result(&raw, story).await;
         let session_elapsed = session_start.elapsed();
 
         if self.is_shutdown() {
@@ -1393,16 +1415,49 @@ impl StoryPipeline {
             let consultations =
                 self.build_review_consultations(story, critic_memory_path, project_brief_path);
 
-            let session_outcome = self
+            // Execute review session via new pipeline-controlled path
+            let review_prompt = format!(
+                "/bmad-code-review {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+                story.specs_path.to_string_lossy()
+            );
+
+            let raw = self
                 .session_runtime
-                .run_session(SessionContext {
-                    story,
-                    base_branch_override: Some(&branch),
-                    consultations,
+                .execute(RuntimeCommand::Start {
                     role: LlmRole::Review,
-                    initial_phase: PHASE_REVIEW,
+                    phase: PHASE_REVIEW.to_string(),
+                    story_key: story.story_key.clone(),
+                    prompt: review_prompt,
+                    skill_path: None,
+                    preamble: None,
+                    needs_supervisor: false,
                 })
                 .await;
+
+            let raw = self
+                .auto_response_loop(raw, &LlmRole::Review, &story.story_key)
+                .await;
+
+            // Run review-critic consultation if findings warrant it
+            let raw = if raw.exit_code == Some(0) && !consultations.is_empty() {
+                if let Some(ref sid) = raw.session_id {
+                    let (result, _) = self
+                        .run_consultation_sequence(
+                            story,
+                            sid,
+                            &LlmRole::Review,
+                            &consultations,
+                        )
+                        .await;
+                    result
+                } else {
+                    raw
+                }
+            } else {
+                raw
+            };
+
+            let session_outcome = self.interpret_raw_result(&raw, story).await;
 
             self.critic_memory.check_size_threshold();
 
