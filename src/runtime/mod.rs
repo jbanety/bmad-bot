@@ -82,7 +82,41 @@ impl SkillPaths {
 }
 
 // ---------------------------------------------------------------------------
-// SessionContext — runtime-agnostic session parameters
+// RawSessionResult — runtime-agnostic session output (Phase B)
+// ---------------------------------------------------------------------------
+
+/// Raw result from a runtime execution. No interpretation, no business logic.
+/// The pipeline interprets this into a `SessionOutcome`.
+pub type RawSessionResult = sdk::SdkSessionResult;
+
+// ---------------------------------------------------------------------------
+// RuntimeCommand — what the pipeline asks a runtime to do (Phase B)
+// ---------------------------------------------------------------------------
+
+/// Command dispatched by the pipeline to a runtime for execution.
+#[derive(Debug)]
+pub enum RuntimeCommand {
+    /// Start a fresh session.
+    Start {
+        role: LlmRole,
+        phase: String,
+        story_key: String,
+        prompt: String,
+        skill_path: Option<String>,
+        preamble: Option<String>,
+        needs_supervisor: bool,
+    },
+    /// Resume an existing session with additional input.
+    Resume {
+        session_id: String,
+        prompt: String,
+        role: LlmRole,
+        story_key: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// SessionContext — runtime-agnostic session parameters (legacy, Phase C removal)
 // ---------------------------------------------------------------------------
 
 pub struct SessionContext<'a> {
@@ -122,6 +156,50 @@ impl SessionRuntime {
                     sdk.run_session(context).await
                 } else {
                     api.run_session(context).await
+                }
+            }
+        }
+    }
+
+    /// Execute a single runtime command and return raw results.
+    /// No interpretation, no auto-response, no consultations.
+    /// The pipeline layer handles all orchestration on top of this.
+    pub async fn execute(&self, command: RuntimeCommand) -> RawSessionResult {
+        let role = match &command {
+            RuntimeCommand::Start { role, .. } => role.clone(),
+            RuntimeCommand::Resume { role, .. } => role.clone(),
+        };
+        match self {
+            Self::Sdk(sdk) => sdk.execute_command(command).await,
+            Self::Api(_api) => {
+                // TODO Phase C: implement API runtime execute
+                RawSessionResult {
+                    session_id: None,
+                    exit_code: Some(1),
+                    stderr: "API runtime execute() not yet implemented".to_string(),
+                    timed_out: false,
+                    shutdown_requested: false,
+                    completion_text: None,
+                    stream_error: Some("Not implemented".to_string()),
+                    rate_limit_resets_at: None,
+                }
+            }
+            Self::Dual { sdk, config, .. } => {
+                let role_config = resolve_role_config(&config.llm, &role);
+                if role_config.is_sdk_provider() {
+                    sdk.execute_command(command).await
+                } else {
+                    // TODO Phase C: implement API runtime execute
+                    RawSessionResult {
+                        session_id: None,
+                        exit_code: Some(1),
+                        stderr: "API runtime execute() not yet implemented".to_string(),
+                        timed_out: false,
+                        shutdown_requested: false,
+                        completion_text: None,
+                        stream_error: Some("Not implemented".to_string()),
+                        rate_limit_resets_at: None,
+                    }
                 }
             }
         }

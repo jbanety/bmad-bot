@@ -251,6 +251,95 @@ impl SdkRuntime {
         }
     }
 
+    /// Execute a runtime command — dumb executor, no business logic.
+    /// Dispatches Start/Resume to the appropriate SDK provider, returns raw result.
+    pub async fn execute_command(&self, command: super::RuntimeCommand) -> SdkSessionResult {
+        use super::RuntimeCommand;
+        match command {
+            RuntimeCommand::Start {
+                role,
+                phase,
+                story_key,
+                prompt,
+                skill_path,
+                preamble,
+                needs_supervisor,
+            } => {
+                let provider = self.resolve_provider_for_role(&role);
+                match provider.as_str() {
+                    "claude-code" => {
+                        super::sdk_claude::execute_claude_start(
+                            self,
+                            &role,
+                            &phase,
+                            &story_key,
+                            &prompt,
+                            skill_path.as_deref(),
+                            preamble.as_deref(),
+                            needs_supervisor,
+                        )
+                        .await
+                    }
+                    "codex" => {
+                        super::sdk_codex::execute_codex_start(
+                            self,
+                            &role,
+                            &phase,
+                            &story_key,
+                            &prompt,
+                            skill_path.as_deref(),
+                            preamble.as_deref(),
+                            needs_supervisor,
+                        )
+                        .await
+                    }
+                    other => SdkSessionResult {
+                        session_id: None,
+                        exit_code: Some(1),
+                        stderr: format!("SDK provider '{other}' not implemented."),
+                        timed_out: false,
+                        shutdown_requested: false,
+                        completion_text: None,
+                        stream_error: Some(format!("Unknown provider: {other}")),
+                        rate_limit_resets_at: None,
+                    },
+                }
+            }
+            RuntimeCommand::Resume {
+                session_id,
+                prompt,
+                role,
+                story_key: _,
+            } => {
+                let provider = self.resolve_provider_for_role(&role);
+                match provider.as_str() {
+                    "claude-code" => {
+                        super::sdk_claude::execute_claude_resume(
+                            self, &role, &session_id, &prompt,
+                        )
+                        .await
+                    }
+                    "codex" => {
+                        super::sdk_codex::execute_codex_resume(
+                            self, &role, &session_id, &prompt,
+                        )
+                        .await
+                    }
+                    other => SdkSessionResult {
+                        session_id: None,
+                        exit_code: Some(1),
+                        stderr: format!("SDK provider '{other}' does not support resume."),
+                        timed_out: false,
+                        shutdown_requested: false,
+                        completion_text: None,
+                        stream_error: Some(format!("Unknown provider: {other}")),
+                        rate_limit_resets_at: None,
+                    },
+                }
+            }
+        }
+    }
+
     /// Dispatches an SDK session to the appropriate provider.
     pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
         let provider = self.resolve_provider_for_role(&context.role);

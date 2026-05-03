@@ -464,7 +464,117 @@ pub fn build_codex_resume_config(
 }
 
 // ---------------------------------------------------------------------------
-// Orchestration — resume_codex_session
+// Dumb executors — Phase B: no auto-response, no consultation, no outcome mapping
+// ---------------------------------------------------------------------------
+
+/// Execute a fresh Codex session. Returns raw subprocess result.
+pub async fn execute_codex_start(
+    runtime: &SdkRuntime,
+    role: &crate::llm::agent_factory::LlmRole,
+    _phase: &str,
+    story_key: &str,
+    prompt: &str,
+    _skill_path: Option<&str>,
+    _preamble: Option<&str>,
+    needs_supervisor: bool,
+) -> SdkSessionResult {
+    let role_config = runtime.config_for_role(role);
+
+    let project_root = match std::fs::canonicalize(&runtime.config().bmad_paths.project_root) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to canonicalize project_root, using raw value");
+            PathBuf::from(&runtime.config().bmad_paths.project_root)
+        }
+    };
+
+    let mcp_backup: Option<CodexMcpBackup> = if needs_supervisor {
+        let mcp_json = crate::mcp_server::generate_mcp_config(
+            story_key,
+            runtime.config_path(),
+            runtime.secrets(),
+            &runtime.config().mcp_servers,
+        );
+        match write_codex_mcp_config(&project_root, &mcp_json) {
+            Ok(backup) => Some(backup),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to write Codex MCP config");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let session_config = build_codex_config(role_config, &project_root, prompt);
+
+    let result = match runtime
+        .execute_session(session_config, parse_codex_line)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(backup) = mcp_backup {
+                restore_codex_mcp_config(backup);
+            }
+            return SdkSessionResult {
+                session_id: None,
+                exit_code: Some(1),
+                stderr: e.to_string(),
+                timed_out: false,
+                shutdown_requested: false,
+                completion_text: None,
+                stream_error: Some(e.to_string()),
+                rate_limit_resets_at: None,
+            };
+        }
+    };
+
+    if let Some(backup) = mcp_backup {
+        restore_codex_mcp_config(backup);
+    }
+    result
+}
+
+/// Resume a Codex session. Returns raw subprocess result.
+pub async fn execute_codex_resume(
+    runtime: &SdkRuntime,
+    role: &crate::llm::agent_factory::LlmRole,
+    session_id: &str,
+    prompt: &str,
+) -> SdkSessionResult {
+    let role_config = runtime.config_for_role(role);
+
+    let project_root = match std::fs::canonicalize(&runtime.config().bmad_paths.project_root) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to canonicalize project_root for resume");
+            PathBuf::from(&runtime.config().bmad_paths.project_root)
+        }
+    };
+
+    let session_config = build_codex_resume_config(role_config, &project_root, session_id, prompt);
+
+    match runtime
+        .execute_session(session_config, parse_codex_line)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => SdkSessionResult {
+            session_id: None,
+            exit_code: Some(1),
+            stderr: e.to_string(),
+            timed_out: false,
+            shutdown_requested: false,
+            completion_text: None,
+            stream_error: Some(e.to_string()),
+            rate_limit_resets_at: None,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration — resume_codex_session (legacy, Phase C removal)
 // ---------------------------------------------------------------------------
 
 pub async fn resume_codex_session(
