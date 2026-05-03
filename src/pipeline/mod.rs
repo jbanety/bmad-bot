@@ -3448,16 +3448,53 @@ impl StoryPipeline {
             return false;
         }
 
-        let session_outcome = self
+        // Branch setup
+        if let Err(outcome) = self.pipeline_ensure_branch(&story_info, None).await {
+            tracing::error!(
+                action = "pre_epic_branch_failed",
+                error = ?outcome,
+                "Branch setup failed for pre-epic story creation"
+            );
+            return false;
+        }
+
+        let prompt = format!(
+            "/bmad-create-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+            story_info.story_key
+        );
+
+        let raw = self
             .session_runtime
-            .run_session(SessionContext {
-                story: &story_info,
-                base_branch_override: None,
-                consultations,
+            .execute(RuntimeCommand::Start {
                 role: LlmRole::Dev,
-                initial_phase: PHASE_CREATE,
+                phase: PHASE_CREATE.to_string(),
+                story_key: story_info.story_key.clone(),
+                prompt,
+                skill_path: None,
+                preamble: None,
+                needs_supervisor: true,
             })
             .await;
+
+        let raw = self
+            .auto_response_loop(raw, &LlmRole::Dev, &story_info.story_key)
+            .await;
+
+        // Run consultations (adversarial + critic)
+        let raw = if raw.exit_code == Some(0) {
+            if let Some(ref sid) = raw.session_id {
+                let (result, _) = self
+                    .run_consultation_sequence(&story_info, sid, &LlmRole::Dev, &consultations)
+                    .await;
+                result
+            } else {
+                raw
+            }
+        } else {
+            raw
+        };
+
+        let session_outcome = self.interpret_raw_result(&raw, &story_info).await;
 
         let elapsed = start.elapsed();
 
