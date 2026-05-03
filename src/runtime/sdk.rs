@@ -309,19 +309,19 @@ impl SdkRuntime {
                 session_id,
                 prompt,
                 role,
-                story_key: _,
+                story_key,
             } => {
                 let provider = self.resolve_provider_for_role(&role);
                 match provider.as_str() {
                     "claude-code" => {
                         super::sdk_claude::execute_claude_resume(
-                            self, &role, &session_id, &prompt,
+                            self, &role, &session_id, &prompt, &story_key,
                         )
                         .await
                     }
                     "codex" => {
                         super::sdk_codex::execute_codex_resume(
-                            self, &role, &session_id, &prompt,
+                            self, &role, &session_id, &prompt, &story_key,
                         )
                         .await
                     }

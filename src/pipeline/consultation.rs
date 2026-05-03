@@ -32,7 +32,7 @@ pub async fn run_single_consultation(
             story_key: story_key.to_string(),
             prompt: full_prompt,
             skill_path: consultation.skill_path.clone(),
-            preamble: consultation.preamble_override.clone(),
+            preamble: None,
             needs_supervisor: false,
         })
         .await

@@ -342,7 +342,7 @@ pub async fn execute_claude_start(
     runtime: &SdkRuntime,
     role: &crate::llm::agent_factory::LlmRole,
     phase: &str,
-    _story_key: &str,
+    story_key: &str,
     prompt: &str,
     _skill_path: Option<&str>,
     _preamble: Option<&str>,
@@ -360,7 +360,7 @@ pub async fn execute_claude_start(
 
     let mcp_temp_file = if needs_supervisor {
         let mcp_json = crate::mcp_server::generate_mcp_config(
-            _story_key,
+            story_key,
             runtime.config_path(),
             runtime.secrets(),
             &runtime.config().mcp_servers,
@@ -401,7 +401,13 @@ pub async fn execute_claude_start(
         },
     };
 
-    let _ = phase;
+    tracing::info!(
+        action = "execute_claude_start",
+        phase = %phase,
+        story_key = %story_key,
+        exit_code = ?result.exit_code,
+        "Claude Code session completed"
+    );
     drop(mcp_temp_file);
     result
 }
@@ -412,6 +418,7 @@ pub async fn execute_claude_resume(
     role: &crate::llm::agent_factory::LlmRole,
     session_id: &str,
     prompt: &str,
+    story_key: &str,
 ) -> SdkSessionResult {
     let role_config = runtime.config_for_role(role);
 
@@ -424,7 +431,7 @@ pub async fn execute_claude_resume(
     };
 
     let mcp_json = crate::mcp_server::generate_mcp_config(
-        "",
+        story_key,
         runtime.config_path(),
         runtime.secrets(),
         &runtime.config().mcp_servers,

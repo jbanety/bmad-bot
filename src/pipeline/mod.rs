@@ -1438,8 +1438,20 @@ impl StoryPipeline {
                 .auto_response_loop(raw, &LlmRole::Review, &story.story_key)
                 .await;
 
-            // Run review-critic consultation if findings warrant it
-            let raw = if raw.exit_code == Some(0) && !consultations.is_empty() {
+            // Run review-critic consultation only if review found decision-needed items
+            let has_decision_needed = raw
+                .completion_text
+                .as_deref()
+                .map(|t| {
+                    let lower = t.to_lowercase();
+                    lower.contains("decision-needed")
+                        || lower.contains("decision_needed")
+                        || lower.contains("[decision]")
+                        || lower.contains("requires clarification")
+                        || lower.contains("needs human input")
+                })
+                .unwrap_or(false);
+            let raw = if raw.exit_code == Some(0) && !consultations.is_empty() && has_decision_needed {
                 if let Some(ref sid) = raw.session_id {
                     let (result, _) = self
                         .run_consultation_sequence(
@@ -2083,6 +2095,9 @@ impl StoryPipeline {
         let mut attempts = 0;
 
         while attempts < MAX_ATTEMPTS {
+            if self.is_shutdown() || raw.timed_out || raw.shutdown_requested {
+                break;
+            }
             if raw.exit_code != Some(0) {
                 break;
             }
@@ -2142,6 +2157,11 @@ impl StoryPipeline {
         };
 
         for (idx, consult_config) in consultations.iter().enumerate() {
+            if self.is_shutdown() {
+                tracing::info!("Shutdown requested — stopping consultation sequence");
+                break;
+            }
+
             let consult_start = std::time::Instant::now();
             self.ui.consultation_start(
                 &consult_config.label,
@@ -2158,6 +2178,24 @@ impl StoryPipeline {
             .await;
 
             let consult_elapsed = consult_start.elapsed();
+
+            // Abort on consultation failure
+            if consult_result.exit_code != Some(0) {
+                self.ui
+                    .consultation_complete(&consult_config.label, 0, consult_elapsed);
+                tracing::error!(
+                    label = %consult_config.label,
+                    exit_code = ?consult_result.exit_code,
+                    "Consultation failed — aborting consultation sequence"
+                );
+                last_result = RawSessionResult {
+                    exit_code: consult_result.exit_code,
+                    stderr: consult_result.stderr,
+                    stream_error: consult_result.stream_error,
+                    ..last_result
+                };
+                break;
+            }
 
             // Extract findings
             let findings = match consult_result.completion_text {
@@ -2252,13 +2290,25 @@ impl StoryPipeline {
                 error_detail: Some(error),
                 fatal: true,
             },
-            _ => PipelineResult {
-                story_key: "unknown".to_string(),
-                status: StoryStatus::Error,
-                pr_url: None,
-                error_detail: Some("Unexpected outcome in branch setup".to_string()),
-                fatal: true,
-            },
+            other => {
+                let key = match &other {
+                    SessionOutcome::Completed { story_key, .. } => story_key.clone(),
+                    SessionOutcome::Escalated { report, .. } => report.story_key.clone(),
+                    SessionOutcome::Failed { story_key, .. } => story_key.clone(),
+                };
+                tracing::warn!(
+                    story_key = %key,
+                    outcome = ?other,
+                    "Unexpected non-Failed outcome in branch setup"
+                );
+                PipelineResult {
+                    story_key: key,
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some("Unexpected outcome in branch setup".to_string()),
+                    fatal: true,
+                }
+            }
         }
     }
 

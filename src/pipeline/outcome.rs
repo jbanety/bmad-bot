@@ -51,6 +51,14 @@ pub async fn map_sdk_result_to_outcome(
         };
     }
 
+    if result.timed_out {
+        return SessionOutcome::Failed {
+            story_key: story.story_key.clone(),
+            error: "SDK session timed out".to_string(),
+            decisions,
+        };
+    }
+
     if result.exit_code == Some(0) {
         let pr_context = result
             .completion_text

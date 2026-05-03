@@ -32,11 +32,8 @@ pub fn auto_response_for_prompt(text: &str) -> Option<String> {
         }
 
         if lower.contains("patch") && lower.contains("handle") {
-            let tail = if text.len() > 500 {
-                &text[text.len() - 500..]
-            } else {
-                text
-            };
+            let tail = &text[text.floor_char_boundary(text.len().saturating_sub(500))..];
+
             let has_option_0 = tail.lines().any(|l| {
                 let t = l.trim();
                 t.starts_with("0.")
@@ -57,7 +54,7 @@ pub fn auto_response_for_prompt(text: &str) -> Option<String> {
 
         tracing::warn!(
             action = "auto_confirm_unknown_prompt",
-            tail = %&text[text.len().saturating_sub(200)..],
+            tail = %&text[text.floor_char_boundary(text.len().saturating_sub(200))..],
             "Unknown numeric choice prompt — not auto-responding"
         );
         return None;
@@ -70,12 +67,10 @@ pub fn auto_response_for_prompt(text: &str) -> Option<String> {
 ///
 /// Only matches the last ~200 chars (the actual ask) to avoid false positives
 /// from earlier narrative text like "I will proceed to review...".
-pub fn is_checkpoint_prompt(lower: &str) -> bool {
-    let tail = if lower.len() > 200 {
-        &lower[lower.len() - 200..]
-    } else {
-        lower
-    };
+pub fn is_checkpoint_prompt(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let tail = &lower[lower.floor_char_boundary(lower.len().saturating_sub(200))..];
+
     if tail.contains("reply") && tail.contains("proceed") {
         return true;
     }
@@ -90,11 +85,8 @@ pub fn is_checkpoint_prompt(lower: &str) -> bool {
 
 /// Detect if the completion text ends with a numeric choice prompt (1, 2, 3...).
 pub fn is_numeric_choice_prompt(text: &str) -> bool {
-    let tail = if text.len() > 500 {
-        &text[text.len() - 500..]
-    } else {
-        text
-    };
+    let tail = &text[text.floor_char_boundary(text.len().saturating_sub(500))..];
+
     let has_option_1 = tail.lines().any(|l| {
         let t = l.trim();
         t.starts_with("1.") || t.starts_with("1)") || t.starts_with("1 —") || t.starts_with("1-")
@@ -111,11 +103,8 @@ pub fn is_numeric_choice_prompt(text: &str) -> bool {
 /// Matches patterns like `[Y]/[N]`, `[Y] pour confirmer`, `[Y] Yes`, etc.
 /// Only considers the last ~500 chars to avoid false positives in large outputs.
 pub fn is_confirmation_prompt(text: &str) -> bool {
-    let tail = if text.len() > 500 {
-        &text[text.len() - 500..]
-    } else {
-        text
-    };
+    let tail = &text[text.floor_char_boundary(text.len().saturating_sub(500))..];
+
     let lower = tail.to_lowercase();
     let has_y = lower.contains("`y`") || lower.contains("[y]");
     let has_n = lower.contains("`n`") || lower.contains("[n]");

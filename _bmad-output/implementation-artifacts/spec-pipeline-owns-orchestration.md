@@ -239,6 +239,30 @@ For consultations: `Start` with `role: LlmRole::Review` (or `Critic`), `skill_pa
 
 **AC:** No dead code. Single code path. Runtime files contain only config building, line parsing, and subprocess/chat-loop execution.
 
+### Review Findings
+
+_Code review 2026-05-03 — 3 layers (blind adversarial, edge-case hunter, acceptance auditor)_
+
+- [x] [Review][Patch] Consultation error handling: check exit_code before extracting findings — abort consultation sequence on exit_code != 0 (fail-fast). Resolved: option 1. **FIXED**
+- [x] [Review][Patch] run_review_pipeline: add completion_text pattern check before launching review-critic consultation. Resolved: option 1. **FIXED**
+- [ ] [Review][Patch] Remove legacy run_session path — delete SessionRuntime::run_session(), run_claude_code_session, run_codex_session and associated dead code. Accelerate Phase C/D. Resolved: option 1. **SKIPPED — requires significant refactoring beyond batch-apply**
+- [x] [Review][Patch] UTF-8 byte-index slicing panic — `text[text.len().saturating_sub(N)..]` can panic on multi-byte chars [auto_response.rs:35,74,93,113] **FIXED**
+- [x] [Review][Patch] execute_claude_resume: unconditional MCP config with empty story_key [sdk_claude.rs:426-427] **FIXED**
+- [x] [Review][Patch] execute_codex_resume: missing MCP config setup via new execute() path [sdk_codex.rs:539-574] **FIXED**
+- [x] [Review][Patch] Preamble applied twice in run_single_consultation — prepended to prompt AND in RuntimeCommand::Start.preamble [pipeline/consultation.rs:22-26] **FIXED**
+- [x] [Review][Patch] Missing termination checks in auto_response_loop and run_consultation_sequence — no timed_out/shutdown_requested/is_shutdown() guard [pipeline/mod.rs] **FIXED**
+- [x] [Review][Patch] map_sdk_result_to_outcome: timed_out + exit_code=0 treated as Completed [pipeline/outcome.rs] **FIXED**
+- [x] [Review][Patch] RuntimeCommand fields ignored in execute_claude_start — _story_key misleading underscore fixed, phase used in tracing [sdk_claude.rs] **FIXED**
+- [x] [Review][Patch] outcome_to_pipeline_result catch-all `_ =>` loses SessionOutcome data, returns story_key: "unknown" [pipeline/mod.rs] **FIXED**
+- [x] [Review][Patch] is_checkpoint_prompt lowercase precondition undocumented — public fn now lowercases internally [auto_response.rs] **FIXED**
+- [x] [Review][Defer] ConsultationConfig.trigger_pattern field still present — deferred, Phase D cleanup
+- [x] [Review][Defer] No tests for auto_response_loop — deferred, requires runtime mocking infrastructure
+- [x] [Review][Defer] API/rig execute() not implemented — deferred, Phase B task secondary to SDK path
+- [x] [Review][Defer] Legacy code not fully removed (SessionContext, run_session, thin wrappers) — deferred, Phase C/D tasks
+- [x] [Review][Defer] ConsultationRunner still used by run_epic_critic_review — deferred, Phase D migration
+- [x] [Review][Defer] Test duplication sdk_claude.rs ↔ pipeline modules — deferred, Phase D cleanup
+- [x] [Review][Defer] session/runner.rs and session/consultation.rs not cleaned up — deferred, Phase C tasks
+
 ## Design Notes
 
 ### Why linear consultation instead of trigger patterns

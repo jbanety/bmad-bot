@@ -219,3 +219,13 @@
 ## Deferred from: code review of epic-review-critic-autonomous (2026-05-01)
 
 - **`inject_pre_epic_stories()` is now dead code in the autonomous epic gate flow:** The function at `src/pipeline.rs` and its 8+ tests still exist, but the only call site in `run_epic_gate_inner()` was removed. The autonomous flow now uses Critic + create-story session instead. Consider removing the function and tests, or documenting it as a utility for manual use.
+
+## Deferred from: code review of spec-pipeline-owns-orchestration (2026-05-03)
+
+- **ConsultationConfig.trigger_pattern field still present:** Vestige of the old trigger-based system. Phase D cleanup will remove it from the struct.
+- **No tests for auto_response_loop orchestration method:** Central orchestration loop with MAX_ATTEMPTS=15 and multiple exit conditions has no unit tests. Requires runtime mocking infrastructure to test properly.
+- **API/rig execute() not implemented:** Phase B task — SessionRunner::execute() for the rig runtime returns a TODO stub. Secondary to SDK path which is the active runtime.
+- **Legacy code not fully removed (SessionContext, run_session, thin wrappers):** Phase C/D tasks still pending — old SessionContext struct, SessionRuntime::run_session(), and Phase A thin wrappers in sdk_claude.rs all still exist alongside the new execute() path.
+- **ConsultationRunner still used by run_epic_critic_review:** Phase D migration — pipeline/mod.rs still imports and uses the old ConsultationRunner for the epic critic review flow, alongside the new pipeline/consultation.rs path.
+- **Test duplication between sdk_claude.rs and pipeline modules:** Phase A moved tests to new modules but kept originals in sdk_claude.rs. Phase D cleanup will remove the duplicates.
+- **session/runner.rs and session/consultation.rs not cleaned up:** Phase C tasks — run_with_consultations, check_consultation_triggers, ConsultationState, and ConsultationRunner still present in session modules.
