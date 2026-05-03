@@ -3166,7 +3166,7 @@ impl StoryPipeline {
         epic_num: u32,
         ssf: &SprintStatusFile,
         sprint_status_path: &Path,
-        _last_completed_branch: Option<&str>,
+        last_completed_branch: Option<&str>,
     ) -> bool {
         let story_count = ssf
             .stories()
@@ -3227,7 +3227,7 @@ impl StoryPipeline {
             if let Some(ref findings) = critic_findings {
                 let next_epic = epic_num + 1;
                 let created = self
-                    .run_pre_epic_story_creation(epic_num, &report, findings)
+                    .run_pre_epic_story_creation(epic_num, &report, findings, last_completed_branch)
                     .await;
                 if created {
                     tracing::info!(
@@ -3655,6 +3655,7 @@ impl StoryPipeline {
         epic_num: u32,
         report: &str,
         critic_findings: &str,
+        last_completed_branch: Option<&str>,
     ) -> bool {
         let next_epic = epic_num + 1;
         let story_info = self.build_pre_epic_story_info(epic_num);
@@ -3705,8 +3706,8 @@ impl StoryPipeline {
             return false;
         }
 
-        // Branch setup
-        if let Err(outcome) = self.pipeline_ensure_branch(&story_info, None).await {
+        // Branch from the last completed story of the epic (carries critic-memory, report, etc.)
+        if let Err(outcome) = self.pipeline_ensure_branch(&story_info, last_completed_branch).await {
             tracing::error!(
                 action = "pre_epic_branch_failed",
                 error = ?outcome,
