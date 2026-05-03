@@ -11,6 +11,7 @@
 //! instead of processing a stale batch from the initial poll.
 
 pub mod auto_response;
+pub mod consultation;
 pub mod outcome;
 
 use std::collections::{HashMap, HashSet};
@@ -32,7 +33,9 @@ use crate::review::epic::{
     DeferredItemRef, EpicReviewOutcome, EpicReviewRunner, PreEpicStory,
     generate_failure_report, parse_related_deferred_items,
 };
-use crate::runtime::{RuntimeDeps, SessionContext, SessionRuntime, SkillPaths};
+use crate::runtime::{
+    RawSessionResult, RuntimeCommand, RuntimeDeps, SessionContext, SessionRuntime, SkillPaths,
+};
 use crate::session::SessionOutcome;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
 use crate::session::consultation::{ConsultationConfig, ConsultationRunner, ConsultationToolSet};
@@ -1969,6 +1972,175 @@ impl StoryPipeline {
         }
 
         paths
+    }
+
+    // =========================================================================
+    // Phase C — Pipeline-controlled execution helpers
+    // =========================================================================
+
+    /// Repeatedly resume a session while it returns interactive prompts.
+    /// Returns when the session is truly done (no auto-response match) or max attempts.
+    async fn auto_response_loop(
+        &self,
+        mut raw: RawSessionResult,
+        role: &LlmRole,
+        story_key: &str,
+    ) -> RawSessionResult {
+        const MAX_ATTEMPTS: usize = 15;
+        let mut attempts = 0;
+
+        while attempts < MAX_ATTEMPTS {
+            if raw.exit_code != Some(0) {
+                break;
+            }
+            let completion = raw.completion_text.as_deref().unwrap_or("");
+            let Some(response) = auto_response::auto_response_for_prompt(completion) else {
+                break;
+            };
+            let Some(ref session_id) = raw.session_id else {
+                break;
+            };
+
+            attempts += 1;
+            tracing::info!(
+                action = "auto_response",
+                attempt = attempts,
+                response = %response,
+                story_key = %story_key,
+                "Pipeline auto-responding to interactive prompt"
+            );
+            self.ui.sdk_text(&format!("Auto-responding: {response}"));
+
+            raw = self
+                .session_runtime
+                .execute(RuntimeCommand::Resume {
+                    session_id: session_id.clone(),
+                    prompt: response,
+                    role: role.clone(),
+                    story_key: story_key.to_string(),
+                })
+                .await;
+        }
+
+        raw
+    }
+
+    /// Run a linear consultation sequence on a completed session.
+    ///
+    /// For each consultation: run it, resume main session with findings,
+    /// auto-response-loop the resume. Returns final result + session_id.
+    async fn run_consultation_sequence(
+        &self,
+        story: &StoryInfo,
+        main_session_id: &str,
+        main_role: &LlmRole,
+        consultations: &[ConsultationConfig],
+    ) -> (RawSessionResult, String) {
+        let mut current_session_id = main_session_id.to_string();
+        let mut last_result = RawSessionResult {
+            session_id: Some(current_session_id.clone()),
+            exit_code: Some(0),
+            stderr: String::new(),
+            timed_out: false,
+            shutdown_requested: false,
+            completion_text: None,
+            stream_error: None,
+            rate_limit_resets_at: None,
+        };
+
+        for (idx, consult_config) in consultations.iter().enumerate() {
+            let consult_start = std::time::Instant::now();
+            self.ui.consultation_start(
+                &consult_config.label,
+                &story.story_key,
+                Some(&format!("step {}/{}", idx + 1, consultations.len())),
+            );
+
+            // Run consultation as fresh session
+            let consult_result = consultation::run_single_consultation(
+                &self.session_runtime,
+                consult_config,
+                &story.story_key,
+            )
+            .await;
+
+            let consult_elapsed = consult_start.elapsed();
+
+            // Extract findings
+            let findings = match consult_result.completion_text {
+                Some(ref text) if !text.is_empty() => {
+                    let count = text.lines().filter(|l| l.starts_with("- ")).count().max(1);
+                    self.ui
+                        .consultation_complete(&consult_config.label, count, consult_elapsed);
+                    text.clone()
+                }
+                _ => {
+                    self.ui
+                        .consultation_complete(&consult_config.label, 0, consult_elapsed);
+                    tracing::info!(
+                        label = %consult_config.label,
+                        "Consultation produced no findings — skipping resume"
+                    );
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                label = %consult_config.label,
+                findings_len = findings.len(),
+                "Consultation findings — resuming main session"
+            );
+
+            // Resume main session with formatted findings
+            let resume_prompt = consult_config.format_findings(&findings);
+            self.ui
+                .sdk_text("Session resumed with consultation findings");
+
+            let resume_result = self
+                .session_runtime
+                .execute(RuntimeCommand::Resume {
+                    session_id: current_session_id.clone(),
+                    prompt: resume_prompt,
+                    role: main_role.clone(),
+                    story_key: story.story_key.clone(),
+                })
+                .await;
+
+            // Auto-response loop on resumed session
+            let final_result =
+                self.auto_response_loop(resume_result, main_role, &story.story_key)
+                    .await;
+
+            // Update session ID
+            if let Some(ref new_id) = final_result.session_id {
+                current_session_id = new_id.clone();
+            }
+
+            last_result = final_result;
+
+            // Stop if session didn't complete
+            if last_result.exit_code != Some(0) {
+                tracing::warn!(
+                    label = %consult_config.label,
+                    exit_code = ?last_result.exit_code,
+                    "Main session failed after consultation — stopping sequence"
+                );
+                break;
+            }
+        }
+
+        (last_result, current_session_id)
+    }
+
+    /// Interpret a raw runtime result into a pipeline-level SessionOutcome.
+    async fn interpret_raw_result(
+        &self,
+        raw: &RawSessionResult,
+        story: &StoryInfo,
+    ) -> SessionOutcome {
+        let impl_artifacts_path =
+            PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
+        outcome::map_sdk_result_to_outcome(raw, story, &impl_artifacts_path).await
     }
 
     /// Commit any uncommitted changes left by the session agent.
