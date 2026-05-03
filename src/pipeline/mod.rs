@@ -2267,20 +2267,39 @@ impl StoryPipeline {
                 }
             };
 
-            // Persist findings to critic memory and commit
-            if let Err(e) = self
-                .critic_memory
-                .append_entry(&story.story_key, &consult_config.label, &findings)
+            // Persist critic findings to memory (skip adversarial — it's BMAD-internal)
+            let is_critic = consult_config.label.contains("critic");
+            if is_critic {
+                let story_content = tokio::fs::read_to_string(
+                    PathBuf::from(&self.config.bmad_paths.project_root)
+                        .join(&story.specs_path),
+                )
                 .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    label = %consult_config.label,
-                    "Failed to append consultation findings to critic memory"
-                );
-            } else {
-                self.ui.critic_memory_update(&story.story_key);
-                self.commit_critic_memory().await;
+                .ok();
+                let memory_content = self
+                    .summarize_for_memory(
+                        &story.story_key,
+                        &consult_config.label,
+                        &findings,
+                        story_content.as_deref(),
+                    )
+                    .await
+                    .unwrap_or_else(|| findings.clone());
+
+                if let Err(e) = self
+                    .critic_memory
+                    .append_entry(&story.story_key, &consult_config.label, &memory_content)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        label = %consult_config.label,
+                        "Failed to append consultation findings to critic memory"
+                    );
+                } else {
+                    self.ui.critic_memory_update(&story.story_key);
+                    self.commit_critic_memory().await;
+                }
             }
 
             tracing::info!(
@@ -2614,6 +2633,29 @@ impl StoryPipeline {
                 tracing::warn!(error = %e, path = %path_str, "git commit artifact exec failed");
             }
         }
+    }
+
+    /// Summarize review findings via the Utility LLM (lightweight model) for critic memory.
+    async fn summarize_for_memory(
+        &self,
+        story_key: &str,
+        review_type: &str,
+        findings: &str,
+        story_context: Option<&str>,
+    ) -> Option<String> {
+        let context_section = story_context
+            .map(|c| format!("\n\n--- Original Story ---\n{c}"))
+            .unwrap_or_default();
+        let prompt = format!(
+            "Summarize the following {review_type} findings for `{story_key}` into a \
+             concise memory entry for a persistent reviewer memory file. \
+             Use bullet points. Include: what was reviewed, key issues found, \
+             decisions taken, and anything important for future reviews. \
+             Be thorough — include all significant points, but remove noise and redundancy. \
+             Output ONLY the bullet points, no preamble.\n\n\
+             --- Findings ---\n{findings}{context_section}"
+        );
+        self.utility_llm_oneshot(&prompt).await
     }
 
     /// One-shot LLM call using the `Utility` role. Supports API and SDK providers.
@@ -3159,6 +3201,24 @@ impl StoryPipeline {
             )).await;
         }
 
+        // Summarize the epic review report into critic memory
+        let epic_key = format!("epic-{epic_num}");
+        if let Some(summary) = self
+            .summarize_for_memory(&epic_key, "Epic Review Report", &report, None)
+            .await
+        {
+            if let Err(e) = self
+                .critic_memory
+                .append_entry(&epic_key, "Epic Review Summary", &summary)
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to append epic review summary to critic memory");
+            } else {
+                self.ui.critic_memory_update(&epic_key);
+                self.commit_critic_memory().await;
+            }
+        }
+
         // Step 2: Critic review (only on successful review)
         if review_succeeded {
             let critic_findings = self.run_epic_critic_review(&report, epic_num).await;
@@ -3543,12 +3603,32 @@ impl StoryPipeline {
 
         let findings = result.completion_text.as_deref().unwrap_or("").trim();
         let upper = findings.to_uppercase();
-        if findings.is_empty()
+        let no_action = findings.is_empty()
             || upper == "NO_ACTION_NEEDED"
             || upper.starts_with("NO_ACTION_NEEDED\n")
             || upper.starts_with("NO_ACTION_NEEDED.")
-            || upper.starts_with("NO_ACTION_NEEDED —")
+            || upper.starts_with("NO_ACTION_NEEDED —");
+
+        // Always persist to memory — even clean reviews provide cross-epic continuity
+        let memory_content = if no_action {
+            format!("Epic {epic_num} reviewed — no action needed, codebase healthy.")
+        } else {
+            self.summarize_for_memory(&story_key, "Epic Critic Review", findings, None)
+                .await
+                .unwrap_or_else(|| findings.to_string())
+        };
+        if let Err(e) = self
+            .critic_memory
+            .append_entry(&story_key, "Epic Critic Review", &memory_content)
+            .await
         {
+            tracing::warn!(error = %e, "Failed to append epic critic findings to critic memory");
+        } else {
+            self.ui.critic_memory_update(&story_key);
+            self.commit_critic_memory().await;
+        }
+
+        if no_action {
             tracing::info!(
                 action = "epic_critic_clean",
                 epic_num = epic_num,
@@ -3562,16 +3642,6 @@ impl StoryPipeline {
                 findings_len = findings.len(),
                 "Critic identified issues for pre-epic story"
             );
-            if let Err(e) = self
-                .critic_memory
-                .append_entry(&story_key, "Epic Critic Review", findings)
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to append epic critic findings to critic memory");
-            } else {
-                self.ui.critic_memory_update(&story_key);
-                self.commit_critic_memory().await;
-            }
             Some(findings.to_string())
         }
     }
