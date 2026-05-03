@@ -2553,15 +2553,26 @@ impl StoryPipeline {
 
     /// Commit critic-memory.md if it has uncommitted changes.
     async fn commit_critic_memory(&self) {
+        let Some(mem_path) = self.critic_memory.prepare_context_path() else {
+            return;
+        };
+        self.commit_implementation_artifact(
+            Path::new(&mem_path),
+            "docs: update critic memory with review findings",
+        )
+        .await;
+    }
+
+    /// Stage and commit a single file if it has uncommitted changes.
+    async fn commit_implementation_artifact(&self, file_path: &Path, message: &str) {
         let repo_path = &self.config.bmad_paths.project_root;
-        let memory_path = self.critic_memory.prepare_context_path();
-        let Some(mem_path) = memory_path else { return };
+        let path_str = file_path.to_string_lossy();
 
         let status = tokio::process::Command::new("git")
             .arg("-C")
             .arg(repo_path)
             .args(["status", "--porcelain", "--"])
-            .arg(&mem_path)
+            .arg(file_path)
             .output()
             .await;
         let is_dirty = status.as_ref().map(|o| !o.stdout.is_empty()).unwrap_or(false);
@@ -2573,30 +2584,34 @@ impl StoryPipeline {
             .arg("-C")
             .arg(repo_path)
             .args(["add", "--"])
-            .arg(&mem_path)
+            .arg(file_path)
             .output()
             .await;
         if let Err(e) = add {
-            tracing::warn!(error = %e, "Failed to git add critic-memory.md");
+            tracing::warn!(error = %e, path = %path_str, "Failed to git add artifact");
             return;
         }
 
         let commit = tokio::process::Command::new("git")
             .arg("-C")
             .arg(repo_path)
-            .args(["commit", "-m", "docs: update critic memory with review findings"])
+            .args(["commit", "-m", message])
             .output()
             .await;
         match commit {
             Ok(o) if o.status.success() => {
-                tracing::info!(action = "critic_memory_committed", "Committed critic-memory.md");
+                tracing::info!(
+                    action = "artifact_committed",
+                    path = %path_str,
+                    "Committed implementation artifact"
+                );
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
-                tracing::warn!(stderr = %stderr, "git commit critic-memory.md failed");
+                tracing::warn!(path = %path_str, stderr = %stderr, "git commit artifact failed");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "git commit critic-memory.md exec failed");
+                tracing::warn!(error = %e, path = %path_str, "git commit artifact exec failed");
             }
         }
     }
@@ -3138,6 +3153,10 @@ impl StoryPipeline {
                 epic_num = epic_num,
                 "Failed to save epic review report — continuing"
             );
+        } else {
+            self.commit_implementation_artifact(&report_path, &format!(
+                "docs: add epic {epic_num} retrospective report"
+            )).await;
         }
 
         // Step 2: Critic review (only on successful review)
