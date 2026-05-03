@@ -7,7 +7,6 @@ use serde::Deserialize;
 
 use crate::config::LlmRoleConfig;
 use crate::session::SessionOutcome;
-use crate::session::state::{PHASE_CREATE, PHASE_DEV, PHASE_REVIEW};
 use crate::watcher::StoryInfo;
 
 use super::SdkRuntime;
@@ -293,24 +292,6 @@ pub fn build_codex_config(
         sigterm_grace: Duration::from_secs(10),
         stdin_data: None,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Prompt construction per phase
-// ---------------------------------------------------------------------------
-
-pub fn build_codex_prompt(phase: &str, story: &StoryInfo) -> String {
-    let skill_cmd = match phase {
-        PHASE_CREATE => format!("$bmad-create-story {}", story.story_key),
-        PHASE_REVIEW => format!("$bmad-code-review {}", story.specs_path.to_string_lossy()),
-        _ => {
-            if phase != PHASE_DEV {
-                tracing::warn!(phase = %phase, "Unknown phase for Codex prompt, defaulting to dev-story");
-            }
-            format!("$bmad-dev-story {}", story.specs_path.to_string_lossy())
-        }
-    };
-    format!("{skill_cmd}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.")
 }
 
 // ---------------------------------------------------------------------------
@@ -666,89 +647,9 @@ pub async fn resume_codex_session(
 
     let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
     let outcome =
-        super::sdk_claude::map_sdk_result_to_outcome(&result, story, &impl_artifacts_path).await;
-    (outcome, Some(result))
-}
-
-// ---------------------------------------------------------------------------
-// Orchestration — run_codex_session
-// ---------------------------------------------------------------------------
-
-pub async fn run_codex_session(
-    runtime: &SdkRuntime,
-    context: super::SessionContext<'_>,
-) -> SessionOutcome {
-    let role_config = runtime.config_for_role(&context.role);
-    let prompt = build_codex_prompt(context.initial_phase, context.story);
-    runtime.ui().sdk_session_info(&role_config.provider, &role_config.model);
-    runtime.ui().chat_turn(0, &prompt);
-    runtime.ui().activation_start();
-
-    let project_root = match std::fs::canonicalize(&runtime.config().bmad_paths.project_root) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                raw = %runtime.config().bmad_paths.project_root,
-                "Failed to canonicalize project_root, using raw value"
-            );
-            PathBuf::from(&runtime.config().bmad_paths.project_root)
-        }
-    };
-
-    let needs_supervisor = matches!(context.initial_phase, PHASE_CREATE | PHASE_DEV);
-    let mcp_backup: Option<CodexMcpBackup> = if needs_supervisor {
-        let mcp_json = crate::mcp_server::generate_mcp_config(
-            &context.story.story_key,
-            runtime.config_path(),
-            runtime.secrets(),
-            &runtime.config().mcp_servers,
-        );
-        match write_codex_mcp_config(&project_root, &mcp_json) {
-            Ok(backup) => {
-                tracing::info!(
-                    "Wrote Codex MCP config — ensure project is trusted (`codex trust .`) for project-scoped config"
-                );
-                Some(backup)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to write Codex MCP config, proceeding without supervisor");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let session_config = build_codex_config(role_config, &project_root, &prompt);
-
-    let mut result = match runtime
-        .execute_session(session_config, parse_codex_line)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            if let Some(backup) = mcp_backup {
-                restore_codex_mcp_config(backup);
-            }
-            return SessionOutcome::Failed {
-                story_key: context.story.story_key.clone(),
-                error: e.to_string(),
-                decisions: vec![],
-            };
-        }
-    };
-
-    if let Some(backup) = mcp_backup {
-        restore_codex_mcp_config(backup);
-    }
-
-    let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
-    let outcome =
-        super::sdk_claude::map_sdk_result_to_outcome(&result, context.story, &impl_artifacts_path)
+        crate::pipeline::outcome::map_sdk_result_to_outcome(&result, story, &impl_artifacts_path)
             .await;
-
-    outcome
+    (outcome, Some(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,33 +1001,6 @@ mod tests {
         assert_eq!(sep_idx + 1, config.args.len() - 1);
     }
 
-    // -- 9.28: prompt create phase --
-    #[test]
-    fn test_build_codex_prompt_create() {
-        let story = make_test_story();
-        let prompt = build_codex_prompt("create", &story);
-        assert!(prompt.starts_with("$bmad-create-story 15-6-codex-provider"), "prompt should start with $skill command: {prompt}");
-        assert!(prompt.contains("English"), "prompt should contain English override");
-    }
-
-    // -- 9.29: prompt dev phase --
-    #[test]
-    fn test_build_codex_prompt_dev() {
-        let story = make_test_story();
-        let prompt = build_codex_prompt("dev", &story);
-        assert!(prompt.starts_with("$bmad-dev-story /tmp/impl-artifacts/15-6-codex-provider.md"), "prompt should start with $skill command: {prompt}");
-        assert!(prompt.contains("English"), "prompt should contain English override");
-    }
-
-    // -- 9.30: prompt review phase --
-    #[test]
-    fn test_build_codex_prompt_review() {
-        let story = make_test_story();
-        let prompt = build_codex_prompt("review", &story);
-        assert!(prompt.starts_with("$bmad-code-review /tmp/impl-artifacts/15-6-codex-provider.md"), "prompt should start with $skill command: {prompt}");
-        assert!(prompt.contains("English"), "prompt should contain English override");
-    }
-
     // -- 9.31: generate_mcp_toml_section --
     #[test]
     fn test_generate_mcp_toml_section() {
@@ -1298,110 +1172,6 @@ mod tests {
         restore_codex_mcp_config(backup);
         let restored = std::fs::read_to_string(&config_path).unwrap();
         assert_eq!(restored, original);
-    }
-
-    // -- 9.40: integration test — Codex dispatch --
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_run_session_codex_dispatches() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-
-        use crate::config::{BotConfig, BotSecrets};
-        use crate::llm::agent_factory::LlmRole;
-        use crate::ui::UiHandle;
-
-        let dir = tempfile::tempdir().unwrap();
-
-        std::process::Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::fs::write(dir.path().join("README.md"), "init").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
-        let script_path = dir.path().join("fake-codex.sh");
-        std::fs::write(
-            &script_path,
-            "#!/bin/sh\necho '{\"type\":\"thread.started\",\"thread_id\":\"test-codex-session-456\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"All done\"}}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script_path, PermissionsExt::from_mode(0o755)).unwrap();
-
-        let mut config = BotConfig::_test_minimal("pretty", "info");
-        config.llm.dev.provider = "codex".to_string();
-        config.llm.dev.cli_path = Some(script_path.to_string_lossy().to_string());
-        config.bmad_paths.project_root = dir.path().to_string_lossy().to_string();
-        config.bmad_paths.implementation_artifacts = dir.path().to_string_lossy().to_string();
-
-        let runtime = SdkRuntime::new(
-            Arc::new(config),
-            Arc::new(BotSecrets {
-                anthropic_api_key: None,
-                openai_api_key: Some("sk-test".to_string()),
-                github_token: None,
-                gitlab_token: None,
-                telegram_bot_token: None,
-            }),
-            PathBuf::from("test-config.yaml"),
-            Arc::new(AtomicBool::new(false)),
-            UiHandle::null(),
-        );
-
-        let story = StoryInfo {
-            story_id: "15.6".to_string(),
-            story_key: "15-6-codex".to_string(),
-            epic_num: 15,
-            story_num: 6,
-            label: "codex".to_string(),
-            branch_name: "story/15-6-codex".to_string(),
-            specs_path: dir.path().join("15-6-codex.md"),
-            dependencies: vec![],
-            status: "in-progress".to_string(),
-        };
-        let context = super::super::SessionContext {
-            story: &story,
-            base_branch_override: None,
-            consultations: vec![],
-            role: LlmRole::Dev,
-            initial_phase: "dev",
-        };
-        let outcome = runtime.run_session(context).await;
-        match outcome {
-            SessionOutcome::Completed {
-                story_key,
-                branch,
-                pr_context,
-                ..
-            } => {
-                assert_eq!(story_key, "15-6-codex");
-                assert_eq!(branch, "story/15-6-codex");
-                assert!(pr_context.is_some());
-                assert_eq!(pr_context.unwrap(), "All done");
-            }
-            other => panic!("expected SessionOutcome::Completed, got {:?}", other),
-        }
     }
 
     // -- Story 15.7: resume config builder tests --

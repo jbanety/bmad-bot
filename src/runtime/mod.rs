@@ -9,13 +9,9 @@ use std::sync::Arc;
 use crate::config::{BotConfig, BotSecrets};
 use crate::llm::AgentFactory;
 use crate::llm::agent_factory::LlmRole;
-use crate::session::SessionOutcome;
 use crate::session::agent::ShutdownFlag;
-use crate::session::consultation::ConsultationConfig;
 use crate::session::runner::SessionRunner;
-use crate::session::state::{PHASE_CREATE, PHASE_DEV, PHASE_REVIEW};
 use crate::ui::UiHandle;
-use crate::watcher::StoryInfo;
 
 pub use sdk::SdkRuntime;
 
@@ -115,18 +111,6 @@ pub enum RuntimeCommand {
 }
 
 // ---------------------------------------------------------------------------
-// SessionContext — runtime-agnostic session parameters (legacy, Phase C removal)
-// ---------------------------------------------------------------------------
-
-pub struct SessionContext<'a> {
-    pub story: &'a StoryInfo,
-    pub base_branch_override: Option<&'a str>,
-    pub consultations: Vec<ConsultationConfig>,
-    pub role: LlmRole,
-    pub initial_phase: &'a str,
-}
-
-// ---------------------------------------------------------------------------
 // SessionRuntime — dual runtime dispatch
 // ---------------------------------------------------------------------------
 
@@ -141,25 +125,6 @@ pub enum SessionRuntime {
 }
 
 impl SessionRuntime {
-    pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
-        if let Err(outcome) = self.ensure_branch(&context).await {
-            return outcome;
-        }
-
-        match self {
-            Self::Api(api) => api.run_session(context).await,
-            Self::Sdk(sdk) => sdk.run_session(context).await,
-            Self::Dual { api, sdk, config } => {
-                let role_config = resolve_role_config(&config.llm, &context.role);
-                if role_config.is_sdk_provider() {
-                    sdk.run_session(context).await
-                } else {
-                    api.run_session(context).await
-                }
-            }
-        }
-    }
-
     /// Execute a single runtime command and return raw results.
     /// No interpretation, no auto-response, no consultations.
     /// The pipeline layer handles all orchestration on top of this.
@@ -201,55 +166,6 @@ impl SessionRuntime {
                     }
                 }
             }
-        }
-    }
-
-    async fn ensure_branch(&self, context: &SessionContext<'_>) -> Result<(), SessionOutcome> {
-        let cfg = self.config();
-        let repo_path = std::path::PathBuf::from(&cfg.bmad_paths.project_root);
-        let default_branch = cfg.git_provider.target_branch.clone();
-        let base_branch = if let Some(ovr) = context.base_branch_override {
-            ovr.to_string()
-        } else {
-            crate::session::branch::determine_base_branch(
-                context.story,
-                &repo_path,
-                &default_branch,
-            )
-        };
-
-        let rp = repo_path;
-        let bn = context.story.branch_name.clone();
-        let bb = base_branch;
-        let story_key = context.story.story_key.clone();
-
-        match tokio::task::spawn_blocking(move || {
-            crate::session::branch::ensure_story_branch(&rp, &bn, &bb)
-        })
-        .await
-        {
-            Ok(Ok(action)) => {
-                tracing::info!(action = ?action, "Branch setup complete");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(SessionOutcome::Failed {
-                story_key,
-                error: format!("Branch setup failed: {e}"),
-                decisions: vec![],
-            }),
-            Err(e) => Err(SessionOutcome::Failed {
-                story_key,
-                error: format!("Branch setup panicked: {e}"),
-                decisions: vec![],
-            }),
-        }
-    }
-
-    fn config(&self) -> &BotConfig {
-        match self {
-            Self::Api(api) => api.session_runner().config(),
-            Self::Sdk(sdk) => sdk.config(),
-            Self::Dual { config, .. } => config,
         }
     }
 
@@ -351,43 +267,6 @@ impl ApiRuntime {
         Self {
             session_runner,
             skill_paths,
-        }
-    }
-
-    pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
-        let (skill_path, preamble) = self.resolve_phase_config(context.initial_phase);
-
-        self.session_runner
-            .run_with_consultations(
-                context.story,
-                context.base_branch_override,
-                context.consultations,
-                Some(&skill_path),
-                preamble,
-                context.role,
-                context.initial_phase,
-            )
-            .await
-    }
-
-    fn resolve_phase_config(&self, initial_phase: &str) -> (String, Option<String>) {
-        match initial_phase {
-            PHASE_CREATE => (
-                self.skill_paths.create_story.clone(),
-                Some(crate::session::agent::build_create_preamble()),
-            ),
-            PHASE_REVIEW => (
-                self.skill_paths.code_review.clone(),
-                Some(crate::session::agent::build_review_preamble()),
-            ),
-            PHASE_DEV => (self.skill_paths.dev_story.clone(), None),
-            other => {
-                tracing::warn!(
-                    phase = other,
-                    "resolve_phase_config: unknown phase, falling back to dev defaults"
-                );
-                (self.skill_paths.dev_story.clone(), None)
-            }
         }
     }
 
@@ -522,51 +401,6 @@ mod tests {
             SkillPaths::ide_to_skill_dir("unknown-ide"),
             ".claude/skills"
         );
-    }
-
-    #[test]
-    fn test_resolve_phase_config_create() {
-        let dir = tempfile::tempdir().unwrap();
-        let skill_paths = SkillPaths::resolve(dir.path());
-        let expected_create = skill_paths.create_story.clone();
-
-        let config = make_test_config(dir.path());
-        let runner = make_test_session_runner(&config, &skill_paths);
-        let api = ApiRuntime::new(runner, skill_paths);
-
-        let (path, preamble) = api.resolve_phase_config(PHASE_CREATE);
-        assert_eq!(path, expected_create);
-        assert!(preamble.is_some());
-    }
-
-    #[test]
-    fn test_resolve_phase_config_review() {
-        let dir = tempfile::tempdir().unwrap();
-        let skill_paths = SkillPaths::resolve(dir.path());
-        let expected_review = skill_paths.code_review.clone();
-
-        let config = make_test_config(dir.path());
-        let runner = make_test_session_runner(&config, &skill_paths);
-        let api = ApiRuntime::new(runner, skill_paths);
-
-        let (path, preamble) = api.resolve_phase_config(PHASE_REVIEW);
-        assert_eq!(path, expected_review);
-        assert!(preamble.is_some());
-    }
-
-    #[test]
-    fn test_resolve_phase_config_dev() {
-        let dir = tempfile::tempdir().unwrap();
-        let skill_paths = SkillPaths::resolve(dir.path());
-        let expected_dev = skill_paths.dev_story.clone();
-
-        let config = make_test_config(dir.path());
-        let runner = make_test_session_runner(&config, &skill_paths);
-        let api = ApiRuntime::new(runner, skill_paths);
-
-        let (path, preamble) = api.resolve_phase_config("dev");
-        assert_eq!(path, expected_dev);
-        assert!(preamble.is_none());
     }
 
     #[test]

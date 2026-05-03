@@ -84,6 +84,29 @@ impl CriticMemory {
         }
     }
 
+    /// Appends a structured entry to the critic memory file.
+    pub async fn append_entry(
+        &self,
+        story_key: &str,
+        review_type: &str,
+        findings: &str,
+    ) -> Result<(), CriticMemoryError> {
+        self.ensure_exists()?;
+        let date = chrono::Local::now().format("%Y-%m-%d");
+        let entry = format!(
+            "\n## {review_type} — {story_key} — {date}\n\n{findings}\n",
+        );
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.file_path)
+            .await
+            .map_err(|e| CriticMemoryError::Io(e))?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, entry.as_bytes())
+            .await
+            .map_err(|e| CriticMemoryError::Io(e))?;
+        Ok(())
+    }
+
     /// Ensures the memory file exists and returns its path as a string.
     ///
     /// Returns `None` (degraded mode) if the file cannot be created, logging

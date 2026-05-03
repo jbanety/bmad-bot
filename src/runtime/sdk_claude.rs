@@ -7,8 +7,6 @@ use serde::Deserialize;
 
 use crate::config::LlmRoleConfig;
 use crate::session::SessionOutcome;
-use crate::session::state::{PHASE_CREATE, PHASE_DEV, PHASE_REVIEW};
-use crate::supervisor::decisions::{DecisionRecord, DecisionSource};
 use crate::watcher::StoryInfo;
 
 use super::SdkRuntime;
@@ -272,24 +270,6 @@ pub fn build_claude_code_config(
 }
 
 // ---------------------------------------------------------------------------
-// Prompt construction per phase
-// ---------------------------------------------------------------------------
-
-pub fn build_claude_code_prompt(phase: &str, story: &StoryInfo) -> String {
-    let skill_cmd = match phase {
-        PHASE_CREATE => format!("/bmad-create-story {}", story.story_key),
-        PHASE_REVIEW => format!("/bmad-code-review {}", story.specs_path.to_string_lossy()),
-        _ => {
-            if phase != PHASE_DEV {
-                tracing::warn!(phase = %phase, "Unknown phase for Claude Code prompt, defaulting to dev-story");
-            }
-            format!("/bmad-dev-story {}", story.specs_path.to_string_lossy())
-        }
-    };
-    format!("{skill_cmd}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.")
-}
-
-// ---------------------------------------------------------------------------
 // Resume config builder
 // ---------------------------------------------------------------------------
 
@@ -543,85 +523,10 @@ pub async fn resume_claude_code_session(
     drop(mcp_temp_file);
 
     let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
-    let outcome = map_sdk_result_to_outcome(&result, story, &impl_artifacts_path).await;
+    let outcome =
+        crate::pipeline::outcome::map_sdk_result_to_outcome(&result, story, &impl_artifacts_path)
+            .await;
     (outcome, Some(result))
-}
-
-// ---------------------------------------------------------------------------
-// Orchestration — run_claude_code_session
-// ---------------------------------------------------------------------------
-
-pub async fn run_claude_code_session(
-    runtime: &SdkRuntime,
-    context: super::SessionContext<'_>,
-) -> SessionOutcome {
-    let role_config = runtime.config_for_role(&context.role);
-    let prompt = build_claude_code_prompt(context.initial_phase, context.story);
-    runtime.ui().sdk_session_info(&role_config.provider, &role_config.model);
-    runtime.ui().chat_turn(0, &prompt);
-    runtime.ui().activation_start();
-
-    let project_root = match std::fs::canonicalize(&runtime.config().bmad_paths.project_root) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                raw = %runtime.config().bmad_paths.project_root,
-                "Failed to canonicalize project_root, using raw value"
-            );
-            PathBuf::from(&runtime.config().bmad_paths.project_root)
-        }
-    };
-
-    let needs_supervisor = matches!(context.initial_phase, PHASE_CREATE | PHASE_DEV);
-    let mcp_temp_file = if needs_supervisor {
-        let mcp_json = crate::mcp_server::generate_mcp_config(
-            &context.story.story_key,
-            runtime.config_path(),
-            runtime.secrets(),
-            &runtime.config().mcp_servers,
-        );
-        match write_mcp_config_temp_file(&mcp_json) {
-            Ok(f) => Some(f),
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to write MCP config temp file, proceeding without supervisor");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let mcp_config_path = mcp_temp_file.as_ref().map(|f| f.path().to_path_buf());
-
-    let session_config = build_claude_code_config(
-        role_config,
-        &project_root,
-        &prompt,
-        mcp_config_path.as_deref(),
-    );
-
-    let mut result = match runtime
-        .execute_session(session_config, parse_claude_code_line)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return SessionOutcome::Failed {
-                story_key: context.story.story_key.clone(),
-                error: e.to_string(),
-                decisions: vec![],
-            };
-        }
-    };
-
-    // Drop temp file after session completes (best-effort cleanup)
-    drop(mcp_temp_file);
-
-    let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
-    let outcome = map_sdk_result_to_outcome(&result, context.story, &impl_artifacts_path).await;
-
-    outcome
 }
 
 fn write_mcp_config_temp_file(
@@ -632,35 +537,6 @@ fn write_mcp_config_temp_file(
     serde_json::to_writer(&mut tmp, mcp_json).map_err(std::io::Error::other)?;
     tmp.flush()?;
     Ok(tmp)
-}
-
-/// Determine the automatic response for an interactive prompt, if any.
-pub(crate) fn auto_response_for_prompt(text: &str) -> Option<String> {
-    crate::pipeline::auto_response::auto_response_for_prompt(text)
-}
-
-/// Detect if the completion text ends with a BMAD skill confirmation prompt.
-pub(crate) fn is_confirmation_prompt(text: &str) -> bool {
-    crate::pipeline::auto_response::is_confirmation_prompt(text)
-}
-
-pub(crate) async fn map_sdk_result_to_outcome(
-    result: &super::sdk::SdkSessionResult,
-    story: &StoryInfo,
-    impl_artifacts_path: &Path,
-) -> SessionOutcome {
-    crate::pipeline::outcome::map_sdk_result_to_outcome(result, story, impl_artifacts_path).await
-}
-
-pub async fn read_decisions_json_sidecar(
-    impl_artifacts_dir: &Path,
-    story_key: &str,
-) -> Vec<DecisionRecord> {
-    crate::pipeline::outcome::read_decisions_json_sidecar(impl_artifacts_dir, story_key).await
-}
-
-pub fn detect_escalation(decisions: &[DecisionRecord]) -> Option<(String, String)> {
-    crate::pipeline::outcome::detect_escalation(decisions)
 }
 
 // ---------------------------------------------------------------------------
@@ -874,125 +750,6 @@ mod tests {
                 .args
                 .contains(&"OVERRIDE: communication_language = English".to_string())
         );
-    }
-
-    // -- Task 9.16: prompt create phase --
-    #[test]
-    fn test_build_claude_code_prompt_create() {
-        let story = make_test_story();
-        let prompt = build_claude_code_prompt("create", &story);
-        assert!(prompt.starts_with("/bmad-create-story 15-5-claude-code"), "prompt should start with /skill command: {prompt}");
-        assert!(prompt.contains("English"), "prompt should contain English override");
-    }
-
-    // -- Task 9.17: prompt dev phase --
-    #[test]
-    fn test_build_claude_code_prompt_dev() {
-        let story = make_test_story();
-        let prompt = build_claude_code_prompt("dev", &story);
-        assert!(prompt.starts_with("/bmad-dev-story /tmp/impl-artifacts/15-5-claude-code.md"), "prompt should start with /skill command: {prompt}");
-        assert!(prompt.contains("English"), "prompt should contain English override");
-    }
-
-    // -- Task 9.18: prompt review phase --
-    #[test]
-    fn test_build_claude_code_prompt_review() {
-        let story = make_test_story();
-        let prompt = build_claude_code_prompt("review", &story);
-        assert!(prompt.starts_with("/bmad-code-review /tmp/impl-artifacts/15-5-claude-code.md"), "prompt should start with /skill command: {prompt}");
-        assert!(prompt.contains("English"), "prompt should contain English override");
-    }
-
-    // -- Task 9.22: detect escalation found --
-    #[test]
-    fn test_detect_escalation_found() {
-        let decisions = vec![
-            DecisionRecord::new(
-                "Proceed?".to_string(),
-                None,
-                "Yes".to_string(),
-                DecisionSource::RuleEngine {
-                    rule_name: "confirm".to_string(),
-                },
-                "matched".to_string(),
-                vec![],
-            ),
-            DecisionRecord::new(
-                "What DB schema?".to_string(),
-                None,
-                String::new(),
-                DecisionSource::Escalation,
-                "Cannot determine".to_string(),
-                vec![],
-            ),
-        ];
-        let result = detect_escalation(&decisions);
-        assert!(result.is_some());
-        let (question, reason) = result.unwrap();
-        assert_eq!(question, "What DB schema?");
-        assert_eq!(reason, "Cannot determine");
-    }
-
-    // -- Task 9.23: detect escalation not found --
-    #[test]
-    fn test_detect_escalation_not_found() {
-        let decisions = vec![
-            DecisionRecord::new(
-                "Proceed?".to_string(),
-                None,
-                "Yes".to_string(),
-                DecisionSource::RuleEngine {
-                    rule_name: "confirm".to_string(),
-                },
-                "matched".to_string(),
-                vec![],
-            ),
-            DecisionRecord::new(
-                "What approach?".to_string(),
-                None,
-                "Use X".to_string(),
-                DecisionSource::LlmFallback,
-                "analysis".to_string(),
-                vec![],
-            ),
-        ];
-        assert!(detect_escalation(&decisions).is_none());
-    }
-
-    // -- Task 9.24: detect escalation empty decisions --
-    #[test]
-    fn test_detect_escalation_empty_decisions() {
-        assert!(detect_escalation(&[]).is_none());
-    }
-
-    // -- Task 9.25: read sidecar missing file --
-    #[tokio::test]
-    async fn test_read_decisions_json_sidecar_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let result = read_decisions_json_sidecar(dir.path(), "nonexistent").await;
-        assert!(result.is_empty());
-    }
-
-    // -- Task 9.26: read sidecar valid JSON --
-    #[tokio::test]
-    async fn test_read_decisions_json_sidecar_valid_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let decisions = vec![DecisionRecord::new(
-            "question".to_string(),
-            None,
-            "answer".to_string(),
-            DecisionSource::LlmFallback,
-            "reasoning".to_string(),
-            vec![],
-        )];
-        let path = dir.path().join("test-story-SUPERVISOR-DECISIONS.json");
-        let json = serde_json::to_string(&decisions).unwrap();
-        tokio::fs::write(&path, &json).await.unwrap();
-
-        let result = read_decisions_json_sidecar(dir.path(), "test-story").await;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].question, "question");
-        assert_eq!(result[0].answer, "answer");
     }
 
     // -- Story 15.7: resume config builder tests --

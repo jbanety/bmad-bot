@@ -34,11 +34,11 @@ use crate::review::epic::{
     generate_failure_report, parse_related_deferred_items,
 };
 use crate::runtime::{
-    RawSessionResult, RuntimeCommand, RuntimeDeps, SessionContext, SessionRuntime, SkillPaths,
+    RawSessionResult, RuntimeCommand, RuntimeDeps, SessionRuntime, SkillPaths,
 };
 use crate::session::SessionOutcome;
 use crate::session::cleanup::{unblock_dependents, update_story_status};
-use crate::session::consultation::{ConsultationConfig, ConsultationRunner, ConsultationToolSet};
+use crate::session::consultation::{ConsultationConfig, ConsultationToolSet};
 use crate::session::runner::ShutdownFlag;
 use crate::session::state::{
     PHASE_CREATE, PHASE_CREATE_ADVERSARIAL_CONSULT, PHASE_CREATE_CRITIC_CONSULT, PHASE_DEV,
@@ -1438,6 +1438,55 @@ impl StoryPipeline {
                 .auto_response_loop(raw, &LlmRole::Review, &story.story_key)
                 .await;
 
+            // Check if findings exist in completion but not in story file — resume to persist
+            let raw = if raw.exit_code == Some(0) {
+                if let Some(ref sid) = raw.session_id {
+                    let has_findings_in_completion = raw
+                        .completion_text
+                        .as_deref()
+                        .map(|t| {
+                            t.contains("[Review][Patch]")
+                                || t.contains("[Review][Decision]")
+                                || t.contains("[Review][Defer]")
+                        })
+                        .unwrap_or(false);
+                    let story_path = PathBuf::from(&self.config.bmad_paths.project_root)
+                        .join(&story.specs_path);
+                    let story_has_findings = tokio::fs::read_to_string(&story_path)
+                        .await
+                        .map(|c| c.contains("### Review Findings"))
+                        .unwrap_or(false);
+                    if has_findings_in_completion && !story_has_findings {
+                        tracing::info!(
+                            action = "review_findings_persist_resume",
+                            story_key = %story.story_key,
+                            "Review findings in completion but not in story file — resuming to persist"
+                        );
+                        let resume_result = self
+                            .session_runtime
+                            .execute(RuntimeCommand::Resume {
+                                session_id: sid.clone(),
+                                prompt: "The review findings were not written to the story file. \
+                                    Please write ALL review findings to the story file now, under \
+                                    a `### Review Findings` section in the Tasks & Acceptance area. \
+                                    Use the exact format from the review output."
+                                    .to_string(),
+                                role: LlmRole::Review,
+                                story_key: story.story_key.clone(),
+                            })
+                            .await;
+                        self.auto_response_loop(resume_result, &LlmRole::Review, &story.story_key)
+                            .await
+                    } else {
+                        raw
+                    }
+                } else {
+                    raw
+                }
+            } else {
+                raw
+            };
+
             // Run review-critic consultation only if review found decision-needed items
             let has_decision_needed = raw
                 .completion_text
@@ -2215,6 +2264,21 @@ impl StoryPipeline {
                     continue;
                 }
             };
+
+            // Persist findings to critic memory
+            if let Err(e) = self
+                .critic_memory
+                .append_entry(&story.story_key, &consult_config.label, &findings)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    label = %consult_config.label,
+                    "Failed to append consultation findings to critic memory"
+                );
+            } else {
+                self.ui.critic_memory_update(&story.story_key);
+            }
 
             tracing::info!(
                 label = %consult_config.label,
@@ -3326,7 +3390,7 @@ impl StoryPipeline {
     ///
     /// Returns `Some(findings)` if the Critic identified issues, `None` if
     /// nothing to fix or the consultation failed.
-    async fn run_epic_critic_review(&self, report: &str, epic_num: u32) -> Option<String> {
+    async fn run_epic_critic_review(&self, _report: &str, epic_num: u32) -> Option<String> {
         let next_epic = epic_num + 1;
         self.ui
             .phase_start(&format!("Epic {epic_num} Critic Review"));
@@ -3335,7 +3399,6 @@ impl StoryPipeline {
         let critic_memory_path = self.critic_memory.prepare_context_path();
         let project_brief_path = self.prepare_project_brief_path();
 
-        // The report was already saved to disk — use that as context
         let report_context_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
             .join(format!("epic-{epic_num}-retrospective-report.md"));
 
@@ -3349,17 +3412,6 @@ impl StoryPipeline {
         if let Some(ref memory_path) = critic_memory_path {
             context_files.push(memory_path.clone());
         }
-
-        let memory_instruction = if let Some(ref memory_path) = critic_memory_path {
-            format!(
-                "\n\nIMPORTANT: After your analysis, append a summary of your epic {epic_num} review \
-                 observations to your memory file at `{memory_path}` using `edit_file`. Include: \
-                 the epic number, key findings, and items requiring attention for epic {next_epic}. \
-                 This ensures cross-epic continuity in your reviews."
-            )
-        } else {
-            String::new()
-        };
 
         let config = ConsultationConfig {
             label: format!("epic-{epic_num}-critic"),
@@ -3380,62 +3432,74 @@ impl StoryPipeline {
                  If there are items that must be fixed, describe them clearly with file paths and \
                  specific actions. If the codebase is clean and nothing needs immediate attention, \
                  respond with exactly: NO_ACTION_NEEDED\n\n\
-                 {{context}}{memory_instruction}\n\n\
-                 When finished, output <<BMAD_JOB_DONE>>"
+                 {{context}}"
             ),
             resume_message_template: String::new(),
             pipeline_phase: None,
         };
 
-        let runner = ConsultationRunner::new(
-            Arc::clone(&self.agent_factory),
-            Arc::clone(&self.shutdown),
-            self.ui.clone(),
-            PathBuf::from(&self.config.bmad_paths.project_root),
+        let story_key = format!("epic-{epic_num}");
+        let result = consultation::run_single_consultation(
+            &self.session_runtime,
+            &config,
+            &story_key,
+        )
+        .await;
+
+        if result.exit_code != Some(0) {
+            tracing::warn!(
+                action = "epic_critic_failed",
+                exit_code = ?result.exit_code,
+                stderr = %result.stderr,
+                epic_num = epic_num,
+                "Epic critic review failed — continuing without pre-epic story"
+            );
+            self.ui.phase_complete_with_result(
+                &format!("Epic {epic_num} Critic Review"),
+                start.elapsed(),
+                "failed",
+            );
+            return None;
+        }
+
+        self.critic_memory.check_size_threshold();
+        self.ui.phase_complete_with_result(
+            &format!("Epic {epic_num} Critic Review"),
+            start.elapsed(),
+            "completed",
         );
 
-        match runner.execute(&config).await {
-            Ok(findings) => {
-                self.critic_memory.check_size_threshold();
-                self.ui.phase_complete_with_result(
-                    &format!("Epic {epic_num} Critic Review"),
-                    start.elapsed(),
-                    "completed",
-                );
-
-                let trimmed = findings.trim();
-                let upper = trimmed.to_uppercase();
-                if trimmed.is_empty() || upper == "NO_ACTION_NEEDED" || upper.starts_with("NO_ACTION_NEEDED\n") || upper.starts_with("NO_ACTION_NEEDED.") || upper.starts_with("NO_ACTION_NEEDED —") {
-                    tracing::info!(
-                        action = "epic_critic_clean",
-                        epic_num = epic_num,
-                        "Critic found no issues requiring pre-epic story"
-                    );
-                    None
-                } else {
-                    tracing::info!(
-                        action = "epic_critic_findings",
-                        epic_num = epic_num,
-                        findings_len = trimmed.len(),
-                        "Critic identified issues for pre-epic story"
-                    );
-                    Some(trimmed.to_string())
-                }
+        let findings = result.completion_text.as_deref().unwrap_or("").trim();
+        let upper = findings.to_uppercase();
+        if findings.is_empty()
+            || upper == "NO_ACTION_NEEDED"
+            || upper.starts_with("NO_ACTION_NEEDED\n")
+            || upper.starts_with("NO_ACTION_NEEDED.")
+            || upper.starts_with("NO_ACTION_NEEDED —")
+        {
+            tracing::info!(
+                action = "epic_critic_clean",
+                epic_num = epic_num,
+                "Critic found no issues requiring pre-epic story"
+            );
+            None
+        } else {
+            tracing::info!(
+                action = "epic_critic_findings",
+                epic_num = epic_num,
+                findings_len = findings.len(),
+                "Critic identified issues for pre-epic story"
+            );
+            if let Err(e) = self
+                .critic_memory
+                .append_entry(&story_key, "Epic Critic Review", findings)
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to append epic critic findings to critic memory");
+            } else {
+                self.ui.critic_memory_update(&story_key);
             }
-            Err(e) => {
-                tracing::warn!(
-                    action = "epic_critic_failed",
-                    error = %e,
-                    epic_num = epic_num,
-                    "Epic critic review failed — continuing without pre-epic story"
-                );
-                self.ui.phase_complete_with_result(
-                    &format!("Epic {epic_num} Critic Review"),
-                    start.elapsed(),
-                    "failed",
-                );
-                None
-            }
+            Some(findings.to_string())
         }
     }
 

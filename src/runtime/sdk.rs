@@ -16,7 +16,6 @@ use crate::session::SessionOutcome;
 use crate::session::agent::ShutdownFlag;
 use crate::ui::UiHandle;
 
-use super::SessionContext;
 
 // ---------------------------------------------------------------------------
 // SdkError
@@ -139,19 +138,6 @@ impl SdkRuntime {
 
     pub(crate) fn config(&self) -> &BotConfig {
         &self.config
-    }
-
-    pub(crate) fn config_arc(&self) -> Arc<BotConfig> {
-        Arc::clone(&self.config)
-    }
-
-    pub(crate) fn ui(&self) -> &UiHandle {
-        &self.ui
-    }
-
-    pub(crate) fn set_suppress_activation_ui(&self, suppress: bool) {
-        self.suppress_activation_ui
-            .store(suppress, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn secrets(&self) -> &BotSecrets {
@@ -337,20 +323,6 @@ impl SdkRuntime {
                     },
                 }
             }
-        }
-    }
-
-    /// Dispatches an SDK session to the appropriate provider.
-    pub async fn run_session(&self, context: SessionContext<'_>) -> SessionOutcome {
-        let provider = self.resolve_provider_for_role(&context.role);
-        match provider.as_str() {
-            "claude-code" => super::sdk_claude::run_claude_code_session(self, context).await,
-            "codex" => super::sdk_codex::run_codex_session(self, context).await,
-            other => SessionOutcome::Failed {
-                story_key: context.story.story_key.clone(),
-                error: format!("SDK provider '{}' not implemented.", other),
-                decisions: vec![],
-            },
         }
     }
 
@@ -895,39 +867,6 @@ mod tests {
 
     // -- Task 9.20: unknown SDK provider fails --
 
-    #[tokio::test]
-    async fn test_run_session_unknown_sdk_provider_fails() {
-        let runtime = make_test_runtime(make_test_secrets(None, None));
-        let story = crate::watcher::StoryInfo {
-            story_id: "15.5".to_string(),
-            story_key: "15-5-test".to_string(),
-            epic_num: 15,
-            story_num: 5,
-            label: "test".to_string(),
-            branch_name: "story/15-5-test".to_string(),
-            specs_path: PathBuf::from("/tmp/story.md"),
-            dependencies: vec![],
-            status: "ready-for-dev".to_string(),
-        };
-        let context = SessionContext {
-            story: &story,
-            base_branch_override: None,
-            consultations: vec![],
-            role: LlmRole::Dev,
-            initial_phase: "dev",
-        };
-        let outcome = runtime.run_session(context).await;
-        match outcome {
-            SessionOutcome::Failed {
-                error, story_key, ..
-            } => {
-                assert!(error.contains("not implemented"));
-                assert_eq!(story_key, "15-5-test");
-            }
-            _ => panic!("expected SessionOutcome::Failed"),
-        }
-    }
-
     // -- Task 9.21: config_for_role returns correct config --
 
     #[test]
@@ -941,100 +880,6 @@ mod tests {
         assert_eq!(supervisor_config.provider, "anthropic");
     }
 
-    // -- Task 9.19: claude-code dispatch integration test --
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_run_session_claude_code_dispatches() {
-        let dir = tempfile::tempdir().unwrap();
-
-        std::process::Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::fs::write(dir.path().join("README.md"), "init").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
-        let script_path = dir.path().join("fake-claude.sh");
-        std::fs::write(
-            &script_path,
-            "#!/bin/sh\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"test-session-123\"}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"All done\",\"is_error\":false}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(
-            &script_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )
-        .unwrap();
-
-        let mut config = BotConfig::_test_minimal("pretty", "info");
-        config.llm.dev.provider = "claude-code".to_string();
-        config.llm.dev.cli_path = Some(script_path.to_string_lossy().to_string());
-        config.bmad_paths.project_root = dir.path().to_string_lossy().to_string();
-        config.bmad_paths.implementation_artifacts = dir.path().to_string_lossy().to_string();
-
-        let runtime = SdkRuntime::new(
-            Arc::new(config),
-            make_test_secrets(Some("sk-test"), None),
-            PathBuf::from("test-config.yaml"),
-            Arc::new(AtomicBool::new(false)),
-            UiHandle::null(),
-        );
-
-        let story = crate::watcher::StoryInfo {
-            story_id: "15.5".to_string(),
-            story_key: "15-5-claude-code".to_string(),
-            epic_num: 15,
-            story_num: 5,
-            label: "claude-code".to_string(),
-            branch_name: "story/15-5-claude-code".to_string(),
-            specs_path: dir.path().join("15-5-claude-code.md"),
-            dependencies: vec![],
-            status: "in-progress".to_string(),
-        };
-        let context = SessionContext {
-            story: &story,
-            base_branch_override: None,
-            consultations: vec![],
-            role: LlmRole::Dev,
-            initial_phase: "dev",
-        };
-        let outcome = runtime.run_session(context).await;
-        match outcome {
-            SessionOutcome::Completed {
-                story_key,
-                branch,
-                pr_context,
-                ..
-            } => {
-                assert_eq!(story_key, "15-5-claude-code");
-                assert_eq!(branch, "story/15-5-claude-code");
-                assert!(pr_context.is_some());
-                assert_eq!(pr_context.unwrap(), "All done");
-            }
-            other => panic!("expected SessionOutcome::Completed, got {:?}", other),
-        }
-    }
 
     // -- Story 15.7: resume dispatcher tests --
 
