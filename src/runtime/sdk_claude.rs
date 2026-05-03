@@ -7,7 +7,6 @@ use serde::Deserialize;
 
 use crate::config::LlmRoleConfig;
 use crate::session::SessionOutcome;
-use crate::session::escalation::EscalationReport;
 use crate::session::state::{PHASE_CREATE, PHASE_DEV, PHASE_REVIEW};
 use crate::supervisor::decisions::{DecisionRecord, DecisionSource};
 use crate::watcher::StoryInfo;
@@ -566,153 +565,13 @@ fn write_mcp_config_temp_file(
 }
 
 /// Determine the automatic response for an interactive prompt, if any.
-///
-/// Returns `Some(response)` if the prompt is recognized, `None` if the session
-/// should not be auto-resumed (legitimate completion or unrecognized prompt).
 pub(crate) fn auto_response_for_prompt(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-
-    // BMAD checkpoint: "HALT and wait for user confirmation to proceed"
-    if is_checkpoint_prompt(&lower) {
-        return Some("proceed".to_string());
-    }
-
-    if !is_confirmation_prompt(text) && !is_numeric_choice_prompt(text) {
-        return None;
-    }
-
-    // Chunk review: "offer to chunk the review by file group" → accept and go in order
-    if lower.contains("chunk") && is_confirmation_prompt(text) {
-        return Some("Y — review all chunks in order, starting from the first group".to_string());
-    }
-
-    // Numeric choice prompts — detect specific BMAD workflow patterns
-    if is_numeric_choice_prompt(text) {
-        // "What would you like to do next?" / "next steps" → stop, don't burn tokens
-        if lower.contains("what would you like to do next")
-            || lower.contains("next step")
-            || (lower.contains("done") && lower.contains("re-run"))
-        {
-            return None;
-        }
-
-        // Patch handling: prefer batch-apply (0) when offered, else apply all (1)
-        if lower.contains("patch") && lower.contains("handle") {
-            let tail = if text.len() > 500 {
-                &text[text.len() - 500..]
-            } else {
-                text
-            };
-            let has_option_0 = tail.lines().any(|l| {
-                let t = l.trim();
-                t.starts_with("0.") || t.starts_with("0)")  || t.starts_with("0 —") || t.starts_with("0-")
-            });
-            return if has_option_0 {
-                Some("0".to_string())
-            } else {
-                Some("1".to_string())
-            };
-        }
-
-        // Approve / confirm spec → [A]
-        if lower.contains("[a] approv") || lower.contains("[a] approve") {
-            return Some("A".to_string());
-        }
-
-        // Default: don't auto-respond to unknown numeric prompts
-        tracing::warn!(
-            action = "auto_confirm_unknown_prompt",
-            tail = %&text[text.len().saturating_sub(200)..],
-            "Unknown numeric choice prompt — not auto-responding"
-        );
-        return None;
-    }
-
-    // Default Y/N confirmation
-    Some("Y".to_string())
-}
-
-/// Detect BMAD skill checkpoint prompts that wait for free-text confirmation.
-///
-/// Only matches the last ~200 chars (the actual ask) to avoid false positives
-/// from earlier narrative text like "I will proceed to review...".
-/// Looks for imperative patterns directed at the user: "Reply `proceed`",
-/// "Confirm and I'll proceed", "HALT and wait for confirmation".
-fn is_checkpoint_prompt(lower: &str) -> bool {
-    let tail = if lower.len() > 200 {
-        &lower[lower.len() - 200..]
-    } else {
-        lower
-    };
-    // "reply `proceed`" / "reply proceed" — explicit ask
-    if tail.contains("reply") && tail.contains("proceed") {
-        return true;
-    }
-    // "confirm and I'll proceed" / "confirm to proceed" — imperative directed at user
-    if tail.contains("confirm") && tail.contains("proceed") {
-        return true;
-    }
-    // "halt and wait for confirmation/user" — BMAD checkpoint language
-    if tail.contains("halt") && tail.contains("wait") {
-        return true;
-    }
-    false
-}
-
-/// Detect if the completion text ends with a numeric choice prompt (1, 2, 3...).
-fn is_numeric_choice_prompt(text: &str) -> bool {
-    let tail = if text.len() > 500 {
-        &text[text.len() - 500..]
-    } else {
-        text
-    };
-    // Look for numbered options like "1." or "1)" at line starts in the tail
-    let has_option_1 = tail.lines().any(|l| {
-        let t = l.trim();
-        t.starts_with("1.") || t.starts_with("1)") || t.starts_with("1 —") || t.starts_with("1-")
-    });
-    let has_option_2 = tail.lines().any(|l| {
-        let t = l.trim();
-        t.starts_with("2.") || t.starts_with("2)") || t.starts_with("2 —") || t.starts_with("2-")
-    });
-    has_option_1 && has_option_2
+    crate::pipeline::auto_response::auto_response_for_prompt(text)
 }
 
 /// Detect if the completion text ends with a BMAD skill confirmation prompt.
-///
-/// Matches patterns like `[Y]/[N]`, `[Y] pour confirmer`, `[Y] Yes`, etc.
-/// Only considers the last ~500 chars to avoid false positives in large outputs.
 pub(crate) fn is_confirmation_prompt(text: &str) -> bool {
-    let tail = if text.len() > 500 {
-        &text[text.len() - 500..]
-    } else {
-        text
-    };
-    let lower = tail.to_lowercase();
-    // Any text that contains both Y and N as expected responses
-    // Covers: [Y]/[N], `Y`/`N`, Y for yes / N for no, [Y] Yes / [N] No, etc.
-    let has_y = lower.contains("`y`") || lower.contains("[y]");
-    let has_n = lower.contains("`n`") || lower.contains("[n]");
-    if has_y && has_n {
-        return true;
-    }
-    // [Y] alone (confirm-only prompts without N option)
-    if lower.contains("[y]") {
-        if let Some(pos) = lower.rfind("[y]") {
-            let after = &lower[pos + 3..];
-            let trimmed = after.trim_start();
-            if trimmed.starts_with("pour")
-                || trimmed.starts_with("yes")
-                || trimmed.starts_with("oui")
-                || trimmed.starts_with("to confirm")
-                || trimmed.is_empty()
-                || trimmed.starts_with('\n')
-            {
-                return true;
-            }
-        }
-    }
-    false
+    crate::pipeline::auto_response::is_confirmation_prompt(text)
 }
 
 pub(crate) async fn map_sdk_result_to_outcome(
@@ -720,125 +579,18 @@ pub(crate) async fn map_sdk_result_to_outcome(
     story: &StoryInfo,
     impl_artifacts_path: &Path,
 ) -> SessionOutcome {
-    if let Some(ref text) = result.completion_text {
-        tracing::info!(
-            action = "sdk_completion",
-            story_key = %story.story_key,
-            exit_code = ?result.exit_code,
-            len = text.len(),
-            text = %text,
-            "SDK session final completion"
-        );
-    }
-
-    let decisions = read_decisions_json_sidecar(impl_artifacts_path, &story.story_key).await;
-
-    if let Some(resets_at) = result.rate_limit_resets_at {
-        return SessionOutcome::Failed {
-            story_key: story.story_key.clone(),
-            error: format!("RATE_LIMITED:{resets_at}"),
-            decisions,
-        };
-    }
-
-    if let Some((question, reason)) = detect_escalation(&decisions) {
-        return SessionOutcome::Escalated {
-            report: EscalationReport::new(
-                story.story_key.clone(),
-                question,
-                reason,
-                story.branch_name.clone(),
-                "SDK session completed with escalation".to_string(),
-            ),
-            decisions,
-        };
-    }
-
-    if result.exit_code == Some(0) {
-        let pr_context = result
-            .completion_text
-            .as_ref()
-            .filter(|text| !text.is_empty())
-            .map(|text| {
-                if text.chars().count() > 2000 {
-                    text.chars().take(2000).collect()
-                } else {
-                    text.clone()
-                }
-            });
-
-        SessionOutcome::Completed {
-            story_key: story.story_key.clone(),
-            branch: story.branch_name.clone(),
-            decisions,
-            pr_context,
-            pr_how_to_test: None,
-            pr_additional_info: None,
-        }
-    } else {
-        let mut error = format!("SDK session failed (exit code {:?})", result.exit_code);
-        if let Some(ref stream_err) = result.stream_error {
-            error.push_str(": ");
-            error.push_str(stream_err);
-        } else if !result.stderr.is_empty() {
-            error.push_str(": ");
-            error.push_str(&result.stderr);
-        }
-
-        let error_lower = error.to_lowercase();
-        if (error_lower.contains("rate limit") || error_lower.contains("usage limit")) && result.rate_limit_resets_at.is_none() {
-            return SessionOutcome::Failed {
-                story_key: story.story_key.clone(),
-                error: "RATE_LIMITED:0".to_string(),
-                decisions,
-            };
-        }
-
-        SessionOutcome::Failed {
-            story_key: story.story_key.clone(),
-            error,
-            decisions,
-        }
-    }
+    crate::pipeline::outcome::map_sdk_result_to_outcome(result, story, impl_artifacts_path).await
 }
-
-// ---------------------------------------------------------------------------
-// JSON sidecar: read decisions written by MCP supervisor process
-// ---------------------------------------------------------------------------
 
 pub async fn read_decisions_json_sidecar(
     impl_artifacts_dir: &Path,
     story_key: &str,
 ) -> Vec<DecisionRecord> {
-    let path = impl_artifacts_dir.join(format!("{story_key}-SUPERVISOR-DECISIONS.json"));
-    let content = match tokio::fs::read_to_string(&path).await {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    match serde_json::from_str(&content) {
-        Ok(decisions) => decisions,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                path = %path.display(),
-                "Failed to parse decisions JSON sidecar, treating as empty"
-            );
-            Vec::new()
-        }
-    }
+    crate::pipeline::outcome::read_decisions_json_sidecar(impl_artifacts_dir, story_key).await
 }
 
-// ---------------------------------------------------------------------------
-// Escalation detection from structured decisions
-// ---------------------------------------------------------------------------
-
 pub fn detect_escalation(decisions: &[DecisionRecord]) -> Option<(String, String)> {
-    for record in decisions {
-        if record.source == DecisionSource::Escalation {
-            return Some((record.question.clone(), record.reasoning.clone()));
-        }
-    }
-    None
+    crate::pipeline::outcome::detect_escalation(decisions)
 }
 
 // ---------------------------------------------------------------------------

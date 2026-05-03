@@ -10,6 +10,9 @@
 //! changes (e.g., story 1-1 done → 1-2 now eligible) are reflected immediately
 //! instead of processing a stale batch from the initial poll.
 
+pub mod auto_response;
+pub mod outcome;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -6181,7 +6184,7 @@ development_status:
 
     #[test]
     fn test_process_story_installs_cleanup_guard_source_check() {
-        let src = include_str!("pipeline.rs");
+        let src = include_str!("mod.rs");
         // Find the start of process_story's body.
         let process_story_pos = src
             .find("pub async fn process_story(")
