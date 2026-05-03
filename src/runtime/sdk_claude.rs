@@ -608,82 +608,11 @@ pub async fn run_claude_code_session(
         }
     };
 
-    // Auto-confirm loop: if the session ended with a prompt waiting for input,
-    // detect the type and resume with the appropriate response.
-    let mut confirm_attempts = 0;
-    const MAX_CONFIRM_ATTEMPTS: usize = 15;
-    while confirm_attempts < MAX_CONFIRM_ATTEMPTS {
-        if result.exit_code != Some(0) {
-            break;
-        }
-        let completion = result.completion_text.as_deref().unwrap_or("");
-        let response = auto_response_for_prompt(completion);
-        let Some(response) = response else {
-            break;
-        };
-        let Some(ref session_id) = result.session_id else {
-            break;
-        };
-        confirm_attempts += 1;
-        tracing::info!(
-            action = "auto_confirm",
-            attempt = confirm_attempts,
-            response = %response,
-            story_key = %context.story.story_key,
-            "Detected interactive prompt — auto-resuming"
-        );
-        runtime
-            .ui()
-            .sdk_text(&format!("Auto-responding: {response}"));
-        let (_, resume_result) = runtime
-            .resume_sdk_session(
-                &role_config.provider,
-                session_id,
-                &response,
-                context.story,
-                &context.role,
-            )
-            .await;
-        match resume_result {
-            Some(r) => result = r,
-            None => break,
-        }
-    }
-
     // Drop temp file after session completes (best-effort cleanup)
     drop(mcp_temp_file);
 
     let impl_artifacts_path = PathBuf::from(&runtime.config().bmad_paths.implementation_artifacts);
     let outcome = map_sdk_result_to_outcome(&result, context.story, &impl_artifacts_path).await;
-
-    if !context.consultations.is_empty() {
-        if let SessionOutcome::Completed { .. } = &outcome {
-            let agent_factory = std::sync::Arc::new(crate::llm::AgentFactory::new(
-                runtime.config_arc(),
-                std::sync::Arc::new(crate::config::BotSecrets {
-                    anthropic_api_key: None,
-                    openai_api_key: None,
-                    github_token: None,
-                    gitlab_token: None,
-                    telegram_bot_token: None,
-                }),
-            ));
-            let mut consultation_runner = super::sdk_consultation::SdkConsultationRunner::new(
-                runtime,
-                context.consultations,
-            );
-            return consultation_runner
-                .run_with_consultations(
-                    context.story,
-                    context.initial_phase,
-                    outcome,
-                    &result,
-                    &context.role,
-                    Some(&agent_factory),
-                )
-                .await;
-        }
-    }
 
     outcome
 }

@@ -1,7 +1,6 @@
 pub mod sdk;
 pub mod sdk_claude;
 pub mod sdk_codex;
-pub mod sdk_consultation;
 pub mod sdk_wal;
 
 use std::path::{Path, PathBuf};
