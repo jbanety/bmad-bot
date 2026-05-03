@@ -3522,7 +3522,7 @@ impl StoryPipeline {
     ///
     /// Returns `Some(findings)` if the Critic identified issues, `None` if
     /// nothing to fix or the consultation failed.
-    async fn run_epic_critic_review(&self, _report: &str, epic_num: u32) -> Option<String> {
+    async fn run_epic_critic_review(&self, report: &str, epic_num: u32) -> Option<String> {
         let next_epic = epic_num + 1;
         self.ui
             .phase_start(&format!("Epic {epic_num} Critic Review"));
@@ -3613,7 +3613,7 @@ impl StoryPipeline {
         let memory_content = if no_action {
             format!("Epic {epic_num} reviewed — no action needed, codebase healthy.")
         } else {
-            self.summarize_for_memory(&story_key, "Epic Critic Review", findings, None)
+            self.summarize_for_memory(&story_key, "Epic Critic Review", findings, Some(report))
                 .await
                 .unwrap_or_else(|| findings.to_string())
         };
