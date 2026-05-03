@@ -461,21 +461,59 @@ impl StoryPipeline {
         self.ui.phase_start("Create Story");
         let session_start = std::time::Instant::now();
 
+        // Branch setup (pipeline-owned)
+        if let Err(outcome) = self
+            .pipeline_ensure_branch(story, base_branch_override)
+            .await
+        {
+            return self.outcome_to_pipeline_result(outcome, story_title);
+        }
+
+        // Build consultation configs for post-session use
         let critic_memory_path = self.critic_memory.prepare_context_path();
         let project_brief_path = self.prepare_project_brief_path();
         let consultations =
             self.build_create_story_consultations(story, critic_memory_path, project_brief_path);
 
-        let session_outcome = self
+        // Build prompt (same as SDK claude does internally)
+        let prompt = format!(
+            "/bmad-create-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+            story.story_key
+        );
+
+        // Execute session via new path
+        let raw = self
             .session_runtime
-            .run_session(SessionContext {
-                story,
-                base_branch_override,
-                consultations,
+            .execute(RuntimeCommand::Start {
                 role: LlmRole::Dev,
-                initial_phase: PHASE_CREATE,
+                phase: PHASE_CREATE.to_string(),
+                story_key: story.story_key.clone(),
+                prompt,
+                skill_path: None,
+                preamble: None,
+                needs_supervisor: true,
             })
             .await;
+
+        // Auto-response loop (handles interactive prompts)
+        let raw = self
+            .auto_response_loop(raw, &LlmRole::Dev, &story.story_key)
+            .await;
+
+        // Run consultation sequence (adversarial → critic)
+        let (raw, _session_id) = if raw.exit_code == Some(0) {
+            if let Some(ref sid) = raw.session_id {
+                self.run_consultation_sequence(story, sid, &LlmRole::Dev, &consultations)
+                    .await
+            } else {
+                (raw, String::new())
+            }
+        } else {
+            (raw, String::new())
+        };
+
+        // Interpret final result
+        let session_outcome = self.interpret_raw_result(&raw, story).await;
 
         self.critic_memory.check_size_threshold();
         let session_elapsed = session_start.elapsed();
@@ -2141,6 +2179,73 @@ impl StoryPipeline {
         let impl_artifacts_path =
             PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
         outcome::map_sdk_result_to_outcome(raw, story, &impl_artifacts_path).await
+    }
+
+    /// Convert a failed SessionOutcome (e.g. from branch setup) into a PipelineResult.
+    fn outcome_to_pipeline_result(
+        &self,
+        outcome: SessionOutcome,
+        _story_title: &str,
+    ) -> PipelineResult {
+        match outcome {
+            SessionOutcome::Failed {
+                story_key, error, ..
+            } => PipelineResult {
+                story_key,
+                status: StoryStatus::Error,
+                pr_url: None,
+                error_detail: Some(error),
+                fatal: true,
+            },
+            _ => PipelineResult {
+                story_key: "unknown".to_string(),
+                status: StoryStatus::Error,
+                pr_url: None,
+                error_detail: Some("Unexpected outcome in branch setup".to_string()),
+                fatal: true,
+            },
+        }
+    }
+
+    /// Ensure the story branch exists and is checked out (pipeline-owned).
+    async fn pipeline_ensure_branch(
+        &self,
+        story: &StoryInfo,
+        base_branch_override: Option<&str>,
+    ) -> Result<(), SessionOutcome> {
+        let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
+        let default_branch = self.config.git_provider.target_branch.clone();
+        let base_branch = if let Some(ovr) = base_branch_override {
+            ovr.to_string()
+        } else {
+            crate::session::branch::determine_base_branch(story, &repo_path, &default_branch)
+        };
+
+        let rp = repo_path;
+        let bn = story.branch_name.clone();
+        let bb = base_branch;
+        let story_key = story.story_key.clone();
+
+        match tokio::task::spawn_blocking(move || {
+            crate::session::branch::ensure_story_branch(&rp, &bn, &bb)
+        })
+        .await
+        {
+            Ok(Ok(action)) => {
+                tracing::info!(action = ?action, "Branch setup complete");
+                Ok(())
+            }
+            Ok(Err(e)) => Err(SessionOutcome::Failed {
+                story_key,
+                error: format!("Branch setup failed: {e}"),
+                decisions: vec![],
+            }),
+            Err(e) => Err(SessionOutcome::Failed {
+                story_key,
+                error: format!("Branch setup panicked: {e}"),
+                decisions: vec![],
+            }),
+        }
     }
 
     /// Commit any uncommitted changes left by the session agent.
