@@ -3687,6 +3687,22 @@ impl StoryPipeline {
             return false;
         }
 
+        // Commit any dirty files before branch switch — sessions and artifact writes
+        // may leave uncommitted changes that block checkout.
+        let repo_path = &self.config.bmad_paths.project_root;
+        let _ = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["add", "-A"])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["commit", "-m", &format!("chore: stage work before pre-epic {next_epic} branch")])
+            .output()
+            .await;
+
         // Branch from the last completed story of the epic (carries critic-memory, report, etc.)
         if let Err(outcome) = self.pipeline_ensure_branch(&story_info, last_completed_branch).await {
             tracing::error!(
