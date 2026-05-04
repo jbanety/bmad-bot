@@ -294,6 +294,49 @@ pub fn build_codex_config(
     }
 }
 
+/// Build a Codex session config with the prompt passed via stdin.
+///
+/// Used for consultations where the prompt (preamble + context files) can
+/// exceed the OS argument-list limit (E2BIG). Regular sessions use
+/// [`build_codex_config`] which passes the prompt as a CLI argument.
+pub fn build_codex_config_stdin(
+    role_config: &LlmRoleConfig,
+    project_root: &Path,
+    prompt: &str,
+) -> SdkSessionConfig {
+    let command = role_config
+        .cli_path
+        .clone()
+        .unwrap_or_else(|| "codex".to_string());
+
+    let mut args = vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "--dangerously-bypass-approvals-and-sandbox".to_string(),
+        "--model".to_string(),
+        role_config.model.clone(),
+        "--cd".to_string(),
+        project_root.to_string_lossy().to_string(),
+    ];
+
+    if let Some(ref effort) = role_config.reasoning_effort {
+        if VALID_CODEX_REASONING.contains(&effort.as_str()) {
+            args.push("--config".to_string());
+            args.push(format!("model_reasoning_effort={effort}"));
+        }
+    }
+
+    SdkSessionConfig {
+        command,
+        args,
+        env: Vec::new(),
+        working_directory: project_root.to_path_buf(),
+        timeout: Duration::from_secs(30 * 60),
+        sigterm_grace: Duration::from_secs(10),
+        stdin_data: Some(prompt.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MCP config via project-scoped .codex/config.toml
 // ---------------------------------------------------------------------------
@@ -487,7 +530,7 @@ pub async fn execute_codex_start(
         None
     };
 
-    let session_config = build_codex_config(role_config, &project_root, prompt);
+    let session_config = build_codex_config_stdin(role_config, &project_root, prompt);
 
     let result = match runtime
         .execute_session(session_config, parse_codex_line)

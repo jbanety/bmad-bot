@@ -239,7 +239,6 @@ pub fn build_claude_code_config(
 
     let mut args = vec![
         "-p".to_string(),
-        prompt.to_string(),
         "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
@@ -265,7 +264,7 @@ pub fn build_claude_code_config(
         working_directory: project_root.to_path_buf(),
         timeout: Duration::from_secs(30 * 60),
         sigterm_grace: Duration::from_secs(10),
-        stdin_data: None,
+        stdin_data: Some(prompt.to_string()),
     }
 }
 
@@ -696,7 +695,7 @@ mod tests {
         let config = build_claude_code_config(&role, Path::new("/repo"), "test prompt", None);
         assert_eq!(config.command, "claude");
         assert!(config.args.contains(&"-p".to_string()));
-        assert!(config.args.contains(&"test prompt".to_string()));
+        assert_eq!(config.stdin_data.as_deref(), Some("test prompt"));
         assert!(config.args.contains(&"--output-format".to_string()));
         assert!(config.args.contains(&"stream-json".to_string()));
         assert!(config.args.contains(&"--model".to_string()));
