@@ -20,10 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{BotConfig, BotSecrets};
 use crate::critic::CriticMemory;
-use crate::git_provider::{
-    CreatePrParams, GitProvider, PrDescriptionParams, PrInfo, PrSummary, build_pr_description,
-    build_pr_title, create_provider,
-};
+use crate::git_provider::{CreatePrParams, GitProvider, create_provider};
 use crate::llm::AgentFactory;
 use crate::llm::agent_factory::LlmRole;
 use crate::notifier::{
@@ -44,7 +41,6 @@ use crate::session::state::{
     PHASE_CREATE, PHASE_CREATE_ADVERSARIAL_CONSULT, PHASE_CREATE_CRITIC_CONSULT, PHASE_DEV,
     PHASE_REVIEW, PHASE_REVIEW_CRITIC_CONSULT, SessionState,
 };
-use crate::supervisor::decisions::format_pr_decisions_section;
 use crate::tools::SubAgentState;
 use crate::ui::UiHandle;
 use crate::watcher::deps as watcher_deps;
@@ -414,7 +410,7 @@ impl StoryPipeline {
                     .await
             }
             StoryPhase::Review => {
-                self.run_review_pipeline(story, &story_title, None, None)
+                self.run_review_pipeline(story, &story_title, None)
                     .await
             }
             StoryPhase::Unknown => {
@@ -561,7 +557,7 @@ impl StoryPipeline {
                     .await
             }
 
-            SessionOutcome::Escalated { report, decisions } => {
+            SessionOutcome::Escalated { report, decisions: _ } => {
                 self.ui
                     .phase_error("Create Story", &format!("Escalated: {}", report.reason));
                 tracing::warn!(
@@ -589,66 +585,12 @@ impl StoryPipeline {
                     self.ui.phase_complete("Push Branch", push_start.elapsed());
                 }
 
-                // Build escalation PR
-                let partial_work = if report.partial_work_summary.is_empty() {
-                    "No partial work summary available.".to_string()
-                } else {
-                    format!("Partial work summary: {}", report.partial_work_summary)
-                };
-                let pr_summary = PrSummary {
-                    context: format!(
-                        "Create-story session escalated. Question: {}. Reason: {}",
-                        report.question, report.reason
-                    ),
-                    how_to_test: "N/A — session was escalated during story creation.".to_string(),
-                    additional_info: partial_work,
-                };
-
-                let decisions_section = format_pr_decisions_section(&decisions);
-                let pr_title = build_pr_title(&report.story_key, story_title, true);
-                let pr_body = build_pr_description(&PrDescriptionParams {
-                    story_key: report.story_key.clone(),
-                    story_title: story_title.to_string(),
-                    outcome_summary: "escalated — needs clarification (create phase)".to_string(),
-                    decisions_section,
-                    failure_details: Some(format!(
-                        "**Question:** {}\n**Reason:** {}",
-                        report.question, report.reason
-                    )),
-                    pr_summary: Some(pr_summary),
-                });
-                let pr_params = CreatePrParams {
-                    title: pr_title,
-                    body: pr_body,
-                    source_branch: branch.clone(),
-                    target_branch: self.config.git_provider.target_branch.clone(),
-                };
-
-                self.ui.phase_start("Create PR");
-                let pr_start = std::time::Instant::now();
-                let pr_url = match self.git_provider.create_pr(pr_params).await {
-                    Ok(pr_info) => {
-                        self.ui.phase_complete("Create PR", pr_start.elapsed());
-                        Some(pr_info.url.clone())
-                    }
-                    Err(e) => {
-                        self.ui.phase_error("Create PR", &e.to_string());
-                        tracing::error!(
-                            action = "escalation_pr_creation_failed",
-                            story_key = %report.story_key,
-                            error = %e,
-                            "Failed to create escalation PR"
-                        );
-                        None
-                    }
-                };
-
                 self.ui.phase_start("Notification");
                 let notify_start = std::time::Instant::now();
                 let result = PipelineResult {
                     story_key: report.story_key.clone(),
                     status: StoryStatus::Blocked,
-                    pr_url,
+                    pr_url: None,
                     error_detail: Some(format!(
                         "Create phase escalated: {} — {}",
                         report.question, report.reason
@@ -680,7 +622,7 @@ impl StoryPipeline {
             SessionOutcome::Failed {
                 story_key,
                 error,
-                decisions,
+                decisions: _,
             } => {
                 self.ui.phase_error("Create Story", &error);
                 let infra = is_infra_error(&error);
@@ -733,84 +675,31 @@ impl StoryPipeline {
                         self.ui.phase_complete("Push Branch", push_start.elapsed());
                     }
 
-                    let decisions_section = format_pr_decisions_section(&decisions);
-                    let pr_title = build_pr_title(&story_key, story_title, true);
-                    let pr_body = build_pr_description(&PrDescriptionParams {
+                    self.ui.phase_start("Notification");
+                    let notify_start = std::time::Instant::now();
+                    let result = PipelineResult {
                         story_key: story_key.clone(),
-                        story_title: story_title.to_string(),
-                        outcome_summary: "failed (create phase)".to_string(),
-                        decisions_section,
-                        failure_details: Some(error.clone()),
-                        pr_summary: None,
-                    });
-                    let pr_params = CreatePrParams {
-                        title: pr_title,
-                        body: pr_body,
-                        source_branch: branch.clone(),
-                        target_branch: self.config.git_provider.target_branch.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!(
+                            "Create session failed: {error}. Branch: {branch}"
+                        )),
+                        fatal: false,
                     };
-
-                    self.ui.phase_start("Create PR");
-                    let pr_start = std::time::Instant::now();
-                    match self.git_provider.create_pr(pr_params).await {
-                        Ok(pr_info) => {
-                            self.ui.phase_complete("Create PR", pr_start.elapsed());
-                            self.ui.phase_start("Notification");
-                            let notify_start = std::time::Instant::now();
-                            let result = PipelineResult {
-                                story_key: story_key.clone(),
-                                status: StoryStatus::Error,
-                                pr_url: Some(pr_info.url.clone()),
-                                error_detail: Some(error),
-                                fatal: false,
-                            };
-                            self.notify_story_result(&result).await;
-                            self.ui
-                                .phase_complete("Notification", notify_start.elapsed());
-                            self.ui.story_error(
-                                &story_key,
-                                "Create session failed — failure PR created",
-                            );
-                            result
-                        }
-                        Err(pr_err) => {
-                            self.ui.phase_error("Create PR", &pr_err.to_string());
-                            tracing::error!(
-                                action = "failure_pr_creation_failed",
-                                story_key = %story_key,
-                                error = %pr_err,
-                                "Failed to create failure PR"
-                            );
-
-                            self.ui.phase_start("Notification");
-                            let notify_start = std::time::Instant::now();
-                            let result = PipelineResult {
-                                story_key: story_key.clone(),
-                                status: StoryStatus::Error,
-                                pr_url: None,
-                                error_detail: Some(format!(
-                                    "Create session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
-                                )),
-                                fatal: false,
-                            };
-                            self.notify_story_result(&result).await;
-                            self.ui
-                                .phase_complete("Notification", notify_start.elapsed());
-                            self.ui.story_error(
-                                &story_key,
-                                &format!(
-                                    "Create session failed, PR creation also failed: {pr_err}"
-                                ),
-                            );
-                            result
-                        }
-                    }
+                    self.notify_story_result(&result).await;
+                    self.ui
+                        .phase_complete("Notification", notify_start.elapsed());
+                    self.ui.story_error(
+                        &story_key,
+                        "Create session failed — work preserved on branch",
+                    );
+                    result
                 }
             }
         }
     }
 
-    /// Run the dev session phase: session → push → PR → mark review → chain to review phase.
+    /// Run the dev session phase: session → push → mark review → chain to review.
     ///
     /// On successful completion, chains to `run_review_pipeline()` for code review and notification.
     async fn run_dev_pipeline(
@@ -864,7 +753,6 @@ impl StoryPipeline {
             SessionOutcome::Completed {
                 story_key,
                 branch,
-                decisions,
                 ..
             } => {
                 self.ui
@@ -872,11 +760,6 @@ impl StoryPipeline {
 
                 // Post-session pipeline steps (unified API/SDK)
                 self.post_session_commit(story).await;
-                // Impact analysis disabled — stories are created on-demand now,
-                // no downstream specs to update.
-                // self.post_session_impact_analysis(story).await;
-                let (pr_context, pr_how_to_test, pr_additional_info) =
-                    self.post_session_pr_summary(story, None).await;
 
                 // Phase 2 — Push branch to remote before PR creation (non-blocking)
                 self.ui.phase_start("Push Branch");
@@ -933,62 +816,6 @@ impl StoryPipeline {
                     return result;
                 }
 
-                // Phase 3 — Create PR (before review so it's visible immediately)
-                let decisions_section = format_pr_decisions_section(&decisions);
-                let pr_summary = pr_context.map(|ctx| PrSummary {
-                    context: ctx,
-                    how_to_test: pr_how_to_test.unwrap_or_default(),
-                    additional_info: pr_additional_info.unwrap_or_default(),
-                });
-                let pr_title = build_pr_title(&story_key, story_title, false);
-                let pr_body = build_pr_description(&PrDescriptionParams {
-                    story_key: story_key.clone(),
-                    story_title: story_title.to_string(),
-                    outcome_summary: "completed successfully".to_string(),
-                    decisions_section,
-                    failure_details: None,
-                    pr_summary,
-                });
-                let pr_params = CreatePrParams {
-                    title: pr_title,
-                    body: pr_body,
-                    source_branch: branch.clone(),
-                    target_branch: self.config.git_provider.target_branch.clone(),
-                };
-
-                self.ui.phase_start("Create PR");
-                let pr_start = std::time::Instant::now();
-                let pr_info = match self.git_provider.create_pr(pr_params).await {
-                    Ok(info) => {
-                        self.ui.phase_complete("Create PR", pr_start.elapsed());
-                        info
-                    }
-                    Err(e) => {
-                        self.ui.phase_error("Create PR", &e.to_string());
-                        tracing::error!(
-                            action = "pr_creation_failed",
-                            story_key = %story_key,
-                            branch = %branch,
-                            error = %e,
-                            "PR creation failed — skipping review, notifying human with branch name"
-                        );
-
-                        self.ui
-                            .story_error(&story_key, &format!("PR creation failed: {e}"));
-                        let result = PipelineResult {
-                            story_key: story_key.clone(),
-                            status: StoryStatus::Error,
-                            pr_url: None,
-                            error_detail: Some(format!(
-                                "PR creation failed: {e}. Branch: {branch}"
-                            )),
-                            fatal: false,
-                        };
-                        self.notify_story_result(&result).await;
-                        return result;
-                    }
-                };
-
                 // Mark story as "review" in sprint-status.yaml
                 let sprint_status_path =
                     Path::new(&self.config.bmad_paths.implementation_artifacts)
@@ -1021,11 +848,11 @@ impl StoryPipeline {
                 };
 
                 // Chain to review phase
-                self.run_review_pipeline(&updated_story, story_title, Some(&branch), Some(pr_info))
+                self.run_review_pipeline(&updated_story, story_title, Some(&branch))
                     .await
             }
 
-            SessionOutcome::Escalated { report, decisions } => {
+            SessionOutcome::Escalated { report, decisions: _ } => {
                 self.ui
                     .phase_error("Dev Session", &format!("Escalated: {}", report.reason));
                 tracing::warn!(
@@ -1033,10 +860,10 @@ impl StoryPipeline {
                     story_key = %report.story_key,
                     question = %report.question,
                     reason = %report.reason,
-                    "Story escalated — needs human clarification, creating escalation PR"
+                    "Story escalated — needs human clarification"
                 );
 
-                // Push branch to remote (best-effort, same pattern as Failed branch)
+                // Push branch to remote (best-effort)
                 let branch = report.branch_name.clone();
                 self.ui.phase_start("Push Branch");
                 let push_start = std::time::Instant::now();
@@ -1047,74 +874,18 @@ impl StoryPipeline {
                         story_key = %report.story_key,
                         branch = %branch,
                         error = %e,
-                        "Git push failed for escalation branch — attempting PR anyway"
+                        "Git push failed for escalation branch"
                     );
                 } else {
                     self.ui.phase_complete("Push Branch", push_start.elapsed());
                 }
-
-                // Build PrSummary from EscalationReport fields
-                let partial_work = if report.partial_work_summary.is_empty() {
-                    "No partial work summary available.".to_string()
-                } else {
-                    format!("Partial work summary: {}", report.partial_work_summary)
-                };
-                let pr_summary = PrSummary {
-                    context: format!(
-                        "Session escalated to human. Question: {}. Reason: {}",
-                        report.question, report.reason
-                    ),
-                    how_to_test: "N/A — session was escalated and requires human clarification."
-                        .to_string(),
-                    additional_info: partial_work,
-                };
-
-                let decisions_section = format_pr_decisions_section(&decisions);
-                let pr_title = build_pr_title(&report.story_key, story_title, true);
-                let pr_body = build_pr_description(&PrDescriptionParams {
-                    story_key: report.story_key.clone(),
-                    story_title: story_title.to_string(),
-                    outcome_summary: "escalated — needs clarification".to_string(),
-                    decisions_section,
-                    failure_details: Some(format!(
-                        "**Question:** {}\n**Reason:** {}",
-                        report.question, report.reason
-                    )),
-                    pr_summary: Some(pr_summary),
-                });
-                let pr_params = CreatePrParams {
-                    title: pr_title,
-                    body: pr_body,
-                    source_branch: branch.clone(),
-                    target_branch: self.config.git_provider.target_branch.clone(),
-                };
-
-                self.ui.phase_start("Create PR");
-                let pr_start = std::time::Instant::now();
-                let pr_url = match self.git_provider.create_pr(pr_params).await {
-                    Ok(pr_info) => {
-                        self.ui.phase_complete("Create PR", pr_start.elapsed());
-                        Some(pr_info.url.clone())
-                    }
-                    Err(e) => {
-                        self.ui.phase_error("Create PR", &e.to_string());
-                        tracing::error!(
-                            action = "escalation_pr_creation_failed",
-                            story_key = %report.story_key,
-                            branch = %branch,
-                            error = %e,
-                            "Failed to create escalation PR — notifying human with branch name only"
-                        );
-                        None
-                    }
-                };
 
                 self.ui.phase_start("Notification");
                 let notify_start = std::time::Instant::now();
                 let result = PipelineResult {
                     story_key: report.story_key.clone(),
                     status: StoryStatus::Blocked,
-                    pr_url,
+                    pr_url: None,
                     error_detail: Some(format!(
                         "Escalated: {} — {}",
                         report.question, report.reason
@@ -1146,7 +917,7 @@ impl StoryPipeline {
             SessionOutcome::Failed {
                 story_key,
                 error,
-                decisions,
+                decisions: _,
             } => {
                 self.ui.phase_error("Dev Session", &error);
                 let infra = is_infra_error(&error);
@@ -1196,10 +967,10 @@ impl StoryPipeline {
                         action = "session_failed",
                         story_key = %story_key,
                         error = %error,
-                        "Dev session failed mid-work — creating failure PR to preserve partial work"
+                        "Dev session failed mid-work — pushing partial work to branch"
                     );
 
-                    // Session crashed mid-work — failure PR preserves partial code
+                    // Session crashed mid-work — push partial code to branch
                     let branch = format!("story/{story_key}");
 
                     self.ui.phase_start("Push Branch");
@@ -1211,97 +982,46 @@ impl StoryPipeline {
                             story_key = %story_key,
                             branch = %branch,
                             error = %e,
-                            "Git push failed for failure branch — attempting PR anyway"
+                            "Git push failed for failure branch"
                         );
                     } else {
                         self.ui.phase_complete("Push Branch", push_start.elapsed());
                     }
 
-                    let decisions_section = format_pr_decisions_section(&decisions);
-                    let pr_title = build_pr_title(&story_key, story_title, true);
-                    let pr_body = build_pr_description(&PrDescriptionParams {
+                    self.ui.phase_start("Notification");
+                    let notify_start = std::time::Instant::now();
+                    let result = PipelineResult {
                         story_key: story_key.clone(),
-                        story_title: story_title.to_string(),
-                        outcome_summary: "failed".to_string(),
-                        decisions_section,
-                        failure_details: Some(error.clone()),
-                        pr_summary: None,
-                    });
-                    let pr_params = CreatePrParams {
-                        title: pr_title,
-                        body: pr_body,
-                        source_branch: branch.clone(),
-                        target_branch: self.config.git_provider.target_branch.clone(),
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!(
+                            "Dev session failed: {error}. Branch: {branch}"
+                        )),
+                        fatal: false,
                     };
-
-                    self.ui.phase_start("Create PR");
-                    let pr_start = std::time::Instant::now();
-                    match self.git_provider.create_pr(pr_params).await {
-                        Ok(pr_info) => {
-                            self.ui.phase_complete("Create PR", pr_start.elapsed());
-                            self.ui.phase_start("Notification");
-                            let notify_start = std::time::Instant::now();
-                            let result = PipelineResult {
-                                story_key: story_key.clone(),
-                                status: StoryStatus::Error,
-                                pr_url: Some(pr_info.url.clone()),
-                                error_detail: Some(error),
-                                fatal: false,
-                            };
-                            self.notify_story_result(&result).await;
-                            self.ui
-                                .phase_complete("Notification", notify_start.elapsed());
-                            self.ui
-                                .story_error(&story_key, "Dev session failed — failure PR created");
-                            result
-                        }
-                        Err(pr_err) => {
-                            self.ui.phase_error("Create PR", &pr_err.to_string());
-                            tracing::error!(
-                                action = "failure_pr_creation_failed",
-                                story_key = %story_key,
-                                branch = %branch,
-                                error = %pr_err,
-                                "Failed to create failure PR — notifying human with branch name only"
-                            );
-
-                            self.ui.phase_start("Notification");
-                            let notify_start = std::time::Instant::now();
-                            let result = PipelineResult {
-                                story_key: story_key.clone(),
-                                status: StoryStatus::Error,
-                                pr_url: None,
-                                error_detail: Some(format!(
-                                    "Session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
-                                )),
-                                fatal: false,
-                            };
-                            self.notify_story_result(&result).await;
-                            self.ui
-                                .phase_complete("Notification", notify_start.elapsed());
-                            self.ui.story_error(
-                                &story_key,
-                                &format!("Session failed, PR creation also failed: {pr_err}"),
-                            );
-                            result
-                        }
-                    }
+                    self.notify_story_result(&result).await;
+                    self.ui
+                        .phase_complete("Notification", notify_start.elapsed());
+                    self.ui.story_error(
+                        &story_key,
+                        "Dev session failed — work preserved on branch",
+                    );
+                    result
                 }
             }
         }
     }
 
-    /// Run the review pipeline phase: code review → push review commits → post comment → mark done → notify.
+    /// Run the review pipeline phase: code review → push review commits → mark done → notify.
     ///
     /// Two entry points:
-    /// - **Chained from dev:** `pr_info_override` is `Some` — PR already exists, skip push/PR creation.
-    /// - **Direct from watcher:** `pr_info_override` is `None` — push branch, create PR, then review.
+    /// - **Chained from dev:** branch already pushed.
+    /// - **Direct from watcher:** ensure branch exists, push, then review.
     async fn run_review_pipeline(
         &self,
         story: &StoryInfo,
         story_title: &str,
         branch_override: Option<&str>,
-        pr_info_override: Option<PrInfo>,
     ) -> PipelineResult {
         let story_key = &story.story_key;
 
@@ -1313,13 +1033,9 @@ impl StoryPipeline {
             .map(|b| b.to_string())
             .unwrap_or_else(|| story.branch_name.clone());
 
-        // Resolve or create PR
-        let pr_info = if let Some(info) = pr_info_override {
-            info
-        } else {
-            // Direct from watcher — ensure branch exists before pushing.
-            // The branch may not exist locally if the daemon restarted after dev
-            // completed on a different machine, or if the status was set manually.
+        // Direct from watcher — ensure branch exists before pushing.
+        // When chained from dev, branch_override is Some and push already succeeded.
+        if branch_override.is_none() {
             if let Err(fallback) = self
                 .ensure_branch_for_review(story, story_title, &branch)
                 .await
@@ -1336,7 +1052,7 @@ impl StoryPipeline {
                     story_key = %story_key,
                     branch = %branch,
                     error = %e,
-                    "Git push failed in review pipeline — cannot create PR"
+                    "Git push failed in review pipeline"
                 );
                 self.ui
                     .story_error(story_key, &format!("Push failed in review pipeline: {e}"));
@@ -1353,59 +1069,9 @@ impl StoryPipeline {
                 return result;
             }
             self.ui.phase_complete("Push Branch", push_start.elapsed());
+        }
 
-            let pr_title = build_pr_title(story_key, story_title, false);
-            let pr_body = build_pr_description(&PrDescriptionParams {
-                story_key: story_key.clone(),
-                story_title: story_title.to_string(),
-                outcome_summary: "resuming from review status".to_string(),
-                decisions_section: String::new(),
-                failure_details: None,
-                pr_summary: None,
-            });
-            let pr_params = CreatePrParams {
-                title: pr_title,
-                body: pr_body,
-                source_branch: branch.clone(),
-                target_branch: self.config.git_provider.target_branch.clone(),
-            };
-
-            self.ui.phase_start("Create PR");
-            let pr_start = std::time::Instant::now();
-            match self.git_provider.create_pr(pr_params).await {
-                Ok(info) => {
-                    self.ui.phase_complete("Create PR", pr_start.elapsed());
-                    info
-                }
-                Err(e) => {
-                    self.ui.phase_error("Create PR", &e.to_string());
-                    tracing::error!(
-                        action = "review_pr_creation_failed",
-                        story_key = %story_key,
-                        branch = %branch,
-                        error = %e,
-                        "PR creation failed in review pipeline"
-                    );
-                    self.ui.story_error(
-                        story_key,
-                        &format!("PR creation failed in review pipeline: {e}"),
-                    );
-                    let result = PipelineResult {
-                        story_key: story_key.clone(),
-                        status: StoryStatus::Error,
-                        pr_url: None,
-                        error_detail: Some(format!(
-                            "PR creation failed in review pipeline: {e}. Branch: {branch}"
-                        )),
-                        fatal: false,
-                    };
-                    self.notify_story_result(&result).await;
-                    return result;
-                }
-            }
-        };
-
-        // Phase 4 — Code Review (optional, on existing PR)
+        // Code Review (optional)
         let review_report = if self.config.code_review_enabled {
             self.ui.phase_start("Code Review");
             let review_start = std::time::Instant::now();
@@ -1672,7 +1338,7 @@ impl StoryPipeline {
             }
         }
 
-        // Phase 5 — Push review fix commits to update PR (if review ran)
+        // Push review fix commits (if review ran)
         if review_report.is_some()
             && let Err(e) = self.push_branch(&branch).await
         {
@@ -1681,30 +1347,11 @@ impl StoryPipeline {
                 story_key = %story_key,
                 branch = %branch,
                 error = %e,
-                "Failed to push review fix commits — PR still exists with dev commits"
+                "Failed to push review fix commits"
             );
         }
 
-        // Phase 6 — Post review comment on PR (non-blocking)
-        // Report is already formatted by build_review_comment() — no stripping needed.
-        if let Some(ref report) = review_report {
-            match self.git_provider.add_comment(&pr_info.id, report).await {
-                Ok(()) => {
-                    self.ui.tool_result("pr_comment", "Review posted");
-                }
-                Err(e) => {
-                    tracing::error!(
-                        action = "pr_comment_failed",
-                        pr_id = %pr_info.id,
-                        error = %e,
-                        "Failed to post review comment — PR created successfully"
-                    );
-                    self.ui.tool_result("pr_comment", &format!("Failed: {e}"));
-                }
-            }
-        }
-
-        // Phase 7 — Mark story done in sprint-status.yaml, commit & push
+        // Mark story done in sprint-status.yaml, commit & push
         let sprint_status_path =
             Path::new(&self.config.bmad_paths.implementation_artifacts).join("sprint-status.yaml");
         if sprint_status_path.exists() {
@@ -1860,9 +1507,9 @@ impl StoryPipeline {
                         self.notify_story_result(&PipelineResult {
                             story_key: story_key.clone(),
                             status: StoryStatus::Error,
-                            pr_url: Some(pr_info.url.clone()),
+                            pr_url: None,
                             error_detail: Some(format!(
-                                "Story completed and PR created, but sprint-status commit failed: {e}. \
+                                "Story completed but sprint-status commit failed: {e}. \
                                  Pipeline halted to prevent infinite loop. Fix git config and restart."
                             )),
                             fatal: true,
@@ -1870,7 +1517,7 @@ impl StoryPipeline {
                         return PipelineResult {
                             story_key: story_key.clone(),
                             status: StoryStatus::Error,
-                            pr_url: Some(pr_info.url.clone()),
+                            pr_url: None,
                             error_detail: Some(format!("sprint-status commit failed: {e}")),
                             fatal: true,
                         };
@@ -1879,20 +1526,20 @@ impl StoryPipeline {
             }
         }
 
-        // Phase 8 — Notify
+        // Notify
         self.ui.phase_start("Notification");
         let notify_start = std::time::Instant::now();
         let result = PipelineResult {
             story_key: story_key.clone(),
             status: StoryStatus::Completed,
-            pr_url: Some(pr_info.url.clone()),
+            pr_url: None,
             error_detail: None,
             fatal: false,
         };
         self.notify_story_result(&result).await;
         self.ui
             .phase_complete("Notification", notify_start.elapsed());
-        self.ui.story_complete(story_key, Some(&pr_info.url));
+        self.ui.story_complete(story_key, None);
         result
     }
 
@@ -2785,60 +2432,6 @@ impl StoryPipeline {
     ///
     /// If the session already produced `pr_context` (e.g. from SDK completion text),
     /// returns it directly. Otherwise dispatches a one-shot LLM call.
-    async fn post_session_pr_summary(
-        &self,
-        story: &StoryInfo,
-        existing_pr_context: Option<&str>,
-    ) -> (Option<String>, Option<String>, Option<String>) {
-        if let Some(ctx) = existing_pr_context {
-            if !ctx.trim().is_empty() {
-                return (Some(ctx.to_string()), None, None);
-            }
-        }
-
-        self.ui.phase_start("PR Summary");
-        let start = std::time::Instant::now();
-
-        let story_title = crate::pipeline::story_title_from_label(&story.label);
-        let prompt = format!(
-            "Based on the git diff of branch `{branch}` vs `{target}`, \
-             summarize what was built. Use this exact format:\n\n\
-             <pr-summary>\n\
-             <context>\n\
-             (What was built and why — reference actual files)\n\
-             </context>\n\
-             <how-to-test>\n\
-             (Concrete commands to test)\n\
-             </how-to-test>\n\
-             <additional-info>\n\
-             (Design decisions, caveats)\n\
-             </additional-info>\n\
-             </pr-summary>\n\n\
-             Story: {key} — {title}\n\
-             Branch: {branch}",
-            branch = story.branch_name,
-            target = self.config.git_provider.target_branch,
-            key = story.story_key,
-            title = story_title,
-        );
-
-        match self.utility_llm_oneshot(&prompt).await {
-            Some(response) => {
-                self.ui
-                    .phase_complete_with_result("PR Summary", start.elapsed(), "generated");
-                match crate::session::runner::parse_pr_summary(&response) {
-                    Some((ctx, test, info)) => (Some(ctx), Some(test), Some(info)),
-                    None => (Some(response), None, None),
-                }
-            }
-            None => {
-                self.ui
-                    .phase_error("PR Summary", "LLM call failed — using defaults");
-                (None, None, None)
-            }
-        }
-    }
-
     /// Re-read sprint-status.yaml and return an updated `StoryInfo` for the given key.
     fn reload_story_info(&self, story_key: &str) -> Result<StoryInfo, String> {
         let sprint_status_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
@@ -4397,7 +3990,7 @@ impl StoryPipeline {
                     let mut story = story_for_pipeline;
                     story.status = "review".to_string();
                     self.ui.story_start(&story.story_key, &story_title);
-                    self.run_review_pipeline(&story, &story_title, None, None)
+                    self.run_review_pipeline(&story, &story_title, None)
                         .await
                 }
                 StoryPhase::Unknown => {
@@ -4502,7 +4095,7 @@ impl StoryPipeline {
                 story_for_pipeline.status = "review".to_string();
                 self.ui
                     .story_start(&story_for_pipeline.story_key, &story_title);
-                self.run_review_pipeline(&story_for_pipeline, &story_title, None, None)
+                self.run_review_pipeline(&story_for_pipeline, &story_title, None)
                     .await
             }
             StoryPhase::Unknown => {
@@ -4540,8 +4133,8 @@ impl StoryPipeline {
 
     /// Process the outcome of a recovered session through the post-session pipeline.
     ///
-    /// On `Completed`: push → PR → mark review → chain to `run_review_pipeline()`.
-    /// On `Escalated`/`Failed`: same as `run_dev_pipeline()` (push, PR, notify).
+    /// On `Completed`: push → mark review → chain to `run_review_pipeline()`.
+    /// On `Escalated`/`Failed`: push branch, notify.
     fn build_story_from_wal(&self, wal: &SessionState) -> StoryInfo {
         let parts: Vec<&str> = wal.story_key.splitn(3, '-').collect();
         let epic_num = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -4573,12 +4166,9 @@ impl StoryPipeline {
             SessionOutcome::Completed {
                 story_key,
                 branch,
-                decisions,
-                pr_context,
-                pr_how_to_test,
-                pr_additional_info,
+                ..
             } => {
-                // Push branch before PR creation
+                // Push branch
                 self.ui.phase_start("Push Branch");
                 let push_start = std::time::Instant::now();
                 if let Err(e) = self.push_branch(&branch).await {
@@ -4588,7 +4178,7 @@ impl StoryPipeline {
                         story_key = %story_key,
                         branch = %branch,
                         error = %e,
-                        "Git push failed after recovery — cannot create PR"
+                        "Git push failed after recovery"
                     );
                     self.ui
                         .story_error(&story_key, &format!("Push failed after recovery: {e}"));
@@ -4604,108 +4194,52 @@ impl StoryPipeline {
                 }
                 self.ui.phase_complete("Push Branch", push_start.elapsed());
 
-                // Success PR
-                let decisions_section = format_pr_decisions_section(&decisions);
-                let pr_summary = pr_context.map(|ctx| PrSummary {
-                    context: ctx,
-                    how_to_test: pr_how_to_test.unwrap_or_default(),
-                    additional_info: pr_additional_info.unwrap_or_default(),
-                });
-                let pr_title = build_pr_title(&story_key, &story_title, false);
-                let pr_body = build_pr_description(&PrDescriptionParams {
-                    story_key: story_key.clone(),
-                    story_title: story_title.clone(),
-                    outcome_summary: "completed successfully (recovered from crash)".to_string(),
-                    decisions_section,
-                    failure_details: None,
-                    pr_summary,
-                });
-                let pr_params = CreatePrParams {
-                    title: pr_title,
-                    body: pr_body,
-                    source_branch: branch.clone(),
-                    target_branch: self.config.git_provider.target_branch.clone(),
+                // Mark story as "review" in sprint-status.yaml
+                let sprint_status_path =
+                    Path::new(&self.config.bmad_paths.implementation_artifacts)
+                        .join("sprint-status.yaml");
+                if sprint_status_path.exists()
+                    && let Err(e) =
+                        update_story_status(&sprint_status_path, &story_key, "review").await
+                {
+                    tracing::warn!(
+                        action = "sprint_status_update_failed",
+                        story_key = %story_key,
+                        error = %e,
+                        "Failed to mark story as review in sprint-status.yaml after recovery"
+                    );
+                }
+
+                // Re-read story info with updated status
+                let updated_story = match self.reload_story_info(&story.story_key) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            action = "recovery_reload_failed",
+                            error = %e,
+                            "Failed to re-read story info — using original with updated status"
+                        );
+                        let mut fallback = story.clone();
+                        fallback.status = "review".to_string();
+                        fallback
+                    }
                 };
 
-                self.ui.phase_start("Create PR");
-                let pr_start = std::time::Instant::now();
-                match self.git_provider.create_pr(pr_params).await {
-                    Ok(pr_info) => {
-                        self.ui.phase_complete("Create PR", pr_start.elapsed());
-
-                        // Mark story as "review" in sprint-status.yaml
-                        let sprint_status_path =
-                            Path::new(&self.config.bmad_paths.implementation_artifacts)
-                                .join("sprint-status.yaml");
-                        if sprint_status_path.exists()
-                            && let Err(e) =
-                                update_story_status(&sprint_status_path, &story_key, "review").await
-                        {
-                            tracing::warn!(
-                                action = "sprint_status_update_failed",
-                                story_key = %story_key,
-                                error = %e,
-                                "Failed to mark story as review in sprint-status.yaml after recovery"
-                            );
-                        }
-
-                        // Re-read story info with updated status
-                        let updated_story = match self.reload_story_info(&story.story_key) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                tracing::warn!(
-                                    action = "recovery_reload_failed",
-                                    error = %e,
-                                    "Failed to re-read story info — using original with updated status"
-                                );
-                                let mut fallback = story.clone();
-                                fallback.status = "review".to_string();
-                                fallback
-                            }
-                        };
-
-                        // Chain to review phase
-                        self.run_review_pipeline(
-                            &updated_story,
-                            &story_title,
-                            Some(&branch),
-                            Some(pr_info),
-                        )
-                        .await
-                    }
-                    Err(e) => {
-                        self.ui.phase_error("Create PR", &e.to_string());
-                        tracing::error!(
-                            action = "recovery_pr_creation_failed",
-                            story_key = %story_key,
-                            branch = %branch,
-                            error = %e,
-                            "PR creation failed after recovery"
-                        );
-                        let result = PipelineResult {
-                            story_key: story_key.clone(),
-                            status: StoryStatus::Error,
-                            pr_url: None,
-                            error_detail: Some(format!(
-                                "PR creation failed after recovery: {e}. Branch: {branch}"
-                            )),
-                            fatal: false,
-                        };
-                        self.ui.story_error(
-                            &story_key,
-                            &format!("PR creation failed after recovery: {e}"),
-                        );
-                        result
-                    }
-                }
+                // Chain to review phase
+                self.run_review_pipeline(
+                    &updated_story,
+                    &story_title,
+                    Some(&branch),
+                )
+                .await
             }
 
-            SessionOutcome::Escalated { report, decisions } => {
+            SessionOutcome::Escalated { report, decisions: _ } => {
                 tracing::warn!(
                     action = "recovery_session_escalated",
                     story_key = %report.story_key,
                     question = %report.question,
-                    "Recovered session escalated — needs human clarification, creating escalation PR"
+                    "Recovered session escalated — needs human clarification"
                 );
 
                 // Push branch to remote (best-effort)
@@ -4719,73 +4253,16 @@ impl StoryPipeline {
                         story_key = %report.story_key,
                         branch = %branch,
                         error = %e,
-                        "Git push failed for recovery escalation branch — attempting PR anyway"
+                        "Git push failed for recovery escalation branch"
                     );
                 } else {
                     self.ui.phase_complete("Push Branch", push_start.elapsed());
                 }
 
-                // Build PrSummary from EscalationReport fields
-                let partial_work = if report.partial_work_summary.is_empty() {
-                    "No partial work summary available.".to_string()
-                } else {
-                    format!("Partial work summary: {}", report.partial_work_summary)
-                };
-                let pr_summary = PrSummary {
-                    context: format!(
-                        "Session escalated to human. Question: {}. Reason: {}",
-                        report.question, report.reason
-                    ),
-                    how_to_test: "N/A — session was escalated and requires human clarification."
-                        .to_string(),
-                    additional_info: partial_work,
-                };
-
-                let decisions_section = format_pr_decisions_section(&decisions);
-                let pr_title = build_pr_title(&report.story_key, &story_title, true);
-                let pr_body = build_pr_description(&PrDescriptionParams {
-                    story_key: report.story_key.clone(),
-                    story_title: story_title.clone(),
-                    outcome_summary: "escalated — needs clarification (recovered from crash)"
-                        .to_string(),
-                    decisions_section,
-                    failure_details: Some(format!(
-                        "**Question:** {}\n**Reason:** {}",
-                        report.question, report.reason
-                    )),
-                    pr_summary: Some(pr_summary),
-                });
-                let pr_params = CreatePrParams {
-                    title: pr_title,
-                    body: pr_body,
-                    source_branch: branch.clone(),
-                    target_branch: self.config.git_provider.target_branch.clone(),
-                };
-
-                self.ui.phase_start("Create PR");
-                let pr_start = std::time::Instant::now();
-                let pr_url = match self.git_provider.create_pr(pr_params).await {
-                    Ok(pr_info) => {
-                        self.ui.phase_complete("Create PR", pr_start.elapsed());
-                        Some(pr_info.url.clone())
-                    }
-                    Err(e) => {
-                        self.ui.phase_error("Create PR", &e.to_string());
-                        tracing::error!(
-                            action = "recovery_escalation_pr_creation_failed",
-                            story_key = %report.story_key,
-                            branch = %branch,
-                            error = %e,
-                            "Failed to create escalation PR after recovery"
-                        );
-                        None
-                    }
-                };
-
                 let result = PipelineResult {
                     story_key: report.story_key.clone(),
                     status: StoryStatus::Blocked,
-                    pr_url,
+                    pr_url: None,
                     error_detail: Some(format!(
                         "Escalated after recovery: {} — {}",
                         report.question, report.reason
@@ -4814,7 +4291,7 @@ impl StoryPipeline {
             SessionOutcome::Failed {
                 story_key,
                 error,
-                decisions,
+                decisions: _,
             } => {
                 let fatal = is_auth_error(&error);
                 let infra = is_infra_error(&error);
@@ -4849,10 +4326,10 @@ impl StoryPipeline {
                         action = "recovery_session_failed",
                         story_key = %story_key,
                         error = %error,
-                        "Recovered session failed mid-work — creating failure PR"
+                        "Recovered session failed mid-work — pushing partial work to branch"
                     );
 
-                    // Failure PR (push partial work first)
+                    // Push partial work to branch
                     let branch = format!("story/{story_key}");
 
                     self.ui.phase_start("Push Branch");
@@ -4864,69 +4341,24 @@ impl StoryPipeline {
                             story_key = %story_key,
                             branch = %branch,
                             error = %e,
-                            "Git push failed for recovery failure branch — attempting PR anyway"
+                            "Git push failed for recovery failure branch"
                         );
                     } else {
                         self.ui.phase_complete("Push Branch", push_start.elapsed());
                     }
 
-                    let decisions_section = format_pr_decisions_section(&decisions);
-                    let pr_title = build_pr_title(&story_key, &story_title, true);
-                    let pr_body = build_pr_description(&PrDescriptionParams {
+                    self.ui.story_error(
+                        &story_key,
+                        "Recovery session failed — work preserved on branch",
+                    );
+                    PipelineResult {
                         story_key: story_key.clone(),
-                        story_title: story_title.clone(),
-                        outcome_summary: "failed (crash recovery attempted)".to_string(),
-                        decisions_section,
-                        failure_details: Some(error.clone()),
-                        pr_summary: None,
-                    });
-                    let pr_params = CreatePrParams {
-                        title: pr_title,
-                        body: pr_body,
-                        source_branch: branch.clone(),
-                        target_branch: self.config.git_provider.target_branch.clone(),
-                    };
-
-                    self.ui.phase_start("Create PR");
-                    let pr_start = std::time::Instant::now();
-                    match self.git_provider.create_pr(pr_params).await {
-                        Ok(pr_info) => {
-                            self.ui.phase_complete("Create PR", pr_start.elapsed());
-                            self.ui.story_error(
-                                &story_key,
-                                "Recovery session failed — failure PR created",
-                            );
-                            PipelineResult {
-                                story_key: story_key.clone(),
-                                status: StoryStatus::Error,
-                                pr_url: Some(pr_info.url.clone()),
-                                error_detail: Some(error),
-                                fatal: false,
-                            }
-                        }
-                        Err(pr_err) => {
-                            self.ui.phase_error("Create PR", &pr_err.to_string());
-                            tracing::error!(
-                                action = "recovery_failure_pr_creation_failed",
-                                story_key = %story_key,
-                                branch = %branch,
-                                error = %pr_err,
-                                "Failed to create failure PR after recovery"
-                            );
-                            self.ui.story_error(
-                                &story_key,
-                                &format!("Recovery failed, PR creation also failed: {pr_err}"),
-                            );
-                            PipelineResult {
-                                story_key: story_key.clone(),
-                                status: StoryStatus::Error,
-                                pr_url: None,
-                                error_detail: Some(format!(
-                                    "Recovery session failed: {error}. PR creation also failed: {pr_err}. Branch: {branch}"
-                                )),
-                                fatal: false,
-                            }
-                        }
+                        status: StoryStatus::Error,
+                        pr_url: None,
+                        error_detail: Some(format!(
+                            "Recovery session failed: {error}. Branch: {branch}"
+                        )),
+                        fatal: false,
                     }
                 }
             }
