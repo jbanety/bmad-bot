@@ -3256,20 +3256,87 @@ impl StoryPipeline {
             return false;
         }
 
+        // Step 4: Create epic branch and MR
+        let epic_branch = format!("epic/{epic_num}");
+        let _ = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["checkout", "-B", &epic_branch])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["add", "-A"])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args([
+                "commit",
+                "--allow-empty",
+                "-m",
+                &format!("chore: finalize epic {epic_num}"),
+            ])
+            .output()
+            .await;
+
         if let Err(e) = push_current_branch(repo_path).await {
             tracing::error!(
                 action = "epic_gate_push_failed",
                 error = %e,
                 epic_num = epic_num,
-                "Failed to push sprint-status — watcher may not see update until next push"
+                "Failed to push epic branch"
             );
         }
 
-        // Step 4: Create pre-epic story if Critic found issues (may switch branch)
+        // Create MR for the epic
+        let epic_title = resolve_epic_title(
+            Path::new(&self.config.bmad_paths.planning_artifacts),
+            epic_num,
+        );
+        let mr_title = format!("Epic {epic_num}: {epic_title}");
+        let mr_body = format!(
+            "## Epic {epic_num} — {epic_title}\n\n\
+             Autonomous epic completion. Includes all stories, retrospective report, \
+             and critic review findings.\n\n\
+             Stories: {story_count}\n\
+             Review: {review_status}\n",
+            review_status = if review_succeeded { "passed" } else { "failed" },
+        );
+        let pr_params = CreatePrParams {
+            title: mr_title,
+            body: mr_body,
+            source_branch: epic_branch.clone(),
+            target_branch: self.config.git_provider.target_branch.clone(),
+        };
+        let mr_url = match self.git_provider.create_pr(pr_params).await {
+            Ok(pr_info) => {
+                tracing::info!(
+                    action = "epic_mr_created",
+                    epic_num = epic_num,
+                    url = %pr_info.url,
+                    "Created MR for epic"
+                );
+                Some(pr_info.url)
+            }
+            Err(e) => {
+                tracing::error!(
+                    action = "epic_mr_creation_failed",
+                    error = %e,
+                    epic_num = epic_num,
+                    "Failed to create epic MR"
+                );
+                None
+            }
+        };
+
+        // Step 5: Create pre-epic story if Critic found issues (on epic branch, no switch)
         if let Some(ref findings) = critic_findings {
             let next_epic = epic_num + 1;
             let created = self
-                .run_pre_epic_story_creation(epic_num, &report, findings, last_completed_branch)
+                .run_pre_epic_story_creation(epic_num, &report, findings)
                 .await;
             if created {
                 tracing::info!(
@@ -3295,15 +3362,11 @@ impl StoryPipeline {
         }
 
         // Notify
-        let epic_title = resolve_epic_title(
-            Path::new(&self.config.bmad_paths.planning_artifacts),
-            epic_num,
-        );
         let notification = EpicGateNotification {
             epic_num,
             epic_title,
             story_count,
-            mr_url: None,
+            mr_url: mr_url.clone(),
             review_succeeded,
             error_summary,
         };
@@ -3667,7 +3730,6 @@ impl StoryPipeline {
         epic_num: u32,
         report: &str,
         critic_findings: &str,
-        last_completed_branch: Option<&str>,
     ) -> bool {
         let next_epic = epic_num + 1;
         let story_info = self.build_pre_epic_story_info(epic_num);
@@ -3718,31 +3780,9 @@ impl StoryPipeline {
             return false;
         }
 
-        // Commit any dirty files before branch switch — sessions and artifact writes
-        // may leave uncommitted changes that block checkout.
-        let repo_path = &self.config.bmad_paths.project_root;
-        let _ = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["add", "-A"])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["commit", "-m", &format!("chore: stage work before pre-epic {next_epic} branch")])
-            .output()
-            .await;
-
-        // Branch from the last completed story of the epic (carries critic-memory, report, etc.)
-        if let Err(outcome) = self.pipeline_ensure_branch(&story_info, last_completed_branch).await {
-            tracing::error!(
-                action = "pre_epic_branch_failed",
-                error = ?outcome,
-                "Branch setup failed for pre-epic story creation"
-            );
-            return false;
-        }
+        // No branch switch — pre-epic story is created on the current branch
+        // (last story of the completed epic). Everything stays on one branch
+        // so sprint-status, critic-memory, and artifacts remain consistent.
 
         let prompt = format!(
             "/bmad-create-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
