@@ -3167,15 +3167,17 @@ impl StoryPipeline {
                 )
                 .await;
 
-            // Checkout back to the last story branch — it has the most up-to-date
-            // sprint-status.yaml (with all stories marked done, retro finalized, etc.).
-            // Checking out target_branch (main) would lose status updates that were
-            // committed on story branches but not yet merged.
-            if let Some(ref branch) = last_story_branch {
-                let _ = checkout_branch(repo_path, branch).await;
+            // Checkout the epic branch (most up-to-date: retro, critic memory,
+            // pre-epic story, sprint-status). Falls back to last story branch.
+            let epic_branch = format!("epic/{epic_num}");
+            let checkout_target = if branch_exists_async(repo_path, &epic_branch).await {
+                &epic_branch
+            } else if let Some(ref branch) = last_story_branch {
+                branch.as_str()
             } else {
-                let _ = checkout_branch(repo_path, target_branch).await;
-            }
+                target_branch
+            };
+            let _ = checkout_branch(repo_path, checkout_target).await;
 
             if activated {
                 triggered += 1;
@@ -3183,20 +3185,27 @@ impl StoryPipeline {
         }
 
         // Return the last story branch from the last processed epic — callers
-        // use this to chain subsequent stories from the right base.
-        let sprint_status_path_reload = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
-            .join("sprint-status.yaml");
-        let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
-        let final_branch = SprintStatusFile::load(&sprint_status_path_reload, &story_dir)
-            .ok()
-            .and_then(|ssf_reload| {
-                ssf_reload
-                    .stories()
-                    .into_iter()
-                    .filter(|s| s.epic_num == last_pending_epic && s.status == "done")
-                    .max_by_key(|s| s.story_num)
-                    .map(|s| s.branch_name.clone())
-            });
+        // Prefer epic/N branch as the chain point for the next epic.
+        let epic_branch = format!("epic/{last_pending_epic}");
+        let final_branch = if branch_exists_async(repo_path, &epic_branch).await {
+            Some(epic_branch)
+        } else {
+            // Fallback to last story branch
+            let sprint_status_path_reload =
+                PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
+                    .join("sprint-status.yaml");
+            let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
+            SprintStatusFile::load(&sprint_status_path_reload, &story_dir)
+                .ok()
+                .and_then(|ssf_reload| {
+                    ssf_reload
+                        .stories()
+                        .into_iter()
+                        .filter(|s| s.epic_num == last_pending_epic && s.status == "done")
+                        .max_by_key(|s| s.story_num)
+                        .map(|s| s.branch_name.clone())
+                })
+        };
 
         (triggered, final_branch)
     }
@@ -3518,6 +3527,17 @@ async fn push_current_branch(repo_path: &str) -> Result<(), String> {
 }
 
 /// Checkout an existing branch.
+async fn branch_exists_async(repo_path: &str, branch: &str) -> bool {
+    tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "--verify", branch])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 async fn checkout_branch(repo_path: &str, branch: &str) -> Result<(), String> {
     let output = tokio::process::Command::new("git")
         .arg("-C")

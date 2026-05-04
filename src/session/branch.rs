@@ -113,6 +113,20 @@ fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
 /// * `default_branch` — Fallback branch name (typically `"main"`)
 pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch: &str) -> String {
     if story.dependencies.is_empty() {
+        // No explicit dependencies — check if the previous epic's branch exists
+        if story.epic_num > 1 {
+            let prev_epic = format!("epic/{}", story.epic_num - 1);
+            if branch_exists(repo_path, &prev_epic) {
+                tracing::info!(
+                    action = "base_branch_resolved",
+                    base = %prev_epic,
+                    story = %story.story_key,
+                    reason = "no dependencies — chaining from previous epic branch",
+                    "Chaining from previous epic branch"
+                );
+                return prev_epic;
+            }
+        }
         tracing::info!(
             action = "base_branch_resolved",
             base = %default_branch,
@@ -129,10 +143,23 @@ pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch
     // Parse the epic number from the dependency key (format: "{epic_num}-{story_num}-{slug}")
     let dep_epic_num: Option<u32> = last_dep.split('-').next().and_then(|s| s.parse().ok());
 
-    // Chain from the predecessor story branch if it exists locally — regardless
-    // of whether it's intra-epic or inter-epic. In autonomous mode, epics are not
-    // merged into default_branch between runs, so inter-epic dependencies must
-    // also chain from story branches to carry forward sprint-status and artifacts.
+    // Prefer epic/N branch (most complete: has retro, critic memory, pre-epic story).
+    // Fall back to story/X-Y if epic branch doesn't exist yet.
+    if let Some(dep_epic) = dep_epic_num {
+        let epic_candidate = format!("epic/{dep_epic}");
+        if branch_exists(repo_path, &epic_candidate) {
+            tracing::info!(
+                action = "base_branch_resolved",
+                base = %epic_candidate,
+                story = %story.story_key,
+                dependency = %last_dep,
+                reason = "epic branch exists — most complete state",
+                "Chaining from epic branch"
+            );
+            return epic_candidate;
+        }
+    }
+
     let candidate = format!("story/{last_dep}");
     let exists = branch_exists(repo_path, &candidate);
 
@@ -142,7 +169,7 @@ pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch
             base = %candidate,
             story = %story.story_key,
             dependency = %last_dep,
-            reason = "intra-epic dependency branch exists locally",
+            reason = "dependency branch exists locally",
             "Chaining from dependency branch"
         );
         candidate
