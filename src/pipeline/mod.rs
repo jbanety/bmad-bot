@@ -3418,7 +3418,9 @@ impl StoryPipeline {
         let elapsed = start.elapsed();
 
         match session_outcome {
-            SessionOutcome::Completed { story_key, .. } => {
+            SessionOutcome::Completed {
+                story_key, branch, ..
+            } => {
                 self.ui.phase_complete_with_result(
                     &format!("Pre-Epic {next_epic} Story Creation"),
                     elapsed,
@@ -3427,10 +3429,23 @@ impl StoryPipeline {
                 tracing::info!(
                     action = "pre_epic_story_complete",
                     story_key = %story_key,
-                    "Pre-epic story creation completed"
+                    "Pre-epic story creation completed — chaining to dev phase"
                 );
                 self.post_session_commit(&story_info).await;
-                true
+
+                // Chain to dev phase like run_create_pipeline does
+                let updated_story = match self.reload_story_info(&story_info.story_key) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let mut fallback = story_info.clone();
+                        fallback.status = "ready-for-dev".to_string();
+                        fallback
+                    }
+                };
+                let dev_result = self
+                    .run_dev_pipeline(&updated_story, &story_info.label, Some(&branch))
+                    .await;
+                dev_result.error_detail.is_none()
             }
             SessionOutcome::Escalated {
                 report: esc_report, ..
