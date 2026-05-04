@@ -3220,40 +3220,14 @@ impl StoryPipeline {
         }
 
         // Step 2: Critic review (only on successful review)
-        if review_succeeded {
-            let critic_findings = self.run_epic_critic_review(&report, epic_num).await;
+        let critic_findings = if review_succeeded {
+            self.run_epic_critic_review(&report, epic_num).await
+        } else {
+            None
+        };
 
-            // Step 3: Create pre-epic story if Critic found issues
-            if let Some(ref findings) = critic_findings {
-                let next_epic = epic_num + 1;
-                let created = self
-                    .run_pre_epic_story_creation(epic_num, &report, findings, last_completed_branch)
-                    .await;
-                if created {
-                    tracing::info!(
-                        action = "pre_epic_story_created",
-                        epic_num = epic_num,
-                        next_epic = next_epic,
-                        "Pre-epic story created for epic {next_epic}"
-                    );
-                } else {
-                    tracing::warn!(
-                        action = "pre_epic_story_creation_failed",
-                        epic_num = epic_num,
-                        next_epic = next_epic,
-                        "Pre-epic story creation failed — continuing without it"
-                    );
-                }
-            } else {
-                tracing::info!(
-                    action = "epic_critic_no_issues",
-                    epic_num = epic_num,
-                    "Critic found no issues — skipping pre-epic story creation"
-                );
-            }
-        }
-
-        // Step 4: Finalize — mark retrospective as done (no human gate)
+        // Step 3: Finalize BEFORE pre-epic branch switch — mark retrospective
+        // as done on the current branch (story/X-Y) so re-polls don't re-trigger.
         let retro_key = format!("epic-{epic_num}-retrospective");
         let repo_path = &self.config.bmad_paths.project_root;
         if let Err(e) = update_story_status(sprint_status_path, &retro_key, "done").await {
@@ -3284,6 +3258,35 @@ impl StoryPipeline {
                 error = %e,
                 epic_num = epic_num,
                 "Failed to push sprint-status — watcher may not see update until next push"
+            );
+        }
+
+        // Step 4: Create pre-epic story if Critic found issues (may switch branch)
+        if let Some(ref findings) = critic_findings {
+            let next_epic = epic_num + 1;
+            let created = self
+                .run_pre_epic_story_creation(epic_num, &report, findings, last_completed_branch)
+                .await;
+            if created {
+                tracing::info!(
+                    action = "pre_epic_story_created",
+                    epic_num = epic_num,
+                    next_epic = next_epic,
+                    "Pre-epic story created for epic {next_epic}"
+                );
+            } else {
+                tracing::warn!(
+                    action = "pre_epic_story_creation_failed",
+                    epic_num = epic_num,
+                    next_epic = next_epic,
+                    "Pre-epic story creation failed — continuing without it"
+                );
+            }
+        } else if review_succeeded {
+            tracing::info!(
+                action = "epic_critic_no_issues",
+                epic_num = epic_num,
+                "Critic found no issues — skipping pre-epic story creation"
             );
         }
 
@@ -3503,8 +3506,15 @@ impl StoryPipeline {
                 )
                 .await;
 
-            // Checkout back to target branch after gate flow (best effort)
-            let _ = checkout_branch(repo_path, target_branch).await;
+            // Checkout back to the last story branch — it has the most up-to-date
+            // sprint-status.yaml (with all stories marked done, retro finalized, etc.).
+            // Checking out target_branch (main) would lose status updates that were
+            // committed on story branches but not yet merged.
+            if let Some(ref branch) = last_story_branch {
+                let _ = checkout_branch(repo_path, branch).await;
+            } else {
+                let _ = checkout_branch(repo_path, target_branch).await;
+            }
 
             if activated {
                 triggered += 1;
