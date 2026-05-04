@@ -1730,11 +1730,13 @@ async fn run_polling_loop(
                 // Scan for completed epics whose retrospective is `optional`
                 // (never reviewed, or reset after failure). Runs the full epic
                 // gate flow inline — no story completion trigger needed.
-                let retro_triggered = pipeline.scan_pending_epic_reviews().await;
+                let (retro_triggered, retro_branch) =
+                    pipeline.scan_pending_epic_reviews().await;
                 if retro_triggered > 0 {
                     tracing::info!(
                         action = "scan_retro_completed",
                         triggered = retro_triggered,
+                        branch = ?retro_branch,
                         "Pending epic reviews processed — re-polling for newly eligible stories"
                     );
                 }
@@ -1747,7 +1749,9 @@ async fn run_polling_loop(
                             eligible_count = stories.len(),
                             "Found eligible stories — launching pipeline"
                         );
-                        let summary = pipeline.process_eligible_stories(stories).await;
+                        let summary = pipeline
+                            .process_eligible_stories(stories, retro_branch)
+                            .await;
                         tracing::info!(
                             total = summary.total_processed,
                             completed = summary.completed,

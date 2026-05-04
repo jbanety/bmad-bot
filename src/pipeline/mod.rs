@@ -2880,7 +2880,11 @@ impl StoryPipeline {
     /// - Re-poll itself fails (conservative — wait for next poll cycle)
     ///
     /// A run summary notification is sent after all processing completes.
-    pub async fn process_eligible_stories(&self, stories: Vec<StoryInfo>) -> RunSummary {
+    pub async fn process_eligible_stories(
+        &self,
+        stories: Vec<StoryInfo>,
+        initial_branch: Option<String>,
+    ) -> RunSummary {
         let mut results: Vec<PipelineResult> = Vec::new();
 
         let sprint_status_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
@@ -2896,7 +2900,7 @@ impl StoryPipeline {
         // next story chains from it instead of forking from its declared dependency.
         // This prevents sprint-status.yaml from diverging across parallel branch
         // chains (e.g., story/2-x vs story/3-x both forking from story/1-5).
-        let mut last_completed_branch: Option<String> = None;
+        let mut last_completed_branch: Option<String> = initial_branch;
 
         // Start with the first story from the initial eligible list.
         // After each story, we re-poll sprint-status.yaml and recompute
@@ -3332,8 +3336,8 @@ impl StoryPipeline {
     /// `epic-X-retrospective: optional` in sprint-status.yaml is enough to
     /// re-trigger the review — no need to re-run a story.
     ///
-    /// Returns the number of epic reviews that were triggered.
-    pub async fn scan_pending_epic_reviews(&self) -> usize {
+    /// Returns (triggered_count, last_story_branch) so callers can chain from it.
+    pub async fn scan_pending_epic_reviews(&self) -> (usize, Option<String>) {
         let sprint_status_path = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
             .join("sprint-status.yaml");
         let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
@@ -3346,7 +3350,7 @@ impl StoryPipeline {
                     error = %e,
                     "Failed to load sprint-status for pending epic review scan"
                 );
-                return 0;
+                return (0, None);
             }
         };
 
@@ -3384,7 +3388,7 @@ impl StoryPipeline {
         }
 
         if pending.is_empty() {
-            return 0;
+            return (0, None);
         }
 
         tracing::info!(
@@ -3394,6 +3398,7 @@ impl StoryPipeline {
         );
 
         let mut triggered = 0usize;
+        let last_pending_epic = *pending.last().unwrap();
         let repo_path = &self.config.bmad_paths.project_root;
         let target_branch = &self.config.git_provider.target_branch;
 
@@ -3521,7 +3526,23 @@ impl StoryPipeline {
             }
         }
 
-        triggered
+        // Return the last story branch from the last processed epic — callers
+        // use this to chain subsequent stories from the right base.
+        let sprint_status_path_reload = PathBuf::from(&self.config.bmad_paths.implementation_artifacts)
+            .join("sprint-status.yaml");
+        let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
+        let final_branch = SprintStatusFile::load(&sprint_status_path_reload, &story_dir)
+            .ok()
+            .and_then(|ssf_reload| {
+                ssf_reload
+                    .stories()
+                    .into_iter()
+                    .filter(|s| s.epic_num == last_pending_epic && s.status == "done")
+                    .max_by_key(|s| s.story_num)
+                    .map(|s| s.branch_name.clone())
+            });
+
+        (triggered, final_branch)
     }
 
     /// Run the Critic on the epic review report.
