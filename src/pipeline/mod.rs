@@ -1264,10 +1264,12 @@ impl StoryPipeline {
                                 })
                                 .count();
                             if completion_findings > 0 {
+                                let tail: String = completion.chars().rev().take(500).collect::<String>().chars().rev().collect();
                                 tracing::warn!(
                                     action = "review_findings_in_completion_only",
                                     story_key = %story_key,
                                     count = completion_findings,
+                                    completion_tail = %tail,
                                     "Review findings found in SDK completion text but not in story file"
                                 );
                                 format!("{completion_findings} findings (from LLM output)")
@@ -1287,9 +1289,20 @@ impl StoryPipeline {
                         &summary,
                     );
                     if report.is_none() && summary == "clean" {
+                        let completion_tail: String = pr_context
+                            .as_deref()
+                            .unwrap_or("")
+                            .chars()
+                            .rev()
+                            .take(300)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
                         tracing::info!(
                             action = "review_clean",
                             story_key = %story_key,
+                            completion_tail = %completion_tail,
                             "No '### Review Findings' section in story file — clean review or skill did not write findings"
                         );
                     }
