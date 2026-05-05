@@ -1882,6 +1882,7 @@ impl StoryPipeline {
             );
             self.ui.sdk_text(&format!("Auto-responding: {response}"));
 
+            let previous_good = raw.clone();
             raw = self
                 .session_runtime
                 .execute(RuntimeCommand::Resume {
@@ -1891,6 +1892,18 @@ impl StoryPipeline {
                     story_key: story_key.to_string(),
                 })
                 .await;
+
+            // If resume failed, revert to the last successful result
+            if raw.exit_code != Some(0) {
+                tracing::warn!(
+                    action = "auto_response_resume_failed",
+                    exit_code = ?raw.exit_code,
+                    story_key = %story_key,
+                    "Resume after auto-response failed — using previous result"
+                );
+                raw = previous_good;
+                break;
+            }
         }
 
         raw

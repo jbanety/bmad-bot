@@ -87,6 +87,7 @@ pub enum SdkOutputEvent {
 // ---------------------------------------------------------------------------
 
 /// Result of an SDK subprocess session.
+#[derive(Clone)]
 pub struct SdkSessionResult {
     pub session_id: Option<String>,
     pub exit_code: Option<i32>,
