@@ -1873,11 +1873,13 @@ impl StoryPipeline {
             };
 
             attempts += 1;
+            let prompt_tail: String = completion.chars().rev().take(300).collect::<String>().chars().rev().collect();
             tracing::info!(
                 action = "auto_response",
                 attempt = attempts,
                 response = %response,
                 story_key = %story_key,
+                prompt_tail = %prompt_tail,
                 "Pipeline auto-responding to interactive prompt"
             );
             self.ui.sdk_text(&format!("Auto-responding: {response}"));
