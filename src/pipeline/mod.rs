@@ -496,6 +496,9 @@ impl StoryPipeline {
             .auto_response_loop(raw, &LlmRole::Dev, &story.story_key)
             .await;
 
+        // Retry on timeout
+        let raw = self.retry_on_timeout(raw, &LlmRole::Dev, &story.story_key).await;
+
         // Run consultation sequence (adversarial → critic)
         let (raw, _session_id) = if raw.exit_code == Some(0) {
             if let Some(ref sid) = raw.session_id {
@@ -725,7 +728,7 @@ impl StoryPipeline {
             story.specs_path.to_string_lossy()
         );
 
-        let raw = self
+        let mut raw = self
             .session_runtime
             .execute(RuntimeCommand::Start {
                 role: LlmRole::Dev,
@@ -738,9 +741,12 @@ impl StoryPipeline {
             })
             .await;
 
-        let raw = self
+        raw = self
             .auto_response_loop(raw, &LlmRole::Dev, &story.story_key)
             .await;
+
+        // Retry on timeout — resume the session and continue
+        raw = self.retry_on_timeout(raw, &LlmRole::Dev, &story.story_key).await;
 
         let session_outcome = self.interpret_raw_result(&raw, story).await;
         let session_elapsed = session_start.elapsed();
@@ -1780,6 +1786,52 @@ impl StoryPipeline {
     // =========================================================================
     // Phase C — Pipeline-controlled execution helpers
     // =========================================================================
+
+    /// Retry a session that timed out by resuming it with "Continue".
+    /// Returns the original result if not timed out or no session_id available.
+    async fn retry_on_timeout(
+        &self,
+        mut raw: RawSessionResult,
+        role: &LlmRole,
+        story_key: &str,
+    ) -> RawSessionResult {
+        const MAX_TIMEOUT_RETRIES: usize = 2;
+        let mut retries = 0;
+
+        while raw.timed_out && retries < MAX_TIMEOUT_RETRIES {
+            if self.is_shutdown() {
+                break;
+            }
+            let Some(ref session_id) = raw.session_id else {
+                break;
+            };
+            retries += 1;
+            tracing::info!(
+                action = "timeout_retry",
+                retry = retries,
+                story_key = %story_key,
+                "Session timed out — resuming to continue work"
+            );
+            self.ui.sdk_text(&format!(
+                "Session timed out — retry {retries}/{MAX_TIMEOUT_RETRIES}"
+            ));
+
+            raw = self
+                .session_runtime
+                .execute(RuntimeCommand::Resume {
+                    session_id: session_id.clone(),
+                    prompt: "Continue — the previous session timed out. Pick up where you left off."
+                        .to_string(),
+                    role: role.clone(),
+                    story_key: story_key.to_string(),
+                })
+                .await;
+
+            raw = self.auto_response_loop(raw, role, story_key).await;
+        }
+
+        raw
+    }
 
     /// Repeatedly resume a session while it returns interactive prompts.
     /// Returns when the session is truly done (no auto-response match) or max attempts.
