@@ -1118,10 +1118,18 @@ impl StoryPipeline {
                         .as_deref()
                         .map(|t| {
                             let lower = t.to_lowercase();
-                            (lower.contains("`decision-needed`")
-                                || lower.contains("`patch`")
-                                || lower.contains("`defer`"))
-                                && lower.contains("code review complete")
+                            lower.contains("code review")
+                                && (lower.contains("patch")
+                                    || lower.contains("finding")
+                                    || lower.contains("decision")
+                                    || lower.contains("defer")
+                                    || t.lines().any(|l| {
+                                        let trimmed = l.trim();
+                                        trimmed.len() > 3
+                                            && trimmed.as_bytes()[0].is_ascii_digit()
+                                            && (trimmed.as_bytes()[1] == b'.'
+                                                || trimmed.as_bytes()[1] == b')')
+                                    }))
                         })
                         .unwrap_or(false);
                     let story_path = PathBuf::from(&self.config.bmad_paths.project_root)
