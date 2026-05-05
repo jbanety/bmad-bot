@@ -246,8 +246,6 @@ pub fn build_claude_code_config(
         role_config.model.clone(),
         "--permission-mode".to_string(),
         "bypassPermissions".to_string(),
-        "--max-turns".to_string(),
-        "200".to_string(),
         "--append-system-prompt".to_string(),
         "OVERRIDE: communication_language = English".to_string(),
     ];
