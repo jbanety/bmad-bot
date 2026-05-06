@@ -131,7 +131,7 @@ impl SessionRuntime {
     pub async fn execute(&self, ui: &crate::ui::UiHandle, command: RuntimeCommand) -> RawSessionResult {
         match &command {
             RuntimeCommand::Start { role, phase, story_key, prompt, .. } => {
-                let head = &prompt[..prompt.len().min(200)];
+                let head = &prompt[..prompt.floor_char_boundary(200)];
                 tracing::info!(
                     action = "runtime_execute_start",
                     role = ?role,
@@ -144,7 +144,7 @@ impl SessionRuntime {
                 ui.sdk_text(&format!("→ Start [{phase}] {head}"));
             }
             RuntimeCommand::Resume { session_id, prompt, story_key, .. } => {
-                let head = &prompt[..prompt.len().min(200)];
+                let head = &prompt[..prompt.floor_char_boundary(200)];
                 tracing::info!(
                     action = "runtime_execute_resume",
                     session_id = %session_id,

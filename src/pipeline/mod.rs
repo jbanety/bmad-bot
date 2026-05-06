@@ -2279,7 +2279,7 @@ impl StoryPipeline {
             .map(|o| {
                 let s = String::from_utf8_lossy(&o.stdout).to_string();
                 if s.len() > 4096 {
-                    format!("{}...\n[truncated]", &s[..4096])
+                    format!("{}...\n[truncated]", &s[..s.floor_char_boundary(4096)])
                 } else {
                     s
                 }
