@@ -1099,7 +1099,7 @@ impl StoryPipeline {
             // Execute review session via new pipeline-controlled path
             let review_prefix = self.skill_prefix(&LlmRole::Review);
             let review_prompt = format!(
-                "{review_prefix}bmad-code-review {} branch diff against {base_for_diff}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+                "{review_prefix}bmad-code-review {} with current branch diff against base branch {base_for_diff}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
                 story.specs_path.to_string_lossy()
             );
             let review_prompt_debug = review_prompt.clone();
