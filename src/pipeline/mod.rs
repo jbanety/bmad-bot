@@ -1110,6 +1110,14 @@ impl StoryPipeline {
                 .auto_response_loop(raw, &LlmRole::Review, &story.story_key)
                 .await;
 
+            // Debug: dump review session output to file for diagnosis
+            self.dump_session_debug(
+                &story.story_key,
+                "review",
+                &raw,
+            )
+            .await;
+
             // Check if findings exist in completion but not in story file — resume to persist
             let raw = if raw.exit_code == Some(0) {
                 if let Some(ref sid) = raw.session_id {
@@ -1957,6 +1965,14 @@ impl StoryPipeline {
 
             let consult_elapsed = consult_start.elapsed();
 
+            // Debug: dump consultation output
+            self.dump_session_debug(
+                &story.story_key,
+                &format!("consultation-{}", consult_config.label),
+                &consult_result,
+            )
+            .await;
+
             // Abort on consultation failure
             if consult_result.exit_code != Some(0) {
                 self.ui
@@ -2310,6 +2326,40 @@ impl StoryPipeline {
     }
 
     /// Stage and commit a single file if it has uncommitted changes.
+    /// Dump session result to a debug file for post-mortem analysis.
+    async fn dump_session_debug(
+        &self,
+        story_key: &str,
+        phase: &str,
+        raw: &RawSessionResult,
+    ) {
+        let log_dir = PathBuf::from(&self.config.bmad_paths.project_root).join("bmad-debug");
+        let _ = tokio::fs::create_dir_all(&log_dir).await;
+        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let filename = format!("{timestamp}-{story_key}-{phase}.md");
+        let path = log_dir.join(&filename);
+
+        let content = format!(
+            "# Debug: {story_key} — {phase}\n\n\
+             **exit_code:** {:?}\n\
+             **session_id:** {:?}\n\
+             **timed_out:** {}\n\
+             **shutdown_requested:** {}\n\
+             **stderr:** {}\n\n\
+             ## Completion Text\n\n{}\n",
+            raw.exit_code,
+            raw.session_id,
+            raw.timed_out,
+            raw.shutdown_requested,
+            if raw.stderr.is_empty() { "(empty)" } else { &raw.stderr },
+            raw.completion_text.as_deref().unwrap_or("(none)"),
+        );
+
+        if let Err(e) = tokio::fs::write(&path, &content).await {
+            tracing::warn!(error = %e, "Failed to write session debug file");
+        }
+    }
+
     async fn commit_implementation_artifact(&self, file_path: &Path, message: &str) {
         let repo_path = &self.config.bmad_paths.project_root;
         let path_str = file_path.to_string_lossy();

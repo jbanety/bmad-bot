@@ -288,7 +288,7 @@ pub fn build_codex_config(
         args,
         env: Vec::new(),
         working_directory: project_root.to_path_buf(),
-        timeout: Duration::from_secs(30 * 60),
+        timeout: Duration::from_secs(4 * 60 * 60),
         sigterm_grace: Duration::from_secs(10),
         stdin_data: None,
     }
@@ -331,7 +331,7 @@ pub fn build_codex_config_stdin(
         args,
         env: Vec::new(),
         working_directory: project_root.to_path_buf(),
-        timeout: Duration::from_secs(30 * 60),
+        timeout: Duration::from_secs(4 * 60 * 60),
         sigterm_grace: Duration::from_secs(10),
         stdin_data: Some(prompt.to_string()),
     }
@@ -481,7 +481,7 @@ pub fn build_codex_resume_config(
         args,
         env: Vec::new(),
         working_directory: project_root.to_path_buf(),
-        timeout: Duration::from_secs(30 * 60),
+        timeout: Duration::from_secs(4 * 60 * 60),
         sigterm_grace: Duration::from_secs(10),
         stdin_data: None,
     }
