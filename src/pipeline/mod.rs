@@ -1340,7 +1340,29 @@ impl StoryPipeline {
                     None
                 }
                 SessionOutcome::Failed { error, .. } => {
-                    self.ui.phase_error("Code Review", &error);
+                    if let Some(resets_at) = parse_rate_limit(&error) {
+                        let reset_time = chrono::DateTime::from_timestamp(resets_at as i64, 0)
+                            .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                            .unwrap_or_else(|| format!("{resets_at}"));
+                        self.ui.phase_error("Code Review", &format!("Rate limited — resets at {reset_time}"));
+                    } else {
+                        self.ui.phase_error("Code Review", &error);
+                    }
+                    if parse_rate_limit(&error).is_some() {
+                        tracing::warn!(
+                            action = "review_rate_limited",
+                            story_key = %story_key,
+                            error = %error,
+                            "Code review rate limited — propagating for retry"
+                        );
+                        return PipelineResult {
+                            story_key: story_key.clone(),
+                            status: StoryStatus::Error,
+                            pr_url: None,
+                            error_detail: Some(error),
+                            fatal: false,
+                        };
+                    }
                     tracing::warn!(
                         action = "review_failed",
                         story_key = %story_key,
