@@ -81,7 +81,9 @@ struct CodexItem {
 // ---------------------------------------------------------------------------
 
 /// Parse "try again at 1:20 PM" style reset times from Codex error messages.
-fn parse_codex_reset_time(msg: &str) -> Option<u64> {
+/// Parse "try again at 6:57 PM" style reset times from Codex error messages.
+/// The time is in UTC (Codex/OpenAI server time).
+pub fn parse_codex_reset_time(msg: &str) -> Option<u64> {
     let lower = msg.to_lowercase();
     let marker = "try again at ";
     let start = lower.find(marker)? + marker.len();
@@ -106,12 +108,11 @@ fn parse_codex_reset_time(msg: &str) -> Option<u64> {
         hour_24 = 0;
     }
 
-    let now = chrono::Local::now();
+    let now = chrono::Utc::now();
     let mut target = now
         .date_naive()
         .and_hms_opt(hour_24 as u32, minute as u32, 0)?
-        .and_local_timezone(chrono::Local)
-        .single()?;
+        .and_utc();
 
     if target <= now {
         target += chrono::Duration::days(1);

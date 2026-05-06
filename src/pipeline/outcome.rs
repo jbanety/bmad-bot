@@ -94,9 +94,13 @@ pub async fn map_sdk_result_to_outcome(
         if (error_lower.contains("rate limit") || error_lower.contains("usage limit"))
             && result.rate_limit_resets_at.is_none()
         {
+            // Try to extract reset time from stderr (codex puts "try again at X:XX PM" there)
+            let resets_at = crate::runtime::sdk_codex::parse_codex_reset_time(&result.stderr)
+                .or_else(|| crate::runtime::sdk_codex::parse_codex_reset_time(&error))
+                .unwrap_or(0);
             return SessionOutcome::Failed {
                 story_key: story.story_key.clone(),
-                error: "RATE_LIMITED:0".to_string(),
+                error: format!("RATE_LIMITED:{resets_at}"),
                 decisions,
             };
         }
