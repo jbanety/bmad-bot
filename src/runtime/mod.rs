@@ -131,25 +131,33 @@ impl SessionRuntime {
     pub async fn execute(&self, command: RuntimeCommand) -> RawSessionResult {
         match &command {
             RuntimeCommand::Start { role, phase, story_key, prompt, .. } => {
+                let head = &prompt[..prompt.len().min(200)];
                 tracing::info!(
                     action = "runtime_execute_start",
                     role = ?role,
                     phase = %phase,
                     story_key = %story_key,
                     prompt_len = prompt.len(),
-                    prompt_head = %&prompt[..prompt.len().min(200)],
+                    prompt_head = %head,
                     "Sending Start command to runtime"
                 );
+                if let Some(ui) = self.ui() {
+                    ui.sdk_text(&format!("→ Start [{phase}] {head}"));
+                }
             }
             RuntimeCommand::Resume { session_id, prompt, story_key, .. } => {
+                let head = &prompt[..prompt.len().min(200)];
                 tracing::info!(
                     action = "runtime_execute_resume",
                     session_id = %session_id,
                     story_key = %story_key,
                     prompt_len = prompt.len(),
-                    prompt_head = %&prompt[..prompt.len().min(200)],
+                    prompt_head = %head,
                     "Sending Resume command to runtime"
                 );
+                if let Some(ui) = self.ui() {
+                    ui.sdk_text(&format!("→ Resume {head}"));
+                }
             }
         }
         let role = match &command {
@@ -205,6 +213,14 @@ impl SessionRuntime {
             Self::Api(_) => None,
             Self::Sdk(sdk) => Some(sdk),
             Self::Dual { sdk, .. } => Some(sdk),
+        }
+    }
+
+    fn ui(&self) -> Option<&UiHandle> {
+        match self {
+            Self::Sdk(sdk) => Some(sdk.ui_handle()),
+            Self::Dual { sdk, .. } => Some(sdk.ui_handle()),
+            Self::Api(_) => None,
         }
     }
 

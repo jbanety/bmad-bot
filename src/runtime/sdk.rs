@@ -141,6 +141,10 @@ impl SdkRuntime {
         &self.config
     }
 
+    pub(crate) fn ui_handle(&self) -> &crate::ui::UiHandle {
+        &self.ui
+    }
+
     pub(crate) fn secrets(&self) -> &BotSecrets {
         &self.secrets
     }
