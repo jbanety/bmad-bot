@@ -1113,7 +1113,7 @@ impl StoryPipeline {
                     prompt: review_prompt,
                     skill_path: None,
                     preamble: None,
-                    needs_supervisor: false,
+                    needs_supervisor: true,
                 })
                 .await;
 
