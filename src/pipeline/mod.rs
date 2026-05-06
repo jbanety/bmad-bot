@@ -1341,17 +1341,8 @@ impl StoryPipeline {
                 }
                 SessionOutcome::Failed { error, .. } => {
                     if let Some(resets_at) = parse_rate_limit(&error) {
-                        let now_epoch = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let wait_mins = if resets_at > now_epoch {
-                            (resets_at - now_epoch + 30) / 60
-                        } else {
-                            5
-                        };
-                        let reset_time = format!("~{wait_mins}min");
-                        self.ui.phase_error("Code Review", &format!("Rate limited — retry in {reset_time}"));
+                        let reset_time = format_reset_time(resets_at);
+                        self.ui.phase_error("Code Review", &format!("Rate limited — retry at {reset_time}"));
                     } else {
                         self.ui.phase_error("Code Review", &error);
                     }
@@ -2732,10 +2723,10 @@ impl StoryPipeline {
                     } else {
                         300 // default 5 min when no reset time
                     };
-                    let wait_mins = wait_secs / 60;
+                    let reset_time = format_reset_time(resets_at);
                     self.ui.story_error(
                         &story.story_key,
-                        &format!("Rate limited — waiting ~{wait_mins}min for reset"),
+                        &format!("Rate limited — retry at {reset_time}"),
                     );
                     tracing::warn!(
                         story_key = %story.story_key,
@@ -5304,6 +5295,15 @@ fn parse_rate_limit(error: &str) -> Option<u64> {
     error
         .strip_prefix("RATE_LIMITED:")
         .and_then(|ts| ts.parse::<u64>().ok())
+}
+
+fn format_reset_time(resets_at: u64) -> String {
+    if resets_at == 0 {
+        return "~5min".to_string();
+    }
+    chrono::DateTime::from_timestamp(resets_at as i64, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_else(|| format!("epoch {resets_at}"))
 }
 
 /// Convert a kebab-case label to a human-readable title.
