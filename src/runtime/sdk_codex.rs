@@ -561,12 +561,16 @@ pub async fn execute_codex_start(
 }
 
 /// Resume a Codex session. Returns raw subprocess result.
+///
+/// Does NOT inject MCP config — the resumed session inherits config from
+/// the original Start. Injecting MCP on resume caused "bmad-supervisor:
+/// No such file or directory" crashes for sessions started without supervisor.
 pub async fn execute_codex_resume(
     runtime: &SdkRuntime,
     role: &crate::llm::agent_factory::LlmRole,
     session_id: &str,
     prompt: &str,
-    story_key: &str,
+    _story_key: &str,
 ) -> SdkSessionResult {
     let role_config = runtime.config_for_role(role);
 
@@ -578,49 +582,24 @@ pub async fn execute_codex_resume(
         }
     };
 
-    let mcp_json = crate::mcp_server::generate_mcp_config(
-        story_key,
-        runtime.config_path(),
-        runtime.secrets(),
-        &runtime.config().mcp_servers,
-    );
-    let mcp_backup: Option<CodexMcpBackup> = match write_codex_mcp_config(&project_root, &mcp_json)
-    {
-        Ok(backup) => Some(backup),
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to write Codex MCP config for resume");
-            None
-        }
-    };
-
     let session_config = build_codex_resume_config(role_config, &project_root, session_id, prompt);
 
-    let result = match runtime
+    match runtime
         .execute_session(session_config, parse_codex_line)
         .await
     {
         Ok(r) => r,
-        Err(e) => {
-            if let Some(backup) = mcp_backup {
-                restore_codex_mcp_config(backup);
-            }
-            return SdkSessionResult {
-                session_id: None,
-                exit_code: Some(1),
-                stderr: e.to_string(),
-                timed_out: false,
-                shutdown_requested: false,
-                completion_text: None,
-                stream_error: Some(e.to_string()),
-                rate_limit_resets_at: None,
-            };
-        }
-    };
-
-    if let Some(backup) = mcp_backup {
-        restore_codex_mcp_config(backup);
+        Err(e) => SdkSessionResult {
+            session_id: None,
+            exit_code: Some(1),
+            stderr: e.to_string(),
+            timed_out: false,
+            shutdown_requested: false,
+            completion_text: None,
+            stream_error: Some(e.to_string()),
+            rate_limit_resets_at: None,
+        },
     }
-    result
 }
 
 // ---------------------------------------------------------------------------
