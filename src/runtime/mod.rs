@@ -129,6 +129,29 @@ impl SessionRuntime {
     /// No interpretation, no auto-response, no consultations.
     /// The pipeline layer handles all orchestration on top of this.
     pub async fn execute(&self, command: RuntimeCommand) -> RawSessionResult {
+        match &command {
+            RuntimeCommand::Start { role, phase, story_key, prompt, .. } => {
+                tracing::info!(
+                    action = "runtime_execute_start",
+                    role = ?role,
+                    phase = %phase,
+                    story_key = %story_key,
+                    prompt_len = prompt.len(),
+                    prompt_head = %&prompt[..prompt.len().min(200)],
+                    "Sending Start command to runtime"
+                );
+            }
+            RuntimeCommand::Resume { session_id, prompt, story_key, .. } => {
+                tracing::info!(
+                    action = "runtime_execute_resume",
+                    session_id = %session_id,
+                    story_key = %story_key,
+                    prompt_len = prompt.len(),
+                    prompt_head = %&prompt[..prompt.len().min(200)],
+                    "Sending Resume command to runtime"
+                );
+            }
+        }
         let role = match &command {
             RuntimeCommand::Start { role, .. } => role.clone(),
             RuntimeCommand::Resume { role, .. } => role.clone(),
