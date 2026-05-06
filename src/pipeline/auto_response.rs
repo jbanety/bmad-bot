@@ -126,6 +126,19 @@ pub fn is_confirmation_prompt(text: &str) -> bool {
             }
         }
     }
+    // Detect open-ended Y/N questions: "do you want...", "shall I...", "should I..."
+    // ending with "?" in the last 100 chars
+    let last_100 = &lower[lower.floor_char_boundary(lower.len().saturating_sub(100))..];
+    if last_100.trim_end().ends_with('?') {
+        if lower.contains("do you want")
+            || lower.contains("shall i")
+            || lower.contains("should i")
+            || lower.contains("would you like")
+            || lower.contains("proceed with")
+        {
+            return true;
+        }
+    }
     false
 }
 
