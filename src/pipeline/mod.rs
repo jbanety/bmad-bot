@@ -1100,6 +1100,7 @@ impl StoryPipeline {
                 "/bmad-code-review {} branch diff against {base_for_diff}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
                 story.specs_path.to_string_lossy()
             );
+            let review_prompt_debug = review_prompt.clone();
 
             let raw = self
                 .session_runtime
@@ -1123,6 +1124,7 @@ impl StoryPipeline {
                 &story.story_key,
                 "review",
                 &raw,
+                Some(&review_prompt_debug),
             )
             .await;
 
@@ -1978,6 +1980,7 @@ impl StoryPipeline {
                 &story.story_key,
                 &format!("consultation-{}", consult_config.label),
                 &consult_result,
+                None,
             )
             .await;
 
@@ -2340,12 +2343,17 @@ impl StoryPipeline {
         story_key: &str,
         phase: &str,
         raw: &RawSessionResult,
+        prompt: Option<&str>,
     ) {
         let log_dir = PathBuf::from(&self.config.bmad_paths.project_root).join("bmad-debug");
         let _ = tokio::fs::create_dir_all(&log_dir).await;
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let filename = format!("{timestamp}-{story_key}-{phase}.md");
         let path = log_dir.join(&filename);
+
+        let prompt_section = prompt
+            .map(|p| format!("## Prompt Sent\n\n```\n{p}\n```\n\n"))
+            .unwrap_or_default();
 
         let content = format!(
             "# Debug: {story_key} — {phase}\n\n\
@@ -2354,6 +2362,7 @@ impl StoryPipeline {
              **timed_out:** {}\n\
              **shutdown_requested:** {}\n\
              **stderr:** {}\n\n\
+             {prompt_section}\
              ## Completion Text\n\n{}\n",
             raw.exit_code,
             raw.session_id,
