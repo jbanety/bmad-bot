@@ -2744,7 +2744,13 @@ impl StoryPipeline {
                         "Rate limited — sleeping until reset"
                     );
 
-                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                    // Sleep in 10s chunks so SIGINT can interrupt
+                    let mut remaining = wait_secs;
+                    while remaining > 0 && !self.is_shutdown() {
+                        let chunk = remaining.min(10);
+                        tokio::time::sleep(std::time::Duration::from_secs(chunk)).await;
+                        remaining = remaining.saturating_sub(chunk);
+                    }
 
                     if self.is_shutdown() {
                         results.push(self.make_shutdown_result(&story.story_key));
