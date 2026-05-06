@@ -15,6 +15,7 @@ pub async fn run_single_consultation(
     runtime: &SessionRuntime,
     consultation: &ConsultationConfig,
     story_key: &str,
+    ui: &crate::ui::UiHandle,
 ) -> RawSessionResult {
     let context = build_context(consultation).await;
     let rendered_prompt = consultation.prompt_template.replace("{context}", &context);
@@ -26,7 +27,7 @@ pub async fn run_single_consultation(
     };
 
     runtime
-        .execute(RuntimeCommand::Start {
+        .execute(ui, RuntimeCommand::Start {
             role: consultation.role.clone(),
             phase: format!("consultation-{}", consultation.label),
             story_key: story_key.to_string(),

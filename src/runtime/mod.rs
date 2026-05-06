@@ -128,7 +128,7 @@ impl SessionRuntime {
     /// Execute a single runtime command and return raw results.
     /// No interpretation, no auto-response, no consultations.
     /// The pipeline layer handles all orchestration on top of this.
-    pub async fn execute(&self, command: RuntimeCommand) -> RawSessionResult {
+    pub async fn execute(&self, ui: &crate::ui::UiHandle, command: RuntimeCommand) -> RawSessionResult {
         match &command {
             RuntimeCommand::Start { role, phase, story_key, prompt, .. } => {
                 let head = &prompt[..prompt.len().min(200)];
@@ -141,9 +141,7 @@ impl SessionRuntime {
                     prompt_head = %head,
                     "Sending Start command to runtime"
                 );
-                if let Some(ui) = self.ui() {
-                    ui.sdk_text(&format!("→ Start [{phase}] {head}"));
-                }
+                ui.sdk_text(&format!("→ Start [{phase}] {head}"));
             }
             RuntimeCommand::Resume { session_id, prompt, story_key, .. } => {
                 let head = &prompt[..prompt.len().min(200)];
@@ -155,9 +153,7 @@ impl SessionRuntime {
                     prompt_head = %head,
                     "Sending Resume command to runtime"
                 );
-                if let Some(ui) = self.ui() {
-                    ui.sdk_text(&format!("→ Resume {head}"));
-                }
+                ui.sdk_text(&format!("→ Resume {head}"));
             }
         }
         let role = match &command {
@@ -216,13 +212,6 @@ impl SessionRuntime {
         }
     }
 
-    fn ui(&self) -> Option<&UiHandle> {
-        match self {
-            Self::Sdk(sdk) => Some(sdk.ui_handle()),
-            Self::Dual { sdk, .. } => Some(sdk.ui_handle()),
-            Self::Api(_) => None,
-        }
-    }
 
     pub fn from_config(deps: RuntimeDeps) -> Self {
         let RuntimeDeps {

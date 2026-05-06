@@ -480,7 +480,7 @@ impl StoryPipeline {
         // Execute session via new path
         let raw = self
             .session_runtime
-            .execute(RuntimeCommand::Start {
+            .execute(&self.ui, RuntimeCommand::Start {
                 role: LlmRole::Dev,
                 phase: PHASE_CREATE.to_string(),
                 story_key: story.story_key.clone(),
@@ -731,7 +731,7 @@ impl StoryPipeline {
 
         let mut raw = self
             .session_runtime
-            .execute(RuntimeCommand::Start {
+            .execute(&self.ui, RuntimeCommand::Start {
                 role: LlmRole::Dev,
                 phase: PHASE_DEV.to_string(),
                 story_key: story.story_key.clone(),
@@ -1106,7 +1106,7 @@ impl StoryPipeline {
 
             let raw = self
                 .session_runtime
-                .execute(RuntimeCommand::Start {
+                .execute(&self.ui, RuntimeCommand::Start {
                     role: LlmRole::Review,
                     phase: PHASE_REVIEW.to_string(),
                     story_key: story.story_key.clone(),
@@ -1158,7 +1158,7 @@ impl StoryPipeline {
                         );
                         let resume_result = self
                             .session_runtime
-                            .execute(RuntimeCommand::Resume {
+                            .execute(&self.ui, RuntimeCommand::Resume {
                                 session_id: sid.clone(),
                                 prompt: "The review findings were not written to the story file. \
                                     Please write ALL review findings to the story file now, under \
@@ -1861,7 +1861,7 @@ impl StoryPipeline {
 
             raw = self
                 .session_runtime
-                .execute(RuntimeCommand::Resume {
+                .execute(&self.ui, RuntimeCommand::Resume {
                     session_id: session_id.clone(),
                     prompt: "Continue — the previous session timed out. Pick up where you left off."
                         .to_string(),
@@ -1917,7 +1917,7 @@ impl StoryPipeline {
             let previous_good = raw.clone();
             raw = self
                 .session_runtime
-                .execute(RuntimeCommand::Resume {
+                .execute(&self.ui, RuntimeCommand::Resume {
                     session_id: session_id.clone(),
                     prompt: response,
                     role: role.clone(),
@@ -1982,6 +1982,7 @@ impl StoryPipeline {
                 &self.session_runtime,
                 consult_config,
                 &story.story_key,
+                &self.ui,
             )
             .await;
 
@@ -2081,7 +2082,7 @@ impl StoryPipeline {
 
             let resume_result = self
                 .session_runtime
-                .execute(RuntimeCommand::Resume {
+                .execute(&self.ui, RuntimeCommand::Resume {
                     session_id: current_session_id.clone(),
                     prompt: resume_prompt,
                     role: main_role.clone(),
@@ -3430,6 +3431,7 @@ impl StoryPipeline {
             &self.session_runtime,
             &config,
             &story_key,
+            &self.ui,
         )
         .await;
 
@@ -3553,7 +3555,7 @@ impl StoryPipeline {
 
         let raw = self
             .session_runtime
-            .execute(RuntimeCommand::Start {
+            .execute(&self.ui, RuntimeCommand::Start {
                 role: LlmRole::Dev,
                 phase: PHASE_CREATE.to_string(),
                 story_key: story_info.story_key.clone(),
