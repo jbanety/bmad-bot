@@ -471,9 +471,9 @@ impl StoryPipeline {
         let consultations =
             self.build_create_story_consultations(story, critic_memory_path, project_brief_path);
 
-        // Build prompt (same as SDK claude does internally)
+        let prefix = self.skill_prefix(&LlmRole::Dev);
         let prompt = format!(
-            "/bmad-create-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+            "{prefix}bmad-create-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
             story.story_key
         );
 
@@ -723,8 +723,9 @@ impl StoryPipeline {
             return self.outcome_to_pipeline_result(outcome, story_title);
         }
 
+        let prefix = self.skill_prefix(&LlmRole::Dev);
         let prompt = format!(
-            "/bmad-dev-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+            "{prefix}bmad-dev-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
             story.specs_path.to_string_lossy()
         );
 
@@ -1096,8 +1097,9 @@ impl StoryPipeline {
             );
 
             // Execute review session via new pipeline-controlled path
+            let review_prefix = self.skill_prefix(&LlmRole::Review);
             let review_prompt = format!(
-                "/bmad-code-review {} branch diff against {base_for_diff}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+                "{review_prefix}bmad-code-review {} branch diff against {base_for_diff}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
                 story.specs_path.to_string_lossy()
             );
             let review_prompt_debug = review_prompt.clone();
@@ -1584,6 +1586,16 @@ impl StoryPipeline {
     ///
     /// Returns `Some(absolute_path)` if a vision document is found, `None` otherwise.
     /// Never panics — operates in degraded mode if no document is available.
+    /// Returns the skill prefix for the given role's provider ("/" for claude-code, "$" for codex).
+    fn skill_prefix(&self, role: &LlmRole) -> &'static str {
+        let role_config = crate::runtime::resolve_role_config(&self.config.llm, role);
+        if role_config.provider == "codex" {
+            "$"
+        } else {
+            "/"
+        }
+    }
+
     fn prepare_project_brief_path(&self) -> Option<String> {
         if let Some(ref path) = self.config.project_brief {
             if path.trim().is_empty() {
@@ -3533,8 +3545,9 @@ impl StoryPipeline {
         // (last story of the completed epic). Everything stays on one branch
         // so sprint-status, critic-memory, and artifacts remain consistent.
 
+        let prefix = self.skill_prefix(&LlmRole::Dev);
         let prompt = format!(
-            "/bmad-create-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+            "{prefix}bmad-create-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
             story_info.story_key
         );
 
