@@ -1341,10 +1341,17 @@ impl StoryPipeline {
                 }
                 SessionOutcome::Failed { error, .. } => {
                     if let Some(resets_at) = parse_rate_limit(&error) {
-                        let reset_time = chrono::DateTime::from_timestamp(resets_at as i64, 0)
-                            .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
-                            .unwrap_or_else(|| format!("{resets_at}"));
-                        self.ui.phase_error("Code Review", &format!("Rate limited — resets at {reset_time}"));
+                        let now_epoch = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let wait_mins = if resets_at > now_epoch {
+                            (resets_at - now_epoch + 30) / 60
+                        } else {
+                            5
+                        };
+                        let reset_time = format!("~{wait_mins}min");
+                        self.ui.phase_error("Code Review", &format!("Rate limited — retry in {reset_time}"));
                     } else {
                         self.ui.phase_error("Code Review", &error);
                     }
