@@ -2721,7 +2721,7 @@ impl StoryPipeline {
                             300
                         }
                     } else {
-                        300 // default 5 min when no reset time
+                        3600 // default 1h when no specific reset time
                     };
                     let reset_time = format_reset_time(resets_at);
                     self.ui.story_error(
