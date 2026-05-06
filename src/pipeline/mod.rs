@@ -1087,9 +1087,17 @@ impl StoryPipeline {
             let consultations =
                 self.build_review_consultations(story, critic_memory_path, project_brief_path);
 
+            // Resolve base branch for the diff (same logic as branch creation)
+            let repo_path_buf = PathBuf::from(&self.config.bmad_paths.project_root);
+            let base_for_diff = crate::session::branch::determine_base_branch(
+                story,
+                &repo_path_buf,
+                &self.config.git_provider.target_branch,
+            );
+
             // Execute review session via new pipeline-controlled path
             let review_prompt = format!(
-                "/bmad-code-review {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
+                "/bmad-code-review {} branch diff against {base_for_diff}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
                 story.specs_path.to_string_lossy()
             );
 
