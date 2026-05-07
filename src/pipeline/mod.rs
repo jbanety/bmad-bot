@@ -410,7 +410,7 @@ impl StoryPipeline {
                     .await
             }
             StoryPhase::Review => {
-                self.run_review_pipeline(story, &story_title, None)
+                self.run_review_pipeline(story, &story_title, None, None)
                     .await
             }
             StoryPhase::Unknown => {
@@ -855,7 +855,7 @@ impl StoryPipeline {
                 };
 
                 // Chain to review phase
-                self.run_review_pipeline(&updated_story, story_title, Some(&branch))
+                self.run_review_pipeline(&updated_story, story_title, Some(&branch), base_branch_override)
                     .await
             }
 
@@ -1029,6 +1029,7 @@ impl StoryPipeline {
         story: &StoryInfo,
         story_title: &str,
         branch_override: Option<&str>,
+        base_branch_for_diff: Option<&str>,
     ) -> PipelineResult {
         let story_key = &story.story_key;
 
@@ -1088,13 +1089,17 @@ impl StoryPipeline {
             let consultations =
                 self.build_review_consultations(story, critic_memory_path, project_brief_path);
 
-            // Resolve base branch for the diff (same logic as branch creation)
-            let repo_path_buf = PathBuf::from(&self.config.bmad_paths.project_root);
-            let base_for_diff = crate::session::branch::determine_base_branch(
-                story,
-                &repo_path_buf,
-                &self.config.git_provider.target_branch,
-            );
+            // Use the branch this story was created from for a focused diff
+            let base_for_diff = base_branch_for_diff
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| {
+                    let repo_path_buf = PathBuf::from(&self.config.bmad_paths.project_root);
+                    crate::session::branch::determine_base_branch(
+                        story,
+                        &repo_path_buf,
+                        &self.config.git_provider.target_branch,
+                    )
+                });
 
             // Execute review session via new pipeline-controlled path
             let review_prefix = self.skill_prefix(&LlmRole::Review);
@@ -4213,7 +4218,7 @@ impl StoryPipeline {
                     let mut story = story_for_pipeline;
                     story.status = "review".to_string();
                     self.ui.story_start(&story.story_key, &story_title);
-                    self.run_review_pipeline(&story, &story_title, None)
+                    self.run_review_pipeline(&story, &story_title, None, None)
                         .await
                 }
                 StoryPhase::Unknown => {
@@ -4318,7 +4323,7 @@ impl StoryPipeline {
                 story_for_pipeline.status = "review".to_string();
                 self.ui
                     .story_start(&story_for_pipeline.story_key, &story_title);
-                self.run_review_pipeline(&story_for_pipeline, &story_title, None)
+                self.run_review_pipeline(&story_for_pipeline, &story_title, None, None)
                     .await
             }
             StoryPhase::Unknown => {
@@ -4453,6 +4458,7 @@ impl StoryPipeline {
                     &updated_story,
                     &story_title,
                     Some(&branch),
+                    None,
                 )
                 .await
             }

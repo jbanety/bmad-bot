@@ -19,7 +19,7 @@ pub fn auto_response_for_prompt(text: &str) -> Option<String> {
         return None;
     }
 
-    if lower.contains("chunk") && is_confirmation_prompt(text) {
+    if lower.contains("chunk") && (is_confirmation_prompt(text) || lower.contains("recommend chunking") || lower.contains("chunk the review")) {
         return Some("Y — review all chunks in order, starting from the first group".to_string());
     }
 
@@ -29,6 +29,10 @@ pub fn auto_response_for_prompt(text: &str) -> Option<String> {
             || (lower.contains("done") && lower.contains("re-run"))
         {
             return None;
+        }
+
+        if lower.contains("chunk") {
+            return Some("Y — review all chunks in order, starting from the first group".to_string());
         }
 
         if lower.contains("patch") && lower.contains("handle") {
