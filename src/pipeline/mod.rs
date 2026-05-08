@@ -1092,14 +1092,7 @@ impl StoryPipeline {
             // Use the branch this story was created from for a focused diff
             let base_for_diff = base_branch_for_diff
                 .map(|b| b.to_string())
-                .unwrap_or_else(|| {
-                    let repo_path_buf = PathBuf::from(&self.config.bmad_paths.project_root);
-                    crate::session::branch::determine_base_branch(
-                        story,
-                        &repo_path_buf,
-                        &self.config.git_provider.target_branch,
-                    )
-                });
+                .unwrap_or_else(|| self.resolve_review_base_branch(story));
 
             // Execute review session via new pipeline-controlled path
             let review_prefix = self.skill_prefix(&LlmRole::Review);
@@ -1612,6 +1605,45 @@ impl StoryPipeline {
     /// Returns `Some(absolute_path)` if a vision document is found, `None` otherwise.
     /// Never panics — operates in degraded mode if no document is available.
     /// Returns the skill prefix for the given role's provider ("/" for claude-code, "$" for codex).
+    /// Resolve the base branch for a code review diff.
+    ///
+    /// Looks at the sprint-status to find the previous story in the same epic.
+    /// If this is the first story of the epic, uses `epic/{N-1}` or target branch.
+    fn resolve_review_base_branch(&self, story: &StoryInfo) -> String {
+        let sprint_status_path =
+            PathBuf::from(&self.config.bmad_paths.implementation_artifacts).join("sprint-status.yaml");
+        let story_dir = PathBuf::from(&self.config.bmad_paths.implementation_artifacts);
+
+        if let Ok(ssf) = SprintStatusFile::load(&sprint_status_path, &story_dir) {
+            // Find stories in the same epic, sorted by story_num
+            let mut same_epic: Vec<_> = ssf
+                .stories()
+                .into_iter()
+                .filter(|s| s.epic_num == story.epic_num)
+                .collect();
+            same_epic.sort_by_key(|s| s.story_num);
+
+            // Find the story just before this one
+            if let Some(pos) = same_epic.iter().position(|s| s.story_key == story.story_key) {
+                if pos > 0 {
+                    let prev = &same_epic[pos - 1];
+                    return format!("story/{}", prev.story_key);
+                }
+            }
+        }
+
+        // First story of epic — try epic/{N-1}
+        if story.epic_num > 1 {
+            let prev_epic = format!("epic/{}", story.epic_num - 1);
+            let repo_path = PathBuf::from(&self.config.bmad_paths.project_root);
+            if crate::session::branch::branch_exists_local(&repo_path, &prev_epic) {
+                return prev_epic;
+            }
+        }
+
+        self.config.git_provider.target_branch.clone()
+    }
+
     fn skill_prefix(&self, role: &LlmRole) -> &'static str {
         let role_config = crate::runtime::resolve_role_config(&self.config.llm, role);
         if role_config.provider == "codex" {
