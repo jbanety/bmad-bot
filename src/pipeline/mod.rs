@@ -1129,6 +1129,8 @@ impl StoryPipeline {
             .await;
 
             // Check if findings exist in completion but not in story file — resume to persist
+            let story_path = PathBuf::from(&self.config.bmad_paths.project_root)
+                .join(&story.specs_path);
             let raw = if raw.exit_code == Some(0) {
                 if let Some(ref sid) = raw.session_id {
                     let has_findings_in_completion = raw
@@ -1142,8 +1144,6 @@ impl StoryPipeline {
                                 && lower.contains("code review complete")
                         })
                         .unwrap_or(false);
-                    let story_path = PathBuf::from(&self.config.bmad_paths.project_root)
-                        .join(&story.specs_path);
                     let story_has_findings = tokio::fs::read_to_string(&story_path)
                         .await
                         .map(|c| c.contains("### Review Findings"))
@@ -1179,8 +1179,10 @@ impl StoryPipeline {
                 raw
             };
 
-            // Run review-critic consultation only if review found decision-needed items
-            let has_decision_needed = raw
+            // Run review-critic consultation only if review found decision-needed items.
+            // Check both completion text and story file — completion text may lack the
+            // pattern if the reviewer exited early (e.g. AskUserQuestion fallback).
+            let has_decision_needed_in_completion = raw
                 .completion_text
                 .as_deref()
                 .map(|t| {
@@ -1192,6 +1194,12 @@ impl StoryPipeline {
                         || lower.contains("needs human input")
                 })
                 .unwrap_or(false);
+            let has_decision_needed_in_story = if !has_decision_needed_in_completion {
+                story_has_decision_needed_findings(&story_path).await
+            } else {
+                false
+            };
+            let has_decision_needed = has_decision_needed_in_completion || has_decision_needed_in_story;
             let raw = if raw.exit_code == Some(0) && !consultations.is_empty() && has_decision_needed {
                 if let Some(ref sid) = raw.session_id {
                     let (result, _) = self
@@ -5008,6 +5016,34 @@ fn extract_review_report_from_story(story: &StoryInfo, project_root: &Path) -> O
     Some(format!("## Code Review\n\n{findings}"))
 }
 
+/// Check whether the story file contains `decision-needed` findings in its
+/// `### Review Findings` section. Used as a fallback when the completion text
+/// doesn't contain the expected patterns.
+async fn story_has_decision_needed_findings(story_path: &Path) -> bool {
+    let content = match tokio::fs::read_to_string(story_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                path = %story_path.display(),
+                error = %e,
+                "Could not read story file for decision-needed fallback check"
+            );
+            return false;
+        }
+    };
+    let Some(start_idx) = content.find("### Review Findings") else {
+        return false;
+    };
+    let section = &content[start_idx..];
+    let end_idx = section["### Review Findings".len()..]
+        .find("\n## ")
+        .map(|i| i + "### Review Findings".len())
+        .unwrap_or(section.len());
+    let findings = &section[..end_idx];
+    let lower = findings.to_lowercase();
+    lower.contains("decision-needed") || lower.contains("decision_needed")
+}
+
 fn build_adversarial_consultation_preamble() -> String {
     "You are a cynical, jaded adversarial reviewer. Your job is to find every \
      weakness, missing detail, and potential disaster in the content provided.\n\n\
@@ -8350,5 +8386,47 @@ development_status:
             result, content,
             "File should be unchanged when no items are removed"
         );
+    }
+
+    #[tokio::test]
+    async fn test_story_has_decision_needed_findings_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("story.md");
+        tokio::fs::write(
+            &path,
+            "## Tasks\n\n### Review Findings\n\n- `decision-needed` — AND vs OR logic\n- `patch` — fix guard\n\n## Design Notes\n",
+        )
+        .await
+        .unwrap();
+        assert!(story_has_decision_needed_findings(&path).await);
+    }
+
+    #[tokio::test]
+    async fn test_story_has_decision_needed_findings_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("story.md");
+        tokio::fs::write(
+            &path,
+            "## Tasks\n\n### Review Findings\n\n- `patch` — fix guard\n- `defer` — minor issue\n\n## Design Notes\n",
+        )
+        .await
+        .unwrap();
+        assert!(!story_has_decision_needed_findings(&path).await);
+    }
+
+    #[tokio::test]
+    async fn test_story_has_decision_needed_findings_no_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("story.md");
+        tokio::fs::write(&path, "## Tasks\n\nSome content.\n")
+            .await
+            .unwrap();
+        assert!(!story_has_decision_needed_findings(&path).await);
+    }
+
+    #[tokio::test]
+    async fn test_story_has_decision_needed_findings_missing_file() {
+        let path = std::path::PathBuf::from("/nonexistent/story.md");
+        assert!(!story_has_decision_needed_findings(&path).await);
     }
 }

@@ -246,6 +246,8 @@ pub fn build_claude_code_config(
         role_config.model.clone(),
         "--permission-mode".to_string(),
         "bypassPermissions".to_string(),
+        "--disallowedTools".to_string(),
+        "AskUserQuestion".to_string(),
         "--append-system-prompt".to_string(),
         "OVERRIDE: communication_language = English".to_string(),
     ];
@@ -292,6 +294,8 @@ pub fn build_claude_code_resume_config(
         "stream-json".to_string(),
         "--model".to_string(),
         role_config.model.clone(),
+        "--disallowedTools".to_string(),
+        "AskUserQuestion".to_string(),
     ];
 
     if let Some(mcp_path) = mcp_config_path {
@@ -805,5 +809,22 @@ mod tests {
         let config =
             build_claude_code_resume_config(&role, Path::new("/repo"), "sess-abc", "prompt", None);
         assert_eq!(config.command, "/custom/claude");
+    }
+
+    #[test]
+    fn test_build_claude_code_config_disallows_ask_user_question() {
+        let role = make_test_role_config();
+        let config = build_claude_code_config(&role, Path::new("/repo"), "prompt", None);
+        assert!(config.args.contains(&"--disallowedTools".to_string()));
+        assert!(config.args.contains(&"AskUserQuestion".to_string()));
+    }
+
+    #[test]
+    fn test_build_claude_code_resume_config_disallows_ask_user_question() {
+        let role = make_test_role_config();
+        let config =
+            build_claude_code_resume_config(&role, Path::new("/repo"), "sess-abc", "prompt", None);
+        assert!(config.args.contains(&"--disallowedTools".to_string()));
+        assert!(config.args.contains(&"AskUserQuestion".to_string()));
     }
 }

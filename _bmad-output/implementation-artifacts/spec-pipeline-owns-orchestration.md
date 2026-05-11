@@ -2,7 +2,7 @@
 title: 'Pipeline owns all orchestration — runtimes become dumb session executors'
 type: 'refactor'
 created: '2026-05-02'
-status: 'in-progress'
+status: 'done'
 baseline_commit: '539e0a0'
 context:
   - '_bmad-output/project-context.md'
