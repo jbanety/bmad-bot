@@ -1202,14 +1202,16 @@ impl StoryPipeline {
             let has_decision_needed = has_decision_needed_in_completion || has_decision_needed_in_story;
             let raw = if raw.exit_code == Some(0) && !consultations.is_empty() && has_decision_needed {
                 if let Some(ref sid) = raw.session_id {
-                    let reviewer_message = raw.completion_text.as_deref().unwrap_or("");
+                    let reviewer_message = extract_review_summary(
+                        raw.completion_text.as_deref().unwrap_or(""),
+                    );
                     let (result, _) = self
                         .run_consultation_sequence(
                             story,
                             sid,
                             &LlmRole::Review,
                             &consultations,
-                            Some(reviewer_message),
+                            Some(&reviewer_message),
                         )
                         .await;
                     result
@@ -5021,6 +5023,19 @@ fn extract_review_report_from_story(story: &StoryInfo, project_root: &Path) -> O
     Some(format!("## Code Review\n\n{findings}"))
 }
 
+/// Extract the review summary from a completion text, starting at the findings
+/// banner (e.g. "**Code review complete.** 1 `decision-needed`...").
+/// Returns the full text if the banner is not found.
+fn extract_review_summary(text: &str) -> &str {
+    let lower = text.to_lowercase();
+    if let Some(idx) = lower.find("code review complete") {
+        let start = text[..idx].rfind('\n').map(|i| i + 1).unwrap_or(idx);
+        &text[start..]
+    } else {
+        text
+    }
+}
+
 /// Check whether the story file contains `decision-needed` findings in its
 /// `### Review Findings` section. Used as a fallback when the completion text
 /// doesn't contain the expected patterns.
@@ -8433,5 +8448,19 @@ development_status:
     async fn test_story_has_decision_needed_findings_missing_file() {
         let path = std::path::PathBuf::from("/nonexistent/story.md");
         assert!(!story_has_decision_needed_findings(&path).await);
+    }
+
+    #[test]
+    fn test_extract_review_summary_with_banner() {
+        let text = "Loading skill...\nRunning review...\n**Code review complete.** 1 `decision-needed`, 3 `patch`.\n\n### Decision needed\n\nWhich option?";
+        let result = extract_review_summary(text);
+        assert!(result.starts_with("**Code review complete.**"));
+        assert!(result.contains("Decision needed"));
+    }
+
+    #[test]
+    fn test_extract_review_summary_no_banner() {
+        let text = "Some random completion text without a banner.";
+        assert_eq!(extract_review_summary(text), text);
     }
 }
