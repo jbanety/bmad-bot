@@ -11,6 +11,10 @@
 pub fn auto_response_for_prompt(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
+    if lower.contains("code review complete") {
+        return None;
+    }
+
     if is_checkpoint_prompt(&lower) {
         return Some("proceed".to_string());
     }
@@ -249,5 +253,11 @@ mod tests {
     #[test]
     fn test_is_confirmation_not_matched() {
         assert!(!is_confirmation_prompt("The code looks good."));
+    }
+
+    #[test]
+    fn test_review_complete_stops_auto_response() {
+        let text = "**Code review complete.** 1 `decision-needed`, 3 `patch`.\n\nWhich option? (1/2/3)\n1. Patch\n2. Defer\n3. Dismiss";
+        assert_eq!(auto_response_for_prompt(text), None);
     }
 }
