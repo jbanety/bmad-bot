@@ -2532,7 +2532,12 @@ impl StoryPipeline {
         story_context: Option<&str>,
     ) -> Option<String> {
         let context_section = story_context
-            .map(|c| format!("\n\n--- Original Story ---\n{c}"))
+            .map(|c| {
+                let truncated: String = c.chars().take(2000).collect();
+                format!(
+                    "\n\n--- Story context (for reference only, do NOT summarize this) ---\n{truncated}"
+                )
+            })
             .unwrap_or_default();
         let prompt = format!(
             "Summarize the following {review_type} findings for `{story_key}` into a \
@@ -2541,7 +2546,10 @@ impl StoryPipeline {
              decisions taken, and anything important for future reviews. \
              Be thorough — include all significant points, but remove noise and redundancy. \
              Output ONLY the bullet points, no preamble.\n\n\
-             --- Findings ---\n{findings}{context_section}"
+             IMPORTANT: The content to summarize is ONLY what appears under \"Findings to summarize\". \
+             The story context section below it is background reference — do not summarize it, \
+             do not ask for more data, do not comment on it.\n\n\
+             --- Findings to summarize ---\n{findings}{context_section}"
         );
         self.utility_llm_oneshot(&prompt).await
     }
