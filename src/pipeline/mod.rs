@@ -2086,13 +2086,23 @@ impl StoryPipeline {
                 break;
             }
 
-            // Extract findings
+            // Extract findings, stripping BMAD termination marker
             let findings = match consult_result.completion_text {
                 Some(ref text) if !text.is_empty() => {
-                    let count = text.lines().filter(|l| l.starts_with("- ")).count().max(1);
+                    let cleaned = text.replace("<<BMAD_JOB_DONE>>", "").trim().to_string();
+                    if cleaned.is_empty() {
+                        self.ui
+                            .consultation_complete(&consult_config.label, 0, consult_elapsed);
+                        tracing::info!(
+                            label = %consult_config.label,
+                            "Consultation produced only BMAD_JOB_DONE marker — skipping resume"
+                        );
+                        continue;
+                    }
+                    let count = cleaned.lines().filter(|l| l.starts_with("- ")).count().max(1);
                     self.ui
                         .consultation_complete(&consult_config.label, count, consult_elapsed);
-                    text.clone()
+                    cleaned
                 }
                 _ => {
                     self.ui
