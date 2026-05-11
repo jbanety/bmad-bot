@@ -502,7 +502,7 @@ impl StoryPipeline {
         // Run consultation sequence (adversarial → critic)
         let (raw, _session_id) = if raw.exit_code == Some(0) {
             if let Some(ref sid) = raw.session_id {
-                self.run_consultation_sequence(story, sid, &LlmRole::Dev, &consultations)
+                self.run_consultation_sequence(story, sid, &LlmRole::Dev, &consultations, None)
                     .await
             } else {
                 (raw, String::new())
@@ -1202,12 +1202,14 @@ impl StoryPipeline {
             let has_decision_needed = has_decision_needed_in_completion || has_decision_needed_in_story;
             let raw = if raw.exit_code == Some(0) && !consultations.is_empty() && has_decision_needed {
                 if let Some(ref sid) = raw.session_id {
+                    let reviewer_message = raw.completion_text.as_deref().unwrap_or("");
                     let (result, _) = self
                         .run_consultation_sequence(
                             story,
                             sid,
                             &LlmRole::Review,
                             &consultations,
+                            Some(reviewer_message),
                         )
                         .await;
                     result
@@ -1817,11 +1819,11 @@ impl StoryPipeline {
             trigger_pattern: r"(?i)(\[Review\]\[Decision\]|decision[_\s-]*needed)".to_string(),
             prompt_template: "The code review is complete. The reviewer is asking questions \
                 that need human decisions. You are acting as the human decision-maker.\n\n\
-                Read the reviewer's message below and answer each question directly — \
-                pick a numbered option or provide the requested input. Base your decisions \
-                on the project brief, your memory of previous reviews, the completed stories \
-                from this epic, and the current story spec — all loaded in your context.\n\n\
-                --- Reviewer message ---\n{context}"
+                Base your decisions on the project brief, your memory of previous reviews, \
+                the completed stories from this epic, and the current story spec — all loaded \
+                below as context files.\n\n\
+                --- Project context ---\n{context}\n\n\
+                --- Reviewer message (answer each question directly) ---\n{reviewer_message}"
                 .to_string(),
             resume_message_template: "An external vision reviewer has resolved the following \
                 flagged findings:\n\n{findings}\n\nPlease apply these decisions accordingly: \
@@ -2016,6 +2018,7 @@ impl StoryPipeline {
         main_session_id: &str,
         main_role: &LlmRole,
         consultations: &[ConsultationConfig],
+        reviewer_message: Option<&str>,
     ) -> (RawSessionResult, String) {
         let mut current_session_id = main_session_id.to_string();
         let mut last_result = RawSessionResult {
@@ -2048,6 +2051,7 @@ impl StoryPipeline {
                 consult_config,
                 &story.story_key,
                 &self.ui,
+                reviewer_message,
             )
             .await;
 
@@ -3503,6 +3507,7 @@ impl StoryPipeline {
             &config,
             &story_key,
             &self.ui,
+            None,
         )
         .await;
 
@@ -3645,7 +3650,7 @@ impl StoryPipeline {
         let raw = if raw.exit_code == Some(0) {
             if let Some(ref sid) = raw.session_id {
                 let (result, _) = self
-                    .run_consultation_sequence(&story_info, sid, &LlmRole::Dev, &consultations)
+                    .run_consultation_sequence(&story_info, sid, &LlmRole::Dev, &consultations, None)
                     .await;
                 result
             } else {

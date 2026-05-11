@@ -16,9 +16,13 @@ pub async fn run_single_consultation(
     consultation: &ConsultationConfig,
     story_key: &str,
     ui: &crate::ui::UiHandle,
+    reviewer_message: Option<&str>,
 ) -> RawSessionResult {
     let context = build_context(consultation).await;
-    let rendered_prompt = consultation.prompt_template.replace("{context}", &context);
+    let rendered_prompt = consultation
+        .prompt_template
+        .replace("{context}", &context)
+        .replace("{reviewer_message}", reviewer_message.unwrap_or(""));
 
     let full_prompt = if let Some(ref preamble) = consultation.preamble_override {
         format!("{preamble}\n\n{rendered_prompt}")
