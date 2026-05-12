@@ -1189,6 +1189,7 @@ impl StoryPipeline {
                     let lower = t.to_lowercase();
                     lower.contains("decision-needed")
                         || lower.contains("decision_needed")
+                        || lower.contains("decision point")
                         || lower.contains("[decision]")
                         || lower.contains("requires clarification")
                         || lower.contains("needs human input")
@@ -5079,7 +5080,9 @@ async fn story_has_decision_needed_findings(story_path: &Path) -> bool {
         .unwrap_or(section.len());
     let findings = &section[..end_idx];
     let lower = findings.to_lowercase();
-    lower.contains("decision-needed") || lower.contains("decision_needed")
+    lower.contains("decision-needed")
+        || lower.contains("decision_needed")
+        || lower.contains("[review][decision]")
 }
 
 fn build_adversarial_consultation_preamble() -> String {
@@ -8433,6 +8436,19 @@ development_status:
         tokio::fs::write(
             &path,
             "## Tasks\n\n### Review Findings\n\n- `decision-needed` — AND vs OR logic\n- `patch` — fix guard\n\n## Design Notes\n",
+        )
+        .await
+        .unwrap();
+        assert!(story_has_decision_needed_findings(&path).await);
+    }
+
+    #[tokio::test]
+    async fn test_story_has_decision_needed_findings_review_decision_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("story.md");
+        tokio::fs::write(
+            &path,
+            "## Tasks\n\n### Review Findings\n\n- [ ] [Review][Decision] Headroom inconsistency — defer or align now\n- [x] [Review][Patch] Fix guard\n\n## Design Notes\n",
         )
         .await
         .unwrap();
