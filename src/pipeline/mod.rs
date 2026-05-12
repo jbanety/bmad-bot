@@ -2094,10 +2094,18 @@ impl StoryPipeline {
                     if cleaned.is_empty() {
                         self.ui
                             .consultation_complete(&consult_config.label, 0, consult_elapsed);
-                        tracing::info!(
-                            label = %consult_config.label,
-                            "Consultation produced only BMAD_JOB_DONE marker — skipping resume"
-                        );
+                        if consult_config.label.contains("review-critic") {
+                            tracing::warn!(
+                                label = %consult_config.label,
+                                story_key = %story.story_key,
+                                "Review critic returned empty — decision-needed findings may be unresolved"
+                            );
+                        } else {
+                            tracing::info!(
+                                label = %consult_config.label,
+                                "Consultation produced only BMAD_JOB_DONE marker — skipping resume"
+                            );
+                        }
                         continue;
                     }
                     let count = cleaned.lines().filter(|l| l.starts_with("- ")).count().max(1);
