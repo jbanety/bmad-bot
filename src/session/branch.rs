@@ -81,6 +81,36 @@ pub fn branch_exists_local(repo_path: &Path, branch_name: &str) -> bool {
     branch_exists(repo_path, branch_name)
 }
 
+/// Find the most recent story branch for a given epic, excluding the current story.
+///
+/// Lists local branches matching `story/{epic_num}-*`, sorted by committer date
+/// (newest first), and returns the first one that isn't the current story's branch.
+fn find_latest_story_branch_in_epic(
+    repo_path: &Path,
+    epic_num: u32,
+    exclude_key: &str,
+) -> Option<String> {
+    let pattern = format!("story/{epic_num}-*");
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["branch", "--list", "--sort=-committerdate", &pattern])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let exclude_branch = format!("story/{exclude_key}");
+
+    stdout
+        .lines()
+        .map(|line| line.trim().trim_start_matches("* ").to_string())
+        .find(|branch| !branch.is_empty() && *branch != exclude_branch)
+}
+
 fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
     match std::process::Command::new("git")
         .arg("-C")
@@ -113,15 +143,29 @@ fn branch_exists(repo_path: &Path, branch_name: &str) -> bool {
 /// * `default_branch` — Fallback branch name (typically `"main"`)
 pub fn determine_base_branch(story: &StoryInfo, repo_path: &Path, default_branch: &str) -> String {
     if story.dependencies.is_empty() {
-        // No explicit dependencies — check if the previous epic's branch exists
-        if story.epic_num > 1 {
+        // No explicit dependencies — find the latest story branch in the current epic
+        if let Some(latest) =
+            find_latest_story_branch_in_epic(repo_path, story.epic_num, &story.story_key)
+        {
+            tracing::info!(
+                action = "base_branch_resolved",
+                base = %latest,
+                story = %story.story_key,
+                reason = "no dependencies — chaining from latest story in current epic",
+                "Chaining from latest story branch in current epic"
+            );
+            return latest;
+        }
+
+        // No story branch in current epic — try previous epic branch
+        if story.epic_num > 0 {
             let prev_epic = format!("epic/{}", story.epic_num - 1);
             if branch_exists(repo_path, &prev_epic) {
                 tracing::info!(
                     action = "base_branch_resolved",
                     base = %prev_epic,
                     story = %story.story_key,
-                    reason = "no dependencies — chaining from previous epic branch",
+                    reason = "no dependencies, no story in current epic — chaining from previous epic branch",
                     "Chaining from previous epic branch"
                 );
                 return prev_epic;
@@ -382,6 +426,52 @@ mod tests {
 
         let base = determine_base_branch(&story, &path, "main");
         assert_eq!(base, "main");
+    }
+
+    #[test]
+    fn test_determine_base_branch_no_deps_chains_from_latest_story_in_epic() {
+        let (_dir, path) = init_test_repo();
+
+        // Create pre-epic story branches for epic 13
+        create_branch_with_commit(&path, "story/13-0a-pre-epic-13");
+        create_branch_with_commit(&path, "story/13-0e-pre-epic-13-emergency-fix");
+
+        // Story 13-1 has no explicit dependencies
+        let story = make_story("13-1-strategy-trait", vec![]);
+
+        let base = determine_base_branch(&story, &path, "main");
+        // Should chain from the latest story branch in epic 13 (by commit date),
+        // not from epic/12 or main
+        assert!(
+            base.starts_with("story/13-"),
+            "Expected story/13-* branch, got: {base}"
+        );
+    }
+
+    #[test]
+    fn test_determine_base_branch_no_deps_falls_back_to_prev_epic_when_no_stories() {
+        let (_dir, path) = init_test_repo();
+
+        // Create previous epic branch but no stories in current epic
+        create_branch_with_commit(&path, "epic/12");
+
+        let story = make_story("13-1-strategy-trait", vec![]);
+
+        let base = determine_base_branch(&story, &path, "main");
+        assert_eq!(base, "epic/12");
+    }
+
+    #[test]
+    fn test_determine_base_branch_epic_1_falls_back_to_epic_0() {
+        let (_dir, path) = init_test_repo();
+
+        // Create epic/0 branch but no stories in epic 1
+        create_branch_with_commit(&path, "epic/0");
+
+        let story = make_story("1-0a-pre-epic-1", vec![]);
+
+        let base = determine_base_branch(&story, &path, "main");
+        assert_eq!(base, "epic/0");
     }
 
     #[test]

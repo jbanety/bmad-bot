@@ -723,6 +723,28 @@ impl StoryPipeline {
             return self.outcome_to_pipeline_result(outcome, story_title);
         }
 
+        // Post-checkout sanity check: verify the story file still exists on
+        // this branch. Branch checkout can change the worktree contents — a
+        // story that was eligible on branch A may not exist on branch B.
+        if !story.specs_path.exists() {
+            tracing::error!(
+                action = "story_file_missing_after_checkout",
+                story_key = %story.story_key,
+                specs_path = %story.specs_path.display(),
+                "Story file does not exist after branch checkout — skipping"
+            );
+            return PipelineResult {
+                story_key: story.story_key.clone(),
+                status: StoryStatus::Error,
+                pr_url: None,
+                error_detail: Some(format!(
+                    "Story file {} not found after branch checkout",
+                    story.specs_path.display()
+                )),
+                fatal: false,
+            };
+        }
+
         let prefix = self.skill_prefix(&LlmRole::Dev);
         let prompt = format!(
             "{prefix}bmad-dev-story {}\n\nIMPORTANT: ALL communication and output MUST be in English regardless of any config file settings.",
@@ -2226,13 +2248,24 @@ impl StoryPipeline {
         match outcome {
             SessionOutcome::Failed {
                 story_key, error, ..
-            } => PipelineResult {
-                story_key,
-                status: StoryStatus::Error,
-                pr_url: None,
-                error_detail: Some(error),
-                fatal: true,
-            },
+            } => {
+                let fatal = is_auth_error(&error);
+                tracing::error!(
+                    action = "branch_setup_failed",
+                    story_key = %story_key,
+                    error = %error,
+                    fatal,
+                    "Branch setup failed"
+                );
+                self.ui.story_error(&story_key, &error);
+                PipelineResult {
+                    story_key,
+                    status: StoryStatus::Error,
+                    pr_url: None,
+                    error_detail: Some(error),
+                    fatal,
+                }
+            }
             other => {
                 let key = match &other {
                     SessionOutcome::Completed { story_key, .. } => story_key.clone(),
@@ -2898,16 +2931,18 @@ impl StoryPipeline {
                 }
             }
 
-            results.push(result);
-
             if is_fatal {
                 tracing::error!(
                     action = "pipeline_halt",
                     story_key = %story.story_key,
+                    error = %result.error_detail.as_deref().unwrap_or("unknown"),
                     "Fatal error detected — stopping pipeline, skipping remaining stories"
                 );
+                results.push(result);
                 break;
             }
+
+            results.push(result);
 
             // Re-poll sprint-status.yaml and recompute eligible list.
             // This ensures that dependency changes from the just-completed story
@@ -6884,9 +6919,10 @@ development_status:
         let story =
             StoryInfo::from_key_and_status("1-1-foo", "backlog", Path::new("/tmp")).unwrap();
         let result = pipeline.process_story(&story, None).await;
-        // Create phase runs but fails (no git repo at /tmp/test-pipeline) — still an error
+        // Create phase runs but fails (no git repo at /tmp/test-pipeline) — branch
+        // setup error is NOT fatal (not an auth error), story is skipped
         assert_eq!(result.status, StoryStatus::Error);
-        assert!(result.fatal);
+        assert!(!result.fatal);
     }
 
     #[tokio::test]

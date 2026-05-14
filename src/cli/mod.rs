@@ -1708,6 +1708,8 @@ async fn run_polling_loop(
         tokio::time::interval(Duration::from_secs(config.polling_interval_secs));
     interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut cycle_num: u32 = 0;
+    let mut consecutive_all_error_cycles: u32 = 0;
+    const MAX_CONSECUTIVE_ALL_ERROR_CYCLES: u32 = 3;
 
     loop {
         // Check shutdown flag at top of loop (covers case where flag was set
@@ -1770,6 +1772,34 @@ async fn run_polling_loop(
                                  Fix credentials and restart with `bmad-bot start`."
                             );
                             break;
+                        }
+
+                        // Detect systemic failures: if every story errored and
+                        // none completed or blocked, the issue is likely
+                        // environmental (dirty worktree, missing CLI, etc.).
+                        // After MAX_CONSECUTIVE_ALL_ERROR_CYCLES such cycles,
+                        // halt to avoid an infinite retry loop.
+                        if summary.total_processed > 0
+                            && summary.errored == summary.total_processed
+                        {
+                            consecutive_all_error_cycles += 1;
+                            tracing::warn!(
+                                consecutive = consecutive_all_error_cycles,
+                                max = MAX_CONSECUTIVE_ALL_ERROR_CYCLES,
+                                "All stories errored this cycle — possible systemic issue"
+                            );
+                            if consecutive_all_error_cycles >= MAX_CONSECUTIVE_ALL_ERROR_CYCLES {
+                                tracing::error!(
+                                    consecutive = consecutive_all_error_cycles,
+                                    "All stories have errored for {consecutive_all_error_cycles} \
+                                     consecutive cycles — halting daemon. \
+                                     Check the working tree and fix the issue, \
+                                     then restart with `bmad-bot start`."
+                                );
+                                break;
+                            }
+                        } else {
+                            consecutive_all_error_cycles = 0;
                         }
                     }
                     Err(crate::watcher::WatcherError::NoEligibleStories) => {
