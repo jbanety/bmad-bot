@@ -219,7 +219,7 @@ impl SdkRuntime {
             provider = %provider,
             session_id = %session_id,
             prompt_len = prompt.len(),
-            prompt_preview = %if prompt.len() > 200 { format!("{}...", &prompt[..197]) } else { prompt.to_string() },
+            prompt_preview = %if prompt.chars().count() > 200 { let t: String = prompt.chars().take(197).collect(); format!("{t}...") } else { prompt.to_string() },
             story_key = %story.story_key,
             "Resuming SDK session with prompt"
         );

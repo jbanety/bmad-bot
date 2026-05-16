@@ -227,7 +227,12 @@ pub fn parse_codex_line(line: &str) -> Option<SdkOutputEvent> {
             } else {
                 Some(SdkOutputEvent::ToolResult {
                     tool_name: "command_execution".to_string(),
-                    detail: if text.len() > 120 { format!("{}...", &text[..117]) } else { text },
+                    detail: if text.chars().count() > 120 {
+                        let truncated: String = text.chars().take(117).collect();
+                        format!("{truncated}...")
+                    } else {
+                        text
+                    },
                 })
             }
         }

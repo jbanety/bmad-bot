@@ -181,7 +181,14 @@ pub fn parse_claude_code_line(line: &str) -> Option<SdkOutputEvent> {
         "user" => {
             let detail = event
                 .tool_use_result
-                .map(|s| if s.len() > 120 { format!("{}...", &s[..117]) } else { s })
+                .map(|s| {
+                    if s.chars().count() > 120 {
+                        let truncated: String = s.chars().take(117).collect();
+                        format!("{truncated}...")
+                    } else {
+                        s
+                    }
+                })
                 .unwrap_or_default();
             Some(SdkOutputEvent::ToolResult {
                 tool_name: String::new(),
