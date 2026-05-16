@@ -89,7 +89,7 @@ pub type RawSessionResult = sdk::SdkSessionResult;
 // ---------------------------------------------------------------------------
 
 /// Command dispatched by the pipeline to a runtime for execution.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RuntimeCommand {
     /// Start a fresh session.
     Start {

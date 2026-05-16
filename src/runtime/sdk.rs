@@ -16,6 +16,7 @@ use crate::session::SessionOutcome;
 use crate::session::agent::ShutdownFlag;
 use crate::ui::UiHandle;
 
+use super::RuntimeCommand;
 
 // ---------------------------------------------------------------------------
 // SdkError
@@ -117,6 +118,9 @@ pub struct SdkRuntime {
 }
 
 const STDERR_MAX_BYTES: usize = 1_024 * 1_024;
+const SDK_TRANSIENT_MAX_RETRIES: usize = 3;
+const SDK_TRANSIENT_BACKOFF_BASE_SECS: u64 = 5;
+const SDK_TRANSIENT_BACKOFF_MAX_SECS: u64 = 60;
 
 impl SdkRuntime {
     /// Creates a new SDK runtime with the given configuration and dependencies.
@@ -244,8 +248,60 @@ impl SdkRuntime {
 
     /// Execute a runtime command — dumb executor, no business logic.
     /// Dispatches Start/Resume to the appropriate SDK provider, returns raw result.
-    pub async fn execute_command(&self, command: super::RuntimeCommand) -> SdkSessionResult {
-        use super::RuntimeCommand;
+    pub async fn execute_command(&self, command: RuntimeCommand) -> SdkSessionResult {
+        self.execute_command_with_retry_policy(
+            command,
+            SDK_TRANSIENT_MAX_RETRIES,
+            Duration::from_secs(SDK_TRANSIENT_BACKOFF_BASE_SECS),
+            Duration::from_secs(SDK_TRANSIENT_BACKOFF_MAX_SECS),
+        )
+        .await
+    }
+
+    async fn execute_command_with_retry_policy(
+        &self,
+        command: RuntimeCommand,
+        max_retries: usize,
+        base_delay: Duration,
+        max_delay: Duration,
+    ) -> SdkSessionResult {
+        let mut retry_count = 0;
+        let mut next_command = command.clone();
+        let mut result = self.execute_command_once(next_command.clone()).await;
+
+        while retry_count < max_retries
+            && is_retryable_sdk_result(&result)
+            && !self.shutdown.load(Ordering::Relaxed)
+        {
+            retry_count += 1;
+            let delay = sdk_transient_backoff_delay(retry_count, base_delay, max_delay);
+            let error = truncate_for_log(&sdk_result_error_text(&result), 300);
+            tracing::warn!(
+                action = "sdk_transient_retry",
+                retry = retry_count,
+                max_retries,
+                delay_secs = delay.as_secs_f64(),
+                error = %error,
+                "SDK session hit transient provider error — retrying with backoff"
+            );
+            self.ui.sdk_text(&format!(
+                "Transient SDK/API error — retry {retry_count}/{max_retries} in {:.0}s",
+                delay.as_secs_f64()
+            ));
+
+            tokio::time::sleep(delay).await;
+            if self.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+
+            next_command = retry_command_after_transient_error(&next_command, &result);
+            result = self.execute_command_once(next_command.clone()).await;
+        }
+
+        result
+    }
+
+    async fn execute_command_once(&self, command: RuntimeCommand) -> SdkSessionResult {
         match command {
             RuntimeCommand::Start {
                 role,
@@ -560,6 +616,130 @@ impl SdkRuntime {
     }
 }
 
+fn is_retryable_sdk_result(result: &SdkSessionResult) -> bool {
+    if result.exit_code == Some(0)
+        || result.timed_out
+        || result.shutdown_requested
+        || result.rate_limit_resets_at.is_some()
+    {
+        return false;
+    }
+
+    is_transient_sdk_error_text(&sdk_result_error_text(result))
+}
+
+fn sdk_result_error_text(result: &SdkSessionResult) -> String {
+    let mut parts = Vec::new();
+    if let Some(ref stream_error) = result.stream_error {
+        parts.push(stream_error.as_str());
+    }
+    if !result.stderr.is_empty() {
+        parts.push(result.stderr.as_str());
+    }
+    if parts.is_empty() {
+        format!("SDK process failed with exit code {:?}", result.exit_code)
+    } else {
+        parts.join("\n")
+    }
+}
+
+fn is_transient_sdk_error_text(error: &str) -> bool {
+    let lower = error.to_lowercase();
+
+    if lower.contains("rate limit")
+        || lower.contains("usage limit")
+        || lower.contains("authentication failed")
+        || lower.contains("bad credentials")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("invalid_request_error")
+        || lower.contains("model is not supported")
+        || lower.contains("unknown option")
+        || lower.contains("unexpected argument")
+        || lower.contains("command not found")
+        || lower.contains("no such file or directory")
+    {
+        return false;
+    }
+
+    let transient_status = ["500", "502", "503", "504", "529"].iter().any(|code| {
+        lower.contains(&format!("api error: {code}"))
+            || lower.contains(&format!("http {code}"))
+            || lower.contains(&format!("status code {code}"))
+            || lower.contains(&format!("({code})"))
+    });
+
+    transient_status
+        || lower.contains("internal server error")
+        || lower.contains("server-side issue")
+        || lower.contains("service unavailable")
+        || lower.contains("bad gateway")
+        || lower.contains("gateway timeout")
+        || lower.contains("overloaded")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("try again in a moment")
+        || lower.contains("try again later")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("connection closed")
+        || lower.contains("broken pipe")
+        || lower.contains("unexpected eof")
+        || lower.contains("error decoding response body")
+        || lower.contains("error sending request")
+        || lower.contains("http client error")
+}
+
+fn sdk_transient_backoff_delay(
+    retry_count: usize,
+    base_delay: Duration,
+    max_delay: Duration,
+) -> Duration {
+    let shift = retry_count.saturating_sub(1).min(10) as u32;
+    let multiplier = 1_u32 << shift;
+    base_delay.saturating_mul(multiplier).min(max_delay)
+}
+
+fn retry_command_after_transient_error(
+    last_command: &RuntimeCommand,
+    result: &SdkSessionResult,
+) -> RuntimeCommand {
+    let Some(session_id) = result.session_id.clone() else {
+        return last_command.clone();
+    };
+
+    match last_command {
+        RuntimeCommand::Start {
+            role, story_key, ..
+        } => RuntimeCommand::Resume {
+            session_id,
+            prompt: "Continue after a transient SDK/API error. Pick up where you left off."
+                .to_string(),
+            role: *role,
+            story_key: story_key.clone(),
+        },
+        RuntimeCommand::Resume {
+            prompt,
+            role,
+            story_key,
+            ..
+        } => RuntimeCommand::Resume {
+            session_id,
+            prompt: prompt.clone(),
+            role: *role,
+            story_key: story_key.clone(),
+        },
+    }
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_string()
+    } else {
+        let truncated: String = value.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Graceful shutdown helpers
 // ---------------------------------------------------------------------------
@@ -729,6 +909,140 @@ mod tests {
         assert!(err.to_string().contains("claude"));
     }
 
+    #[test]
+    fn test_is_transient_sdk_error_text_500() {
+        assert!(is_transient_sdk_error_text(
+            "API Error: 500 Internal server error. This is a server-side issue, usually temporary - try again in a moment."
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_sdk_error_text_false_for_rate_limit_and_auth() {
+        assert!(!is_transient_sdk_error_text("Rate limit exceeded"));
+        assert!(!is_transient_sdk_error_text(
+            "API Error: HTTP 401 Authentication failed"
+        ));
+        assert!(!is_transient_sdk_error_text("Bad credentials"));
+    }
+
+    #[test]
+    fn test_sdk_transient_backoff_delay_exponential_with_cap() {
+        assert_eq!(
+            sdk_transient_backoff_delay(1, Duration::from_secs(5), Duration::from_secs(60)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            sdk_transient_backoff_delay(2, Duration::from_secs(5), Duration::from_secs(60)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            sdk_transient_backoff_delay(8, Duration::from_secs(5), Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn test_retry_command_after_transient_error_resumes_start_with_session_id() {
+        let command = RuntimeCommand::Start {
+            role: LlmRole::Dev,
+            phase: "Create Story".to_string(),
+            story_key: "15-1-test".to_string(),
+            prompt: "start".to_string(),
+            skill_path: None,
+            preamble: None,
+            needs_supervisor: true,
+        };
+        let result = SdkSessionResult {
+            session_id: Some("sess-123".to_string()),
+            exit_code: Some(1),
+            stderr: String::new(),
+            timed_out: false,
+            shutdown_requested: false,
+            completion_text: None,
+            stream_error: Some("API Error: 500 Internal server error".to_string()),
+            rate_limit_resets_at: None,
+        };
+
+        match retry_command_after_transient_error(&command, &result) {
+            RuntimeCommand::Resume {
+                session_id,
+                prompt,
+                role,
+                story_key,
+            } => {
+                assert_eq!(session_id, "sess-123");
+                assert!(prompt.contains("transient SDK/API error"));
+                assert_eq!(role, LlmRole::Dev);
+                assert_eq!(story_key, "15-1-test");
+            }
+            _ => panic!("expected Resume command"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_execute_command_retries_transient_sdk_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("fake-claude");
+        let count_path = dir.path().join("count");
+        let script = format!(
+            r#"#!/bin/sh
+COUNT_FILE='{count_path}'
+COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
+COUNT=$((COUNT + 1))
+echo "$COUNT" > "$COUNT_FILE"
+if [ "$COUNT" -eq 1 ]; then
+  echo '{{"type":"system","subtype":"init","session_id":"sess-1"}}'
+  echo '{{"type":"result","is_error":true,"errors":["API Error: 500 Internal server error. This is a server-side issue, usually temporary - try again in a moment."]}}'
+  exit 1
+fi
+echo '{{"type":"system","subtype":"init","session_id":"sess-1"}}'
+echo '{{"type":"result","is_error":false,"result":"Done"}}'
+exit 0
+"#,
+            count_path = count_path.display()
+        );
+        std::fs::write(&script_path, script).unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let mut config = BotConfig::_test_minimal("pretty", "info");
+        config.bmad_paths.project_root = dir.path().to_string_lossy().to_string();
+        config.llm.dev.provider = "claude-code".to_string();
+        config.llm.dev.model = "test-model".to_string();
+        config.llm.dev.cli_path = Some(script_path.to_string_lossy().to_string());
+
+        let runtime = SdkRuntime::new(
+            Arc::new(config),
+            make_test_secrets(None, None),
+            PathBuf::from("test-config.yaml"),
+            Arc::new(AtomicBool::new(false)),
+            UiHandle::null(),
+        );
+
+        let result = runtime
+            .execute_command_with_retry_policy(
+                RuntimeCommand::Start {
+                    role: LlmRole::Dev,
+                    phase: "Create Story".to_string(),
+                    story_key: "15-1-test".to_string(),
+                    prompt: "start".to_string(),
+                    skill_path: None,
+                    preamble: None,
+                    needs_supervisor: false,
+                },
+                3,
+                Duration::from_millis(1),
+                Duration::from_millis(5),
+            )
+            .await;
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.completion_text.as_deref(), Some("Done"));
+        assert_eq!(std::fs::read_to_string(count_path).unwrap().trim(), "2");
+    }
+
     // -- Task 2 tests: merge_env_vars --
 
     #[test]
@@ -884,7 +1198,6 @@ mod tests {
         let supervisor_config = runtime.config_for_role(&LlmRole::Supervisor);
         assert_eq!(supervisor_config.provider, "anthropic");
     }
-
 
     // -- Story 15.7: resume dispatcher tests --
 
